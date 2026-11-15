@@ -1,0 +1,115 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-06",
+  "mode": "diff",
+  "scope": "all phases, diff-constrained, daily gate 8/10",
+  "branch": "feature/925-peer-skill-in-container",
+  "issue": "abilityai/trinity-enterprise#925",
+  "base": "8b59fdbb1",
+  "commits": [
+    "fea4fb05d"
+  ],
+  "audited": "git diff 8b59fdbb1..fea4fb05d (14 product files, 11 test/doc files)",
+  "counts_as_full_run": false,
+  "phases_run": [
+    0,
+    1,
+    2,
+    6,
+    7,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_not_applicable": {
+    "3": "no dependency, lockfile or image install changed",
+    "4": "no workflow changed",
+    "5": "no Dockerfile, compose or vendored policy file changed",
+    "8": "no skill, template, plugin, hook or MCP config shipped into agents changed"
+  },
+  "stack_cve_quicklist": [
+    {
+      "component": "Starlette BadHost",
+      "verdict": "not reachable through this diff: no new request.url.path read; the new route gates on AuthorizedAgentByName + a person/manager predicate, the changed route on get_self_agent"
+    },
+    {
+      "component": "all other rows",
+      "verdict": "not touched by the diff"
+    }
+  ],
+  "attack_surface": {
+    "new_routes": [
+      "GET /api/agents/{agent_name}/peer-skills/enforcement (AuthorizedAgentByName; answers only a person who may manage the agent's skills, nulls otherwise; census AGENT_CALLABLE_ANY + agent_route_tiers accessor)"
+    ],
+    "changed_routes": [
+      "POST /api/skill-gate/check (agent's own key; new peer step before the gate logic)",
+      "gateway skill_gate_service.enforce via peer_skill_policy.enforce (every admission seam)",
+      "GET /api/skills/peer-grants/drift (admin; new ledger read)"
+    ],
+    "agent_context_ingress": [
+      "the in-container refusal text (a tool result read by the callee's model): skill and agent names are platform-sourced (agent_skills rows, the run row, the key); the only hook-sent value echoed is the subagent name, one-lined and capped at 128 by _one_line, and it is the agent's own definition"
+    ]
+  },
+  "checks": [
+    "Phase 2: added lines scanned for AKIA / sk- / ghp_ / gho_ / github_pat_ / xox / re_ prefixes \u2014 none; no system_settings writer; no new subprocess/docker exec",
+    "Phase 6: no raw X-Source-Agent reader added; the requester is now the agent of an agent-scoped key FIRST (key ids come from the authenticated principal or from rows the platform wrote from it, never a header), then the resolved source agent \u2014 stricter than before at the gateway",
+    "Phase 6: /api/skill-gate/check stays self-only (get_self_agent); an execution id of another agent's run or an unknown id answers alike with one row read",
+    "Phase 7 ASI03: new GET classified in the #2996 census and the ent#926 tier table; an agent key gets nulls and causes no /health probe",
+    "Phase 7 ASI07: attribution tightened \u2014 fan-out without X-Source-Agent and A2A with an agent key were read as the callee itself / a person and skipped the ent#662 peer rule; now a peer at both layers (tests per producer row shape)",
+    "Phase 7 ASI01: refusal text carries platform-sourced names only; no slash before a name",
+    "Phase 9 A01: route behind the uniform-404 access dependency; the answer withheld unless is_person_principal AND can_manage_agent_skills",
+    "Phase 9 A05: SQLAlchemy Core only, parameterized; audit details parsed with json.loads under try",
+    "Phase 9 A10: failure direction stated per guard \u2014 in-container peer step fails OPEN on SQLAlchemyError only (owner ruling, docstring), other errors propagate; gateway: a known peer still refuses 503 on an unreadable read, a request never identified as a peer's passes as before; the gate's clearance keeps its own fail-closed reads and marker",
+    "Invisible-Unicode check over all added lines (Python re, exact ranges) \u2014 none",
+    "Frontend: text interpolation only, no v-html"
+  ],
+  "findings": [],
+  "hypotheses": [],
+  "considered_and_dismissed": [
+    {
+      "item": "Fail-open peer step lets a peer's run load a restricted skill during a database outage",
+      "why": "stated owner ruling (an outage must not block own/scheduled/person turns, which the hook cannot tell apart without the platform); the database error is not attacker-inducible through the check's inputs (bounded id, platform-written key ids)"
+    },
+    {
+      "item": "could_reach reads fleet-wide edges and subscriptions",
+      "why": "returns one boolean to a person who manages the agent; inbound edges and subscriptions concern that agent; no names are returned"
+    },
+    {
+      "item": "Copying a library skill under another name / acting on a SKILL.md it read / nested CLI / self-dispatch from a peer turn",
+      "why": "documented limits of the hook's non-adversarial threat model (adversarial-executor class), stated in requirements and security.md; follow-ups drafted"
+    },
+    {
+      "item": "In-container audit rows name the peer as actor while the callee's key made the call",
+      "why": "deliberate: actor = whose request was refused (gateway parity); mcp_key_id = the calling key; the requester's key is in details"
+    }
+  ],
+  "coverage_gaps": [
+    "No image-internal checks (diff touches no image); gitleaks/zizmor not run \u2014 the diff was scanned by regex for credential prefixes; no Docker operation (live stack owned by the operator)"
+  ],
+  "supply_chain_summary": {
+    "scanner": "none needed \u2014 no dependency change in the diff",
+    "changed_dependencies": []
+  },
+  "filter_stats": {
+    "candidates": 4,
+    "dismissed": 4,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior": "cso-diff-2026-10-05-ent752-gated-skill-hook",
+    "resolved": [],
+    "persistent": [],
+    "new": [],
+    "note": "closes the ent#662 'Known gap' (prose requests) for runtimes with the hook; the gateway attribution gap (fan-out without header, A2A agent key) found in planning is closed in this diff"
+  },
+  "remediation": []
+}

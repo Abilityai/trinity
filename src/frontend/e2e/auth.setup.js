@@ -34,6 +34,26 @@ setup('authenticate as admin', async ({ page }) => {
     .not.toBeNull()
   await expect(passwordInput).toBeHidden({ timeout: 5000 })
 
+  // Accept the instance's terms (trinity-enterprise#1107). The SPA's sign-in
+  // declares its session interactive, so this admin's first authenticated call
+  // is refused 403 `terms_required` and the SPA opens /terms; every downstream
+  // spec would land there. Accept through the API with the minted token —
+  // the two terms routes are exempt from the gate — so the inherited
+  // storageState is a session that has accepted. Idempotent: a second accept
+  // of the same version is a no-op, and a switched-off gate still answers 200.
+  await page.evaluate(async () => {
+    const headers = { Authorization: `Bearer ${localStorage.getItem('token')}` }
+    const current = await fetch('/api/terms/current', { headers })
+    if (!current.ok) throw new Error(`GET /api/terms/current: ${current.status}`)
+    const { version } = await current.json()
+    const accepted = await fetch('/api/terms/accept', {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version }),
+    })
+    if (!accepted.ok) throw new Error(`POST /api/terms/accept: ${accepted.status}`)
+  })
+
   // Pre-close the first-run overlay (ent#581, which replaced the ent#52
   // wizard). On a fresh CI stack — no Claude credential, no agent of the
   // admin's own — it opens on the Dashboard, and its `fixed inset-0` backdrop

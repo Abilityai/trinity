@@ -32,7 +32,8 @@ services/capability_grant_service.set_grant
   │          is_ephemeral    → 422 ephemeral_agent_not_grantable
   ▼
 db/capability_grants  agent_capability_grants(agent_name, 'skills.manage', granted_by, granted_at)
-  │  idempotent — a repeat keeps the original who/when       audit: skill_manager_grant | _revoke
+  │  idempotent — a repeat keeps the original who/when       audit: capability_grant | _revoke
+  │  (rows written before trinity-enterprise#871 say skill_manager_grant | _revoke)
 
 ── the use (every route that changes an agent's skills) ────────────────────────
 PUT    /api/agents/{n}/skills             ┐
@@ -49,6 +50,8 @@ dependencies.get_skill_managed_agent_by_name
   │         connector | ops | portal_delegate | <new scope> → 403
   │         (no mcp_scope attribute)   → 403 (fails closed)
   │       refusal → audit `capability_refused` (agent, key id, target) → 403
+  │       holder  → owner bound (not owned: audit `capability_refused`, 404),
+  │                 then audit `capability_used` (trinity-enterprise#871)
   │  2. get_owned_agent_by_name                           ← unchanged owner fence (uniform 404)
   ▼
 handler — writes agent_skills with assigned_by = owner username,

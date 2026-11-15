@@ -28,6 +28,7 @@ from models import (
     ElevenLabsSettingsUpdate,
     GitHubTemplatesUpdate,
     TemplateRegistryUpdate,
+    QueueStallAlertMinutesUpdate,
     MaxParallelTasksCeilingUpdate,
     McpUrlUpdate,
     OpsSettingsUpdate,
@@ -66,10 +67,15 @@ from services.settings_service import (
     AGENT_DEFAULT_REQUIRE_EMAIL,
     get_agent_default_require_email,
     MAX_PARALLEL_TASKS_CEILING_KEY,
+    QUEUE_STALL_ALERT_MINUTES_DEFAULT,
+    QUEUE_STALL_ALERT_MINUTES_KEY,
+    QUEUE_STALL_ALERT_MINUTES_MAX,
+    QUEUE_STALL_ALERT_MINUTES_MIN,
     MAX_PARALLEL_TASKS_CEILING_DEFAULT,
     MAX_PARALLEL_TASKS_CEILING_MIN,
     MAX_PARALLEL_TASKS_CEILING_MAX,
     get_max_parallel_tasks_ceiling,
+    get_queue_stall_alert_minutes,
     PROACTIVE_RATE_LIMIT_DEFAULTS,
     PROACTIVE_RATE_LIMIT_DESCRIPTIONS,
     PROACTIVE_RATE_LIMIT_MAX,
@@ -322,6 +328,81 @@ async def update_agent_default_access_policy(
         "success": True,
         "updated": updated,
         "require_email": get_agent_default_require_email(),
+    }
+
+
+@router.get("/queue-stall-alert-minutes")
+async def get_queue_stall_alert_minutes_setting(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get how long an agent's oldest queued row may wait before an alert (#4257).
+
+    Admin-only. Registered before the `/{key}` catch-all (Invariant #4).
+    """
+    assert_admin(current_user)
+
+    return {
+        "value": get_queue_stall_alert_minutes(),
+        "default": QUEUE_STALL_ALERT_MINUTES_DEFAULT,
+        "min": QUEUE_STALL_ALERT_MINUTES_MIN,
+        "max": QUEUE_STALL_ALERT_MINUTES_MAX,
+    }
+
+
+@router.put("/queue-stall-alert-minutes")
+async def update_queue_stall_alert_minutes_setting(
+    body: QueueStallAlertMinutesUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Set the queue-stall alert threshold in minutes (#4257).
+
+    Admin-only. Validates MIN ≤ value ≤ MAX (5–1440) with a named reason, so a
+    typo cannot silence the monitor (a huge value) or make every tick file an
+    alert for a row queued a second ago (a tiny one). The getter clamps to the
+    same range as a backstop against a direct DB write.
+    """
+    assert_admin(current_user)
+
+    if (
+        not isinstance(body.value, int)
+        or body.value < QUEUE_STALL_ALERT_MINUTES_MIN
+        or body.value > QUEUE_STALL_ALERT_MINUTES_MAX
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"queue_stall_alert_minutes must be an integer between "
+                f"{QUEUE_STALL_ALERT_MINUTES_MIN} and {QUEUE_STALL_ALERT_MINUTES_MAX}"
+            ),
+        )
+
+    db.set_setting(QUEUE_STALL_ALERT_MINUTES_KEY, str(body.value))
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="settings_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=request.scope["path"],
+        request_id=getattr(request.state, "request_id", None),
+        details={
+            "setting": QUEUE_STALL_ALERT_MINUTES_KEY,
+            "action": "update",
+            "value": body.value,
+        },
+    )
+
+    return {
+        "success": True,
+        "value": get_queue_stall_alert_minutes(),
+        "default": QUEUE_STALL_ALERT_MINUTES_DEFAULT,
+        "min": QUEUE_STALL_ALERT_MINUTES_MIN,
+        "max": QUEUE_STALL_ALERT_MINUTES_MAX,
     }
 
 

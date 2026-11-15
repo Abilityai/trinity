@@ -47,7 +47,7 @@ def env(monkeypatch):
     monkeypatch.setattr(
         system_service,
         "resolve_agent_names",
-        lambda system_name, agents: ({s: f"{system_name}-{s}" for s in agents}, []),
+        lambda system_name, agents, naming="prefixed": ({s: f"{system_name}-{s}" for s in agents}, []),
     )
     app = FastAPI()
     app.include_router(systems.router)

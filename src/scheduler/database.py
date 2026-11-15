@@ -112,6 +112,13 @@ class SchedulerDatabase:
         if _scheduler_pg_url():
             logger.info("Scheduler database: PostgreSQL (via DATABASE_URL)")
         else:
+            # #4175: mirrors db/engine.py::refuse_sqlite_backend. Connecting would
+            # create an empty file that later reads as an existing install.
+            if os.getenv("TRINITY_REQUIRE_POSTGRES") == "1" and os.getenv("TRINITY_ALLOW_SQLITE") != "1":
+                raise RuntimeError(
+                    "Refusing to start: no PostgreSQL DATABASE_URL, and SQLite reached end-of-support "
+                    "on 2026-09-01. See docs/migrations/SQLITE_TO_POSTGRES.md."
+                )
             logger.info(f"Scheduler database initialized: {self.database_path}")
 
     @contextmanager
@@ -135,6 +142,24 @@ class SchedulerDatabase:
             yield conn
         finally:
             conn.close()
+
+    @staticmethod
+    def _agent_subscription_id(cursor, agent_name: str) -> Optional[str]:
+        """The subscription assigned to the agent now, snapshotted onto the row
+        at INSERT (SUB-004, #4085), like the backend's
+        `db.get_agent_subscription_id`: a live (not soft-deleted) ownership row.
+
+        Usage windows aggregate by `schedule_executions.subscription_id`, and
+        the #3470 walk re-points a row only when another credential served it,
+        so a cron or reminder turn the assigned subscription served stayed NULL
+        and fell out of that subscription's spend."""
+        cursor.execute(
+            "SELECT subscription_id FROM agent_ownership "
+            "WHERE agent_name = ? AND deleted_at IS NULL",
+            (agent_name,),
+        )
+        row = cursor.fetchone()
+        return row["subscription_id"] if row else None
 
     @staticmethod
     def _generate_id() -> str:
@@ -415,13 +440,14 @@ class SchedulerDatabase:
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            subscription_id = self._agent_subscription_id(cursor, agent_name)
             cursor.execute("""
                 INSERT INTO schedule_executions (
                     id, schedule_id, agent_name, status, started_at, message, triggered_by,
                     model_used, attempt_number, retry_of_execution_id,
                     source_user_id, source_user_email, source_agent_name,
-                    source_mcp_key_id, source_mcp_key_name, chain_depth
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_mcp_key_id, source_mcp_key_name, chain_depth, subscription_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 execution_id,
                 schedule_id,
@@ -439,6 +465,7 @@ class SchedulerDatabase:
                 source_mcp_key_id,
                 source_mcp_key_name,
                 chain_depth,
+                subscription_id,
             ))
             conn.commit()
 
@@ -571,11 +598,12 @@ class SchedulerDatabase:
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            subscription_id = self._agent_subscription_id(cursor, agent_name)
             cursor.execute("""
                 INSERT INTO schedule_executions (
                     id, schedule_id, agent_name, status, started_at, completed_at,
-                    duration_ms, message, triggered_by, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    duration_ms, message, triggered_by, error, subscription_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 execution_id,
                 schedule_id,
@@ -586,7 +614,8 @@ class SchedulerDatabase:
                 0,    # duration_ms = 0 for skipped
                 message,
                 triggered_by,
-                skip_reason
+                skip_reason,
+                subscription_id,
             ))
             conn.commit()
 

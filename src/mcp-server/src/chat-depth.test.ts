@@ -166,3 +166,71 @@ describe("#2806 controls: other errors still throw", () => {
     assert.equal(parseDepthRefusal(403, JSON.stringify({ detail: "Agent not found" }), "target"), undefined);
   });
 });
+
+// #4357: the backend names the hop that set the depth (`exhausted_by`) and what
+// lowers it (`resets`). Both reach the calling model unchanged.
+const HOP = {
+  execution_id: "exec-deep",
+  chain_depth: 8,
+  triggered_by: "agent",
+  source_agent: "orchestrator",
+};
+const RESETS =
+  "The depth falls when that execution finishes: every call you make counts from the deepest " +
+  "of your executions still running.";
+
+function refusalWith(extra: Record<string, unknown>) {
+  return { detail: { ...REFUSAL.detail, ...extra } };
+}
+
+describe("#4357 the refusal names the hop and what resets it", () => {
+  beforeEach(() => { globalThis.fetch = realFetch; });
+  afterEach(() => { globalThis.fetch = realFetch; });
+
+  it("chat_with_agent passes exhausted_by and resets through", async () => {
+    stubDispatch(() => json(refusalWith({ exhausted_by: HOP, resets: RESETS }), 403));
+    const out = JSON.parse(await tools().chatWithAgent.execute(
+      { agent_name: "target", message: "hi" }, agentSession,
+    ));
+    assert.deepEqual(out.exhausted_by, HOP);
+    assert.equal(out.resets, RESETS);
+    assert.match(out.message, /Do not retry this call or route it through another agent/);
+  });
+
+  it("fan_out passes an event-claim hop through", async () => {
+    const claim = { kind: "event_claim", chain_depth: 8 };
+    stubDispatch(() => json(refusalWith({ exhausted_by: claim, resets: RESETS }), 403));
+    const out = JSON.parse(await tools().fanOut.execute(
+      { agent_name: "target", tasks: [{ id: "t1", message: "m" }] }, agentSession,
+    ));
+    assert.deepEqual(out.exhausted_by, claim);
+    assert.equal(out.resets, RESETS);
+  });
+
+  it("a null exhausted_by (the hop could not be read) stays null, not dropped", async () => {
+    stubDispatch(() => json(refusalWith({ exhausted_by: null, resets: RESETS }), 403));
+    const out = JSON.parse(await tools().chatWithAgent.execute(
+      { agent_name: "target", message: "hi", parallel: true }, agentSession,
+    ));
+    assert.ok("exhausted_by" in out);
+    assert.equal(out.exhausted_by, null);
+    assert.equal(out.status, "inter_agent_depth_exceeded");
+  });
+
+  it("a malformed exhausted_by or resets is not passed through", () => {
+    const r = parseDepthRefusal(
+      403, JSON.stringify(refusalWith({ exhausted_by: ["x"], resets: 7 })), "target",
+    );
+    assert.equal(r?.exhausted_by, undefined);
+    assert.equal(typeof r?.resets, "string");
+  });
+
+  it("the fallback message (no backend message) keeps the stop clause and gains the reset sentence", () => {
+    const { message: _m, ...rest } = REFUSAL.detail;
+    const r = parseDepthRefusal(403, JSON.stringify({ detail: rest }), "target");
+    assert.ok(r);
+    assert.match(r.message, /Do not retry this call or route it through another agent/);
+    assert.match(r.message, /The depth falls when that execution finishes/);
+    assert.match(r.message, /A turn a person starts/);
+  });
+});

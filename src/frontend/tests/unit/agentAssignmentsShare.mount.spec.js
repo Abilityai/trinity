@@ -26,6 +26,7 @@ vi.mock('axios', () => ({ default: ax }))
 import AgentAssignmentsSection from '@/components/AgentAssignmentsSection.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useEnterpriseStore } from '@/stores/enterprise'
+import { candidateAnswer, pickPerson, typePerson } from './helpers/pickPerson'
 
 const AGENT = 'scout'
 const BASE = `/api/enterprise/assignments/agents/${AGENT}`
@@ -47,6 +48,7 @@ const PEOPLE = () => [
 ]
 
 let roster
+let candidatesDown
 function jwtFor(sub) {
   const b64 = (o) => btoa(JSON.stringify(o)).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_')
   return `${b64({ alg: 'HS256' })}.${b64({ sub })}.sig`
@@ -73,9 +75,18 @@ const rowFor = (w, name) => w.findAll('li').find((li) => li.text().includes(name
 const refused = (status, detail) => Object.assign(new Error(String(status)), { response: { status, data: { detail } } })
 const shares = () => ax.post.mock.calls.filter(([u]) => u.endsWith('/share'))
 
+// ent#1154: the Person field is a picker over the scoped read. An account with no
+// email is never a picker row, so it is reached the way an admin still can: the
+// select the field falls back to when that read is down.
 async function add(w, userId, kind = 'viewer') {
-  await q(w, 'add-user').setValue(String(userId))
+  const u = USERS.find((x) => x.id === userId)
   await q(w, 'add-kind').setValue(kind)
+  if (!u.email) {
+    candidatesDown = true
+    await typePerson(w, 'add-user', 'no')
+  }
+  if (q(w, 'add-user-select').exists()) await q(w, 'add-user-select').setValue(String(userId))
+  else await pickPerson(w, 'add-user', u.name.slice(0, 2).toLowerCase(), u.name)
   await q(w, 'assignment-add-form').trigger('submit')
   await flushPromises()
 }
@@ -84,8 +95,14 @@ beforeEach(() => {
   setActivePinia(createPinia())
   for (const fn of [...Object.values(api), ...Object.values(ax)]) fn.mockReset()
   roster = { agent_name: AGENT, assignments: [ANN, BOB], mine: null, primary: 'Ann Lee' }
-  api.get.mockImplementation(async (url) => {
+  candidatesDown = false
+  api.get.mockImplementation(async (url, cfg) => {
     if (url === '/api/users') return { data: USERS }
+    if (url.endsWith('/candidates')) {
+      if (candidatesDown) throw Object.assign(new Error('403'), { response: { status: 403 } })
+      const held = (kind) => roster.assignments.filter((a) => a.kind === kind).map((a) => a.user_id)
+      return { data: candidateAnswer(USERS, held)(cfg?.params) }
+    }
     if (url.endsWith('/canon/roles')) return { data: { roles: [], reason: 'no_canon', message: 'none' } }
     return { data: roster }
   })
@@ -109,9 +126,12 @@ describe('each person\'s platform role is shown', () => {
   it('in the pickers', async () => {
     const { w } = render()
     await flushPromises()
-    const options = q(w, 'add-user').findAll('option').map((o) => o.text())
-    expect(options).toContain('Cat Moe · Workspace only')
-    expect(options).toContain('Bob Ray · operator')
+    await q(w, 'add-kind').setValue('viewer')
+    await typePerson(w, 'add-user', 'ca')
+    expect(w.findAll('[role="option"]')[0].text()).toContain('Cat Moe')
+    expect(w.findAll('[role="option"]')[0].text()).toContain('Workspace only')
+    await typePerson(w, 'add-user', 'bo')
+    expect(w.findAll('[role="option"]')[0].text()).toMatch(/Bob Ray.*operator/)
   })
 
   it('from the people list when the viewer cannot read the users list', async () => {
@@ -204,7 +224,7 @@ describe('assigning someone shares the agent with them', () => {
     api.post.mockImplementationOnce(() => new Promise((ok) => { release = () => ok({ data: {} }) }))
     const { w } = render()
     await flushPromises()
-    await q(w, 'add-user').setValue('3')
+    await pickPerson(w, 'add-user', 'ca', 'Cat Moe')
     await q(w, 'assignment-add-form').trigger('submit')
     await w.setProps({ agentName: 'other' })
     release()
@@ -213,14 +233,155 @@ describe('assigning someone shares the agent with them', () => {
     expect(ax.post).not.toHaveBeenCalledWith(SHARE('other'), expect.anything(), expect.anything())
   })
 
+  // ent#1154: the picked row carries who the person is, so the share does not
+  // depend on the users list having them (personFor's picked-row branch).
+  describe('when the users list does not have the picked person', () => {
+    beforeEach(() => {
+      const answer = api.get.getMockImplementation()
+      api.get.mockImplementation(async (url, cfg) => {
+        if (url === '/api/users') return { data: USERS.filter((u) => u.id !== 3) }
+        return answer(url, cfg)
+      })
+    })
+
+    it('adding shares with the picked row\'s address and names them from it', async () => {
+      const { w, reloadPeople } = render()
+      await flushPromises()
+      await q(w, 'add-kind').setValue('viewer')
+      await pickPerson(w, 'add-user', 'ca', 'Cat Moe')
+      await q(w, 'assignment-add-form').trigger('submit')
+      await flushPromises()
+      expect(api.post).toHaveBeenCalledWith(BASE, { user_id: 3, kind: 'viewer' })
+      expect(ax.post).toHaveBeenCalledWith(SHARE(), { email: 'cat@example.com' }, expect.anything())
+      expect(q(w, 'assignments-share-note').text()).toBe('Shared with Cat Moe so they can use it in the Workspace.')
+      expect(reloadPeople).toHaveBeenCalled()
+    })
+
+    it('replacing the primary shares with the picked row too', async () => {
+      const { w } = render()
+      await flushPromises()
+      await q(w, 'assignment-replace').trigger('click')
+      await pickPerson(w, 'replace-user', 'ca', 'Cat Moe')
+      await q(w, 'assignment-replace-form').trigger('submit')
+      await flushPromises()
+      expect(ax.post).toHaveBeenCalledWith(SHARE(), { email: 'cat@example.com' }, expect.anything())
+      expect(q(w, 'assignments-share-note').text()).toBe('Shared with Cat Moe so they can use it in the Workspace.')
+    })
+  })
+
   it('replacing the primary shares the agent with the new one', async () => {
     const { w } = render()
     await flushPromises()
     await q(w, 'assignment-replace').trigger('click')
-    await q(w, 'replace-user').setValue('3')
+    await pickPerson(w, 'replace-user', 'ca', 'Cat Moe')
     await q(w, 'assignment-replace-form').trigger('submit')
     await flushPromises()
     expect(ax.post).toHaveBeenCalledWith(SHARE(), { email: 'cat@example.com' }, expect.anything())
+  })
+})
+
+// #3664: the note is a confirmation of a fact, so it must not outlive the fact.
+// AccessPanel re-reads its people list after every share and unshare; these
+// tests re-read it the same way, through the prop.
+describe('the "Shared with …" note says only what is still true (#3664)', () => {
+  function renderLive() {
+    let access = PEOPLE()
+    const ctx = {}
+    // The share route adds the person to the list the panel re-reads.
+    ax.post.mockImplementation(async (url, body) => {
+      access = [...access, { email: body.email, username: body.email, role: 'user', status: 'active' }]
+      return { data: {} }
+    })
+    const reloadPeople = vi.fn(async () => { await ctx.w.setProps({ people: access.map((p) => ({ ...p })) }) })
+    ctx.w = render({ reloadPeople }).w
+    ctx.unshare = async (email) => {
+      access = access.filter((p) => p.email !== email)
+      await reloadPeople()
+    }
+    return ctx
+  }
+  beforeEach(() => {
+    api.delete.mockImplementation(async (url) => {
+      const id = decodeURIComponent(url.split('/').pop())
+      roster = { ...roster, assignments: roster.assignments.filter((a) => a.id !== id) }
+      return { data: {} }
+    })
+  })
+
+  it('goes when that person\'s row is removed', async () => {
+    const { w } = renderLive()
+    await flushPromises()
+    await add(w, 3)
+    expect(q(w, 'assignments-share-note').text()).toBe('Shared with Cat Moe so they can use it in the Workspace.')
+    expect(rowFor(w, 'Cat Moe').find('[data-testid="assignment-not-shared"]').exists()).toBe(false)
+    await rowFor(w, 'Cat Moe').find('[data-testid="assignment-remove"]').trigger('click')
+    await flushPromises()
+    expect(rowFor(w, 'Cat Moe')).toBeUndefined()
+    expect(q(w, 'assignments-share-note').exists()).toBe(false)
+  })
+
+  it('goes when the agent is unshared from them in the list below', async () => {
+    const ctx = renderLive()
+    await flushPromises()
+    await add(ctx.w, 3)
+    expect(q(ctx.w, 'assignments-share-note').exists()).toBe(true)
+    await ctx.unshare('cat@example.com')
+    await flushPromises()
+    expect(q(ctx.w, 'assignments-share-note').exists()).toBe(false)
+  })
+
+  it('stays while it is still true: another row removed, the list re-read with them on it', async () => {
+    const ctx = renderLive()
+    await flushPromises()
+    await add(ctx.w, 3)
+    await rowFor(ctx.w, 'Bob Ray').find('[data-testid="assignment-remove"]').trigger('click')
+    await flushPromises()
+    await ctx.unshare('lee@example.com')
+    await flushPromises()
+    expect(q(ctx.w, 'assignments-share-note').text()).toBe('Shared with Cat Moe so they can use it in the Workspace.')
+  })
+
+  it('a share from the row\'s own button goes the same way', async () => {
+    const ctx = renderLive()
+    await flushPromises()
+    await rowFor(ctx.w, 'Bob Ray').find('[data-testid="assignment-share"]').trigger('click')
+    await flushPromises()
+    expect(q(ctx.w, 'assignments-share-note').text()).toBe('Shared with Bob Ray so they can use it in the Workspace.')
+    await rowFor(ctx.w, 'Bob Ray').find('[data-testid="assignment-remove"]').trigger('click')
+    await flushPromises()
+    expect(q(ctx.w, 'assignments-share-note').exists()).toBe(false)
+  })
+})
+
+// #3664: the badge read the users list (loaded once per session) before the
+// people list (re-read on every visit and after every change), so a role
+// changed in Settings showed in the list below but not on the row.
+describe('the platform-role badge shows the current role (#3664)', () => {
+  const badge = (w, name) => rowFor(w, name).find('[data-testid="assignment-platform-role"]').text()
+
+  it('a shared person: from the people list once it is re-read, over an older users list', async () => {
+    const bobShared = (role) => [...PEOPLE(), { email: 'bob@example.com', username: 'bob', role, status: 'active' }]
+    const { w } = render({ people: bobShared('operator') })
+    await flushPromises()
+    expect(badge(w, 'Bob Ray')).toBe('operator')
+    await w.setProps({ people: bobShared('user') })   // the users list still says operator
+    expect(badge(w, 'Bob Ray')).toBe('user — Workspace only')
+  })
+
+  it('a person it is not shared with: the users list is re-read each time the tab opens', async () => {
+    const first = render().w
+    await flushPromises()
+    expect(badge(first, 'Bob Ray')).toBe('operator')
+    first.unmount()
+    // Their role changes in Settings → User Management while the tab is closed.
+    USERS[1] = { ...USERS[1], role: 'user' }
+    try {
+      const { w } = render()
+      await flushPromises()
+      expect(badge(w, 'Bob Ray')).toBe('user — Workspace only')
+    } finally {
+      USERS[1] = { ...USERS[1], role: 'operator' }
+    }
   })
 })
 

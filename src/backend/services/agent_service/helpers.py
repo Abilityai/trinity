@@ -27,6 +27,7 @@ from services.docker_utils import volume_get, image_get
 from services.agent_auth import derive_agent_token, merge_auth_headers
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, settings_service
 from utils.helpers import sanitize_agent_name
+from services import tool_access_profiles
 
 logger = logging.getLogger(__name__)
 
@@ -294,6 +295,7 @@ def get_accessible_agents(current_user: User) -> list:
             agent_dict["is_system"] = False
             agent_dict["autonomy_enabled"] = False
             agent_dict["read_only_enabled"] = False
+            agent_dict["tool_access_profile"] = tool_access_profiles.FULL
             agent_dict["github_repo"] = None
             agent_dict["memory_limit"] = None
             agent_dict["cpu_limit"] = None
@@ -316,6 +318,10 @@ def get_accessible_agents(current_user: User) -> list:
         agent_dict["is_system"] = metadata.get("is_system", False)
         agent_dict["autonomy_enabled"] = metadata.get("autonomy_enabled", False)
         agent_dict["read_only_enabled"] = metadata.get("read_only_enabled", False)
+        # trinity-enterprise#341: the list's Read-only toggle shows ON for the
+        # Strict read-only profile only — the same resolver as the detail page.
+        agent_dict["tool_access_profile"] = tool_access_profiles.resolve(
+            metadata.get("guardrails_config"), metadata.get("read_only_enabled", False))["profile"]
         agent_dict["github_repo"] = metadata.get("github_repo")
         agent_dict["memory_limit"] = metadata.get("memory_limit")
         agent_dict["cpu_limit"] = metadata.get("cpu_limit")
@@ -353,6 +359,66 @@ def accessible_agent_names(current_user: User) -> Optional[List[str]]:
     return [a["name"] for a in get_accessible_agents(current_user)]
 
 
+def viewer_own_rows(current_user: User) -> tuple:
+    """`(own_rows_user_id, own_rows_exempt_agents)` for a fleet-level read of
+    executions or activity (trinity-enterprise#875).
+
+    The fleet routes span every agent the caller can reach, and the answer is
+    per agent: on an agent the caller OWNS (or as an admin) every row is theirs
+    to see; on any other agent they can reach, just the rows they started.
+
+    The rule is written as an EXEMPTION list, not a list of the agents to narrow:
+    narrowing is the default and only an agent the caller provably owns escapes
+    it. An agent that is reachable but missing from the owned list (a stale
+    roster, a metadata gap) is therefore narrowed, never shown in full — the
+    failure direction is "too few rows", not "everyone's rows".
+
+    * `(None, None)` — no narrowing: an admin person, and agent/system/ops/
+      connector keys — except an agent key acting in a shared person's turn,
+      which reads `(that person, [])` (ent#926, `acting_turn_user_id`).
+    * `(uid, [owned names])` — narrow every agent except those the caller owns.
+    * `(uid, [])` — narrow on EVERY agent: a principal this module does not list
+      as a key (fails closed, like `viewer_principal_kind`'s "other").
+
+    `uid` is `NO_ROWS_USER_ID` when the principal has no usable id, which
+    matches no row — a missing id never reads as "no filter"."""
+    from dependencies import (
+        NO_ROWS_USER_ID, acting_turn_user_id, is_fleet_admin, viewer_principal_kind,
+    )
+
+    kind = viewer_principal_kind(current_user)
+    if kind == "key":
+        # ent#926: an agent's key in a shared person's turn reads that person's
+        # rows on every agent; none is exempt (the key owner's agents are not theirs).
+        acting = acting_turn_user_id(current_user)
+        return (None, None) if acting is None else (acting, [])
+    uid = getattr(current_user, "id", None)
+    uid = uid if isinstance(uid, int) and not isinstance(uid, bool) and uid > 0 else NO_ROWS_USER_ID
+    if kind == "other":
+        return uid, []
+    if is_fleet_admin(current_user):
+        return None, None
+    owned = [a["name"] for a in get_accessible_agents(current_user) if a.get("is_owner")]
+    return uid, owned
+
+
+def acting_person_agents(current_user: User, agent_names: Optional[List[str]]) -> Optional[List[str]]:
+    """The agent set of a fleet read, cut to what an agent key's acting person
+    may open (trinity-enterprise#1148, AC3 — `viewer_row_scope`'s fence for the
+    fleet routes). `viewer_own_rows` narrows such a key to the person's rows on
+    its whole reach, and a callee the key's agent delegated to records that
+    person on an agent they cannot open. Unchanged outside a person's turn; an
+    unreadable lookup drops the agent, and an unbounded set reads nothing."""
+    import dependencies
+
+    acting = dependencies.acting_turn_user_id(current_user)
+    if acting is None or acting == dependencies.NO_ROWS_USER_ID:
+        return agent_names
+    if agent_names is None:
+        return []
+    return [a for a in agent_names if dependencies._acting_person_may_open(acting, a)]
+
+
 def narrow_to_agent(
     agent_names: Optional[List[str]], agent: Optional[str]
 ) -> Optional[List[str]]:
@@ -368,6 +434,36 @@ def narrow_to_agent(
     if agent_names is None:
         return [agent]  # admin: any single agent is fine
     return [agent] if agent in agent_names else []  # non-admin: access-gate
+
+
+# `agent_names` on a fleet read (#3300, the trinity-enterprise#815 shape): the
+# MCP passes its own permit set, one query parameter per name. Bounded so a
+# request line stays well inside every HTTP server's limit.
+AGENT_NAMES_MAX = 500
+
+
+def narrow_to_names(
+    agent_names: Optional[List[str]], wanted: Optional[List[str]]
+) -> Optional[List[str]]:
+    """Narrow an accessible-agent set to the names a caller asked for.
+
+    Only ever NARROWS: intersected with what the caller may see, or taken as
+    given when the caller sees every agent (``agent_names is None``, an admin).
+    ``wanted is None`` passes through. Narrowing for COMPLETENESS, not an
+    authorization point: the cut a route makes at ``limit`` is then made over
+    exactly the rows the caller will keep, so a short page means nothing else
+    matched. Raises ``ValueError`` (the route's 422) for more than
+    ``AGENT_NAMES_MAX`` names or a blank one.
+    """
+    if wanted is None:
+        return agent_names
+    if len(wanted) > AGENT_NAMES_MAX:
+        raise ValueError(f"agent_names: at most {AGENT_NAMES_MAX} names")
+    if any(not name or not name.strip() for name in wanted):
+        raise ValueError("agent_names: a blank name is not allowed")
+    if agent_names is None:
+        return sorted(set(wanted))
+    return sorted(set(agent_names) & set(wanted))
 
 
 def sanitize_and_validate_name(name: str) -> str:
@@ -484,10 +580,17 @@ def get_latest_version(base_name: str) -> Optional[AgentStatus]:
 _SHARED_IN_PREFIX = "/home/developer/shared-in/"
 
 
-async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
+async def check_shared_folder_mounts_match(container, agent_name: str, *, strict: bool = False) -> bool:
     """
     Check if container's shared folder mounts match the current config.
     Returns True if mounts are correct, False if recreation needed.
+
+    ``strict`` (trinity-enterprise#695, keyword-only, default False so the
+    start path is unchanged): re-raise a source-volume inspect that failed
+    for a reason other than NotFound instead of keeping the mount. The start
+    path wants "unknown" to mean "do not recreate"; a caller that REPORTS the
+    answer (system apply's `restart_required`) must not present an unknown
+    as "matches".
     """
     config = db.get_shared_folder_config(agent_name)
     if not config:
@@ -531,6 +634,8 @@ async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
                 # Docker unreadable is not "no volume" (#2196): an unknown
                 # answer must not read as drift and recreate a running
                 # container, so keep whatever mount is there.
+                if strict:
+                    raise
                 if mount_path in mount_dests:
                     expected.add(mount_path)
                 continue
@@ -599,13 +704,21 @@ def check_guardrails_env_matches(container, agent_name: str) -> bool:
     env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
     current = env_dict.get("AGENT_GUARDRAILS", "")
 
-    desired = db.get_guardrails_config(agent_name) or {}
-    expected = _json.dumps(desired) if desired else ""
+    # ent#926: `visitor_shell` is read live by the backend on every turn, so a
+    # change to it alone must not recreate the container.
+    # trinity-enterprise#341: `tool_access` records the owner's profile choice;
+    # what it enforces is already in `disallowed_tools` and the read-only layer
+    # (live), so a change to the record alone must not recreate the container.
+    live = {"visitor_shell", "tool_access"}
+    desired = {k: v for k, v in (db.get_guardrails_config(agent_name) or {}).items() if k not in live}
 
     if not desired and not current:
         return True
     try:
-        return _json.loads(current or "{}") == desired
+        running = _json.loads(current or "{}")
+        if isinstance(running, dict):
+            running = {k: v for k, v in running.items() if k not in live}
+        return running == desired
     except (_json.JSONDecodeError, ValueError):
         return False
 

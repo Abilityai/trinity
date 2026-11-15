@@ -109,20 +109,11 @@ ACCEPTED_UNTIL_RELEASE: dict[tuple[str, str], str] = {
     # guard below said so on every run since. Add a row only for a NEW
     # divergence, with its reason.
     #
-    # #2945 (2026-09-22): two NEW workflows. Both fire from `dev` today through
-    # their `push` trigger where they have one; the default-branch-registered
-    # events below are inert until the next release cut carries the files to
-    # `main`. Consequence, stated so nobody waits for a nightly that cannot yet
-    # run: `dev-nightly.yml` does NOT run at all until then (Tier 3 is the
-    # release cut's gain, not this PR's), and `dev-ci-status.yml`'s manual
-    # re-evaluation is unavailable, while its per-push verdict works from day one.
-    ("dev-nightly.yml", "schedule"): "new file; nightly on dev starts at the next release cut",
-    ("dev-nightly.yml", "workflow_dispatch"): "new file; manual run available once on main",
-    ("dev-ci-status.yml", "workflow_dispatch"): "new file; the push trigger is the live path, dispatch is re-evaluation only",
-    # trinity-enterprise#794: manual-only by design (it gates a release cut, never
-    # a PR), so it cannot be dispatched until the release cut carries it to
-    # `main`. Until then the same run is `scripts/system/run_chains.sh`.
-    ("system-chains.yml", "workflow_dispatch"): "new file; dispatchable once on main — run_chains.sh is the path until then",
+    # Pruned at the v1.0.0 release cut (2026-10-20, #3867): the #2945 rows —
+    # dev-nightly `schedule` + `workflow_dispatch`, dev-ci-status
+    # `workflow_dispatch` — and the trinity-enterprise#794 system-chains
+    # `workflow_dispatch` row are all declared on `main` now, and the guard
+    # below went red on dev's first push after the sync, as designed.
 }
 
 

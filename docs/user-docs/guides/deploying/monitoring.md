@@ -84,6 +84,8 @@ docker exec trinity-postgres pg_isready -h 127.0.0.1 -U trinity -d trinity
 | `trinity.db` size | >1 GB | >5 GB | Archive old data |
 | Vector log size | >5 GB | >10 GB | Trigger archival rotation |
 
+If memory, CPU or disk crosses these thresholds regularly rather than once, the server may be too small for the fleet — see [Sizing Your Server → When to Grow](capacity-planning.md#when-to-grow).
+
 Check disk and Docker space:
 
 ```bash

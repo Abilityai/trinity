@@ -46,7 +46,7 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, nextTick, ref } from 'vue'
+import { onMounted, onUnmounted, onDeactivated, nextTick, ref } from 'vue'
 
 defineProps({
   title: { type: String, required: true },
@@ -97,6 +97,11 @@ const onKey = (e) => {
   if (e.key === 'Escape') emit('close')
   else if (e.key === 'Tab') trapTab(e)
 }
+
+// AgentDetail is KeepAlive-cached: navigating away (e.g. a router-link inside
+// a channel panel) deactivates the page without unmounting it, and the
+// teleported dialog plus its body scroll lock would stay on the next page.
+onDeactivated(() => emit('close'))
 
 onMounted(() => {
   prevActive = document.activeElement

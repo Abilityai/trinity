@@ -187,12 +187,15 @@ fi
 # ---------------------------------------------------------------------------
 # `-rs` is mandatory on every tier: the skip audit reads it. Without it a skip
 # prints as a dot and the audit has nothing to check.
+# `-p no:randomly` (#2891): deterministic order, pinned explicitly — an installed
+# pytest-randomly is auto-discovered and would silently shuffle every tier; a
+# no-op when the plugin is absent. Randomized runs are CI's seed matrix.
 run_tier() {  # name timeout_s paths...
     local name="$1" tmo="$2"; shift 2
     wants "$name" || return 0
     log "tier: ${name}"
     local out="${LOG_DIR}/${name}.log"
-    python -m pytest "$@" \
+    python -m pytest -p no:randomly "$@" \
         -rs --tb=short -q \
         --timeout="$tmo" --timeout-method=thread \
         "${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"}" 2>&1 | tee "$out"
@@ -269,7 +272,7 @@ if wants standalone; then
     while IFS= read -r spec; do
         [ -z "$spec" ] && continue
         note "$spec"
-        python -m pytest "$spec" -rs -q --timeout=120 --timeout-method=thread \
+        python -m pytest -p no:randomly "$spec" -rs -q --timeout=120 --timeout-method=thread \
             >>"${LOG_DIR}/standalone.log" 2>&1 || rc_total=1
     done < <(python ./harness/list_standalone_tests.py)
     if [ "$rc_total" = 0 ]; then

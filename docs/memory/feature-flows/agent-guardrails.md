@@ -37,14 +37,15 @@ platform's baseline protections.
 
 ## Entry Points
 
-- **UI (Agent Detail)**: owner-only **Settings** tab (renamed from "Guardrails", #1108/#1122) — `GuardrailsPanel.vue` rendered unchanged as **section #1** inside `components/settings/SettingsPanel.vue`, wired in `AgentDetail.vue:187` (tab pushed at `647`, gated on `agent.can_share`). Old `?tab=guardrails` deep links resolve via `TAB_ALIASES` (`guardrails → settings`). Exposes `max_turns_chat` / `max_turns_task` only (#967 / #992).
+- **UI (Agent Detail)**: owner-only Settings › **Guardrails** pane (`components/agent-settings/GuardrailsPane.vue`, the one Settings home of trinity-enterprise#887/#3798). Its first section is **Tool access** (`agent-settings/ToolAccessSection.vue`, trinity-enterprise#341 — see [Tool-access profiles](#tool-access-profiles-guard-008-trinity-enterprise341)); the turn caps are edited in `GuardrailsPanel.vue` (embedded under "Guardrail rules"). Old `?tab=guardrails` deep links resolve via `LEGACY_TAB_SECTIONS`.
+- **API (tool access)**: `GET|PUT /api/agents/{name}/tool-access` — the profile that sets read-only mode and `disallowed_tools` together.
 - **API (read)**: `GET /api/agents/{name}/guardrails` — any authenticated user; 404 if no container.
 - **API (write)**: `PUT /api/agents/{name}/guardrails` — **owner-only** and **person-only** (`Depends(require_person)`, #2996: agent- and system-scoped keys get 403 `person_required`); empty body clears overrides. Requires agent restart to apply.
 - **Agent creation**: overrides serialized into the `AGENT_GUARDRAILS` env var (`crud.py`).
 - **Agent restart**: env var re-serialized from DB (`lifecycle.py`); runtime config regenerated at boot (`startup.sh` → `write-runtime-config.py`).
 - **Tool-call time**: Claude Code `PreToolUse` / `PostToolUse` hooks fire on every `Bash` / file-write tool call.
 
-> **UI scope is narrower than the API.** The Settings tab's Guardrails section only edits the two turn caps; `execution_timeout_sec` and the `extra_bash_deny` / `extra_path_deny` / `disallowed_tools` lists remain API-only and are *preserved* by the panel's whole-config PUT (see Frontend Layer).
+> **UI scope is narrower than the API.** The rules editor only edits the two turn caps; `execution_timeout_sec` and the `extra_bash_deny` / `extra_path_deny` lists remain API-only and are *preserved* by the panel's whole-config PUT. `disallowed_tools` is edited through **Tool access** (Custom) since trinity-enterprise#341; once a profile is stored the guardrails PUT neither writes it nor `tool_access`.
 
 ---
 
@@ -170,8 +171,8 @@ Compute/Auth, Git sync.
 
 | Lines | Element | Notes |
 |-------|---------|-------|
-| 16-68 | Form | Two number inputs: Max turns (chat), Max turns (task); placeholder `50 (default)`; blank = inherit baseline |
-| 77-91 | Props/consts | `agentName`, `notify` (toast callback); `MIN_TURNS=1`, `MAX_TURNS=500`, `DEFAULT_TURNS=50` |
+| 16-68 | Form | Two number inputs: Max turns (chat), Max turns (task); placeholder `200 (default)`; blank = inherit baseline |
+| 77-91 | Props/consts | `agentName`, `notify` (toast callback); `MIN_TURNS=1`, `MAX_TURNS=500`, `DEFAULT_TURNS=200` |
 | 100-101, 116-117 | `otherKeys` | **Preserves out-of-scope overrides** — `load()` splits off `execution_timeout_sec` / `*_deny` / `disallowed_tools` so the whole-config PUT doesn't wipe API-set values |
 | 126-132 | `validateField` | Client-side mirror of backend bounds (whole number 1–500) |
 | 134-167 | `save()` | Merges managed keys over `otherKeys`; blank field `delete`s the key (clears); toast "restart agent to apply"; reloads |
@@ -196,9 +197,64 @@ The `can_share` gate matches the backend's owner-only `PUT` check, so a non-owne
 
 ---
 
+## Tool-access profiles (GUARD-008, trinity-enterprise#341)
+
+One owner-facing answer to "what may this agent do?". A profile is a fixed bundle that sets the read-only layer ([read-only-mode.md](read-only-mode.md)) and `disallowed_tools` together, so the two can no longer disagree; read-only mode IS the Strict read-only profile. Requirement: `requirements/security.md` §28.10.
+
+| Profile | Read-only layer | `disallowed_tools` | Codex `--sandbox` |
+|---|---|---|---|
+| Full access (default) | off | — | `danger-full-access` |
+| Workspace-only | off | the 7 send tools | `danger-full-access` |
+| Read-only + report | on | the 7 send tools | `read-only` |
+| Strict read-only | on | the 7 send tools + `mcp__trinity__report` | `read-only` |
+| Custom | owner's switch | owner's list (≤50, 1–256 chars) | per the switch |
+
+The send tools (`services/tool_access_profiles.py::SEND_TOOLS`, closed at seven): `send_message`, `send_group_message`, `send_notification`, `send_voice_reply`, `call_user`, `post_to_room`, `share_file`, named `mcp__trinity__<tool>` (pinned against the MCP server's registry and the `"trinity"` key in `trinity_mcp.py`).
+
+**Layers**
+- `services/tool_access_profiles.py` — pure policy: bundles, card copy, `resolve()` (stored or derived profile + `applied`), `plan_selection` / `plan_shortcut` / `merge_guardrails_put`, `denies_tool`, per-runtime `coverage_line`.
+- `services/agent_service/tool_access.py` — reads the row, applies the plan, writes it in ONE compare-and-set (`db.write_tool_access_row`: `guardrails_config` + `read_only_mode` + optional `read_only_config`, `WHERE` both unchanged → 409 on a lost race), applies the read-only layer live (`inject_/remove_read_only_hooks`) and then re-reads the row once, applying what is stored if a racing writer moved it, audits (`configuration` / `tool_access_change`, actor + before → after: profile, read-only, list), answers with `restart_required` (the container's `AGENT_GUARDRAILS` tool list differs from the stored one — the tool list only, so a pending turn-cap change is not named twice — or a running agent whose live apply failed). Limit: a failed live apply is reported by that save only; the next start re-syncs.
+- `services/tool_access_guard.py::assert_tool_allowed` — the send block refused by Trinity: the first action of the nine routes behind the send tools and `report` (messages, Telegram/Slack group posts, notifications, voice reply, VoIP call, room post, shared files, reports). An agent-scoped caller whose ENFORCED list names the tool gets 403 naming the tool and the profile; the four routes that send AS their path agent (`as_agent=`) check that agent's list too. People, the system key and Workspace visitors are never checked.
+
+**Storage — materialized.** `disallowed_tools` and the read-only columns stay exactly what is enforced, so the env injection (`crud.py`, `lifecycle.py` ×2) and `write-runtime-config.py` are unchanged — no base-image change. `guardrails_config.tool_access = {profile, custom: {read_only, disallowed_tools}, before_strict}` is bookkeeping: it rides in `AGENT_GUARDRAILS`, the container's whitelist drops it, and `check_guardrails_env_matches` ignores it on both sides, so a save whose enforced fields are unchanged never recreates.
+
+**Upgrade — nothing changes.** No row is written. A profile-less agent's profile is derived: read-only on and no list → Strict read-only with `applied: false` (the card reads "Send block not applied" + Apply); any list → Custom; else Full access.
+
+**Writers**
+| Route | What it does |
+|---|---|
+| `PUT /tool-access` `{profile, custom?}` | the one writer of the profile; gate = the composed routes' (`require_person_or_capability("agents.manage", self_person_only=True)` + `assert_agent_owner`); system agent 403 |
+| `PUT /read-only` `{enabled, config?}` | the header/list toggle = shortcut: ON → Strict (`before_strict` remembered), ON from a list that removes tools Strict allows → 409 naming them (never loosens silently), OFF from Strict → back (Full if none), OFF on another read-only profile → 409, already off → 200 unchanged |
+| `PUT /guardrails` | keeps the stored `tool_access` (never from the body); with a stored profile, `disallowed_tools` absent/`[]`/equal is kept and a different list is 409 naming `/tool-access`; profile-less agents unchanged |
+
+**Reads.** `GET /guardrails` (access tier) shows `tool_access` as `{profile}` only. `GET /tool-access` (owner tier — it shows Custom's remembered list): profile, `derived`, `applied`, the enforced layers, `custom`, `before_strict`, `runtime`, the five cards (bundle + statement + coverage line for the agent's runtime), `restart_required`. `GET /read-only` adds `profile`, `applied`, `read_only_layer`; its `enabled` is the toggle (Strict only). Agent detail and the fleet payload carry `tool_access_profile` (same resolver).
+
+**Per-runtime coverage** (one line per card for the agent's runtime):
+| | Claude Code | Codex | Gemini |
+|---|---|---|---|
+| Read-only layer | file tools can't write code/config files; shell commands aren't covered | the sandbox blocks every shell command, reads included | not enforced |
+| Send block | refused by Trinity + removed from the tool list | refused by Trinity | refused by Trinity |
+| Other removed tools | removed from the tool list | not enforced (`codex_runtime` logs them) | not enforced (`gemini_runtime` reads only the timeout) |
+
+**Frontend.** `ToolAccessSection.vue` (radio cards from the API, Customize → Custom pre-filled, named list errors from `utils/toolAccess.js` mirroring the backend, Apply on a not-applied profile, reports `tool-access` to `stores/agentRestart.js`, re-reads when the page's `tool_access_profile` moves); a save emits up through `GuardrailsPane` (`tool-access-saved`) so `AgentDetail` updates the header toggle; store actions `getToolAccess` / `setToolAccess` / `setReadOnly`; the header (`AgentHeader.vue`) and list (`AgentListPanel.vue`) toggles bind to `tool_access_profile === 'strict_read_only'` and send through `setReadOnly`. `GuardrailsPanel.vue` stops echoing `tool_access` / `disallowed_tools` once a profile is stored, and remounts after a Tool access save.
+
+**No MCP surface (deliberate boundary).** No MCP tool reads or writes a profile — it is the operator's choice about the agent, not the agent's (`# mcp:` header of `routers/agent_config.py`). Agent self-selection of its tool surface is a later, separately granted capability. An agent can only see the effect: the tools it is not offered, a 403 on a refused send, and the read-only refusals.
+
+**Tests.** `tests/unit/test_ent341_tool_access_profiles.py` (policy + name pins), `test_ent341_tool_access_routes.py` (real routes, CAS, shortcut, guardrails PUT, drift, payloads), `test_ent341_send_block.py` (helper + all nine routes + AST pin); frontend `toolAccess.spec.js`, `toolAccessSection.mount.spec.js`, `readOnlyShortcut.mount.spec.js`, `agentHeaderIdentityEdit.mount.spec.js`.
+
+---
+
 ## Agent-Side Enforcement (`docker/base-image/`)
 
 This is where guardrails actually *bite*. All hooks are root-owned in `/opt/trinity/hooks/` and registered in root-owned `/etc/claude-code/managed-settings.json` (ent#345) — the agent cannot deregister them without `sudo` (the file is also in `path_deny`).
+
+### Routing env pins — `managed-settings.d/60-routing-env.json` (trinity-enterprise#1001)
+
+Claude Code applies settings `env` from `~/.claude/settings.json` and the workspace `.claude/settings.json`, both agent-writable, so either could set `ANTHROPIC_BASE_URL`, a proxy or a TLS trust override and send the CLI's traffic, credential included, to another host. `hooks/write-routing-env.py` writes a root-owned `0444` policy drop-in whose `env` pins each of those names to the container's own value, or `""` when it has none; policy `env` beats user and project settings and the process env, and `""` makes the CLI use its default. The image build runs it under `env -i` (every pin empty); `startup.sh` reruns it through `sudo -E` before the agent server starts, so a proxy set on the container keeps working. Its own file, so a rejected entry voids only itself. The `.env` half of the same rule is in [credential-injection.md](credential-injection.md).
+
+### Vendor-traffic opt-out — `managed-settings.d/70-vendor-telemetry.json` (trinity-enterprise#1093)
+
+A static, root-owned `0444`, env-only drop-in setting `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `DISABLE_TELEMETRY` and `DISABLE_ERROR_REPORTING` to `1`, so Claude Code sends Anthropic no usage telemetry (including the per-file content hash on reads) and no error reports. It is the only layer, on purpose: there is no image `ENV`, because a recreate replays the old container's `Config.Env`, which would freeze an image value into every agent where a later admin opt-in could not reach it. A live capture showed the drop-in alone holds (no event logging, no third-party intake), and that with it removed and only a process-env value left, `""` in the agent's own settings file cancels it. The customer OTLP export Trinity configures for `/api/ops/costs` (`CLAUDE_CODE_ENABLE_TELEMETRY`) is gated on its own name and keeps working: the same capture saw `claude_code.cost.usage` and `claude_code.token.usage` reach a collector. On a Claude agent `.env` cannot set the three names (`execution_env.RUNTIME_OPT_OUT_KEYS`); on any runtime it cannot set `CLAUDE_CODE_MANAGED_SETTINGS_PATH` or `CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION` (`PROTECTED_KEYS`), which the CLI already drops from every settings file's `env`. The only `claude` run in the build before the drop-in exists is the install's `claude --version`, which makes no request. The agent server's `/health` reports `vendor_telemetry_opt_out` (`ok` / `missing` / `not_root_owned` / `writable` / `altered` / `unsupported_runtime`), so an agent on an older image shows as `missing`. Nothing rewrites it at boot.
 
 ### Hook registration — `hooks/managed-settings.json`
 
@@ -224,13 +280,13 @@ Each hook registers in exec form (trinity-enterprise#787): `"command": "/usr/bin
 
 **Hook protocol**: exit 0 (silent) = allow; exit 2 + stderr = deny (message shown to model); exit 1 / uncaught = Claude treats as non-blocking, so hooks deliberately convert all errors to exit 2.
 
-### Bash deny — `hooks/bash-guardrail.py` (54 lines)
+### Bash deny — `hooks/bash-guardrail.py` (66 lines)
 
-Loads config → compiles `bash_deny` (baseline regex) → first match wins → `deny`. Then checks `extra_bash_deny` (per-agent literal substrings). `allow()` if clean. Logs `tool`, `pattern`, `command_prefix[:120]` on deny.
+Loads config → takes `bash_deny`, plus `gated_bash_deny` while the root-owned skill-gate marker exists (trinity-enterprise#1002) → compiles them → first match wins → `deny`. Then checks `extra_bash_deny` (per-agent literal substrings). `allow()` if clean. Logs `tool`, `pattern`, `command_prefix[:120]` on deny.
 
-### File deny — `hooks/file-guardrail.py` (77 lines)
+### File deny — `hooks/file-guardrail.py` (89 lines)
 
-`_normalise(path)` → absolute (expands `~`, prefixes `/home/developer` for relative, collapses any run of leading slashes to one — `normpath` keeps exactly two, which made `//home/developer/.ssh/x` match no absolute pattern, trinity-enterprise#792; `read-only-guard.py` normalises the same way). `_matches_glob` runs `fnmatch` against **both** the full path and the basename, so `.env` patterns catch nested copies. Checks `path_deny` (baseline globs) then `extra_path_deny` (literals). `deny` with `tool`, `path`, `pattern`.
+`_normalise(path)` → absolute (expands `~`, prefixes `/home/developer` for relative, collapses any run of leading slashes to one — `normpath` keeps exactly two, which made `//home/developer/.ssh/x` match no absolute pattern, trinity-enterprise#792; `read-only-guard.py` normalises the same way). `_matches_glob` runs `fnmatch` against **both** the full path and the basename, so `.env` patterns catch nested copies. Checks `path_deny` (baseline globs) then `extra_path_deny` (literals). A basename on `path_allow` (`.env.example`, #3868 — names only, required by compat check K-001) skips the slash-free `path_deny` patterns (`.env.*` and the other basename rules); absolute patterns, `extra_path_deny` and a symlinked `.env.example` still deny. `deny` with `tool`, `path`, `pattern`.
 
 ### Credential scanner — `hooks/output-scanner.py` (58 lines, PostToolUse)
 
@@ -242,12 +298,12 @@ Runs as **root** via `sudo` from `startup.sh`. Reads baseline + `$AGENT_GUARDRAI
 
 ### CLI budget/scope — `agent_server/services/_runtime_config.py` (33 lines) + consumers
 
-`_load_guardrails()` (runtime → baseline → `{}`) is read on **every** Claude invocation, so backend-driven changes (via container recreation) apply without restarting the agent-server process. Defaults: `_DEFAULT_MAX_TURNS_CHAT=50`, `_DEFAULT_MAX_TURNS_TASK=50`, `_DEFAULT_EXECUTION_TIMEOUT_SEC=1800` (30 min).
+`_load_guardrails()` (runtime → baseline → `{}`) is read on **every** Claude invocation, so backend-driven changes (via container recreation) apply without restarting the agent-server process. Defaults: `_DEFAULT_MAX_TURNS_CHAT=200`, `_DEFAULT_MAX_TURNS_TASK=200` (equal to the baseline JSON, pinned by `test_ent471_turn_default_parity.py`), `_DEFAULT_EXECUTION_TIMEOUT_SEC=1800` (30 min).
 
 | Consumer | Lines | Applies |
 |----------|-------|---------|
 | `claude_code.py` (chat) | 209-222 | `--max-turns max_turns_chat`, `--disallowedTools`, wall-clock `execution_timeout_sec` |
-| `headless_executor.py` (task) | 323-344, 647 | `--disallowedTools`, `--max-turns max_turns_task`; turn-limit error suggests raising `max_turns_task` |
+| `headless_executor.py` (task) | `_setup_headless_command`, `_finalize_headless_result` | `--disallowedTools`, `--max-turns` = `max_turns_task`, or a lower per-task `max_turns` (a per-task value may only tighten it, #2328); the turn-limit 422 suggests raising `max_turns_task` only when the guardrail bound |
 
 ### Platform tool denials — `PLATFORM_DENIED_TOOLS` (#2454 → #2468)
 
@@ -267,9 +323,11 @@ Runs as **root** via `sudo` from `startup.sh`. Reads baseline + `$AGENT_GUARDRAI
 Immutable, root-owned `0444`. Contents:
 
 - **`bash_deny`** (12 regex+reason rules): recursive root/home delete, `chmod 777`, pipe-to-shell, git force-push, `kill -9 1`, raw `dd of=/dev/sd…`, `mkfs.*`, fork bomb, read-only-config tamper, host shutdown/reboot/poweroff, `sudo` naming `/etc/claude-code`/`/opt/trinity`/`/etc/sudoers` or `visudo`, root shells (`sudo -i`/`-s`/`--login`/`--shell`, `sudo su`, `sudo <shell>` with no script, bare `su`) (#3105).
-- **`path_deny`** (16 globs): `.env`, `.env.*`, `.mcp.json`, `.credentials.enc`, `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*`, `~/.claude/settings.json`, `~/.claude/settings.local.json`, `.claude.json`, `~/.claude/.credentials.json`, `~/.gemini/settings.json`, `~/.tmp/codex/*` (the runtimes' login and MCP config, trinity-enterprise#823), `~/.trinity/read-only-config.json`, `/opt/trinity/*`, `/etc/claude-code/*`. The image-build smoke (`guard002-smoke.py`) includes a `~/.claude.json` row.
+- **`gated_bash_deny`** (1 rule, trinity-enterprise#1002): `claude`, `codex` or `gemini` in command position, after any run of `VAR=value`, shell keywords and launchers (`env`, `nohup`, `timeout`, `sudo`, `xargs`, …), or inside `sh -c "`. A command that starts no session passes: `--version`, `--help`, `mcp`, and `plugin` on `claude` and `codex` (`gemini` has no `plugin` subcommand and reads the word as its prompt), unless a `-p` or `--print` comes before any `--`: that skips subcommand parsing, so `claude mcp -p x` is a session. `claude = x` passes too, as a variable in an inline script. Applies only on an agent with gates; not overridable from `AGENT_GUARDRAILS`. Quote-unaware like the `su` row. No nested quantifiers, no `\s*` after a command position, no inner token that can swallow `;`, `&`, `|`, `(` or `)`, and the `-p` scan after an allowed word stops at 512 characters, because a hook that outlives its 30 s timeout lets the tool run.
+- **`path_deny`** (16 globs): `.env`, `.env.*`, `.mcp.json`, `.credentials.enc`, `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*`, `~/.claude/settings.json`, `~/.claude/settings.local.json`, `.claude.json`, `~/.claude/.credentials.json`, `~/.gemini/settings.json`, `~/.tmp/codex/*` (the runtimes' login and MCP config, trinity-enterprise#823), `~/.trinity/read-only-config.json`, `/opt/trinity/*`, `/etc/claude-code/*`. The image-build smoke (`guard002-smoke.py`) includes a `~/.claude.json` row and a `.env.local` deny / `.env.example` allow pair.
+- **`path_allow`** (`[".env.example"]`, #3868): not overridable from `AGENT_GUARDRAILS`; mirrored into the platform prompt as `_GUARDRAIL_PATH_ALLOW`.
 - **`credential_patterns`** (9): Anthropic key/OAuth, OpenAI, GitHub PAT (classic + fine-grained), AWS access key, Slack bot/user token, Google API key.
-- **Budgets**: `max_turns_chat: 50`, `max_turns_task: 50`, `execution_timeout_sec: 1800`.
+- **Budgets**: `max_turns_chat: 200`, `max_turns_task: 200` (raised from 50 in trinity-enterprise#471), `execution_timeout_sec: 1800`. The baseline is baked into the agent image, so a deployed agent adopts a new default only after `./scripts/deploy/build-base-image.sh` and a **cold start** (stop → start; image drift is evaluated only when the agent was not already running, #1809). No recreate is needed, and a per-agent override (`AGENT_GUARDRAILS`) is unaffected.
 - **Override slots** (empty by default): `extra_bash_deny: []`, `extra_path_deny: []`, `disallowed_tools: []`.
 
 ### Config file locations (inside container)
@@ -301,6 +359,7 @@ See [read-only-mode.md](read-only-mode.md).
 | `tests/unit/test_guardrails.py` | Baseline bash deny-list (dangerous blocked / normal allowed), required credential patterns, router `_validate_guardrails_payload` bounds, `write-runtime-config.py` sanitization + clamping + malformed-env handling, migration idempotency |
 | `tests/test_files_guardrail_bypass.py` | AISEC-C2 RCE-by-config bypass repro, `PUT /files` deny-list coverage for protected paths, credential-inject allowlist rejection |
 | `tests/unit/test_ent787_guardrail_exec_form.py` | Exec-form registration shape of the four GUARD-002 hooks, no shell-prefix wrap, each hook's verdicts under the registered invocation and a hostile env, smoke-script coverage, `CLAUDE_CODE_SHELL_PREFIX` in `PROTECTED_KEYS` (trinity-enterprise#787) |
+| `tests/unit/test_ent1002_nested_cli_guardrail.py` | `gated_bash_deny`: the real hook under its registered flags with the marker on and off, refuse and pass tables run on the pinned CLIs, known-limit tables, adversarial commands to 512 KB, the image smoke's marker case |
 
 ---
 
@@ -333,10 +392,12 @@ See [read-only-mode.md](read-only-mode.md).
 | Env match check | `src/backend/services/agent_service/helpers.py` | ~408-430 |
 | Baseline | `docker/base-image/hooks/guardrails-baseline.json` | — |
 | Hook registration | `docker/base-image/hooks/managed-settings.json` | — |
+| Routing env pins | `docker/base-image/hooks/write-routing-env.py` → `/etc/claude-code/managed-settings.d/60-routing-env.json` (trinity-enterprise#1001) | `tests/unit/test_ent1001_endpoint_env.py` |
+| Vendor-traffic opt-out | `docker/base-image/hooks/managed-settings.d/70-vendor-telemetry.json`; `/health` `vendor_telemetry_opt_out` (trinity-enterprise#1093) | `tests/unit/test_ent1093_claude_vendor_telemetry.py` |
 | Registration smoke (build) | `docker/base-image/hooks/guard002-smoke.py` | — |
 | Hook lib | `docker/base-image/hooks/lib.py` | 1-103 |
-| Bash hook | `docker/base-image/hooks/bash-guardrail.py` | 1-54 |
-| File hook | `docker/base-image/hooks/file-guardrail.py` | 1-77 |
+| Bash hook | `docker/base-image/hooks/bash-guardrail.py` | 1-66 |
+| File hook | `docker/base-image/hooks/file-guardrail.py` | 1-89 |
 | Output scanner | `docker/base-image/hooks/output-scanner.py` | 1-58 |
 | Runtime merge | `docker/base-image/hooks/write-runtime-config.py` | 1-83 |
 | CLI loader | `docker/base-image/agent_server/services/_runtime_config.py` | 1-33 |

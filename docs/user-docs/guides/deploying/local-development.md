@@ -72,7 +72,7 @@ The frontend binds port `80` by default. If another process already holds `:80`,
 ./scripts/deploy/build-base-image.sh
 ```
 
-This builds `trinity-agent-base:latest` — the Docker image every agent container inherits. It includes Python 3.13, Node.js 20, Go 1.23, and the three agent runtimes: Claude Code, Gemini CLI and OpenAI Codex. **The platform can start without this, but you cannot create any agents until the image exists.**
+This builds `trinity-agent-base:latest` — the Docker image every agent container inherits. It includes Python 3.13, Node.js 24, Go 1.23, and the three agent runtimes: Claude Code, Gemini CLI and OpenAI Codex. **The platform can start without this, but you cannot create any agents until the image exists.**
 
 The image is tagged both `trinity-agent-base:latest` and `trinity-agent-base:<VERSION>` (read from the `VERSION` file). First build takes 5–10 minutes.
 
@@ -132,7 +132,7 @@ Log in with username `admin` and the `ADMIN_PASSWORD` from `.env`. There is no s
 |---|---|
 | http://localhost | Web UI |
 | http://localhost:8000/docs | Backend API (Swagger) |
-| http://localhost:8080/mcp | MCP Server endpoint (the dev Vite server does not proxy `/mcp`; that route exists on the production nginx only) |
+| http://localhost:8080/mcp | MCP Server endpoint (the dev Vite server does not proxy `/mcp`; that route exists on the production nginx only). Claude Code on your machine is refused with `external_mcp_access_off` until you turn on **External MCP access** once under Settings → MCP Keys |
 | http://localhost:8686/health | Vector log aggregator health |
 
 ## Hot Reload
@@ -193,16 +193,7 @@ The volume name prefix `trinity_` comes from the Compose project name (the direc
 
 ### Optional: PostgreSQL Backend
 
-SQLite is the zero-config default for local development, and the dev compose ships a bundled PostgreSQL container behind a profile. SQLite reached **end-of-support on September 1, 2026** — it no longer receives schema migrations or fixes, and server installs run PostgreSQL (see [Single-Server Deployment → Database backend](single-server.md#database-backend)). To run your local stack on PostgreSQL:
-
-```bash
-# In .env:
-#   POSTGRES_PASSWORD=your-postgres-password
-#   DATABASE_URL=postgresql://trinity:your-postgres-password@postgres:5432/trinity
-docker compose --profile postgres up -d
-```
-
-The host in the URL is the compose service name `postgres` (Docker DNS). `POSTGRES_DB`, `POSTGRES_USER` and `POSTGRES_PASSWORD` configure the bundled container. The hosted compose bundles one too (always on, database and user fixed at `trinity`); the prod compose has none. The switch is non-destructive — comment `DATABASE_URL` out and the next restart is back on SQLite (each backend keeps its own data).
+The dev compose runs a bundled PostgreSQL container, and `./scripts/deploy/start.sh` generates its password. The host in `DATABASE_URL` is the compose service name `postgres` (Docker DNS). `POSTGRES_DB` and `POSTGRES_USER` configure the bundled container. A dev volume holding an older `trinity.db` is refused at start: see `docs/migrations/SQLITE_TO_POSTGRES.md`.
 
 ## Troubleshooting
 

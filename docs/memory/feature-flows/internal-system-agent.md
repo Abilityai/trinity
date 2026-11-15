@@ -387,7 +387,7 @@ Stored in `system_settings` table with these defaults:
 |-------|-------------|------------------|
 | `user` | Human user via Claude Code client | Owner/admin/shared |
 | `agent` | Regular agent | Explicit permission list |
-| `system` | System agent | **Bypasses all checks** |
+| `system` | System agent | **Bypasses the agent-permission edge**; not shown a tool whose route admits only a person or only a signed-in session (trinity-enterprise#719) |
 
 ## Slash Commands
 

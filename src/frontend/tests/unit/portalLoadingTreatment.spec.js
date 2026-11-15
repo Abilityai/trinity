@@ -55,14 +55,16 @@ const CHART = [
   'components/AgentTile.vue',            // grid tile chart zones (ent#245)
   'components/DashboardPanel.vue',       // agent-defined dashboard charts (ent#253)
   'components/tiles/ExecutionsTile.vue', // the Executions grid tile (ent#449)
-  // ent#523 — the Workspace agent band. A Workspace surface AND a chart
-  // surface: the ruling is "charts only", not "not in the Workspace", and the
-  // beam here wraps the `StackedBarChart` alone. The band's own stat figures
-  // load with a skeleton beside it, which is the same ruling read the other
-  // way round. The `no Workspace surface imports it` test below is deliberately
-  // NOT extended to cover this file — its three named surfaces are the stage,
-  // the thread and the briefing, none of which draws a chart.
-  'components/portal/PortalAgentBand.vue',
+  // ent#523 put the Workspace agent band here (a Workspace surface AND a chart
+  // surface — the beam wrapped the `StackedBarChart` alone). trinity-enterprise#968
+  // took it OUT again: the band's chart is now `portal/ActivityWave.vue`, a
+  // waveform signature that owns its loading face (operator ruling 2026-10-22,
+  // recorded as the named exception in design-system.md §6). It still obeys the
+  // scanline's PHASE rules via `utils/scanlinePhase.js` — cache hits never
+  // animate, background refresh is invisible, empty terminals snap — which is
+  // what the ruling is about; only the pixels differ. Shrinking this list is
+  // allowed; the wave must not re-import the primitive, and the `no Workspace
+  // surface imports it` test below keeps its three named surfaces.
 ]
 // Non-chart consumers that pre-date the ruling, re-pointed to #1921's sweep
 // (skeletons, not scanlines). Shrinking this list is the sweep; growing it is

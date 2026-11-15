@@ -109,9 +109,11 @@ withholds `DAC_OVERRIDE`, so even root inside the container is subject to
 ordinary permission checks against the `developer`-owned, mode-0700 home.
 
 Nothing is destroyed — the token stays exactly where it already was — but the
-remediation did **not** run. Trinity files one operator-queue alert per agent per
-day for this (`ent615-git-token-scrub-unreadable-…`), separate from the refusal
-alert because the action differs. Re-run the agent with full capabilities, or
+remediation did **not** run. Trinity keeps one operator-queue alert per agent for
+this (`ent615-git-token-scrub-unreadable-…`), updated in place by each sweep that
+still cannot inspect the workspace and ended by the platform once one can
+(#3254), separate from the refusal alert because the action differs. Re-run the
+agent with full capabilities, or
 check that agent's remotes by hand:
 
 ```bash

@@ -37,6 +37,7 @@ const isUnavailable = computed(() => report.value?.overall_status === 'unavailab
 // collapse to one line per reason above the checklist instead.
 const AI_SKIP_NOTES = {
   no_api_key: 'no Anthropic API key is configured. An admin can add one in Settings, then re-run the analysis',
+  no_credential: 'no credential answers for this agent — it runs on a subscription the platform cannot read, or the model-credential setting excludes it. Fix that in Settings, then re-run the analysis',
   ai_not_run: 'the analysis has not run yet for this agent',
   ai_no_result: 'the model returned no verdict for them — re-run the analysis',
 }

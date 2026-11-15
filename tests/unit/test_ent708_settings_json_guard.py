@@ -532,10 +532,15 @@ class TestWiring:
         def line_of(pred):
             return min(c.lineno for c in calls if pred(c))
 
+        def verb_of(argv):
+            # The first constant after "git", past #4001's leading
+            # `*GIT_NO_AUTO_MAINTENANCE` option splice.
+            rest = [e for e in argv.elts[1:] if not isinstance(e, ast.Starred)]
+            return rest[0].value if rest and isinstance(rest[0], ast.Constant) else None
+
         def is_git(verb):
             return lambda c: any(isinstance(a, ast.List) and len(a.elts) > 1
-                                 and isinstance(a.elts[1], ast.Constant)
-                                 and a.elts[1].value == verb for a in c.args)
+                                 and verb_of(a) == verb for a in c.args)
 
         guard = line_of(lambda c: getattr(c.func, "id", None) == "_guard_container_only_settings")
         assert line_of(is_git("add")) < guard < line_of(is_git("commit"))

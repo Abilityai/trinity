@@ -24,6 +24,8 @@ import logging
 import os
 from typing import Iterable, Optional, Tuple
 
+from utils.untrusted_text import defang_bracket_markers
+
 logger = logging.getLogger(__name__)
 
 
@@ -78,10 +80,12 @@ def _label(raw: Optional[str], fallback: str) -> str:
 
 def _content(raw: Optional[str]) -> str:
     text = raw or ""
-    # A member can type the delimiters verbatim; strip them so the block cannot
-    # be closed (or re-opened) from inside. Newlines are collapsed below, so a
-    # forged `[agent] name:` prefix can only ever appear mid-line.
-    text = text.replace(HISTORY_OPEN, "").replace(HISTORY_CLOSE, "")
+    # A member can type the delimiters verbatim; defang every copy (its `[`
+    # becomes `(`, ignoring case) so the block cannot be closed (or re-opened)
+    # from inside. Deleting them instead reassembled a nested copy (ent#419).
+    # Newlines are collapsed below, so a forged `[agent] name:` prefix can only
+    # ever appear mid-line.
+    text = defang_bracket_markers(text, (HISTORY_OPEN, HISTORY_CLOSE))
     return _one_line(text, LINE_CLAMP)
 
 
@@ -135,7 +139,7 @@ def reply_quote_line(raw_message: Optional[dict], bot_id: str) -> Optional[str]:
     # block — neutralise it the same way: no block delimiters, no brackets (so
     # it cannot spell a `[From: …]` / `[agent]` line or close this one), and no
     # double quotes (so it cannot close the quote and continue as prose).
-    text = text.replace(HISTORY_OPEN, "").replace(HISTORY_CLOSE, "")
+    text = defang_bracket_markers(text, (HISTORY_OPEN, HISTORY_CLOSE))
     text = text.replace("[", "(").replace("]", ")").replace('"', "'")
     text = _one_line(text, QUOTE_CLAMP)
     if not text:

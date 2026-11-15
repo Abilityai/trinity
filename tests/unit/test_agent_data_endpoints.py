@@ -12,6 +12,7 @@ container restore path; this test covers everything up to that boundary.
 """
 import base64
 import io
+import json
 import tarfile
 import types
 from unittest.mock import AsyncMock, patch
@@ -52,7 +53,7 @@ def client(tmp_path, monkeypatch):
     app.include_router(ad.router)
     app.dependency_overrides[get_owned_agent_by_name] = lambda: _AGENT
     app.dependency_overrides[get_current_user] = lambda: types.SimpleNamespace(
-        username="admin", email="admin@example.com"
+        id=1, username="admin", email="admin@example.com"  # id: ent#830 caller scope
     )
     # Stage temp tars in a writable dir, not the container path /data.
     monkeypatch.setattr(ad, "_TMP_DIR", str(tmp_path / "agent-data-tmp"))
@@ -109,6 +110,23 @@ def test_export_base64_returns_tar_with_manifest(client):
         names = set(tf.getnames())
         assert "data/app.db" in names
         assert "manifest.json" in names  # self-describing
+
+
+def test_export_manifest_trinity_version_is_release_version(client, monkeypatch):
+    # #4381: was read from an unset GIT_COMMIT_SHORT, so always "unknown".
+    monkeypatch.setenv("VERSION", "0.9.5-rc2+g1a2b3c4")
+    tar = _data_tar({"data/app.db": b"SQLITEDATA"})
+    archive = AsyncMock(return_value=(iter([tar]), {}))
+    with patch.object(ad, "get_agent_container", return_value=_running()), patch.object(
+        ad, "container_get_archive", archive
+    ):
+        resp = client.post(f"/api/agents/{_AGENT}/data/export?format=base64")
+
+    assert resp.status_code == 200
+    raw = base64.b64decode(resp.json()["tar_base64"])
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r") as tf:
+        manifest = json.loads(tf.extractfile("manifest.json").read())
+    assert manifest["trinity_version"] == "0.9.5-rc2"
 
 
 def test_export_stream_returns_tar(client):

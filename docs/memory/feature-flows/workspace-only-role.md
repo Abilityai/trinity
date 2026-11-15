@@ -41,7 +41,8 @@ me a platform account.
 
 ```
 get_current_user(request, token)                    dependencies.py
-  └─ resolve_platform_user_unfloored(request, token)   every scope fence, unchanged
+  └─ resolve_platform_user_unfloored(request, token)   every scope fence, the suspension check,
+                                                       then the terms gate (ent#1054; every person on a declared session since ent#1107, auth.md §2.13)
   └─ enforce_operator_floor(request, user)
         is_workspace_only_role(user.role)?  no  → return     (operator, creator, admin)
         user.connector_agent set → return     (the ent#46 fence already confined it)
@@ -101,6 +102,78 @@ member: every canvas audience (`agent_page.canvas_audience_for`), the agent's wh
 runs included (`agent_page._client_scope`), voice and model choice. The narrower client view
 (`roster` canvases, their own work) is for people without a platform account. Decided at #837;
 nothing new is exposed, since a `user` saw all of it on Agent Detail before.
+
+**One Workspace whichever door (#3922, ruled option b).** The Workspace's own code page
+gives a platform account no client session. `client_portal.service.platform_login_admits`
+decides "platform account" as `/login` would: a `users` row exists, and either it has a
+password (`/api/token` takes the email, e.g. the admin) or the platform email login admits it
+(email login on, the login policy allows codes, the address allow-listed). The user row is
+required because an allow-list row is not an account: sharing and access-request approval
+wrote allow-list rows for outside clients before trinity-enterprise#837, and `/login` would
+create a user for such a client and drop the #3139 viewer scope. An account with neither (no
+password, not allow-listed, e.g. SSO-created) keeps the client door; `/login`'s code path
+would refuse it. Such an address gets a code at
+`/auth/request` even with nothing shared to it, and once the code verifies `/auth/verify`
+answers **409** `{"reason": "platform_login_required"}` and mints nothing. The verdict
+comes only after a correct code, so it tells nobody but the inbox owner that the account
+exists. `Portal.vue` then sends the person to `/login?redirect=<the Workspace page>&email=<address>`;
+`/login` fills the address and says "This email has a Trinity account. Sign in here to open
+your Workspace." Every platform login (`auth._finalizeLogin`: password, email, SSO, after 2FA)
+also ends a Workspace client sign-in left in the browser, because `clientPortal.authHeader`
+sends a held portal token before the platform JWT. An address the platform login cannot
+admit keeps the client door unchanged. Residual: a portal session minted for a platform
+address before #3922 keeps the client view until it ends or a `/login` supersedes it.
+
+**A deactivated account has no door (trinity-enterprise#1258).** The code page decided on two
+questions, "is an agent shared with this address" and "would `/login` admit it", and neither
+reads `users.suspended_at` (#995). A suspended account whose email also held a share was
+handled as an outside client: a code, a portal session and turns on the shared agent, while
+`/login` refused the same person. Ruling: suspension wins on every door. A share made before
+or after it does not re-open the account; an admin reactivates it.
+
+- **Sign-in.** `client_portal.service.email_account_suspended(email)` reads the account by
+  email. It is checked inside `email_has_access` (so the code request, the code verify and the
+  delegated exchange all inherit it, as they do the block) and first in `portal_signin_request`
+  and `portal_signin_verify`, before a code is issued or redeemed and before the #3922 hand-off.
+  The answers are the ones a stranger gets: the generic 200 at `/auth/request`, 401 at
+  `/auth/verify`, 403 at `/auth/exchange`.
+- **A live session.** A portal session knows an email, not an account, so one minted before the
+  suspension would outlive it. `portal_auth._reject_if_blocked` now refuses a suspended account
+  with the block's own 403 "Access has been revoked." Every consumer of a portal session calls
+  it (`get_portal_principal`, `workspace_email_from_request`, `routers/terms.py::terms_caller`),
+  so the session stops on its next request and works again after reactivation.
+- **Who is unaffected.** An address with no `users` row (an outside client) and an active
+  account. Both are pinned as controls.
+- **Failure direction.** A lookup that cannot answer denies, like the block.
+- **A revoked or expired invitation** suspends an account that never accepted. That account is
+  refused here too, including when an agent is shared with its email afterwards.
+- **Not covered.** A public chat link and the channel sign-ins (Telegram, Slack, WhatsApp)
+  identify a person by a verified email of their own and do not read the account either.
+
+Tests: `tests/unit/test_ent1258_suspended_workspace_door.py`.
+
+**One code, not two (#4157).** The first code is correct and spent at the portal door, so
+the 409 also carries `handoff` — a one-time token from `services/login_handoff_service.py`
+(`secrets.token_urlsafe(32)`, held in Redis as `login_handoff:<sha256>` bound to the
+address, 5-minute TTL, never logged). It is minted only after a correct code, and only when
+the platform email login would take the address (email login on, policy allows codes,
+allow-listed — `client_portal.service.platform_login_handoff`); a password-only account
+with email login off gets a bare 409 and signs in with its password. `Portal.vue` keeps the
+token in the auth store (`workspaceHandoff`, memory only — never the URL or storage) and
+pushes the same `/login?redirect=…&email=…`. `Login.vue` redeems it once at
+`POST /api/auth/email/handoff` `{email, token}`, which shares the verify route's code
+(`_require_email_login_open`, `_email_allow_listed`, `_email_login_failed`,
+`_complete_email_login`): same door gates, per-account/per-IP login buckets and
+`otp_attempts:{email}`, #2381 allow-list re-check, audit (`method: email_handoff`) and 2FA
+step; only the code check is replaced by an atomic `GETDEL` of the token. A second
+redemption, an expired token or another address's token is the verify route's uniform 401.
+A reload drops the in-memory token and `/login` shows the ordinary code form, filled in.
+Because a correct portal code now leads to a platform session, a wrong portal code for an
+address `platform_login_admits` also spends that account's platform budget
+(`login_attempts_acct:{email}`, `otp_attempts:{email}`); outsiders' platform buckets stay
+untouched (ent#311).
+Portal codes are not made redeemable at `/api/auth/email/verify` by this (that is #3983's
+territory).
 
 **Known limit (follow-up):** the loop routes keep their pre-#837 reach — a member lists every
 loop on a reachable agent and may stop any of them.
@@ -163,7 +236,7 @@ set is pinned by `test_837_workspace_only_floor.py::test_the_unfloored_resolver_
 | `/ws/events` | `main.py::websocket_events_endpoint` refuses a Workspace-only owner at the handshake, before `accept()` (the client sees HTTP 403) |
 | `/api/agents/{agent_name}/terminal` | `services/agent_service/terminal.py` closes 4003 for a Workspace-only role, after the JWT decode and before any agent lookup |
 | system-agent terminal | admin only |
-| `/ws/voice/{id}` | bound to the voice session's owner (#600) |
+| `/ws/voice/{id}` | first-frame single-use ticket from either voice start — the Workspace one admits a Workspace-only account, the operator one requires operator-or-above, re-checked at attach; then bound to the session's owner (#600, trinity-enterprise#595) |
 | VoIP media stream | provider-authenticated |
 
 ### Sharing
@@ -200,7 +273,7 @@ self-signup and SSO first sign-in keep writing.
 
 | File | Change |
 |---|---|
-| `utils/workspaceOnly.js` | `isWorkspaceOnlyRole` (exactly `'user'`; an unknown role is not), `landingAfterSignIn`, `operatorRouteRedirect`, `isWorkspaceOnlyRefusal`, `reactToWorkspaceOnly`, `setWorkspaceOnlyHandler` / `notifyWorkspaceOnly` (one reaction per 2 s burst), `WORKSPACE_ONLY_ROLE_LABEL` |
+| `utils/workspaceOnly.js` | `isWorkspaceOnlyRole` (exactly `'user'`; an unknown role is not), `landingAfterSignIn`, `operatorRouteRedirect` (leaves `/terms` alone, `isTermsPath`, ent#1054), `isWorkspaceOnlyRefusal`, `reactToWorkspaceOnly`, `setWorkspaceOnlyHandler` / `notifyWorkspaceOnly` (one reaction per 2 s burst), `WORKSPACE_ONLY_ROLE_LABEL` |
 | `router/index.js` | on a `requiresAuth` route a `user` goes to `/workspace` (`/agents/:name/*` → `/workspace?agent=:name`), before the entitlement branch; a cached `user` role is confirmed with `GET /api/users/me` first, so an account raised since its last sign-in is not bounced; authenticated `/login` → role landing |
 | `views/Login.vue` | `afterLogin` and the SSO callback use `landingAfterSignIn`; a pointer "Was an agent shared with you? Sign in to the Workspace" |
 | `main.js`, `api.js` | response interceptors report a 403 `workspace_only` to the handler: re-read the profile, `router.replace('/workspace')` unless already on a Workspace / canvas / chat / sign-in page (path via `pathForVerdict`, #3406) |
@@ -216,9 +289,14 @@ self-signup and SSO first sign-in keep writing.
 ## Sequence — a `user` signs in
 
 ```
-/login → POST /api/auth/email/verify → _finalizeLogin → GET /api/users/me (marked) → role "user"
+/workspace code page → POST …/client-portal/auth/verify → 409 platform_login_required (#3922)
+      + handoff token (#4157, held in memory by the auth store)
+      → /login?redirect=<Workspace page>&email=<address>
+/login → POST /api/auth/email/handoff (#4157; no token held → POST /api/auth/email/verify
+      with a second code) → _finalizeLogin (ends any Workspace client sign-in)
+      → GET /api/users/me (marked) → role "user"
       → landingAfterSignIn(redirect, "user") → /workspace
-/workspace → App.vue connect() → POST /api/ws/ticket (marked) → /ws
+/workspace → App.vue token watch → followToken → POST /api/ws/ticket (marked) → /ws (#3445)
            → GET /api/enterprise/client-portal/my-agents (portal door) → roster
 operator URL → router guard → /workspace          any operator route → 403 workspace_only
 ```

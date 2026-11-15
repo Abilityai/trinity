@@ -1,7 +1,11 @@
 # Feature: Agent Info Display
 
 ## Overview
-Displays template metadata (capabilities, commands, sub-agents, platforms, resources) in an "Info" tab on the agent detail page, exposing what an agent can do and how it is configured.
+Displays template metadata (template tags, commands, sub-agents, platforms, resources) in an "Info" tab on the agent detail page, exposing what an agent can do and how it is configured.
+
+> **Current home (#3798):** the Info tab is gone; `InfoPanel.vue` renders inside Settings › General's **Technical details** dialog. The line numbers below predate that move.
+>
+> **trinity-enterprise#584 — one source for capability descriptions (requirements/skills.md §23):** a capability is described once, in its skill's `SKILL.md` `description:`. So `template.yaml` `capabilities:` render as **Template tags** (`data-testid="info-template-tags"`): raw strings in neutral `BaseBadge size="sm"` chips (object entries show their `name`; `formatCapability`'s title-casing is gone, so a tag reads as the template and the `brain-orb` gate spell it), with a line saying what they do. The **Skills** block (`data-testid="info-declared-skills"`) lists `template.yaml` `skills:` names only — their template-side descriptions were a sixth source and are not rendered — and points at the Skills tab. Brain Orb detection still reads `capabilities` from `/info` unchanged (`AgentDetail.vue::checkBrainOrbCapability`, `router/index.js`).
 
 ## User Story
 As a platform user, I want to see what an agent is capable of so that I understand its purpose and available commands before interacting with it.
@@ -92,8 +96,8 @@ The complete Info Panel component displaying template metadata.
 | Sub-Agents | 113-141 | `sub_agents[]` | Blue grid cards | Yes |
 | Slash Commands | 143-168 | `commands[]` | Purple mono pills | Yes |
 | MCP Servers | 170-190 | `mcp_servers[]` | Yellow mono pills | No |
-| Skills | 192-212 | `skills[]` | Teal pills | No |
-| Capabilities | 214-231 | `capabilities[]` | Green pills | No |
+| Skills | 192-212 | `skills[]` | Teal pills, names only + pointer to the Skills tab (ent#584) | No |
+| Template tags | 214-231 | `capabilities[]` | Neutral `BaseBadge` chips, raw text (ent#584; was "Capabilities", green, title-cased) | No |
 | Platforms | 233-250 | `platforms[]` | Gray pills | No |
 | Enabled Tools | 252-270 | `tools[]` | Orange pills | No |
 
@@ -465,17 +469,9 @@ Renders all metadata sections when `templateInfo.has_template === true`
 
 ## Helper Functions
 
-### formatCapability (InfoPanel.vue:324-330)
-Converts snake_case capability names to Title Case:
-```javascript
-const formatCapability = (capability) => {
-  // Convert snake_case to Title Case
-  return capability
-    .split('_')
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ')
-}
-```
+### formatCapability — removed (trinity-enterprise#584)
+Template tags render raw through `getItemName`, so an object-shaped entry
+(`{name, description}`) shows its name instead of throwing on `.split`.
 
 ### getItemName / getItemDescription (InfoPanel.vue:312-322)
 Handle items that can be either strings or {name, description} objects:
@@ -508,10 +504,12 @@ Agents can also retrieve template metadata for other agents via the MCP tool `ge
 getAgentInfo: {
   name: "get_agent_info",
   description:
-    "Get full template metadata and capabilities for an agent. " +
+    "Get full template metadata for an agent. " +
     "Returns detailed information from the agent's template.yaml including: " +
-    "display name, description, version, author, capabilities, available commands, " +
-    "MCP servers, tools, skills, and example use cases. " +
+    "display name, description, version, author, capabilities (template tags, not skill " +
+    "descriptions), available commands, MCP servers, tools, declared skills, and example " +
+    "use cases, plus the create-time kind ('agent' | 'deployment', null when unknown). " +
+    "What a skill does is its own SKILL.md description:, not anything in template.yaml. " +
     "Useful for understanding what an agent can do before interacting with it. " +
     "Access control: agents can only get info about agents they have permission to call.",
   parameters: z.object({

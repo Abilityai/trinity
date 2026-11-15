@@ -126,10 +126,13 @@ describe('the Reports tab', () => {
     // #2169's Overview block is gone with the agent page. The chart it owned is
     // the band's, and the details panel must not grow a second copy — two charts
     // for one agent is exactly the duplication the dismantle removed.
+    // trinity-enterprise#968: the band's chart is the activity wave; the rule
+    // is the same — one chart for one agent, and it lives in the band.
     const page = src(PAGE)
     expect(page).not.toContain('StackedBarChart')
+    expect(page).not.toContain('ActivityWave')
     const band = src('../../src/components/portal/PortalAgentBand.vue')
-    expect(band).toContain('StackedBarChart')
+    expect(band).toContain('ActivityWave')
   })
 })
 

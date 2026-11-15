@@ -391,6 +391,7 @@
   - Backend endpoint: `POST /api/internal/agents/{name}/pre-check` (X-Internal-Secret gated) runs the script via `execute_command_in_container` — the same primitive used by `git_service.py` (persistent-state allowlist, #384 S3), `ssh_service.py`, `agent_service/terminal.py`, `adapters/message_router.py`, `routers/system_agent.py`, `routers/voice.py`.
   - Fail-open: script absent, non-zero exit, timeout, backend 5xx / malformed response → scheduler fires as usual. A broken pre-check never silently suppresses scheduled work.
   - Message override: non-empty stdout replaces `schedule.message` for that one invocation — lets the agent inject real work items (e.g. the PR list) into the chat prompt.
+  - Schedule identity (#3966): the one agent-scoped hook gates every cron schedule on the agent, so the scheduler sends the firing schedule's `schedule_id` / `schedule_name` / `schedule_message` in the pre-check request body and the backend exports them to the hook as `TRINITY_SCHEDULE_ID` / `TRINITY_SCHEDULE_NAME` / `TRINITY_SCHEDULE_MESSAGE` (exec environment, not argv). Without them an agent with two schedules could not gate one without rewriting the other's task (#955). A bodyless request runs the hook as before.
   - Skip record: empty stdout writes a row to `schedule_executions` with `status='skipped'`, reason, and zero cost — visible in the Trinity UI alongside successful runs.
   - Manual triggers bypass pre-check entirely (explicit operator intent always fires).
   - Zero DB schema change (reuses existing `ExecutionStatus.SKIPPED` + `create_skipped_execution`).
@@ -442,6 +443,21 @@
   - Frontend: amber `queued` badge in Tasks tab and Execution Detail
   - Identity captured at enqueue and replayed at drain (no re-auth, matches scheduler pattern)
 - **Flow**: `docs/memory/feature-flows/persistent-task-backlog.md`
+
+### 10.8.2 The Queue Wait Is Measurable and a Stuck Queue Alerts (#4257)
+- **Status**: ✅ Implemented (2026-11-05)
+- **Requirement ID**: QUEUE-STALL-001
+- **GitHub Issue**: #4257
+- **Description**: An async `/task` on an idle pull pilot sat `queued` for hours and nothing in the product could say why — the claim NULLed `queued_at`, so the wait was unmeasurable, and every refusal on the claim path was silent. A queued row now carries its real wait, the caller's receipt explains it, and a head that stops moving raises one operator alert per agent.
+- **Key Features**:
+  - `queued_at` survives a claim; `release_claim_to_queued` coalesces it, so a released claim keeps its FIFO place. `requeue_expired_lease` still restamps, so "wait" means this attempt's wait. Readers filter on `status='queued'` — `queued_at IS NOT NULL` is **not** a queued predicate
+  - Both queued receipts (async, and the sync backlog timeout) carry `queued_at`, `queue_position` and `wait_reason` ∈ `capacity` / `backlog_drain` / `agent_busy` / `worker_claim` / `conversation_busy`. `agent_busy` is reused from #3244 as a *value* in a new field, never as a `status`
+  - `services/queue_stall_service.py` runs from `capacity_manager.run_maintenance` (the existing 60 s tick) and files one `dispatch_queue_stalled` platform alert per agent past the threshold; convergence across uvicorn workers is the `uq_operator_queue_pending_subject` unique index. The alert ends itself when the head moves
+  - `queue_stall_alert_minutes`: admin-only, default 30, range 5–1440, named 400 outside it; dedicated `GET/PUT /api/settings/queue-stall-alert-minutes` and a 422 pointer from the generic `/{key}` PUT. No migration (`system_settings` row)
+  - Worker side: a non-200 claim is warned once per status per process instead of being read as "queue empty"; in-loop delivery is bounded to 90 s or the lease, whichever is shorter, with the envelope already on disk and a 60 s resend tick to finish it — a parked worker no longer looks alive and claims nothing
+  - The push stall verdict reads the live slot meter (`SlotService.active_slot_count`), never an assumption: a full meter on a long turn is `capacity`, an expected wait, not a drain the backend owes
+  - The `/next-task` claim-denied counter is gated on the caller's own validated agent key and a shape-checked name — the 403 branch is reached before any credential is read, so the refusal alone authorizes nothing
+- **Not included**: `GET /api/executions/{id}` and the MCP `get_execution_result` read surface do not yet carry the three fields; they reach MCP callers on the dispatch receipt only.
 
 ### 10.8.1 Fleet-Wide Parallel-Capacity Ceiling (#506)
 - **Status**: ✅ Implemented (2026-06-29)
@@ -575,7 +591,7 @@
 - **Description**: Under pull/work-stealing (#1081), lease-expiry re-delivery re-runs failed turns. Two cases must escalate to a human instead of looping: a **poison task** that fails every re-delivery, and an **irreversible-and-un-confineable effect** the platform cannot make safe (agent's own keys / `gh` / `curl` — no confined Trinity tool in the path). Both land in the **asynchronous operator queue** (OPS-001). There are **no synchronous user gates**: a turn that needs a human parks a request and ENDS — it never holds a worker waiting on a person.
 - **Re-delivery cap (mechanism — shipped Phase 3)**:
   - `schedule_executions.redelivery_count` + fleet-wide `MAX_REDELIVERY` (env, default 3); distinct from #678's `retry_count` (reader-race auto-retry).
-  - Under the cap the lease reaper re-queues the SAME row (`execution_id` preserved — effect_guard #1084 and idempotency #525 are execution_id-scoped); at the cap it poison-parks: operator alert FIRST (idempotent `poison-{execution_id}` item), then CAS-FAILs the row (`poison_lease` tag) — never silently dropped.
+  - Under the cap the lease reaper re-queues the SAME row (`execution_id` preserved — effect_guard #1084 and idempotency #525 are execution_id-scoped); at the cap it poison-parks: operator alert FIRST (`platform_alerts.observe`, subject `poison:{execution_id}`: one pending row per execution that never expires and only a person ends; a failed write parks nothing and the next pass retries), then CAS-FAILs the row (`poison_lease` tag) — never silently dropped.
   - **Counter semantics: raw attempts, NO reset-on-progress.** Partial progress is invisible to the platform (the #548/#333 trace-fidelity gap), and resetting on apparent progress would let an intermittently-progressing poison task loop forever. Re-litigating requires new trace-fidelity evidence, not a config change.
   - Per-agent cap override: **deferred** (seam documented in `lease_reaper_service.get_max_redelivery`). Design note: a per-agent cap of 0 is the only *deterministic platform-side* park-first lever for effect-bearing pilot agents — every lease expiry escalates straight to a human (tradeoff: every transient crash becomes an operator interrupt). Record kept so the future pilot decision isn't re-derived.
 - **Async human-gate contract (AUTHORED CONTRACT, NOT ENFORCEMENT)**: the platform cannot intercept un-confineable effects by definition; the lever is the contract surfaced to agents in the platform system prompt (`platform_prompt_service.PLATFORM_INSTRUCTIONS` → Operator Communication) and `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`:
@@ -808,6 +824,21 @@ schedules:
   `tests/unit/test_1823_tz_capability_parity.py`. An unresolvable zone is a named 400 at the API and
   a **permanent** (bounded, non-retrying) `_add_job` failure in the scheduler — never a 500, and
   never the 60s retry storm that froze `next_run_at`.
+- **A fire time never goes backwards across a DST transition (#3940)**: APScheduler 3.11.0's
+  `CronTrigger` answered a fire time EARLIER than the previous one at every fall-back for a
+  minute-stepped cron with `hour='*'` in a zone leaving summer time (`*/30` in Europe/Lisbon:
+  01:00Z, 00:30Z, 01:00Z, ...), with pytz and `zoneinfo` zones alike. The job loop never advanced,
+  the scheduler grew without bound, and two hosts ran out of memory on 2026-10-25. The images pin
+  **APScheduler 3.11.3** (fixed since 3.11.1), and every user schedule registers
+  `src/scheduler/cron_trigger.py::MonotonicCronTrigger`. An answer not after the previous fire time
+  (earlier, or EQUAL — the `0 1 * * *` shape) is retried once, asking for the first fire time
+  after `previous + 1s` in UTC, which lands on the correct schedule; only if the retry is not after
+  the previous fire time either does it fall back to `previous + 1 minute`. Logged once per trigger. It compares and adds on UTC
+  instants only: two datetimes sharing a zone compare by wall clock, and local arithmetic resets
+  `fold`, so either mistake lets a backwards time through inside the repeated hour. Guarded by
+  `tests/unit/test_3940_cron_dst_fold.py`, which also requires `tests/requirements-test.txt` to pin
+  the image's exact APScheduler, so CI cannot pass on a fixed release while the images ship a
+  broken one.
 - `MAX_DECLARED_SCHEDULES = 20` lives in the reader, so the catalog surface and the materializer
   inherit the same cap. (Verified: the platform has no other per-agent schedule cap.)
 
@@ -876,6 +907,17 @@ schedules:
    post-#89 it is the second schedule producer for the same agent. It gains the same name-match
    skip; otherwise a manifest declaring `daily-briefing` on a template that also declares it yields
    two rows.
+   **Apply mode (trinity-enterprise#695, roadmap §16.5.4) is the one deliberate exception on this
+   path.** For a member apply creates it re-reads the member's schedules after creation, and a
+   same-named template row is **updated** to the manifest's declared fields (`cron`, `message`, and
+   `timezone` / `description` only when declared) instead of skipped; on an existing member the same
+   rule applies to every live row the manifest names. It never writes `enabled` on a matched row
+   (a difference is reported, `enabled_differs`) and never deletes a row (live rows the manifest does
+   not name are reported, `schedule_undeclared`). Matching is by exact name because no identity
+   column exists — a deliberate departure from trinity#1198's "never adopt an unlinked row": with no
+   identity every row is unlinked, so following it literally would make an in-place update
+   impossible. It fails closed: two live rows with one name refuse the run
+   (`schedule_name_ambiguous`), and a manifest naming one schedule twice is `schedule_declared_twice`.
 - There is **no** `UNIQUE(agent_name, name)` index on `agent_schedules` and none is added: it is a
   schema change (Invariant #3, dual-track) and would fail on installs already holding
   duplicate-named schedules. Known blind spot: `list_agent_schedules` excludes soft-deleted rows, so
@@ -912,7 +954,8 @@ schedules:
 - **Invariant removed, named deliberately:** `config/manifests/default-system.yaml` records as an
   ent#124 decision *"No `schedules:` — a zero-credential fresh install must not accumulate failing
   cron executions."* #89 transfers that control from the manifest author to the template author with
-  no opt-out (a manifest can only add schedules, never suppress a template's).
+  no opt-out (a manifest can only add schedules, never suppress a template's; apply mode, roadmap
+  §16.5.4, may change a template row's declared fields, but never arms, disarms or deletes one).
 - **Amplification to note, not gate:** a schedule `message` carries the same trust level as that
   template's `CLAUDE.md` and skills — no new trust boundary. But an agent-scoped MCP key holding
   `create_agent` can now spawn an agent from an arbitrary `github:` template *and* mint recurring
@@ -1891,6 +1934,10 @@ failed iteration and proceeds, bounded so a fully-broken agent still terminates.
   `source_channel_client` on the row, and memory is keyed `UNIQUE(agent_name,
   user_email)` — a companion serving several seats runs one schedule per seat and
   each run can only reach its own.
+- **One live scope at a time** (#4121). The write is refused `memory_turn_ambiguous`
+  while another live turn on the agent resolves to a different scope, so two seats
+  briefed at the same time cannot save until one ends: stagger the schedules. A run
+  that is not running is refused `memory_turn_not_live`.
 - **The same gate as chat, not a back door** (AC 2). There is one write boundary —
   `POST /api/agents/{name}/user-memory` → `db.write_user_memory_agent_notes` — and
   the seat case is a second *resolver* of "which user", not a second writer. The

@@ -45,7 +45,7 @@ from models import (
     User,
 )
 from database import db, SystemSetting, SystemSettingUpdate
-from dependencies import get_current_user, assert_admin
+from dependencies import get_current_user, assert_admin, is_interactive_principal
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services import operator_intake_service, telemetry_sharing_service
 
@@ -71,6 +71,7 @@ from services.settings_service import (
     AGENT_DEFAULT_REQUIRE_EMAIL,
     get_agent_default_require_email,
     MAX_PARALLEL_TASKS_CEILING_KEY,
+    QUEUE_STALL_ALERT_MINUTES_KEY,
     MAX_PARALLEL_TASKS_CEILING_DEFAULT,
     MAX_PARALLEL_TASKS_CEILING_MIN,
     MAX_PARALLEL_TASKS_CEILING_MAX,
@@ -114,6 +115,13 @@ from services.subscription_headroom_alerts import (
 )
 
 
+# trinity-enterprise#1107 — the terms of use are written only through
+# `PUT /api/terms` / `POST /api/terms/restore-default` (admin + interactive,
+# validated by name, audited by version). Blocked on the generic PUT so an
+# empty or oversized text, or a hand-typed version, cannot reach the sink.
+from services.terms_service import SETTING_KEYS as TERMS_SETTING_KEYS
+
+
 
 router = APIRouter()
 
@@ -136,9 +144,17 @@ async def get_all_settings(
     try:
         settings = db.get_all_settings()
 
-        return settings
+        # #3825: the admin env fingerprint is boot's own record, not a setting.
+        from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY
+        # trinity-enterprise#1174: a module-reserved key is listed to a signed-in admin only.
+        from services import reserved_settings
+        interactive = is_interactive_principal(current_user)
+        return [st for st in settings if st.key != ADMIN_ENV_FINGERPRINT_KEY
+                and (interactive or reserved_settings.managed_by(st.key) is None)]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get settings: {str(e)}")
+        # #4284: the exception text goes to the log, never the body.
+        logger.exception("Failed to get settings")
+        raise HTTPException(status_code=500, detail=f"Failed to get settings ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.get("/{key}")
@@ -156,7 +172,13 @@ async def get_setting(
     assert_admin(current_user)
 
     try:
-        setting = db.get_setting(key)
+        # #3825: reads as absent — the row holds a crackable hash of ADMIN_PASSWORD.
+        from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY
+        setting = None if key == ADMIN_ENV_FINGERPRINT_KEY else db.get_setting(key)
+        # trinity-enterprise#1174: a module-reserved key reads as absent to a key caller.
+        from services import reserved_settings
+        if reserved_settings.managed_by(key) is not None and not is_interactive_principal(current_user):
+            setting = None
 
         if not setting:
             raise HTTPException(status_code=404, detail=f"Setting '{key}' not found")
@@ -165,7 +187,8 @@ async def get_setting(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get setting: {str(e)}")
+        logger.exception("Failed to get setting %s", key)
+        raise HTTPException(status_code=500, detail=f"Failed to get setting ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.put("/{key}", response_model=SystemSetting)
@@ -181,6 +204,16 @@ async def update_setting(
     Admin-only endpoint. Creates the setting if it doesn't exist.
     """
     assert_admin(current_user)
+
+    # trinity-enterprise#1174: a key a registered module owns is written only
+    # through that module's own route (which enforces who may write it).
+    from services import reserved_settings
+
+    if reserved_settings.managed_by(key) is not None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} is set via {reserved_settings.managed_by(key)}",
+        )
 
     # #2380: install provenance is a RECORDED FACT, not a setting. It is written
     # once at boot from TRINITY_INSTALL_SOURCE and gates a surface that is meant
@@ -204,9 +237,43 @@ async def update_setting(
             ),
         )
 
+    # #3825: boot's record of the ADMIN_PASSWORD value it last applied. Writing
+    # it would let a key-only caller decide whether the next restart re-applies
+    # `.env` over a password the admin changed in the app.
+    from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY
+
+    if key == ADMIN_ENV_FINGERPRINT_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} is recorded by the platform at boot and is not writable through the API.",
+        )
+
+    # trinity-enterprise#1107: the terms text, title, version and switch.
+    if key in TERMS_SETTING_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is set via PUT /api/terms (admin + interactive-only, validated, "
+                "audit-logged; POST /api/terms/restore-default restores the shipped text)"
+            ),
+        )
+
     # #506: the fleet ceiling must go through the dedicated range-validated
     # route; block the generic PUT so it can't be written to junk/out-of-range
     # (same pattern as the skills_library_url SSRF special-case below).
+    # #4257: same reason as the ceiling below — the generic PUT takes an
+    # unvalidated string, and a junk threshold here either silences the stall
+    # monitor or makes it file on every tick. The getter clamps as a backstop,
+    # but the named 422 is what tells a caller where the validated route is.
+    if key == QUEUE_STALL_ALERT_MINUTES_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "queue_stall_alert_minutes must be set via "
+                "PUT /api/settings/queue-stall-alert-minutes (range-validated 5–1440)"
+            ),
+        )
+
     if key == MAX_PARALLEL_TASKS_CEILING_KEY:
         raise HTTPException(
             status_code=422,
@@ -310,6 +377,22 @@ async def update_setting(
     # route — without this block the whole SSRF gate is one generic PUT away
     # from being bypassed. `generation` and `lkg` are blocked for a different
     # reason: they ARE the cache, and a writable cache is a poisonable one.
+    # ent#641: the autonomy level has a closed vocabulary (L0-L3) and raising it
+    # is what lets anything on the instance run unprompted. An unvalidated write
+    # here would accept any string — and a value outside the vocabulary reads as
+    # the DEFAULT at every consumer, so the catch-all would be a silent way to
+    # disarm the dial rather than to set it. Same 422-with-a-pointer as the
+    # retention windows (ent#297) and the registry URL (ent#14).
+    from services import autonomy_dial_service
+
+    if key == autonomy_dial_service.LEVEL_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "the autonomy level must be set via PUT /api/settings/autonomy-dial "
+                "(admin + human-only, validated, audit-logged)"
+            ),
+        )
     # Validate at the boundary AND at the sink (#1525).
     from services.settings_service import TEMPLATE_REGISTRY_KEYS
 
@@ -321,6 +404,13 @@ async def update_setting(
                 "(HTTPS + SSRF validated, admin + human-only, audit-logged)"
             ),
         )
+    # trinity-enterprise#591: validated per entry, interactive-admin only.
+    from services.template_source_policy import SETTING_KEY as ALLOWLIST_KEY
+
+    if key == ALLOWLIST_KEY:
+        raise HTTPException(status_code=422, detail=(
+            f"{key} must be set via PUT /api/settings/agent-creation-allowlist "
+            "(validated, admin + interactive-only, audit-logged)"))
 
     from config import OPS_SETTINGS_VALIDATION
     from services.settings_service import RETENTION_OPS_KEYS
@@ -438,6 +528,20 @@ async def update_setting(
             ),
         )
 
+    # trinity-enterprise#1101: the external-MCP-access switch moves the
+    # instance's perimeter, so it has one write path — the typed, audited
+    # route — and the catch-all cannot store a value it would not validate.
+    from services.settings_service import MCP_EXTERNAL_ACCESS_KEY
+
+    if key == MCP_EXTERNAL_ACCESS_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/mcp-external-access "
+                "(admin, boolean, audit-logged)"
+            ),
+        )
+
     if key == "a2a_trusted_networks":
         raise HTTPException(
             status_code=422,
@@ -517,6 +621,15 @@ async def update_setting(
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
 
+    # trinity-enterprise#1027: the model-credential knob takes three words;
+    # anything else used to be stored and silently read as `auto`.
+    from services import model_gateway
+    if key == model_gateway.SETTING_CREDENTIAL and body.value not in model_gateway.MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} must be one of {', '.join(model_gateway.MODES)}; got {body.value!r}.",
+        )
+
     # #2691: `public_chat_url` is the one generic-PUT key whose write has
     # immediate side effects on live integrations — every Telegram webhook is
     # re-registered and every WhatsApp binding rewritten a few lines below. It
@@ -526,9 +639,9 @@ async def update_setting(
     # `http://` stays legal — the managed fleet advertises exactly that behind a
     # tunnel — and clearing the setting stays legal.
     if key == "public_chat_url":
-        from services.settings_service import classify_advertised_url
+        from services.settings_service import classify_advertised_url, normalize_public_url
 
-        body.value = (body.value or "").strip().rstrip("/")
+        body.value = normalize_public_url(body.value)
         if body.value and classify_advertised_url(body.value) == "unconfigured":
             raise HTTPException(
                 status_code=422,
@@ -587,7 +700,8 @@ async def update_setting(
         # rather than a 500 that reads like a platform fault.
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update setting: {str(e)}")
+        logger.exception("Failed to update setting %s", key)
+        raise HTTPException(status_code=500, detail=f"Failed to update setting ({e.__class__.__name__} — details in backend logs)")
 
 
 async def _backfill_telegram_webhooks(public_url: str) -> None:
@@ -627,6 +741,15 @@ async def delete_setting(
     """
     assert_admin(current_user)
 
+    # trinity-enterprise#1174: see update_setting.
+    from services import reserved_settings
+
+    if reserved_settings.managed_by(key) is not None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} is set via {reserved_settings.managed_by(key)} and cannot be cleared here",
+        )
+
     # #2380: blocked here as well as on PUT, and for a sharper reason than
     # ent#14's below. Provenance is write-once by design — `_record_install_source`
     # refuses to overwrite an existing row — so a DELETE is not "revert to a
@@ -642,6 +765,16 @@ async def delete_setting(
                 f"{INSTALL_SOURCE_SETTING_KEY} records how this instance was "
                 "installed and cannot be cleared through the API."
             ),
+        )
+
+    # #3825: deleting it makes the next restart re-apply `.env` over a password
+    # the admin changed in the app — the revert the fingerprint exists to stop.
+    from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY
+
+    if key == ADMIN_ENV_FINGERPRINT_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} is recorded by the platform at boot and cannot be cleared through the API.",
         )
 
     # ent#623: deleting the AAuth signing key re-keys this instance on next
@@ -667,6 +800,19 @@ async def delete_setting(
             ),
         )
 
+    # trinity-enterprise#1107: deleting `terms_version` alone would make the
+    # shipped version name a custom text (nobody asked again); deleting the
+    # text brings the default back without the audit row restore-default
+    # writes. The terms routes are the only writer on BOTH verbs.
+    if key in TERMS_SETTING_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is set via PUT /api/terms (admin + interactive-only, validated, "
+                "audit-logged; POST /api/terms/restore-default restores the shipped text)"
+            ),
+        )
+
     # ent#14: blocked here as well as on PUT, unlike the #1644 retention acks.
     # Deleting an ack re-arms a guard and therefore fails safe; deleting
     # `template_registry_enabled` reverts it to its default of ON, which
@@ -683,6 +829,12 @@ async def delete_setting(
                 "(admin + human-only, audit-logged)"
             ),
         )
+    from services.template_source_policy import SETTING_KEY as ALLOWLIST_KEY
+
+    if key == ALLOWLIST_KEY:  # trinity-enterprise#591, as on PUT
+        raise HTTPException(status_code=422, detail=(
+            f"{key} must be cleared via PUT /api/settings/agent-creation-allowlist "
+            "with an empty list (admin + interactive-only, audit-logged)"))
 
     try:
         deleted = db.delete_setting(key)
@@ -717,4 +869,5 @@ async def delete_setting(
 
         return {"success": True, "deleted": deleted}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete setting: {str(e)}")
+        logger.exception("Failed to delete setting %s", key)
+        raise HTTPException(status_code=500, detail=f"Failed to delete setting ({e.__class__.__name__} — details in backend logs)")

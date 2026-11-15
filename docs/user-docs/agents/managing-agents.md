@@ -21,7 +21,7 @@ Click any agent to open its detail page. The page lands on the **Overview** tab 
 | **Loops** | `loops` | Sequential bounded task runs -- see [Agent Loops](../automation/agent-loops.md) |
 | **Skills** | `skills` | The agent's own skills and those shared from the library, each with **Run**; owners also set approval and assign skills -- see [Skills](../automation/skills-and-playbooks.md) |
 | **Payments** | `nevermined` | Paid access configuration |
-| **Sharing** | `sharing` | External clients and channels (owners only) |
+| **Channels** | `channels` | External clients and channels (owners only) |
 | **Permissions** | `permissions` | Which agents may call this one (owners only) |
 | **A2A** | `a2a` | External-orchestrator interoperability (owners only, where available) |
 | **Git** | `git` | Git status, pending changes, recent commits, **Pull**, **Push** and **Refresh** — only for GitHub-synced agents |

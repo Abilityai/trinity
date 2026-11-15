@@ -44,6 +44,7 @@ from typing import Optional
 from database import db
 from services import git_service
 from utils.credential_sanitizer import scrub_secret_and_urls
+from utils.log_masking import masked_traceback
 
 logger = logging.getLogger(__name__)
 
@@ -252,11 +253,17 @@ def _refuse_if_destination_bound_elsewhere(
     try:
         bound = db.get_git_config_agent_names_for_repo(destination_repo)
     except Exception as e:  # noqa: BLE001 — a read failure must not open the gate
+        # abilityai/trinity#4284: a DB driver's text names internals; the log
+        # keeps it, the answer names the class.
+        logger.warning(
+            "repo-bind: could not check whether %s is bound elsewhere: %s",
+            destination_repo, masked_traceback(e),
+        )
         raise BindError(
             502,
             "BIND_DESTINATION_UNREACHABLE",
             f"Could not check whether '{destination_repo}' is already bound to "
-            f"another agent: {e}",
+            f"another agent ({type(e).__name__} — details in backend logs).",
         )
     others = [name for name in bound if name != agent_name]
     if others:
@@ -470,14 +477,15 @@ async def bind_agent_to_own_repo(
         )
         recreated = True
     except Exception as e:  # noqa: BLE001 — reported, never swallowed
-        logger.error("repo-bind: recreate failed for %s: %s", agent_name, e)
+        logger.error("repo-bind: recreate failed for %s: %s",
+                     agent_name, masked_traceback(e, user_pat))
         raise BindError(
             502,
             "BIND_RECREATE_FAILED",
             f"'{destination_repo}' now holds the agent's history and Trinity "
             f"has recorded the binding, but rebuilding the container to pick up "
-            f"the new repository failed: {_scrub(str(e), user_pat)}. Retry this "
-            f"action to finish — it "
+            f"the new repository failed ({type(e).__name__} — details in backend "
+            f"logs). Retry this action to finish — it "
             f"is idempotent. Do NOT rely on a plain container restart: that "
             f"re-runs the startup script, which rewrites origin from the "
             f"container's stale environment and would undo the rebind.",

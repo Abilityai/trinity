@@ -35,8 +35,9 @@ config = context.config
 
 # The app's own resolution wins over any alembic.ini placeholder so there is a
 # single source for the connection string.
+# `%` is ConfigParser interpolation; an encoded password must be escaped on write.
 _url = config.get_main_option("sqlalchemy.url") or resolve_database_url()
-config.set_main_option("sqlalchemy.url", _url)
+config.set_main_option("sqlalchemy.url", _url.replace("%", "%%"))
 
 if config.config_file_name is not None:
     try:

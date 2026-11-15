@@ -221,7 +221,8 @@ class TestRosterFailureReportsRealEvidence:
         from canary import snapshot as snapshot_module
 
         src = inspect.getsource(snapshot_module.collect_snapshot)
-        assert src.count("collectors_ran.add(") == 2
+        # docker, redis, and #4000's git-stats read.
+        assert src.count("collectors_ran.add(") == 3
         assert "finally:" in src
 
 

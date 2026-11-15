@@ -39,7 +39,7 @@ Open the agent's detail page and select the **A2A** tab.
 2. **Copy the Agent Card URL.** Once exposed, the panel shows the public discovery URL with a one-click **Copy** button. Hand this to whoever is wiring up the external orchestrator.
 
    ![The Agent Card URL section — the public discovery URL with a one-click Copy button.](../../screenshots/a2a-card-url.png)
-3. **Review the advertised skills** — exactly what an external caller sees on the card (derived from the agent's `template.yaml` capabilities).
+3. **Review the advertised skills** — exactly what an external caller sees on the card (derived from the agent's `template.yaml` capabilities). This is a known limit: elsewhere those are template tags, and a capability is described by its skill's `SKILL.md` `description:` ([Template tags are not capabilities](../automation/skills-and-playbooks.md#template-tags-are-not-capabilities)). The card still lists the tags, each carrying the agent's description, until it moves to the agent's skills.
 4. **Manage the inbound allow-list** (optional) — add the account emails of callers that may task the agent. Leave it empty to allow any authenticated owner/shared caller. When AAuth is on, this is also where you list the `aauth:<agent>@<host>` identities of agents on other instances that may task this agent — for those, an empty list means nobody (see [Inbound allow-list](#inbound-allow-list)).
 5. **Outbound endpoints** are not registered here. The tab links to **Settings › Integrations**, where an admin manages the platform-wide list `call_a2a_agent` reads — see *[Outbound endpoints](#outbound-endpoints)*.
 

@@ -12,6 +12,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { HUMAN_ONLY_WHO_MAY_CALL, humanOnlyToolAccess } from "../access.js";
 
 /**
  * Create subscription management tools with the given client
@@ -130,8 +131,11 @@ export function createSubscriptionTools(
       name: "assign_subscription",
       description:
         "Assign a subscription to an agent. " +
-        "Owner access required. If the agent is running, credentials are injected immediately. " +
-        "The agent will use the subscription's OAuth credentials for Claude authentication.",
+        "If the agent is running, credentials are injected immediately. " +
+        "The agent will use the subscription's OAuth credentials for Claude authentication. " +
+        HUMAN_ONLY_WHO_MAY_CALL.interactive +
+        " Assign it under Settings, Integrations, Claude Subscriptions in the web UI instead.",
+      canAccess: humanOnlyToolAccess("interactive"),
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent to assign subscription to"),
         subscription_name: z.string().describe("Name of the subscription to assign"),
@@ -162,7 +166,9 @@ export function createSubscriptionTools(
       name: "clear_agent_subscription",
       description:
         "Clear subscription assignment from an agent. " +
-        "Owner access required. Agent will fall back to API key authentication.",
+        "Agent will fall back to API key authentication. " +
+        HUMAN_ONLY_WHO_MAY_CALL.person,
+      canAccess: humanOnlyToolAccess("person"),
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent to clear subscription from"),
       }),

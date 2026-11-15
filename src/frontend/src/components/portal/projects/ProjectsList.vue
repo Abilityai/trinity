@@ -42,13 +42,25 @@
     <template v-else>
       <InlineError v-if="view.stale" :message="store.listError" @dismiss="store.fetchList()" />
 
-      <div v-if="view.state === 'empty'" class="py-12 text-center" data-testid="projects-empty">
-        <p class="text-base font-semibold text-gray-900 dark:text-gray-100">No projects yet</p>
-        <p class="mx-auto mt-1.5 max-w-[48ch] text-sm text-gray-600 dark:text-gray-300">
+      <!-- Empty-state recipe (design-system §5): dashed border, icon, one line
+           of purpose. The header's New project is the view's one primary
+           (principle 11), so the button here is secondary. -->
+      <div
+        v-if="view.state === 'empty'"
+        class="rounded-lg border border-dashed border-gray-300 dark:border-gray-700 px-5 py-[34px] text-center"
+        data-testid="projects-empty"
+      >
+        <div class="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 dark:bg-gray-750" aria-hidden="true">
+          <svg class="h-5 w-5 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+          </svg>
+        </div>
+        <p class="text-[14.5px] font-[650] text-gray-900 dark:text-gray-100">No projects yet</p>
+        <p class="mx-auto mt-1.5 max-w-[48ch] text-[13px] text-gray-500 dark:text-gray-400">
           A project gathers the chats and rooms about one piece of work, like a launch or a hire, so any agent on it can pick up where things stand.
         </p>
         <template v-if="portal.isPlatformSession">
-          <BaseButton class="mt-4" @click="createOpen = true">New project</BaseButton>
+          <BaseButton variant="secondary" class="mt-4" data-testid="projects-empty-create" @click="createOpen = true">New project</BaseButton>
           <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">Or open a chat and use the Project button, or import one an agent keeps in its files.</p>
         </template>
         <p v-else class="mt-3 text-xs text-gray-500 dark:text-gray-400">Projects you're invited to appear here.</p>

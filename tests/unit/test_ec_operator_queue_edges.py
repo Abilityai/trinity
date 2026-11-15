@@ -6,7 +6,7 @@ The full matrix, with the row numbers used in the param ids below, lives in
 the 2026-10-06 /edge-cases matrix.
 
 TARGETS (the riskiest pure / state functions of
-`services/operator_queue_service.py` and its leaf `services/operator_queue_choices.py`,
+`services/operator_queue_service/` and its leaf `services/operator_queue_choices.py`,
 weighted towards the recent #3242 / #3243 / #2915 / #3024 work):
 
 * id handling — `_ID_RE` / `_valid_execution_id`, `is_platform_minted`,
@@ -118,7 +118,7 @@ class TestIdShape:
     ])
     def test_a_trailing_newline_is_not_id_shaped(self, value):
         """REACHABILITY: the file poller rejects malformed ids with exactly this
-        regex (`operator_queue_service.py` `_sync_agent`, the `_ID_RE.match(req_id)`
+        regex (`operator_queue_service/ingest.py` `_sync_agent`, the `_ID_RE.match(req_id)`
         guard before the #3243 caps) and so does the native raise
         (`ask_service.py:675`, `_validated_ask`). Both are fed agent-authored JSON
         strings, and `"id": "abc\\n"` is a valid JSON string. The contract both
@@ -232,7 +232,7 @@ class TestCaps:
     def test_an_invisible_format_char_does_not_hide_the_chip(self, option):
         """REACHABILITY: options are agent-authored on both paths — the file
         poller runs `options_cap_violation` on every new entry
-        (`operator_queue_service.py` `_sync_agent`, the #3243 block) and the
+        (`operator_queue_service/ingest.py` `_sync_agent`, the #3243 block) and the
         native raise runs it in `ask_service._validated_ask`. The guard's own
         docstring states its scope as "Zero-width / invisible format characters"
         and already strips LRM/RLM (U+200E/F); every char here is the same
@@ -488,14 +488,14 @@ class TestAging:
         pytest.param("abc", oqs.OPERATOR_QUEUE_AGING_HOURS_DEFAULT, id="r127-garbage-falls-back"),
     ])
     def test_aging_hours(self, monkeypatch, raw, expected):
-        monkeypatch.setattr(oqs.db, "get_setting_value", lambda k, d: raw)
+        monkeypatch.setattr(oqs.deps.db, "get_setting_value", lambda k, d: raw)
         assert oqs.aging_hours() == expected
 
     def test_aging_hours_survives_a_db_raise(self, monkeypatch):
         """r128"""
         def boom(*a):
             raise RuntimeError("db down")
-        monkeypatch.setattr(oqs.db, "get_setting_value", boom)
+        monkeypatch.setattr(oqs.deps.db, "get_setting_value", boom)
         assert oqs.aging_hours() == oqs.OPERATOR_QUEUE_AGING_HOURS_DEFAULT
 
 

@@ -13,7 +13,7 @@ from typing import List
 
 from models import User
 from database import db
-from dependencies import get_current_user, assert_admin, agent_may_reach
+from dependencies import get_current_user, assert_admin, agent_may_reach, require_interactive, require_person
 from db_models import NeverminedConfigCreate, NeverminedConfig, NeverminedPaymentLog
 from services.nevermined_payment_service import (
     get_nevermined_payment_service,
@@ -65,7 +65,7 @@ def _check_sdk():
         )
 
 
-@router.post("/agents/{name}/config", response_model=NeverminedConfig)
+@router.post("/agents/{name}/config", response_model=NeverminedConfig, dependencies=[Depends(require_interactive)])
 async def configure_nevermined(
     name: str,
     request: NeverminedConfigCreate,
@@ -105,7 +105,7 @@ async def get_nevermined_config(
     return config
 
 
-@router.delete("/agents/{name}/config")
+@router.delete("/agents/{name}/config", dependencies=[Depends(require_person)])
 async def delete_nevermined_config(
     name: str,
     current_user: User = Depends(get_current_user),
@@ -121,7 +121,7 @@ async def delete_nevermined_config(
     return {"detail": "Nevermined configuration removed"}
 
 
-@router.put("/agents/{name}/config/toggle")
+@router.put("/agents/{name}/config/toggle", dependencies=[Depends(require_person)])
 async def toggle_nevermined(
     name: str,
     enabled: bool,

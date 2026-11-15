@@ -157,6 +157,21 @@ def _sig(route):
 # the guard worth keeping; the alternative (moving the pinned blob forward on
 # every merge) silently re-baselines whatever drifted in with it.
 _ADDED_SINCE_SPLIT = {
+    # trinity-enterprise#591 — template sources for agent-created agents (GET
+    # admin; PUT admin + interactive, validated, so the generic PUT refuses it).
+    ("/api/settings/agent-creation-allowlist", ("GET",), "get_agent_creation_allowlist"),
+    ("/api/settings/agent-creation-allowlist", ("PUT",), "update_agent_creation_allowlist"),
+    # #4257 — the queue-stall alert threshold (admin; range-validated 5–1440,
+    # which is why the generic `/{key}` PUT refuses the key).
+    ("/api/settings/queue-stall-alert-minutes", ("GET",),
+     "get_queue_stall_alert_minutes_setting"),
+    ("/api/settings/queue-stall-alert-minutes", ("PUT",),
+     "update_queue_stall_alert_minutes_setting"),
+    # trinity-enterprise#1046 — Workspace Direct calls (admin).
+    ("/api/settings/direct-voice", ("GET",), "get_direct_voice_settings"),
+    ("/api/settings/direct-voice", ("PUT",), "update_direct_voice_settings"),
+    # trinity-enterprise#1022 — retrieval memory's platform status (admin).
+    ("/api/settings/memory", ("GET",), "get_retrieval_memory_status"),
     # trinity-enterprise#838 — the admin's trusted internal networks for A2A.
     ("/api/settings/a2a-trusted-networks", ("GET",), "get_a2a_trusted_networks"),
     ("/api/settings/a2a-trusted-networks", ("PUT",), "set_a2a_trusted_networks"),
@@ -178,10 +193,22 @@ _ADDED_SINCE_SPLIT = {
     # logged a failed request on every Settings tab. Lives in `mcp_url` beside
     # its precedent `/mcp-url`.
     ("/api/settings/public-chat-url", ("GET",), "get_public_chat_url"),
+    # trinity-enterprise#641 — the instance autonomy level (L0-L3). A named,
+    # validated route because the generic `/{key}` catch-all would let any admin
+    # set an unvalidated level, and the PUT is a grant (admin AND interactive),
+    # so it is blocklisted there. Mounted BEFORE `generic.router` (Invariant #4).
+    ("/api/settings/autonomy-dial", ("GET",), "get_autonomy_dial"),
+    ("/api/settings/autonomy-dial", ("PUT",), "set_autonomy_dial"),
     # trinity-enterprise#862 — the AAuth switch and issuer, with a human-only
     # write; the generic catch-all refuses those keys.
     ("/api/settings/aauth", ("GET",), "get_aauth_settings"),
     ("/api/settings/aauth", ("PUT",), "update_aauth_settings"),
+    # trinity-enterprise#1101 — the external-MCP-access switch: any-auth read,
+    # admin write and clear; the generic catch-all refuses the key. In
+    # `mcp_url`, above the catch-all (Invariant #4).
+    ("/api/settings/mcp-external-access", ("GET",), "get_mcp_external_access"),
+    ("/api/settings/mcp-external-access", ("PUT",), "update_mcp_external_access"),
+    ("/api/settings/mcp-external-access", ("DELETE",), "delete_mcp_external_access"),
 }
 
 

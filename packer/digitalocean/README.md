@@ -27,18 +27,18 @@ above came to be wrong in the first place.
 - The release's images must exist on GHCR **and be publicly pullable**. New GHCR
   packages default to private; the publish workflow's own "Verify anonymous pull"
   step fails loudly when they are, with the fix in the error message.
-- `packer` ≥ 1.9, and a DigitalOcean API token with write scope.
+- `packer` ≥ 1.9, `doctl`, `jq` and `openssl`, and a DigitalOcean API token with write scope.
 
 ## Build
 
 ```bash
-export DIGITALOCEAN_TOKEN=dop_v1_...
+export PKR_VAR_do_token=dop_v1_...
 packer init trinity.pkr.hcl
-packer build \
-  -var "do_token=$DIGITALOCEAN_TOKEN" \
-  -var "image_tag=v0.9.1" \
-  trinity.pkr.hcl
+packer build -var "image_tag=v0.9.1" trinity.pkr.hcl
 ```
+
+`scripts/mp-build.sh` wraps this for a release: fixed SSH key, a per-run droplet tag,
+and a check that the baked files match the tag.
 
 `image_tag` is required and may not be `latest` — the template rejects it. A
 snapshot that resolved `latest` at first boot would serve a different Trinity on
@@ -95,10 +95,8 @@ an existing snapshot — and the `app_id` only exists once that listing does,
 read from its URL. There is no `app_id` to supply beforehand, which is why
 `mp-submit.sh` and `TRINITY_DO_APP_ID` cannot make the first submission.
 
-Nothing about the snapshot changes between the two routes. `TRINITY_DO_APP_ID`
-is read by an optional post-processor at the *end* of a build; unset, the build
-simply does not submit, and the image it produced carries no listing identifier
-either way.
+Nothing about the snapshot changes between the two routes. It carries no listing
+identifier.
 
 > **Submitting consumes the snapshot.** The picker states it: *"the selected
 > snapshot will no longer be available once the listing is submitted."* It
@@ -110,9 +108,8 @@ either way.
 
 1. Cut the release; confirm the `v*` tag published all five images and that
    each package is public.
-2. `packer build` with the new `image_tag` (above). Leave `TRINITY_DO_APP_ID`
-   unset.
-3. QA a droplet created from that snapshot — see "Submission gate" below.
+2. `packer build` with the new `image_tag` (above).
+3. Run `boot-check.sh` on that snapshot — see "Submission gate" below.
 4. In the Vendor Portal, create the listing, choose that snapshot under
    **System Image**, tick both acknowledgements, and submit. Catalog copy lives
    in [`listing.md`](listing.md), not only in the portal.
@@ -120,42 +117,47 @@ either way.
 
 ### Later releases
 
-1. Cut the release; confirm the images published, as above.
-2. `packer build` with the new `image_tag`, either plain — then attach the
-   snapshot in the portal as before — or letting the build submit for you:
+Everything runs from a checkout of the release tag's content, and the scripts read
+`DIGITALOCEAN_TOKEN` (a token on the listing's team), `TRINITY_DO_APP_ID`,
+`TRINITY_SSH_KEY_ID` and `TRINITY_SSH_KEY_FILE`.
 
-   ```bash
-   TRINITY_DO_APP_ID=<app_id> \
-   DIGITALOCEAN_API_TOKEN=dop_v1_... \
-   TRINITY_SUBMIT_REASON="Trinity v0.9.5" \
-     packer build -var "image_tag=v0.9.5" -var "do_token=$DIGITALOCEAN_TOKEN" \
-       trinity.pkr.hcl
-   ```
+```bash
+cd packer/digitalocean/scripts
+bash mp-status.sh                           # 0 clear, 3 queued, 4 rejected or unknown, 1 API failure
+bash mp-build.sh v1.0.0                     # builds, never submits; last line is the snapshot ID
+bash boot-check.sh <snapshot-id> v1.0.0     # see "Submission gate"
+bash mp-submit.sh <snapshot-id>             # requires the pass record and mp-status 0
+```
 
-   The `manifest` + `shell-local` post-processors read the snapshot id from the
-   build's own record and `PATCH` it to
-   `https://api.digitalocean.com/api/v1/vendor-portal/apps/<app_id>`.
+While a submission is queued, build and test anyway, keep the snapshot, and run
+`mp-submit.sh <snapshot-id>` once `mp-status.sh` exits 0. No rebuild is needed.
 
-   The payload carries `imageId` (**required**), `reasonForUpdate`, `osVersion`
-   and `softwareIncluded[]`. A `null` field leaves the existing value alone; a
-   blank string clears it. `.../apps/<app_id>/versions/<version>` is deprecated
-   — do not use it.
-
-3. QA a droplet from the snapshot before submitting, exactly as on the first.
-4. Update the listing's version string and any changed sizing guidance.
+`mp-submit.sh` sends `imageId`, `version`, `reasonForUpdate`, `osVersion` and
+`softwareIncluded[]` in a `PATCH` to
+`https://api.digitalocean.com/api/v1/vendor-portal/apps/<app_id>`. It keeps the
+listing's other software entries, moves the Trinity, Caddy and PostgreSQL versions
+and adds Caddy or PostgreSQL if the listing lacks it. The Caddy version comes from the
+boot check's pass record. A `null`
+field leaves the existing value alone; a blank string clears it.
+`.../apps/<app_id>/versions/<version>` is deprecated.
 
 ### Submission gate
 
-**Nothing is submitted for review on the strength of a green build.**
-`img_check.sh` validates DigitalOcean's *image* requirements — no baked
-secrets, firewall on, no pending security updates — and knows nothing about
-whether Trinity comes up, serves HTTPS, or can create an agent. A human boots
-a droplet from the snapshot and uses it first.
+**A snapshot is submitted only after `boot-check.sh` passes on it and the operator
+confirms.** `img_check.sh` validates DigitalOcean's image requirements and knows
+nothing about whether Trinity comes up. A bad submission locks the listing until
+review clears.
 
-Prefer someone other than whoever built it. On a team of one that is not
-available, and the gate is then a QA pass by the operator rather than a second
-pair of eyes — a real reduction in cover, recorded here rather than left
-implied. It is not a reason to skip the pass.
+`boot-check.sh` boots a throwaway droplet from the snapshot and destroys it on exit.
+It checks first boot, cloud-init, the certificate on the droplet's IP, the
+`X-DO-MARKETPLACE` header, backend health, a PostgreSQL database with no
+`/data/trinity.db`, the install source marker, every Trinity image at the pinned
+tag, the `/setup` claim, sign-in, creating a running agent, and that every container
+port is closed from off-box. Chatting with an agent is not checked, because it needs a
+model credential.
+
+A pass writes `~/.trinity-marketplace/<snapshot-id>.pass`. `mp-submit.sh` refuses a
+snapshot without one, so a submit runs on the machine that ran the check.
 
 ### The state that blocks a resubmission
 

@@ -12,9 +12,15 @@
 
 ## Database Schema
 
+### PostgreSQL by default, SQLite refused in images (#4175, HOST-023)
+
+Every compose file defaults `DATABASE_URL` to the bundled `postgres` service. The images set `TRINITY_REQUIRE_POSTGRES=1`, which arms two refusals in `db/engine.py`: `refuse_sqlite_backend` (from `init_database`, before any file is touched; `TRINITY_ALLOW_SQLITE=1` opens it) and `refuse_empty_postgres_beside_sqlite` (from `alembic_runner.upgrade_to_head`, under the advisory lock, when `trinity.db` has data and `users` is absent or empty; nothing opens it). An `upgrade_to_head` that fires this cannot have built anything. `db/sqlite_to_postgres.py` is the only caller of `allow_sqlite_source=True`, and it must never import `database`, whose import runs `init_database()`. Outside an image the unit tier keeps running on SQLite until the runner is removed.
+
 ### SQLite (`/data/trinity.db`)
 
 **Orphan tables (#3432):** installs upgraded from before #3432 — SQLite and PostgreSQL alike — may carry `process_schedules` and `process_schedule_executions`, which the scheduler's boot path created ad hoc outside both migration tracks; the scheduler no longer creates or reads them, nothing else references them, and they are deliberately left in place (no migration), so #746 autogenerate will surface them as unknown tables.
+
+**Upgrade parity (#3395):** `test_schema_parity.py` models a fresh install only, so it cannot see a `schema.py` column on a table only `init_schema` creates (`users`, `schedule_executions`, ...) that no registered migration adds — present on every fresh install, absent on every existing one; `scripts/ci/check_sqlite_upgrade_parity.py` (a `schema-parity` step) builds an install with the PR's merge-base, upgrades it with the PR's code, and fails on any table, column, index or trigger `schema.py` declares that did not arrive.
 
 **users:**
 ```sql
@@ -124,6 +130,9 @@ CREATE TABLE access_requests (
     decided_by TEXT,                      -- user_id of approver
     decided_at TEXT,
     created_at TEXT NOT NULL,
+    -- trinity-enterprise#737: who asked, as the channel saw them (all nullable)
+    requester_channel_id TEXT, requester_handle TEXT, requester_name TEXT,
+    requester_chat_id TEXT, requester_thread_id TEXT,
     UNIQUE(agent_name, email)
 );
 
@@ -132,6 +141,8 @@ CREATE TABLE access_requests (
 ```
 
 Access-control flow (#311): `ChannelAdapter.resolve_verified_email()` maps native channel identity → verified email; `message_router` runs a single gate — owner/admin/`agent_sharing` → `open_access` → upsert pending `access_requests` row. Approval inserts into `agent_sharing`, whitelists the email (if email auth on), and fires a fire-and-forget notification on the requester's originating channel (telegram/slack/whatsapp only; bypasses `allow_proactive` and per-recipient rate limit — the user initiated the request; outcome audit-logged; delivery failure never rolls back the approval) (#951). Group chats bypass the gate; agents with both policy flags off retain legacy permissive behavior.
+
+**channel_client_blocks** (trinity-enterprise#21 — an owner's per-agent block on one channel client): `id`, `agent_name`, `channel`, `client_id` (the channel-native sender id the router sees), `blocked_at`, `blocked_by_id`, `blocked_by_email`, `reason`; `UNIQUE(agent_name, channel, client_id)`. Read by `message_router` before every other gate step; CASCADE in the agent-cleanup registry.
 
 **mcp_api_keys:**
 ```sql
@@ -218,6 +229,8 @@ CREATE TABLE schedule_executions (
                                                  -- NULL = no evidence, never "verified healthy"
     chain_depth INTEGER,                         -- #2806: agent-to-agent hops from a non-agent root; NULL = root (0).
                                                  -- Stamped 1 + MAX(caller's running depths) on agent-principal children
+    chat_session_id TEXT,                        -- #3380: the /chat thread this turn answers (NULL = not a /chat turn);
+                                                 -- read by the #2944 watchdog claim to write the recovered reply
     FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
 );
 
@@ -536,7 +549,8 @@ purge paths in `db/agent_shared_files.py` (`delete_expired_and_revoked` and
 
 **public_user_memory_writes** (ent#637 — every write to the MEM-001 `agent_notes` section,
 so a person can see that a scheduled run touched their memory and undo it; also ent#419's
-"write history with rollback" layer):
+"write history with rollback" layer; since trinity-enterprise#962 the summarizer's
+`conversation_summary` changes too, marked by `section`):
 ```sql
 CREATE TABLE public_user_memory_writes (
     id TEXT PRIMARY KEY,
@@ -549,17 +563,83 @@ CREATE TABLE public_user_memory_writes (
     new_notes TEXT NOT NULL DEFAULT '',
     written_at TEXT NOT NULL,
     undone_at TEXT,
-    undone_by TEXT
+    undone_by TEXT,                        -- the person, or the operator (ent#962)
+    section TEXT NOT NULL DEFAULT 'notes'  -- 'notes' | 'summary' (ent#962); a summary row's
+                                           -- previous_/new_notes hold SUMMARY text
 );
 CREATE INDEX idx_public_user_memory_writes_lookup ON public_user_memory_writes(agent_name, user_email, written_at);
 ```
+
+**agent_memory_facts** (trinity-enterprise#1022, MEM-002 — one row per retrieved-memory
+fact; `user_email = ''` is the agent scope, shared with the owner; never NULL so the
+partial unique index holds on both engines; `embedding` is a float32 LE vector,
+`BLOB` on SQLite / `BYTEA` on PostgreSQL via `to_postgres_table_ddl`; forget is a
+soft delete recording who; Alembic `0108`. `agent_ownership.memory_opt_out INTEGER
+DEFAULT 0` is the per-agent opt-out, Alembic `0109`. `updated_by_execution_id` is the
+last run that rewrote or retired the row — `execution_id` stays the run it was born
+in — and `agent_memory_fact_events` below is the journal; both Alembic `0110`.)
+```sql
+CREATE TABLE agent_memory_facts (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    user_email TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL,
+    text_hash TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    embedding_model TEXT NOT NULL,
+    source TEXT NOT NULL,
+    execution_id TEXT,
+    updated_by_execution_id TEXT,
+    recall_count INTEGER DEFAULT 0,
+    last_recalled_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    deleted_by TEXT
+);
+CREATE INDEX idx_agent_memory_facts_scope ON agent_memory_facts(agent_name, user_email, deleted_at);
+CREATE UNIQUE INDEX idx_agent_memory_facts_live_hash ON agent_memory_facts(agent_name, user_email, text_hash) WHERE deleted_at IS NULL;
+```
+
+**agent_memory_fact_events** (trinity-enterprise#1022 — the retrieval-memory journal: one
+append-only row per op on a fact or on a candidate that never became one — `add` /
+`update` / `delete` / `none` / `screened` / `prune` / `recall` / `forget` — keyed to the
+execution that did it, with the candidate the extractor proposed, the text it replaced
+and the neighbour ids the reconciler was shown; `score` is the recall cosine; `actor` the
+person who forgot. Rows older than 90 days are dropped per agent at the next retain.
+Written only by `services/memory_service.py` and the forget route; `AgentRef(…, CASCADE)`.)
+```sql
+CREATE TABLE agent_memory_fact_events (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    user_email TEXT NOT NULL DEFAULT '',
+    fact_id TEXT,
+    op TEXT NOT NULL,
+    execution_id TEXT,
+    candidate_text TEXT,
+    previous_text TEXT,
+    neighbour_ids TEXT,
+    score REAL,
+    actor TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_agent_memory_fact_events_fact ON agent_memory_fact_events(agent_name, fact_id, created_at);
+CREATE INDEX idx_agent_memory_fact_events_execution ON agent_memory_fact_events(agent_name, execution_id);
+```
 Both tracks: SQLite `public_user_memory_writes_table`, Alembic `0066_public_user_memory_writes`;
 `AgentRef("public_user_memory_writes", "agent_name", Policy.CASCADE)`. Written only by
-`db/public_links.py::write_user_memory_agent_notes`, in the same transaction as the notes
-replace, so `previous_notes` is what the row held at that instant. Not keyed to
+`db/public_links.py::write_user_memory_agent_notes` (`section='notes'`) and
+`update_user_memory_conversation_summary` (`section='summary'`, `triggered_by='summarizer'`,
+only when the text changed; a compare-and-set on `expected_previous`), each in the same
+transaction as the blob replace and under the row lock (`_read_blob_for_update`: PostgreSQL
+`FOR UPDATE`, SQLite the RESERVED-lock no-op write), so `previous_notes` is what the row held
+at that instant. `section` is the ent#962 column, both tracks (SQLite
+`public_user_memory_writes_section`, Alembic `0120`). Not keyed to
 `public_user_memory.id` — that row is created on demand; `(agent_name, user_email)` is the
 identity. Undo (`undo_user_memory_write`) is latest-first over the open (`undone_at IS NULL`)
-writes of one `(agent, email)`; a foreign write id is `not_found`, never a 403 (Invariant #8).
+writes of one `(agent, email)` **within the write's section**; a foreign write id is
+`not_found`, never a 403 (Invariant #8). Readers default to `section='notes'`; the Alembic downgrade deletes the summary rows before dropping the column, so no summary text is ever relabelled as notes. No retention:
+rows live until the agent is deleted (a bound is a follow-up).
 
 **agent_role_readiness** (ent#527 / #663 — the agent owner's readiness stamp for a role companion):
 ```sql
@@ -604,6 +684,46 @@ correction inserts a new row with `supersedes_id` and flips the old one to `supe
 in one CAS transaction (`db/seat_decisions.py::supersede_seat_decision`); nothing is
 deleted or edited in place. JSON lists ride in TEXT (no JSON type on either engine);
 every stat is computed in Python over one seat's rows.
+
+**seat_ask_class_state** (trinity-enterprise#641 / P12 — the autonomy dial's earned half):
+```sql
+CREATE TABLE seat_ask_class_state (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL, seat_email TEXT NOT NULL, ask_class TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'on_request',   -- on_request | graduated  (EARNED, not live)
+    blocked_by TEXT NOT NULL DEFAULT '[]',      -- JSON list of named blockers
+    evidence TEXT NOT NULL DEFAULT '{}',        -- criterion, decision ids, counts, rule_version
+    evidence_hash TEXT,                         -- the CAS key; an unchanged verdict writes nothing
+    evidence_expires_at TEXT,                   -- the EARLIEST review_by of the window
+    guard_metric TEXT NOT NULL DEFAULT 'not_assessed',  -- not_assessed | capped | clear
+    held INTEGER NOT NULL DEFAULT 0, held_by TEXT, held_at TEXT,
+    promoted_at TEXT, demoted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    UNIQUE(agent_name, seat_email, ask_class)
+);
+CREATE INDEX idx_seat_ask_class_state_seat ON seat_ask_class_state(agent_name, seat_email);
+```
+Both tracks: SQLite `seat_ask_class_state_table`, Alembic `0113_seat_ask_class_state`
+
+**terms_acceptances** (trinity-enterprise#1107 — terms of use per instance):
+```sql
+CREATE TABLE terms_acceptances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    email TEXT,
+    terms_version TEXT NOT NULL,
+    accepted_at TEXT NOT NULL,
+    door TEXT,                -- the invitation id an optional module binds the row to, else NULL
+    actor_ip TEXT,
+    UNIQUE(user_id, terms_version)
+);
+CREATE INDEX idx_terms_acceptances_email ON terms_acceptances(email);
+```
+One row per (person, terms version): the record of which text they accepted and when; a version bump asks again. The text itself is four `system_settings` rows (`terms_required`, `terms_title`, `terms_text`, `terms_version`) resolved with a shipped default — no seed row. `email` is nullable (an admin account may have none). Both tracks: SQLite `terms_acceptances_table`, Alembic `0119_terms_acceptances`. An optional module that kept its own record before copies it across through its own migration (an INSERT is data, never an ALTER).
+(← `0107_skill_sources_follow_bundled_pin`); `AgentRef(..., Policy.CASCADE)`. The row holds only what was EARNED —
+the instance level, the agent's autonomy switch and the clock are ANDed at read
+time (`services/autonomy_dial_service.live_verdict`), never materialised. The
+instance LEVEL is not a table at all: one validated `system_settings` key,
+`autonomy_dial_level:instance`.
 
 **agent_event_subscriptions / agent_events** (EVT-001 — agent event pub/sub):
 ```sql
@@ -800,6 +920,7 @@ CREATE TABLE agent_sync_state (
     pack_count INTEGER,                    -- #1595: packs from `git count-objects -v`
     loose_objects INTEGER,                 -- #1595: loose objects (gc-health signal)
     maintenance_failures INTEGER DEFAULT 0, -- #1595: consecutive failed maintenance attempts
+    git_stats_at TEXT,                     -- #4000: when the git stats above were measured (agent-written, coerced)
     diverged_since TEXT,                   -- ent#706: divergence episode start (ISO-Z; set once, cleared at 0/0)
     dirty_files INTEGER,                   -- ent#706: porcelain change count
     dirty_since TEXT,                      -- ent#706: dirt episode start (ISO-Z; cleared at 0)
@@ -883,13 +1004,14 @@ CREATE INDEX idx_canary_violations_snapshot
 **idempotency_keys** (RELIABILITY-006 — see [Idempotency](execution.md#idempotency-reliability-006-525) and Invariant #18):
 ```sql
 CREATE TABLE idempotency_keys (
-    scope TEXT NOT NULL,              -- tenant isolation: "agent:{name}" | "webhook:{token}"
+    scope TEXT NOT NULL,              -- tenant isolation: "agent:{name}" (platform-derived keys) | "agent:{name}:caller:{principal}" (client header keys, ent#830) | "webhook:{token}"
     idempotency_key TEXT NOT NULL,    -- caller-supplied or derived
     execution_id TEXT,               -- nullable (webhook short-circuit has none)
     status TEXT NOT NULL,            -- 'in_flight' | 'completed'
     response_snapshot TEXT,          -- JSON of the original response, for replay
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    claim_token TEXT,                 -- #3298: in_flight owner token; writes are CAS on it
     PRIMARY KEY (scope, idempotency_key)
 );
 CREATE INDEX idx_idempotency_created ON idempotency_keys(created_at);
@@ -1110,10 +1232,29 @@ CREATE TABLE skill_sources (
     last_commit_sha TEXT,                -- the pin comparison's durable side (tag sources)
     last_error TEXT,
     created_at TEXT NOT NULL,
-    created_by TEXT
+    created_by TEXT,                     -- 'seed:ent237' on the bundled seed
+    follows_bundled_pin INTEGER NOT NULL DEFAULT 0,  -- trinity-enterprise#529
+    followed_from_ref TEXT,              -- latest boot follow: the ref it moved from
+    followed_at TEXT                     -- … and when
 );
 CREATE UNIQUE INDEX idx_skill_sources_url_ref ON skill_sources(url, ref);
 ```
+
+**Following the bundled pin** (trinity-enterprise#529; SQLite
+`skill_sources_follow_bundled_pin` + Alembic `0107_skill_sources_follow_bundled_pin`).
+`follows_bundled_pin` is 1 while the seeded default still points where the platform put it:
+the seed writes it for the built-in catalog URL only, and `update_source` writes 0 when
+an edit names `url`, `ref` or `ref_type`, even unchanged (`apply` passes only the fields
+that differ). The boot follow moves only such a row to a newer
+`DEFAULT_SKILL_SOURCE_REF`, through a compare-and-set UPDATE whose WHERE carries every
+eligibility predicate. Pre-existing rows were classified by
+`db/migrations.SKILL_SOURCE_FOLLOW_BACKFILL_SQL`, the one statement both tracks execute
+(built-in URL, a historical bundled pin, no `skill_source_update` audit row naming
+`ref`/`url`/`ref_type`). The Alembic revision uses `ADD COLUMN IF NOT EXISTS` because
+`0001_baseline` builds a fresh database from the current DDL. `record_sync` also takes the
+synced `url`/`ref`/`ref_type` and writes only while the row still matches, so a sync in
+flight across a retarget cannot stamp the old commit onto the new ref. Flow:
+[skills-library-sync.md](../feature-flows/skills-library-sync.md).
 
 `agent_skills.source_id` records which source an assignment resolved from — recorded, not
 keyed (the UNIQUE stays `(agent_name, skill_name)`, since two sources' copies cannot
@@ -1241,8 +1382,8 @@ successful-looking sync. Revocation = cut a new tag without the offending skill.
 - **Subscription-headroom keys** (#471): `subscription:headroom:{id}` (JSON provider snapshot, 7d TTL, best-effort DEL on subscription delete) + `subscription:headroom_probe:{sid}` (probe `SingleFlightLock` #1920). Subscription-id-keyed, deliberately not `agent:*` (the #1560 name-keyed registry doesn't apply); ambient probing is fail-CLOSED on an unanswered Redis read — see `subscription_headroom_service`.
 - **Ephemeral-agent keys** (trinity-enterprise#69): `ephemeral:quota:{owner_id}` (owner-keyed atomic ghost-quota counter — deliberately not `agent:*`, so the #1560 name-keyed registry doesn't apply) and `ephemeral:discard:{name}` (SETNX+TTL discard lock, acquired/released through `SingleFlightLock` #1920). Both fail-open.
 - **System-seed provisioning lock** (trinity-enterprise#124, hardened #1920): `system_seed:provision` (SETNX + 600s TTL) — one first-run seeding pass at a time; acquired + released through `SingleFlightLock` so the release is ownership-checked (unique per-acquire token + compare-and-delete), no longer a tokenless `delete` that could remove a successor's lock. Not `agent:*`-named; fail-open; the reserved-name existence backstop is the real duplicate guard.
-- **Single-flight lock consolidation (#1920).** The SETNX single-flight sites — `ops:fleet_restart`, `ephemeral:discard:{name}`, `skill_inject:{name}`, `skills:library:sync`, `system_seed:provision`, `cornelius:provision`, `compat_fix:{name}`, and the later `agent:deploy_op:{base_name}` (#2060) — now share ONE ownership-checked primitive, `redis_breaker_util.SingleFlightLock` (mint-per-acquire token, GET-then-DELETE compare-and-delete). This unifies the **single-flight family only**: **four lock idioms remain** after this change — the shared `SingleFlightLock`, the async Lua-CAD `ResumeLock` (`session_turn_service.py`), the two verbatim leader leases (`monitoring:leader` / `opqueue:leader`, stable cross-cycle worker id), and canary's Lua-CAD leader lease (`canary:leader`, #1881) — kept separate by design. A static guard (`tests/unit/test_1920_no_hand_rolled_single_flight.py`) fails CI when a new hand-rolled `set(..., nx=True, ex=...)` single-flight lock appears outside `SingleFlightLock` with no allowlist entry.
-- **Fleet-restart lock** (#1860, hardened #1919): `ops:fleet_restart` — SETNX + 2100s TTL single-flight guard for `POST /api/ops/fleet/restart` (409 on contention); TTL is sized above the slowest single agent (skill injection alone is bounded by `skill_service._INJECT_LOCK_TTL_SECONDS`=1800 — constants comment-linked). The live loop's per-agent refresh is an **ownership-checked pre-action gate** (GET-compare → EXPIRE, never a bare EXPIRE): a **foreign** token (concurrent caller took the lock after a lapse) stops the run — partial results stand, `summary`/audit carry `stopped_early="lease_lost_foreign"` + `processed` vs `total`; an **absent** token (lapsed, unclaimed) is re-acquired via SETNX and the run continues (`lease_reacquired` audited); acquire sits inside the `try/finally` so nothing can leak the lock. Release is compare-and-delete (shared `redis_breaker_util.lock_token_matches`), attempted even after detected loss (foreign-safe by construction). Not `agent:*`-named (fleet-scoped, #1560 registry doesn't apply); fail-open when Redis is down (a refresh Redis error is throttle-logged, never treated as loss).
+- **Single-flight lock consolidation (#1920).** The SETNX single-flight sites — `ops:fleet_restart`, `ephemeral:discard:{name}`, `skill_inject:{name}`, `skills:library:sync`, `system_seed:provision`, `cornelius:provision`, `compat_fix:{name}`, and the later `agent:deploy_op:{base_name}` (#2060) — now share ONE ownership-checked primitive, `redis_breaker_util.SingleFlightLock` (mint-per-acquire token; renew and release each one Lua compare-and-mutate script, #4028). This unifies the **single-flight family only**: **four lock idioms remain** after this change — the shared `SingleFlightLock`, the async Lua-CAD `ResumeLock` (`session_turn_service.py`), the two verbatim leader leases (`monitoring:leader` / `opqueue:leader`, stable cross-cycle worker id), and canary's Lua-CAD leader lease (`canary:leader`, #1881, on the same shared lease scripts since #4028) — kept separate by design. A static guard (`tests/unit/test_1920_no_hand_rolled_single_flight.py`) fails CI when a new hand-rolled `set(..., nx=True, ex=...)` single-flight lock appears outside `SingleFlightLock` with no allowlist entry.
+- **Fleet-restart lock** (#1860, hardened #1919): `ops:fleet_restart` — SETNX + 2100s TTL single-flight guard for `POST /api/ops/fleet/restart` (409 on contention); TTL is sized above the slowest single agent (skill injection alone is bounded by `skill_service._INJECT_LOCK_TTL_SECONDS`=1800 — constants comment-linked). The live loop's per-agent refresh is an **ownership-checked pre-action gate**, one Lua script (`refresh_if_owned(retake_lapsed=True)`, #4028): a **foreign** token (concurrent caller took the lock after a lapse) stops the run — partial results stand, `summary`/audit carry `stopped_early="lease_lost_foreign"` + `processed` vs `total`; an **absent** token (lapsed, unclaimed at the refresh) is re-taken with `SET NX` in the same script and the run continues (`lease_reacquired` audited — not proof nobody ran inside the lapse); acquire sits inside the `try/finally` so nothing can leak the lock. Release is the Lua compare-and-delete, attempted even after detected loss (foreign-safe by construction). Not `agent:*`-named (fleet-scoped, #1560 registry doesn't apply); fail-open when Redis is down (a refresh Redis error is throttle-logged, never treated as loss).
 - **SSH-port reservations + first-run seed pass lock** (#2215): `port_alloc:{port}` — transient per-port reservation bridging the allocator's check and `containers.run` (SETNX + TTL 600s at allocation; SET no-NX by `reserve_port_for_recreate` across the recreate gap). **No release path by design**: once the container exists its `trinity.ssh-port` label is the durable truth (Invariant #11), so the key self-expires; deliberately not `agent:*` (port-keyed, and no lifecycle event should clear it — clearing on an agent event would un-reserve a port mid-create; the `ephemeral:quota:` precedent). `first_run_seed:provision` — pass-level lock serialising BOTH first-run seeders across workers (SETNX, uuid token, TTL 900s, `lock_token_matches` compare-and-delete release, fail-open; loser skips the whole pass). Both fail open; neither is in the #1560 registry.
 
 ---

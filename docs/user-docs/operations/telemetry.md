@@ -123,6 +123,7 @@ Full API reference: http://localhost:8000/docs
 - Tier 2 sends **aggregates only**; it is not a stream of individual events and cannot be used to reconstruct activity.
 - The hosted funnel/benchmark analytics that consume these aggregates are a separate surface behind an entitlement; this page covers only the opt-in, what is shared, and what the benchmark card renders.
 - Sharing runs on the configured interval — it is not real-time.
+- This page covers Trinity's own telemetry. What an agent's runtime CLI sends its vendor (Claude Code's and the Gemini CLI's usage telemetry are turned off; Codex's is not yet) is described in [Agent Runtimes](../agents/agent-runtimes.md#endpoints-and-proxies) and the [security FAQ](../faq/security.md).
 - Changing `TELEMETRY_SHARING_URL` does not start a new delivery episode: the last-delivered stamp and the backfill marker still count an acknowledgement from the previous address. The panel flags the mismatch, but the new receiver only sees shares from the next heartbeat on.
 
 ## See Also

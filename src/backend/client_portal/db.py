@@ -19,7 +19,7 @@ from db.tables import (
     system_settings, agent_sharing, agent_ownership, users,
     enterprise_portal_chat_state, portal_file_dismissals, schedule_executions,
 )
-from utils.helpers import iso_cutoff, utc_now_iso
+from utils.helpers import iso_cutoff, parse_iso_timestamp, utc_now_iso
 
 
 # Max agents per SQL statement — see `list_portal_sessions_for_agents` (#2198).
@@ -88,6 +88,7 @@ def get_shared_roster(email: str) -> list[dict]:
             # `agent_ownership`, so it is one column rather than a per-card read,
             # and the roster's model control needs it for every row.
             agent_ownership.c.public_channel_model,
+            agent_ownership.c.default_model,
             users.c.username.label("owner"),
         )
         .select_from(
@@ -142,6 +143,7 @@ def get_owned_roster(email: str) -> list[dict]:
             agent_ownership.c.tts_voice_replies_enabled,   # #2157
             agent_ownership.c.display_label,        # #2159, same rationale as above
             agent_ownership.c.public_channel_model,  # ent#403, same rationale
+            agent_ownership.c.default_model,         # ent#1202, same rationale
             users.c.username.label("owner"),
         )
         .select_from(
@@ -170,27 +172,99 @@ def add_portal_message(msg_id: str, agent_name: str, client_email: str,
                        source: Optional[str] = None,
                        voice_call_id: Optional[str] = None,
                        attachments: Optional[str] = None,
-                       execution_id: Optional[str] = None) -> None:
+                       execution_id: Optional[str] = None,
+                       gate_hold: Optional[str] = None) -> None:
     # ent#534: `source`/`voice_call_id` are platform-written only (NULL for a
     # typed turn, 'voice' + the call id for a spoken one) — no request carries them.
     # #3265: `attachments` is the user turn's JSON list, already resolved
     # server-side (`service.resolve_turn_attachments`) — never client text.
     # #3166: `execution_id` names the turn that wrote the row, so a client can
     # take its OWN reply off a thread another turn is writing to.
+    # trinity#3402: `gate_hold` marks a row the skill gate stopped (the request
+    # id or `refused:<code>`) — never replayed to the agent.
     stmt = text(
         "INSERT INTO enterprise_portal_messages "
         "(id, agent_name, client_email, session_id, role, content, cost, created_at, "
-        " source, voice_call_id, attachments, execution_id) "
+        " source, voice_call_id, attachments, execution_id, gate_hold) "
         "VALUES (:id, :agent, :email, :session, :role, :content, :cost, :now, :source, :call, "
-        " :attachments, :execution)"
+        " :attachments, :execution, :gate_hold)"
     )
     with get_engine().begin() as conn:
         conn.execute(stmt, {
             "id": msg_id, "agent": agent_name, "email": (client_email or "").lower(),
             "session": session_id, "role": role, "content": content, "cost": cost, "now": now,
             "source": source, "call": voice_call_id, "attachments": attachments,
-            "execution": execution_id,
+            "execution": execution_id, "gate_hold": gate_hold,
         })
+
+
+def add_portal_message_once(msg_id: str, agent_name: str, client_email: str,
+                            role: str, content: str, now: str, session_id: str,
+                            source: Optional[str] = None) -> bool:
+    """Insert a platform-written row under a deterministic id, at most once
+    (trinity-enterprise#1170). True when THIS call wrote it.
+
+    The insert and the session touch are one transaction, and the touch runs
+    only when the insert landed — so a duplicate counts nothing, and there is
+    no committed row whose ``message_count`` was never advanced. Duplicates are
+    decided by ``ON CONFLICT (id) DO NOTHING`` (SQLite >= 3.24 and PostgreSQL),
+    never by catching an IntegrityError."""
+    insert_stmt = text(
+        "INSERT INTO enterprise_portal_messages "
+        "(id, agent_name, client_email, session_id, role, content, cost, created_at, source) "
+        "VALUES (:id, :agent, :email, :session, :role, :content, NULL, :now, :source) "
+        "ON CONFLICT (id) DO NOTHING"
+    )
+    touch_stmt = text(
+        "UPDATE enterprise_portal_sessions "
+        "SET last_message_at = :now, message_count = message_count + 1 "
+        "WHERE id = :id"
+    )
+    with get_engine().begin() as conn:
+        res = conn.execute(insert_stmt, {
+            "id": msg_id, "agent": agent_name, "email": (client_email or "").lower(),
+            "session": session_id, "role": role, "content": content, "now": now,
+            "source": source,
+        })
+        if res.rowcount != 1:
+            return False
+        conn.execute(touch_stmt, {"now": now, "id": session_id})
+    return True
+
+
+def portal_message_exists(msg_id: str) -> bool:
+    """Whether a row with this id exists (trinity-enterprise#1170)."""
+    stmt = text("SELECT 1 FROM enterprise_portal_messages WHERE id = :id")
+    with get_engine().connect() as conn:
+        return conn.execute(stmt, {"id": msg_id}).first() is not None
+
+
+def mark_portal_messages_held(message_ids: list, gate_hold: Optional[str]) -> None:
+    """trinity#3402: mark the rows of a turn the skill gate stopped — the request
+    id or `refused:<code>` — or, with None, clear a reused row's old verdict (a
+    retry that reuses a refused turn's row stands for the NEW turn)."""
+    ids = [i for i in (message_ids or []) if i]
+    if not ids:
+        return
+    stmt = text(
+        "UPDATE enterprise_portal_messages SET gate_hold = :gate_hold WHERE id IN :ids"
+    ).bindparams(bindparam("ids", expanding=True))
+    with get_engine().begin() as conn:
+        conn.execute(stmt, {"gate_hold": gate_hold, "ids": ids})
+
+
+def get_turn_reply_row(execution_id: str) -> Optional[dict]:
+    """The assistant row one turn wrote, or None while it has not landed. Read by the
+    Direct call's speech (trinity-enterprise#1046): the row, not the execution, holds
+    what the thread shows."""
+    stmt = text(
+        "SELECT id, content, gate_hold FROM enterprise_portal_messages "
+        "WHERE execution_id = :execution AND role = 'assistant' "
+        "ORDER BY created_at DESC LIMIT 1"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"execution": execution_id}).mappings().first()
+    return dict(row) if row else None
 
 
 def set_portal_message_execution_id(msg_id: str, execution_id: str) -> None:
@@ -206,7 +280,8 @@ def set_portal_message_execution_id(msg_id: str, execution_id: str) -> None:
 
 def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
                         session_id: Optional[str] = None,
-                        before: Optional[str] = None) -> list[dict]:
+                        before: Optional[str] = None,
+                        include_held: bool = False) -> list[dict]:
     """The most-recent ``limit`` messages for a conversation, oldest-first for
     display. Scoped to one ``session_id`` when given (the multi-session read);
     with no session it falls back to the whole (agent, client) history — the
@@ -215,7 +290,11 @@ def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
     ``before`` (trinity-enterprise#610 §3g L7): only messages strictly older than
     this ISO-Z instant — the ask context's "what led up to it". A bound
     parameter compared with another `utc_now_iso()` column, so the two strings
-    share one format (Invariant #16's trap is `datetime('now')`, not this)."""
+    share one format (Invariant #16's trap is `datetime('now')`, not this).
+
+    ``include_held`` (trinity#3402): a turn the skill gate stopped, and its
+    notice, are left out unless asked for — see `_not_held`. A prompt builder
+    takes the default; a reader a PERSON sees passes True."""
     where = "agent_name = :agent AND client_email = :email"
     params = {"agent": agent_name, "email": (client_email or "").lower(), "lim": limit}
     if session_id is not None:
@@ -224,6 +303,8 @@ def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
     if before is not None:
         where += " AND created_at < :before"
         params["before"] = before
+    if not include_held:
+        where += " AND " + _not_held("enterprise_portal_messages")
     stmt = text(
         # ent#366: `id` rides along so a message can be RATED. The row has always
         # had a primary key; the client just never saw it, which is why a thumb
@@ -259,6 +340,16 @@ _MESSAGE_COLUMNS = ("id, role, content, cost, created_at, source, voice_call_id,
 # carry NULL `source` too — they are part of the typed timeline, not of a call.
 _TYPED = "source IS NULL"
 
+
+def _not_held(table: str) -> str:
+    """trinity#3402: the rows a prompt may be built from — never a turn the skill
+    gate held or refused, nor its notice, whatever was decided since. The ONE
+    definition every read here uses. The turn marks its rows (`gate_hold`) when
+    the gate stops it; rows held before the column existed were marked once by
+    the `held_gate_turns` migration, from the gate record naming their turn."""
+    return f"{table}.gate_hold IS NULL"
+
+
 # Sized against a real 30-minute transcript (~180 rows): ~3 long calls plus
 # their typed turns. Read at call time (tests pin it), never captured as a
 # default argument.
@@ -273,7 +364,8 @@ class ThreadWindow:
 
 def get_portal_thread_window(agent_name: str, client_email: str, session_id: str,
                              typed_limit: int = 100,
-                             ceiling: Optional[int] = None) -> ThreadWindow:
+                             ceiling: Optional[int] = None,
+                             include_held: bool = False) -> ThreadWindow:
     """The newest ``typed_limit`` typed rows of one thread, plus every spoken
     row inside that span, oldest-first; at most ``ceiling`` rows (the NEWEST
     survive, and ``truncated`` reports the cut).
@@ -283,10 +375,15 @@ def get_portal_thread_window(agent_name: str, client_email: str, session_id: str
     DESC`` so the threshold and the range agree at a tie. Fewer typed rows than
     the limit → the whole thread (≤ ceiling). A call-only thread has no typed
     row at all and is returned whole for the same reason.
+
+    ``include_held`` (trinity#3402): as in `get_portal_messages` — left out of
+    both the window's count and its rows unless asked for.
     """
     ceiling = int(ceiling or PORTAL_HISTORY_ROW_CEILING)
     typed_limit = max(1, int(typed_limit or 1))
     base = "agent_name = :agent AND client_email = :email AND session_id = :session"
+    if not include_held:
+        base += " AND " + _not_held("enterprise_portal_messages")
     params = {"agent": agent_name, "email": (client_email or "").lower(), "session": session_id}
     threshold_stmt = text(
         f"SELECT created_at, id FROM enterprise_portal_messages "
@@ -327,6 +424,15 @@ def get_platform_rows_since_last_reply(agent_name: str, client_email: str,
     the background — typed in form, but it landed mid-call, so it is NOT the
     cursor. Taking it as one would erase the call's earlier spoken rows from
     the next delta, which is the very loss #2694 exists to prevent.
+
+    trinity#3402: nor is a held turn's notice — the platform wrote it, the live
+    session never saw that turn — for the same reason.
+
+    trinity-enterprise#1046: a Direct call's reply IS the cursor, carrying a call id or
+    not. Each one is the agent's own session answering, so nothing before it is
+    unheard. Without this every turn after a Direct call would be re-sent the whole
+    thread since the last typed reply. The call's label row stays out of the delta too:
+    it describes turns the session already holds.
     """
     base = "agent_name = :agent AND client_email = :email AND session_id = :session"
     params = {"agent": agent_name, "email": (client_email or "").lower(), "session": session_id,
@@ -337,9 +443,11 @@ def get_platform_rows_since_last_reply(agent_name: str, client_email: str,
     stmt = text(
         f"SELECT {_MESSAGE_COLUMNS} FROM enterprise_portal_messages "
         f"WHERE {base} AND (source IS NOT NULL OR role = 'system') "
-        f"AND created_at > COALESCE((SELECT MAX(created_at) FROM enterprise_portal_messages "
+        f"AND (voice_call_id IS NULL OR voice_call_id NOT LIKE 'vd\\_%' ESCAPE '\\') "
+        f"AND created_at > COALESCE((SELECT MAX(r.created_at) FROM enterprise_portal_messages r "
         f"                            WHERE {base} AND role = 'assistant' AND {_TYPED} "
-        f"                              AND voice_call_id IS NULL), '') "
+        f"                              AND (voice_call_id IS NULL OR voice_call_id LIKE 'vd\\_%' ESCAPE '\\') "
+        f"                              AND {_not_held('r')}), '') "
         f"ORDER BY created_at DESC, id DESC LIMIT :lim"
     )
     with get_engine().connect() as conn:
@@ -1094,16 +1202,131 @@ def _ensure_unread_baseline(client_email: str, now: str) -> None:
                        last_read_at=now)
 
 
-def mark_chat_read(client_email: str, chat_kind: str, chat_id: str, now: str) -> None:
+def room_cursor_kind(participant_kind: str) -> str:
+    """The chat-state kind that holds a ROOM's read cursor for one identity
+    space (trinity-enterprise#1011).
+
+    A room seats a person as ``user`` + username or ``workspace_user`` + email,
+    and the row is keyed by email, so one email seated under both used to share
+    one cursor: reading through either credential cleared the room for both. The
+    cursor now lives in a row per space. The plain ``room`` row stays what it
+    was — it carries the star, and a cursor written before the split, which each
+    space reads as its floor until it writes its own (`mark_chat_read`'s
+    ``floor_kind``, `_UNREAD_ROOM_ARRIVALS`). Never in `CHAT_KINDS`: the API
+    addresses a room as ``room`` and the space comes from the credential."""
+    return f"room:{participant_kind}"
+
+
+def _later(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    """The later of two stored instants, compared as instants, returned in the
+    spelling it was stored in. Lexical order is wrong across precisions
+    ("…00Z" sorts after "…00.5Z"), and the winner must keep its own spelling so
+    a message's `created_at` sent back verbatim still compares equal to itself."""
+    if not a:
+        return b
+    if not b:
+        return a
+    try:
+        return a if parse_iso_timestamp(a) >= parse_iso_timestamp(b) else b
+    except (TypeError, ValueError):
+        return max(a, b)
+
+
+def mark_chat_read(client_email: str, chat_kind: str, chat_id: str, now: str,
+                   *, through: Optional[str] = None,
+                   floor_kind: Optional[str] = None) -> None:
     """Advance one chat's read cursor for one user.
 
+    trinity-enterprise#1010: the cursor moves to ``through`` — the newest
+    instant the client actually held — not to ``now``. Written at ``now``, an
+    arrival that landed after the client's last fetch but before this write was
+    older than the cursor and never counted, though nobody saw it. The caller
+    clamps ``through`` to now; ``None`` keeps the old meaning (now) for a client
+    that predates it. The cursor never moves BACK: an older ``through`` (a slow
+    request overtaken by a later one, a second tab) leaves it where it is.
+
+    ``floor_kind`` (#1011) is the row whose cursor this one may not start below:
+    a room's per-space cursor is seeded from the shared pre-split ``room`` row,
+    so the first read in a space never resurrects what that row already read.
+
     Also establishes the account baseline on the viewer's FIRST ever read
-    (ent#557). Here rather than at sign-in because this is the first moment we
-    know the viewer has actually looked at something: a baseline written at
-    sign-in would start counting from a session someone opened and abandoned.
+    (ent#557), at the same instant the read covers. Here rather than at sign-in
+    because this is the first moment we know the viewer has actually looked at
+    something: a baseline written at sign-in would start counting from a session
+    someone opened and abandoned.
     """
-    _ensure_unread_baseline(client_email, now)
-    _upsert_chat_state(client_email, chat_kind, chat_id, now, last_read_at=now)
+    target = through or now
+    _ensure_unread_baseline(client_email, target)
+    # Compare-and-set, never read-then-upsert (#1010 review): two tabs reading
+    # the same old cursor would otherwise both write, and the older `through`
+    # landing last would re-badge what the newer one read. Instants cannot be
+    # compared in SQL across spellings (see `_later`), so the comparison stays
+    # here and the write only lands if the row still holds what was compared
+    # against; a lost race re-reads and decides again.
+    for _ in range(_CURSOR_CAS_ATTEMPTS):
+        found, current = _read_cursor(client_email, chat_kind, chat_id)
+        floor = current
+        if floor is None and floor_kind:
+            floor = _read_cursor(client_email, floor_kind, chat_id)[1]
+        cursor = _later(floor, target)
+        if cursor == current:
+            return
+        if _cas_cursor(client_email, chat_kind, chat_id, now,
+                       found=found, expected=current, cursor=cursor):
+            return
+    # Still losing after every attempt: the reads that won moved the cursor on
+    # their own, and a read marker is never worth failing the open over.
+
+
+# A lost compare-and-set means another read of the same chat landed in between;
+# a handful of retries covers any real number of tabs.
+_CURSOR_CAS_ATTEMPTS = 5
+
+
+def _read_cursor(client_email: str, chat_kind: str,
+                 chat_id: str) -> tuple[bool, Optional[str]]:
+    """(row exists, its read cursor)."""
+    stmt = text(
+        "SELECT last_read_at FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND chat_kind = :kind AND chat_id = :id"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {
+            "email": (client_email or "").lower(), "kind": chat_kind, "id": chat_id,
+        }).first()
+    return (row is not None, row[0] if row else None)
+
+
+def _cas_cursor(client_email: str, chat_kind: str, chat_id: str, now: str, *,
+                found: bool, expected: Optional[str], cursor: str) -> bool:
+    """Write ``cursor`` only if the row is still as read: absent (insert, losing
+    to a concurrent insert), or holding ``expected``. True when it landed."""
+    email = (client_email or "").lower()
+    with get_engine().begin() as conn:
+        if not found:
+            stmt = (
+                make_insert(enterprise_portal_chat_state)
+                .values(client_email=email, chat_kind=chat_kind, chat_id=chat_id,
+                        updated_at=now, last_read_at=cursor)
+                .on_conflict_do_nothing(index_elements=[
+                    enterprise_portal_chat_state.c.client_email,
+                    enterprise_portal_chat_state.c.chat_kind,
+                    enterprise_portal_chat_state.c.chat_id,
+                ])
+            )
+            return conn.execute(stmt).rowcount == 1
+        guard = "last_read_at IS NULL" if expected is None else "last_read_at = :expected"
+        stmt = text(
+            "UPDATE enterprise_portal_chat_state "
+            "SET last_read_at = :cursor, updated_at = :now "
+            "WHERE client_email = :email AND chat_kind = :kind AND chat_id = :id "
+            f"AND {guard}"
+        )
+        params = {"cursor": cursor, "now": now, "email": email,
+                  "kind": chat_kind, "id": chat_id}
+        if expected is not None:
+            params["expected"] = expected
+        return conn.execute(stmt, params).rowcount == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1183,8 +1406,8 @@ def dismissed_file_ids(client_email: str) -> set[str]:
 # 20 s poll. Every reader aliases the subquery (PostgreSQL < 16 requires it).
 _UNREAD_CURSOR = (
     "  AND ("
-    "        (st.last_read_at IS NOT NULL AND {at} > st.last_read_at)"
-    "     OR (st.last_read_at IS NULL AND {at} > ("
+    "        ({cur} IS NOT NULL AND {at} > {cur})"
+    "     OR ({cur} IS NULL AND {at} > ("
     "           SELECT b.last_read_at FROM enterprise_portal_chat_state b "
     "           WHERE b.client_email = :email AND b.chat_kind = :bkind "
     "             AND b.chat_id = :bid"
@@ -1201,7 +1424,7 @@ _UNREAD_ARRIVALS = (
     " AND st.chat_id = m.session_id "
     "WHERE m.client_email = :email "
     "  AND m.role = 'assistant' "
-    + _UNREAD_CURSOR.format(at="m.created_at")
+    + _UNREAD_CURSOR.format(at="m.created_at", cur="st.last_read_at")
     + "UNION ALL "
     "SELECT r.portal_session_id AS session_id, r.id AS id, r.created_at AS at, "
     "       'deliverable' AS kind, s.agent_name AS agent_name "
@@ -1212,7 +1435,7 @@ _UNREAD_ARRIVALS = (
     "  ON st.client_email = :email AND st.chat_kind = 'thread' "
     " AND st.chat_id = r.portal_session_id "
     "WHERE r.addressed_to_email = :email "
-    + _UNREAD_CURSOR.format(at="r.created_at")
+    + _UNREAD_CURSOR.format(at="r.created_at", cur="st.last_read_at")
 )
 
 
@@ -1349,6 +1572,128 @@ def unread_arrivals_with_latest(client_email: str) -> dict[str, dict]:
                     "source": r["source"] if is_msg else None,
                     "title": None if is_msg else r["title"],
                 },
+            }
+    return out
+
+
+# trinity-enterprise#959 — a ROOM's unread arrivals, for one viewer.
+#
+# The same per-viewer timestamp cursor a chat uses (`chat_kind = 'room'`, already
+# written by `mark_chat_read` when the person opens a room) and the same ent#557
+# baseline for a room never opened, so `_UNREAD_CURSOR` is reused unchanged.
+# Rooms keep their own `last_read_seq` too, but that one is the AGENTS' delta
+# cursor and is never advanced for a person.
+#
+# An arrival is an AGENT's message: the chat rule (`role = 'assistant'`) in a
+# room's terms. The person's own messages and the room's system lines never
+# count. (A room seats exactly one person — its creator; only agents are ever
+# added — so "not an agent" is the reader or the room itself.)
+#
+# Membership is the grant, and it is a JOIN, not a filter applied afterwards:
+# a message is only ever read through the viewer's OWN active participant row,
+# in the identity space their credential acts in (`:pkind`/`:pid`). A cursor row
+# can still exist for a room the reader is not in — the row is keyed by EMAIL,
+# which two identity spaces share, and rows written before the write checked
+# membership remain — so this read then has no participant row to join through
+# and returns nothing for it, and `active_room_ids` keeps the row itself out of
+# the payload (fix round 1).
+_UNREAD_ROOM_ARRIVALS = (
+    "SELECT msg.room_id AS room_id, msg.id AS id, msg.seq AS seq, "
+    "       msg.created_at AS at "
+    "FROM enterprise_room_messages msg "
+    "JOIN enterprise_room_participants p "
+    "  ON p.room_id = msg.room_id AND p.kind = :pkind AND p.identity = :pid "
+    " AND p.left_at IS NULL "
+    "LEFT JOIN enterprise_portal_chat_state sp "
+    "  ON sp.client_email = :email AND sp.chat_kind = :rkind "
+    " AND sp.chat_id = msg.room_id "
+    "LEFT JOIN enterprise_portal_chat_state st "
+    "  ON st.client_email = :email AND st.chat_kind = 'room' "
+    " AND st.chat_id = msg.room_id "
+    "WHERE msg.sender_kind = 'agent' "
+    + _UNREAD_CURSOR.format(at="msg.created_at",
+                            cur="COALESCE(sp.last_read_at, st.last_read_at)")
+)
+
+
+def active_room_ids(participant_kind: str, participant_identity: str) -> set[str]:
+    """Every room this participant is ACTIVELY in (`left_at IS NULL`), in one
+    statement — the batched membership read `/chat-state` filters its stored
+    room rows through (trinity-enterprise#959 fix round 1). An empty identity is
+    in no room: the caller could not say whose rooms these are."""
+    if not participant_kind or not participant_identity:
+        return set()
+    stmt = text(
+        "SELECT room_id FROM enterprise_room_participants "
+        "WHERE kind = :pkind AND identity = :pid AND left_at IS NULL"
+    )
+    with get_engine().connect() as conn:
+        return {r[0] for r in conn.execute(
+            stmt, {"pkind": participant_kind, "pid": participant_identity}) if r[0]}
+
+
+def is_active_room_participant(room_id: str, participant_kind: str,
+                               participant_identity: str) -> bool:
+    """Is this participant actively in this one room? The read-cursor write's
+    gate (trinity-enterprise#959 fix round 1). An unknown room and a room the
+    participant is not in (or left) are the same False."""
+    if not room_id or not participant_kind or not participant_identity:
+        return False
+    stmt = text(
+        "SELECT 1 FROM enterprise_room_participants "
+        "WHERE room_id = :room AND kind = :pkind AND identity = :pid "
+        "AND left_at IS NULL"
+    )
+    with get_engine().connect() as conn:
+        return conn.execute(stmt, {"room": room_id, "pkind": participant_kind,
+                                   "pid": participant_identity}).first() is not None
+
+
+def unread_room_arrivals(client_email: str, participant_kind: str,
+                         participant_identity: str) -> dict[str, dict]:
+    """Per-room unread count, the newest arrival and the first unread message
+    id, for the rooms this viewer is an ACTIVE participant of — one statement,
+    so a row's "3 new" and its excerpt are one snapshot (the
+    `unread_arrivals_with_latest` rule).
+
+    Returns ``{room_id: {"n", "first_unread_message_id", "latest": {"id",
+    "at", "content"}}}``. Ordered by ``seq`` — the room's own ordering
+    primitive — so "first" and "latest" never depend on a timestamp tie.
+    An empty identity reads nothing: the caller could not say whose rooms these
+    are, and a guess would be someone else's.
+    """
+    if not participant_kind or not participant_identity:
+        return {}
+    stmt = text(
+        "SELECT w.room_id AS room_id, w.n AS n, w.id AS id, w.at AS at, "
+        "       w.first_id AS first_id, m2.content AS content "
+        "FROM ("
+        "  SELECT a.room_id, a.id, a.at, "
+        "         COUNT(*) OVER (PARTITION BY a.room_id) AS n, "
+        "         ROW_NUMBER() OVER (PARTITION BY a.room_id "
+        "                            ORDER BY a.seq DESC) AS rn, "
+        "         FIRST_VALUE(a.id) OVER (PARTITION BY a.room_id "
+        "                                 ORDER BY a.seq ASC "
+        "           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING"
+        "         ) AS first_id "
+        "  FROM (" + _UNREAD_ROOM_ARRIVALS + ") AS a"
+        ") AS w "
+        "JOIN enterprise_room_messages m2 ON m2.id = w.id "
+        "WHERE w.rn = 1"
+    )
+    params = {**_unread_params(client_email),
+              "pkind": participant_kind, "pid": participant_identity,
+              "rkind": room_cursor_kind(participant_kind)}
+    out: dict[str, dict] = {}
+    with get_engine().connect() as conn:
+        for r in conn.execute(stmt, params).mappings():
+            rid = r["room_id"]
+            if not rid:
+                continue
+            out[rid] = {
+                "n": int(r["n"]),
+                "first_unread_message_id": r["first_id"],
+                "latest": {"id": r["id"], "at": r["at"], "content": r["content"]},
             }
     return out
 

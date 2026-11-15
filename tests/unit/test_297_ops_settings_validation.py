@@ -123,12 +123,14 @@ def test_the_community_floor_is_not_enforced_as_a_clamp(cfg):
     ("true", True), ("false", True), ("TRUE", True),
     ("yes", False), ("1", False), ("", False),
 ])
-def test_bool_settings_are_validated(cfg, value, ok):
+@pytest.mark.parametrize("key", ["ssh_access_enabled",
+                                 "apply_unassign_on_failed_gate"])  # trinity-enterprise#1068
+def test_bool_settings_are_validated(cfg, key, value, ok):
     if ok:
-        assert cfg.validate_ops_setting("ssh_access_enabled", value) in ("true", "false")
+        assert cfg.validate_ops_setting(key, value) in ("true", "false")
     else:
         with pytest.raises(ValueError):
-            cfg.validate_ops_setting("ssh_access_enabled", value)
+            cfg.validate_ops_setting(key, value)
 
 
 def test_percent_thresholds_are_range_checked(cfg):

@@ -1,0 +1,3 @@
+## 2026-11-02 — pitfall — `_resolve_bool_flag` cannot turn a default-on flag off from env
+**Context**: trinity-enterprise#1046, `settings_service.is_direct_voice_enabled` (`default=True`).
+**Lesson**: the shared stored→env→default resolver reads the env var as **opt-in only** ("true"/"1"/"yes"); `FLAG=false` falls through to the default. That is right for the opt-in flags it was written for and silently wrong for any flag defaulting to on: the operator's `.env` "off" is ignored. A default-on flag must derive its default from an explicit env "false" (or use a resolver that honours both directions), with a test for `env=false, no stored row → off`.

@@ -46,8 +46,9 @@ async def get_log_stats(current_user: User = Depends(require_admin)):
             "archive_file_count": len(stats["archive_files"]),
         }
     except Exception as e:
-        logger.error(f"Failed to get log stats: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get log stats: {str(e)}")
+        # #4284: the exception text goes to the log, never the body.
+        logger.error(f"Failed to get log stats: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get log stats ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.get("/retention", response_model=RetentionConfig)
@@ -146,8 +147,8 @@ async def trigger_archive(
         }
 
     except Exception as e:
-        logger.error(f"Archive failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Archive failed: {str(e)}")
+        logger.error(f"Archive failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Archive failed ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.get("/health")

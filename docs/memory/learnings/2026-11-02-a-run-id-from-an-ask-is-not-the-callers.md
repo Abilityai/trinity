@@ -1,0 +1,3 @@
+## 2026-11-02 — pitfall — An ask the caller may read can name a run the caller may not watch
+**Context**: trinity-enterprise#1046, `DirectBridge.ask_followup` — after a spoken approval it spoke the run the gate dispatched (`gate_requests.dispatched_execution_id`).
+**Lesson**: `_owned_ask` admits the ask's **addressee** (an approver), not only its requester, so any id reached *through* an ask — the dispatched run, a linked request, a discussion chat — is someone else's until checked on its own. Re-check the reached object with its own gate (`execution_belongs_to_caller` for a run) before streaming, speaking or showing it; reading the ask is not leave to read what it points at.

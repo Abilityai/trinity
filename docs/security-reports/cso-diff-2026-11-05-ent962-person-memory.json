@@ -1,0 +1,70 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-05",
+  "mode": "diff",
+  "scope": "trinity-enterprise#962",
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "stack_cve_quicklist": [
+    {
+      "component": "all rows",
+      "verdict": "not reachable (no pin, image or lockfile changed in the diff)"
+    }
+  ],
+  "attack_surface": {
+    "new_http_routes": 4,
+    "tier": "owner + require_person (decorator)",
+    "websocket": 0,
+    "mcp_tools": 0,
+    "webhooks": 0,
+    "agent_context_ingress": "none new; the summarizer's existing write is now recorded and compare-and-set"
+  },
+  "findings": [],
+  "hypotheses": [
+    {
+      "title": "A user-scoped MCP key reads every person's memory on the owner's agents",
+      "category": "authz-design",
+      "note": "parity with the MEM-002 facts routes; pinned by test_the_owners_user_scoped_key_reads_as_on_the_facts_routes"
+    },
+    {
+      "title": "Summary history kept until agent deletion",
+      "category": "data-retention",
+      "note": "follow-up: opt-in retention bound"
+    },
+    {
+      "title": "An undone summary can be re-derived from recent conversation",
+      "category": "memory-poisoning",
+      "note": "stated limit in MEM-001 and the modal"
+    }
+  ],
+  "coverage_gaps": [
+    "PostgreSQL FOR UPDATE branch of _read_blob_for_update not executed (no TEST_POSTGRES_URL)",
+    "Phases 3, 4, 5, 6 and 8 (beyond the Unicode scan) had no diff overlap"
+  ],
+  "supply_chain_summary": {
+    "scanner": "none needed",
+    "changed_dependencies": 0
+  },
+  "filter_stats": {
+    "candidates_considered": 3,
+    "below_gate": 3,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "first diff report for this scope"
+}

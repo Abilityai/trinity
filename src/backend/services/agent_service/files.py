@@ -16,8 +16,34 @@ from services import file_path_policy as _policy
 from services.docker_service import execute_command_in_container, get_agent_container
 from services.docker_utils import container_reload
 from .helpers import agent_http_request
+from utils.log_masking import masked_text
 
 logger = logging.getLogger(__name__)
+
+
+def _agent_failure(response: httpx.Response, what: str, *, agent_detail: bool = False) -> HTTPException:
+    """The answer for an agent's non-200, at the agent's status.
+
+    An agent 5xx gets a fixed sentence and its body goes to the log: an agent
+    on an older base image answers its 500s with its exception text, and this
+    relay is the only thing between that text and the caller
+    (abilityai/trinity#4284). A 4xx is the agent's refusal (a missing file, a
+    path the policy refuses) and is relayed as before; ``agent_detail`` takes
+    its ``detail`` field rather than the whole body.
+    """
+    if response.status_code >= 500:
+        logger.warning("%s: the agent answered %s: %s", what, response.status_code,
+                       masked_text(response.text[:2000]))
+        return HTTPException(
+            status_code=response.status_code,
+            detail=f"{what} (the agent answered {response.status_code} — details in backend logs)",
+        )
+    if agent_detail:
+        return HTTPException(
+            status_code=response.status_code,
+            detail=response.json().get("detail", f"{what}: {response.text}"),
+        )
+    return HTTPException(status_code=response.status_code, detail=f"{what}: {response.text}")
 
 
 # trinity-enterprise#820: every path class and the tier x verb table live in ONE
@@ -320,10 +346,15 @@ def _caller_tier(current_user, agent_name: str) -> str:
     owner gate (owner or admin), SHARE any other person (a share holder, by JWT
     or by their own user-scope key), KEY every agent, system, connector or ops
     key."""
-    from dependencies import is_person_principal
+    from dependencies import is_person_principal, restricted_agent_turn
     if _passes_owner_tier(current_user, agent_name):
         return _policy.OWNER
     if is_person_principal(current_user):
+        return _policy.SHARE
+    # ent#926: an agent's key acting for a shared person (or a limited visitor)
+    # is that person's tier, so its `instructions.manage` / `skills.manage`
+    # grants do not rewrite instructions on their behalf.
+    if restricted_agent_turn(current_user):
         return _policy.SHARE
     return _policy.KEY
 
@@ -452,6 +483,8 @@ async def _enforce_owner_tier_read(path, current_user, request, agent_name) -> N
         )
         await _audit_read("file_read_refused", request, current_user, agent_name, path,
                           refusal.status_code, rule)
+        # This row is the record; the app's human-only handler adds none (ent#719).
+        refusal.audited = True
         raise
     if not _is_owners_interactive_session(current_user, agent_name):
         await _audit_read("file_read_allowed", request, current_user, agent_name, path, 200, rule)
@@ -479,15 +512,12 @@ def _may_reach_for_path(current_user, agent_name, path, *, include_ancestors=Fal
     the target without a permission edge. Every file class the path touches
     needs its capability, and the target must be one the key's owner OWNS — the
     bound the route-level capability fences apply (`owner_owns_agent`). The
-    capability gate below still decides the write and audits a refusal."""
+    capability gate below still decides the write, audits a refusal and, for
+    reach an edge gave (an edge means may call, never may manage), applies the
+    owner bound."""
     if agent_may_reach(current_user, agent_name):
         return True
-    from db.capability_grants import CAPABILITY_INSTRUCTIONS_MANAGE, CAPABILITY_SKILLS_MANAGE
-    needed = []
-    if _touches_skills_dir(path, include_ancestors=include_ancestors):
-        needed.append(CAPABILITY_SKILLS_MANAGE)
-    if _touches_instructions(path, include_ancestors=include_ancestors):
-        needed.append(CAPABILITY_INSTRUCTIONS_MANAGE)
+    needed = _capabilities_for_path(path, include_ancestors=include_ancestors)
     if not needed:
         return False
     from dependencies import capability_refusal, owner_owns_agent
@@ -508,18 +538,26 @@ def _touches_instructions(path: str, *, include_ancestors: bool = False) -> bool
     return _policy.INSTRUCTIONS in _policy.classes(path, include_ancestors=include_ancestors)
 
 
-async def _require_skill_capability(path, current_user, request, agent_name, *, include_ancestors=False):
-    from dependencies import enforce_agent_capability
+def _capabilities_for_path(path, *, include_ancestors=False) -> list:
+    """The capabilities a platform write to `path` takes, one per file class."""
+    from db.capability_grants import CAPABILITY_INSTRUCTIONS_MANAGE, CAPABILITY_SKILLS_MANAGE
+    needed = []
     if _touches_skills_dir(path, include_ancestors=include_ancestors):
-        from db.capability_grants import CAPABILITY_SKILLS_MANAGE
-        await enforce_agent_capability(
-            request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name
-        )
+        needed.append(CAPABILITY_SKILLS_MANAGE)
     if _touches_instructions(path, include_ancestors=include_ancestors):
-        from db.capability_grants import CAPABILITY_INSTRUCTIONS_MANAGE
-        await enforce_agent_capability(
-            request, current_user, CAPABILITY_INSTRUCTIONS_MANAGE, target=agent_name
-        )
+        needed.append(CAPABILITY_INSTRUCTIONS_MANAGE)
+    return needed
+
+
+async def _require_skill_capability(path, current_user, request, agent_name, *, include_ancestors=False):
+    from dependencies import capability_refusal, enforce_agent_capability
+    needed = _capabilities_for_path(path, include_ancestors=include_ancestors)
+    # A capability the key lacks goes first, so a refused call never records a
+    # use of the other one (trinity-enterprise#871).
+    needed.sort(key=lambda cap: capability_refusal(current_user, cap) is None)
+    for capability in needed:
+        await enforce_agent_capability(request, current_user, capability, target=agent_name,
+                                       owner_bound=True)
 
 
 # trinity-enterprise#820: a hard link to a credential file (made by the agent
@@ -603,10 +641,7 @@ async def list_agent_files_logic(
             data["hidden_withheld"] = hidden_withheld
             return data
         else:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Failed to list files: {response.text}"
-            )
+            raise _agent_failure(response, "Failed to list files")
     except httpx.ConnectError:
         # Agent server not ready - return 503 so tests can skip
         raise HTTPException(
@@ -618,7 +653,12 @@ async def list_agent_files_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to list files for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list files ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def download_agent_file_logic(
@@ -666,10 +706,7 @@ async def download_agent_file_logic(
             return PlainTextResponse(content=response.text)
         else:
             await _raise_if_link_refusal(response, request, current_user, agent_name, path)
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Failed to download file: {response.text}"
-            )
+            raise _agent_failure(response, "Failed to download file")
     except httpx.ConnectError:
         # Agent server not ready - return 503 so tests can skip
         raise HTTPException(
@@ -681,7 +718,12 @@ async def download_agent_file_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to download file: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to download file for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to download file ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def delete_agent_file_logic(
@@ -741,10 +783,7 @@ async def delete_agent_file_logic(
                                   unverified_image=not verified)
             return result
         else:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=response.json().get("detail", f"Failed to delete: {response.text}")
-            )
+            raise _agent_failure(response, "Failed to delete", agent_detail=True)
     except httpx.ConnectError:
         # Agent server not ready - return 503 so tests can skip
         raise HTTPException(
@@ -756,7 +795,12 @@ async def delete_agent_file_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to delete file for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete file ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def preview_agent_file_logic(
@@ -801,10 +845,7 @@ async def preview_agent_file_logic(
         )
         if response.status_code != 200:
             await _raise_if_link_refusal(response, request, current_user, agent_name, path)
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=response.json().get("detail", f"Failed to preview: {response.text}")
-            )
+            raise _agent_failure(response, "Failed to preview", agent_detail=True)
 
         await _refuse_hardlinked_read(response, request, current_user, agent_name, path)
         content_type = response.headers.get("content-type", "application/octet-stream")
@@ -828,7 +869,12 @@ async def preview_agent_file_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to preview file: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to preview file for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to preview file ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def update_agent_file_logic(
@@ -898,10 +944,7 @@ async def update_agent_file_logic(
                                   unverified_image=not verified)
             return result
         else:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=response.json().get("detail", f"Failed to update: {response.text}")
-            )
+            raise _agent_failure(response, "Failed to update", agent_detail=True)
     except httpx.ConnectError:
         # Agent server not ready - return 503 so tests can skip
         raise HTTPException(
@@ -913,7 +956,12 @@ async def update_agent_file_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update file: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to update file for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update file ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def create_agent_folder_logic(
@@ -981,10 +1029,7 @@ async def create_agent_folder_logic(
                                   unverified_image=not verified)
             return result
         else:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=response.json().get("detail", f"Failed to create folder: {response.text}")
-            )
+            raise _agent_failure(response, "Failed to create folder", agent_detail=True)
     except httpx.ConnectError:
         # Agent server not ready - return 503 so tests can skip
         raise HTTPException(
@@ -996,4 +1041,9 @@ async def create_agent_folder_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create folder: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to create folder for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create folder ({e.__class__.__name__} — details in backend logs)",
+        )

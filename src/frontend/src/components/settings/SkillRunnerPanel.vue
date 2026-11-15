@@ -123,7 +123,7 @@
             </BaseSelect>
             <BaseSelect v-model="newSkill" label="Skill" class="w-52">
               <option value="">Select a skill…</option>
-              <option v-for="s in skillNames" :key="s" :value="s">{{ s }}</option>
+              <option v-for="s in skillChoices" :key="s.name" :value="s.name">{{ s.label }}</option>
             </BaseSelect>
             <BaseButton
               variant="secondary"
@@ -171,7 +171,7 @@ import BaseInput from '../base/BaseInput.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import {
   blockingReason, blockingAction, runnerSummary, actionState,
-  headerCounts, grantFormState, revokePrompt, filterGrants, grantsFrom,
+  headerCounts, grantFormState, revokePrompt, filterGrants, grantsFrom, skillOptions,
 } from './skillRunnerPanel.js'
 
 defineEmits(['navigate-tab'])
@@ -186,7 +186,7 @@ const hdr = () => ({ headers: auth.authHeader })
 const status = ref(null)
 const grants = ref([])
 const agentNames = ref([])
-const skillNames = ref([])
+const skillChoices = ref([])
 const hasLoaded = ref(false)
 const loadError = ref(null)
 const lastLoadedAt = ref(null)
@@ -242,7 +242,7 @@ async function load() {
   } catch { /* picker stays empty */ }
   try {
     const r = await axios.get('/api/skills/library', hdr())
-    skillNames.value = (Array.isArray(r.data) ? r.data : []).map((s) => s.name).sort()
+    skillChoices.value = skillOptions(r.data)
   } catch { /* picker stays empty */ }
 }
 

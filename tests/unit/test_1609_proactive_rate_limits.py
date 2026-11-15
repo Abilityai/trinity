@@ -88,7 +88,7 @@ class _FakeRedis:
 
 class TestProactiveDmEnforcement:
     """The proactive-DM per-recipient cap now sources its limit from settings
-    (#1609) and treats 0 as unlimited. Exercises the real `_check_rate_limit`."""
+    (#1609) and treats 0 as unlimited. Exercises the real `check_rate_limit`."""
 
     @pytest.fixture
     def svc(self):
@@ -108,19 +108,19 @@ class TestProactiveDmEnforcement:
         def _boom():
             raise AssertionError("redis should not be touched when unlimited")
         monkeypatch.setattr(svc, "_get_redis", _boom)
-        assert svc._check_rate_limit("atlas", "bob@example.com") is True
+        assert svc.check_rate_limit("atlas", "bob@example.com") is True
 
     def test_under_configured_limit_allows(self, svc, monkeypatch):
         self._set_limit(monkeypatch, 10)
         key = svc._rate_limit_key("atlas", "bob@example.com")
         monkeypatch.setattr(svc, "_get_redis", lambda: _FakeRedis({key: 9}))
-        assert svc._check_rate_limit("atlas", "bob@example.com") is True
+        assert svc.check_rate_limit("atlas", "bob@example.com") is True
 
     def test_at_configured_limit_blocks(self, svc, monkeypatch):
         self._set_limit(monkeypatch, 10)
         key = svc._rate_limit_key("atlas", "bob@example.com")
         monkeypatch.setattr(svc, "_get_redis", lambda: _FakeRedis({key: 10}))
-        assert svc._check_rate_limit("atlas", "bob@example.com") is False
+        assert svc.check_rate_limit("atlas", "bob@example.com") is False
 
     def test_limit_is_sourced_from_settings_not_the_constant(self, svc, monkeypatch):
         # Configured cap of 3: 2 allows, 3 blocks — proving the enforce reads the
@@ -128,11 +128,11 @@ class TestProactiveDmEnforcement:
         self._set_limit(monkeypatch, 3)
         key = svc._rate_limit_key("atlas", "bob@example.com")
         monkeypatch.setattr(svc, "_get_redis", lambda: _FakeRedis({key: 2}))
-        assert svc._check_rate_limit("atlas", "bob@example.com") is True
+        assert svc.check_rate_limit("atlas", "bob@example.com") is True
         monkeypatch.setattr(svc, "_get_redis", lambda: _FakeRedis({key: 3}))
-        assert svc._check_rate_limit("atlas", "bob@example.com") is False
+        assert svc.check_rate_limit("atlas", "bob@example.com") is False
 
     def test_redis_down_fails_open(self, svc, monkeypatch):
         self._set_limit(monkeypatch, 10)
         monkeypatch.setattr(svc, "_get_redis", lambda: None)
-        assert svc._check_rate_limit("atlas", "bob@example.com") is True
+        assert svc.check_rate_limit("atlas", "bob@example.com") is True

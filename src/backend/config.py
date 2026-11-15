@@ -20,6 +20,10 @@ EMAIL_AUTH_ENABLED = os.getenv("EMAIL_AUTH_ENABLED", "true").lower() == "true"
 # code requests for already-whitelisted emails (separate endpoint).
 PUBLIC_ACCESS_REQUESTS_ENABLED = os.getenv("PUBLIC_ACCESS_REQUESTS_ENABLED", "false").lower() == "true"
 
+# PDF attachments are opt-in across web chat and external channels. Enabling
+# delivers original bytes only; parsing, extraction and OCR remain agent-owned.
+ALLOW_PDF_UPLOADS = os.getenv("ALLOW_PDF_UPLOADS", "false").lower() == "true"
+
 # Operator intake (trinity-enterprise#38). At first-run setup the operator may
 # opt in to "occasionally receive important security & product updates"; when
 # they do, their email + company are submitted once to an Ability.ai-operated
@@ -62,6 +66,23 @@ TELEMETRY_SHARING_URL = os.getenv(
 TELEMETRY_SHARING_INTERVAL_HOURS = int(os.getenv("TELEMETRY_SHARING_INTERVAL_HOURS", "24"))
 TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS = int(
     os.getenv("TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS", "30")
+)
+
+# --- Vendor-hosted help channels (#4499) ---------------------------------
+# The two remaining requests an instance makes to a vendor-operated host: the
+# help widget's bug / feature / feedback report (#1116) and the docs Q&A service
+# behind the widget's Ask tab and the `ask_trinity` MCP tool (ent#328). Both
+# are read here at RUN time, so the published images honour them without a
+# rebuild; the SPA reads them from `GET /api/version` (`help`), and the MCP
+# server reads the same two variables from its own environment.
+# `DO_NOT_TRACK=1` turns both off, with the two channels above: it is the one
+# setting after which no request leaves for a vendor-operated host.
+_DO_NOT_TRACK = os.getenv("DO_NOT_TRACK", "0").strip().lower() not in ("0", "", "false")
+BUG_REPORTING_ENABLED = (
+    os.getenv("BUG_REPORTING_ENABLED", "true").strip().lower() != "false" and not _DO_NOT_TRACK
+)
+ASK_TRINITY_ENABLED = (
+    os.getenv("ASK_TRINITY_ENABLED", "true").strip().lower() != "false" and not _DO_NOT_TRACK
 )
 
 # JWT Settings
@@ -344,7 +365,7 @@ VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
 # defends against an empty value from any source. This line is the authoritative
 # source of the default model id — keep compose/.env.example in agreement.
 # (mirrors the GEMINI_API_KEY `or` coalesce above.)
-VOICE_MODEL = os.getenv("VOICE_MODEL") or "models/gemini-3.1-flash-live-preview"
+VOICE_MODEL = os.getenv("VOICE_MODEL") or "models/gemini-3.8-live"
 VOICE_MAX_DURATION = int(os.getenv("VOICE_MAX_DURATION", "300"))  # seconds
 # Workspace voice mode (ent#534): the cap for a call started from the Workspace
 # conversation — 30 min, ruled 2026-09-07 — kept apart from the Agent Detail
@@ -381,6 +402,14 @@ TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "1500"))
 # (Telegram voice messages). Both default to the same model today.
 GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL") or "gemini-3.5-flash"
 GEMINI_TRANSCRIPTION_MODEL = os.getenv("GEMINI_TRANSCRIPTION_MODEL") or "gemini-3.5-flash"
+# Workspace Direct calls (trinity-enterprise#1046). The speech model transcribes only:
+# on a silent clip it returns nothing, where a general model has been seen to invent
+# text. TTS tries the models in order.
+GEMINI_STT_MODEL = os.getenv("GEMINI_STT_MODEL") or "gemini-3.5-transcribe"
+GEMINI_TTS_MODELS = tuple(
+    m.strip() for m in (os.getenv("GEMINI_TTS_MODELS") or "gemini-3.8-flash-lite-tts,gemini-3.8-flash-tts").split(",")
+    if m.strip()
+)
 
 # VoIP Telephony Configuration (VOIP-001, #1056 — Phase 1, outbound)
 # Default OFF. The feature also requires a per-agent voip_bindings row to
@@ -526,8 +555,10 @@ COMMUNITY_RETENTION_FLOOR_DAYS = 5
 # v0.1.0, 2026-08): a default naming a tag that does not exist leaves every
 # fresh install seeded with a source that can never sync — and the failure is
 # quiet (a failed row in Settings), not loud. Bump this in lockstep with the
-# catalog's releases — the seed is fresh-install only, so a bump reaches new
-# installs and nothing else (#2545 moved it to v0.2.0, the release that added
+# catalog's releases. A bump reaches new installs through the seed, and existing
+# installs whose default source still points where the seed put it through the
+# boot follow (trinity-enterprise#529, forward only); a source an admin
+# retargeted stays where they put it (#2545 moved it to v0.2.0, the release that added
 # the project-management category; #3123 to v0.3.0, the release that added
 # `update-dashboard`, which the metrics tiles point users at; #3430 to v0.5.0,
 # the release whose `project-status` and `add-pipeline` match the platform's
@@ -538,8 +569,11 @@ COMMUNITY_RETENTION_FLOOR_DAYS = 5
 #
 # TRINITY_DEFAULT_SKILL_SOURCE="" disables the seed entirely for an operator who
 # wants no community catalog (mirrors TRINITY_DEFAULT_SYSTEM_MANIFEST).
+# The built-in catalog. Only a default seeded from THIS url follows the bundled
+# pin on upgrade (trinity-enterprise#529): a fork may not carry the next tag.
+BUNDLED_SKILL_SOURCE_URL = "github.com/abilityai/trinity-skills"
 DEFAULT_SKILL_SOURCE_URL = os.getenv(
-    "TRINITY_DEFAULT_SKILL_SOURCE", "github.com/abilityai/trinity-skills"
+    "TRINITY_DEFAULT_SKILL_SOURCE", BUNDLED_SKILL_SOURCE_URL
 )
 DEFAULT_SKILL_SOURCE_REF = os.getenv("TRINITY_DEFAULT_SKILL_SOURCE_REF", "v0.5.0")
 DEFAULT_SKILL_SOURCE_NAME = "Trinity Community Skills"
@@ -743,6 +777,9 @@ OPS_SETTINGS_DEFAULTS = {
     "ops_log_retention_days": "7",  # Days to keep container logs
     "ops_health_check_interval": "60",  # Seconds between health checks
     "ssh_access_enabled": "false",  # Enable SSH access via MCP tool
+    # trinity-enterprise#1068: a system apply unassigns a skill the member
+    # already holds when the gate the manifest declares on it fails to write.
+    "apply_unassign_on_failed_gate": "true",
     # RETENTION DEFAULTS — READ THIS BEFORE CHANGING A NUMBER BELOW (#1638).
     #
     # These are the fallback used at PRUNE time for an install with no
@@ -835,6 +872,11 @@ OPS_SETTINGS_DEFAULTS = {
     # source starve the rest). Chain depth bounds how deep a chain runs; this
     # bounds how often.
     "event_dispatch_max_fires_per_hour": "120",
+    # #4357: caller wakes one callee may send one delegator per one-hour Redis
+    # window (ent#1102 wakes). A wake stands at the delegator's own depth, so
+    # depth no longer bounds how many wakes follow one another; this does.
+    # "0" (or less) is unlimited — the `metrics_daily_point_cap` convention.
+    "caller_wake_max_per_hour": "120",
 }
 
 
@@ -848,6 +890,7 @@ OPS_SETTINGS_VALIDATION = {
     "ops_log_retention_days": ("int", 0, _DAYS_MAX),
     "ops_health_check_interval": ("int", 1, 86400),
     "ssh_access_enabled": ("bool", None, None),
+    "apply_unassign_on_failed_gate": ("bool", None, None),
     # The row-retention windows (RETENTION_OPS_KEYS, minus #2216's backup key
     # below). `0` is a documented, meaningful value on every one of THESE —
     # "disable this sweep" — so the lower bound is 0 and NOT the community floor. Clamping to the floor here would be
@@ -881,6 +924,8 @@ OPS_SETTINGS_VALIDATION = {
     # #2806: the floor is 1, not 0 — no value may refuse every agent call.
     "inter_agent_max_chain_depth": ("int", 1, 32),
     "event_dispatch_max_fires_per_hour": ("int", 1, 10_000),
+    # #4357: `0` means UNLIMITED here, so the floor is 0.
+    "caller_wake_max_per_hour": ("int", 0, 10_000),
 }
 
 
@@ -903,6 +948,7 @@ ENV_BACKED_OPS_KEYS = {
     "metrics_retention_days": "METRICS_RETENTION_DAYS",
     "metrics_daily_point_cap": "METRICS_DAILY_POINT_CAP",
     "inter_agent_max_chain_depth": "INTER_AGENT_MAX_CHAIN_DEPTH",
+    "caller_wake_max_per_hour": "CALLER_WAKE_MAX_PER_HOUR",
 }
 
 _env_ops_warned: set = set()

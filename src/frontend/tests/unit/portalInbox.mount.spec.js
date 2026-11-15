@@ -297,11 +297,12 @@ describe('All says what it holds (§3g D-4)', () => {
     expect(w.find('[data-testid="inbox-list-footer"]').text()).not.toContain('Rooms')
   })
 
-  it('says rooms are not here yet only to a viewer who has rooms', async () => {
+  it('trinity-enterprise#959: no "rooms aren\'t here" note, even to a viewer who has rooms', async () => {
     store.asksLoaded = true
-    const threads = [thread('t1'), { id: 'r1', is_room: true, title: 'Room', last_message_at: iso(2) }]
+    const threads = [thread('t1'), { id: 'r1', is_room: true, member: true, title: 'Room', last_message_at: iso(2) }]
     const w = await mountInbox({ threads }, { query: { tab: 'all' } })
-    expect(w.find('[data-testid="inbox-list-footer"]').text()).toContain("Rooms aren't in the Inbox yet. Open them from the sidebar.")
+    expect(w.find('[data-testid="inbox-list-footer"]').text()).not.toContain('Rooms')
+    expect(has(w, 'inbox-row-room:r1')).toBe(true)
   })
 
   it('says when the asks read stopped at its 200-row cap', async () => {

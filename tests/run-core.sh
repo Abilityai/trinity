@@ -21,5 +21,10 @@ echo ""
 # and was renamed to `tests/testkit` in #2080, so `utils` now unambiguously
 # means src/backend/utils. They stay separate because unit/ must not inherit
 # the root conftest's live-backend fixtures — a different, still-valid reason.
-time python -m pytest -m "not slow" --ignore=unit -v --tb=short "$@"
-time python -m pytest unit/ -m "not slow" -v --tb=short
+# #2891: deterministic order, pinned explicitly. pytest auto-discovers an installed
+# pytest-randomly and would silently shuffle this run; `-p no:randomly` is a
+# no-op when the plugin is absent and the tests/conftest guard refuses an
+# unannounced shuffle either way. Randomized runs are CI's seed matrix
+# (`-p randomly --randomly-seed=N`), never a local script default.
+time python -m pytest -p no:randomly -m "not slow" --ignore=unit -v --tb=short "$@"
+time python -m pytest -p no:randomly unit/ -m "not slow" -v --tb=short

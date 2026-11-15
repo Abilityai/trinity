@@ -192,6 +192,12 @@
           </button>
         </div>
 
+        <!-- trinity-enterprise#1066: a credential ask has no respond box — it is
+             answered only through the secret field in the person's Workspace. -->
+        <p v-else-if="responseKind === 'credential'" class="text-sm" data-testid="queue-credential-notice">
+          Answered in the person's Workspace, through the secret field. It can't be answered from here.
+        </p>
+
         <!-- Alert type: acknowledge button -->
         <div v-else class="space-y-3">
           <textarea

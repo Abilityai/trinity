@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import threading
+import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -34,7 +35,7 @@ from ._runtime_config import (
     _load_guardrails,
     merged_disallowed_tools,
 )
-from .execution_env import build_execution_env, auth_override_env_layers
+from .execution_env import build_execution_env, auth_override_env_layers, auto_memory_env_layer
 from .error_classifier import (
     _classify_signal_exit,
     _diagnose_exit_failure,
@@ -88,6 +89,9 @@ class ClaudeCodeRuntime(AgentRuntime):
 
     # #3470: a SUB-003 re-issue may carry the credential for THAT spawn.
     supports_auth_override = True
+    # #4156: a turn serving someone other than the owner spawns with the shared
+    # auto-memory off (`execution_env.auto_memory_env_layer`).
+    supports_auto_memory_switch = True
 
     @classmethod
     def capabilities(cls) -> RuntimeCapabilities:
@@ -153,6 +157,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         execution_id: Optional[str] = None,
         isolated_session: bool = False,
         auth_override=None,
+        disable_auto_memory: bool = False,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
         """Execute Claude Code with the given prompt.
 
@@ -164,7 +169,8 @@ class ClaudeCodeRuntime(AgentRuntime):
         # resumes the chat's own session id (agent_state.chat_session_id, #2958).
         return await execute_claude_code(prompt, stream, model, system_prompt=system_prompt,
                                          execution_id=execution_id, isolated_session=isolated_session,
-                                         auth_override=auth_override)
+                                         auth_override=auth_override,
+                                         disable_auto_memory=disable_auto_memory)
 
     async def execute_headless(
         self,
@@ -179,6 +185,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         persist_session: bool = False,
         images: Optional[List[Dict]] = None,
         auth_override=None,
+        disable_auto_memory: bool = False,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
         """Execute Claude Code in headless mode for parallel tasks.
 
@@ -193,6 +200,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             max_turns, execution_id, resume_session_id,
             persist_session=persist_session, images=images,
             auth_override=auth_override,
+            disable_auto_memory=disable_auto_memory,
         )
 
 
@@ -206,6 +214,7 @@ async def _execute_claude_code_once(
     attempt_state: Optional[Dict] = None,
     cli_model: Optional[str] = None,
     auth_override=None,
+    disable_auto_memory: bool = False,
 ) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
     """
     Run ONE chat subprocess. ``execute_claude_code`` owns the session choice.
@@ -334,6 +343,8 @@ async def _execute_claude_code_once(
             start_new_session=True,
             env=build_execution_env({
                 **auth_extra,
+                # #4156: above `.env`, so the file cannot turn it back on.
+                **auto_memory_env_layer(disable_auto_memory),
                 EXECUTION_TAG_NAME: execution_id,
                 # #2127: same ceiling as the headless path. The chat path has no
                 # early-finalize to gate (it plainly waits for the process), so
@@ -368,7 +379,44 @@ async def _execute_claude_code_once(
             process.stdin.write(prompt)
             process.stdin.close()
         except BaseException:
-            registry.unregister(execution_id)
+            # #3408: since #3307 `unregister()` keeps a live child, so a write
+            # that fails while the child lives (an unencodable prompt, say) must
+            # end it first: no reader exists yet and its stdin is still open.
+            # The kill waits up to ~2s, so it runs off the event loop; this
+            # coroutine's `loop` is assigned only further down.
+            # Best-effort and logged, never raised: the caller must see the
+            # handoff error, and the pipes close even if the kill fails.
+            def _abort_handoff():
+                try:
+                    _terminate_process_group(process, graceful_timeout=0, pgid=process_pgid, execution_tag=execution_id)
+                except Exception:
+                    logger.exception(f"[Chat] killing {execution_id} after its failed handoff raised")
+                finally:
+                    for pipe in (process.stdin, process.stdout, process.stderr):
+                        try:
+                            pipe.close()
+                        except Exception:  # noqa: BLE001 — a close after a failed write flushes again
+                            logger.debug(f"[Chat] pipe close after failed handoff of {execution_id} raised", exc_info=True)
+
+            try:
+                teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
+            except Exception:
+                # The executor refused (shut down, or no thread to start): log it,
+                # keep the live child owned, and still re-raise the handoff error.
+                logger.exception(f"[Chat] could not start the teardown of {execution_id} after its failed handoff")
+                teardown = None
+            if teardown is None:
+                registry.unregister(execution_id)
+            else:
+                try:
+                    await asyncio.shield(teardown)
+                finally:
+                    # Release only once the child is dead: now, or, if this await
+                    # was cancelled mid-teardown, when the teardown ends.
+                    if teardown.done():
+                        registry.unregister(execution_id)
+                    else:
+                        teardown.add_done_callback(lambda _: registry.unregister(execution_id))
             raise
 
         stderr_lines: List[str] = []
@@ -696,8 +744,13 @@ async def _execute_claude_code_once(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Claude Code execution error: {e}")
-        raise HTTPException(status_code=500, detail=f"Execution error: {str(e)}")
+        # trinity#4284: an exception we did not raise ourselves. Its text goes to
+        # the log, scrubbed; the answer names only the class.
+        logger.error(
+            "Claude Code execution error (%s): %s",
+            type(e).__name__, sanitize_text("".join(traceback.format_exception(e))),
+        )
+        raise HTTPException(status_code=500, detail=f"Execution error: {type(e).__name__}") from e
 
 
 # #2958: statuses that are never a dead-session symptom — a rate limit, an auth
@@ -744,7 +797,7 @@ def _cold_retry_reason(
     return "resume_jsonl_missing"
 
 
-async def execute_claude_code(prompt: str, stream: bool = False, model: Optional[str] = None, system_prompt: Optional[str] = None, execution_id: Optional[str] = None, isolated_session: bool = False, auth_override=None) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
+async def execute_claude_code(prompt: str, stream: bool = False, model: Optional[str] = None, system_prompt: Optional[str] = None, execution_id: Optional[str] = None, isolated_session: bool = False, auth_override=None, disable_auto_memory: bool = False) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
     """
     Execute one chat turn, resuming only the chat's OWN session (#2958).
 
@@ -773,6 +826,7 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         return await _execute_claude_code_once(
             prompt, stream, model, system_prompt, execution_id or str(uuid.uuid4()), None, {},
             cli_model=turn_model, auth_override=auth_override,
+            disable_auto_memory=disable_auto_memory,
         )
 
     # Safety-net fallback: backend always resolves model before calling the agent
@@ -808,7 +862,7 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
     try:
         result = await _execute_claude_code_once(
             prompt, stream, model, system_prompt, execution_id, resume, attempt_state,
-            auth_override=auth_override,
+            auth_override=auth_override, disable_auto_memory=disable_auto_memory,
         )
     except HTTPException as exc:
         reason = _cold_retry_reason(resume, exc, attempt_state, execution_id)
@@ -831,7 +885,7 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         _reset_session_counters()
         result = await _execute_claude_code_once(
             prompt, stream, model, system_prompt, execution_id, None, {},
-            auth_override=auth_override,
+            auth_override=auth_override, disable_auto_memory=disable_auto_memory,
         )
 
     _capture_chat_session(result[2], effective_model, generation)

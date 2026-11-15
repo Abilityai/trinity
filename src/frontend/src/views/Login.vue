@@ -113,6 +113,8 @@
           <div v-if="authStore.emailCodeLoginEnabled">
             <!-- Step 1: Enter Email -->
             <div v-if="!codeSent">
+              <!-- #3922: the Workspace's code page sent a platform account here. -->
+              <p v-if="workspaceHandoff" data-testid="login-workspace-handoff" :class="[HELP_CLASS, 'mb-4']">This email has a Trinity account. Sign in here to open your Workspace.</p>
               <form @submit.prevent="handleRequestCode" class="space-y-4">
                 <div>
                   <label for="email" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -330,7 +332,11 @@ const loginLoading = ref(false)
 const loadingMessage = ref('Checking authentication...')
 
 // Email authentication state
-const emailInput = ref('')
+// #3922: the Workspace's code page hands a platform account over with its
+// address in `?email=`, the only producer of that query.
+const handoffEmail = typeof route.query.email === 'string' ? route.query.email.trim() : ''
+const workspaceHandoff = !!handoffEmail
+const emailInput = ref(handoffEmail)
 const codeInput = ref('')
 const codeSent = ref(false)
 const countdown = ref(0)
@@ -472,6 +478,18 @@ onMounted(async () => {
       return
     }
     // mfa → the existing 2FA challenge UI takes over; error → authError shows.
+  }
+
+  // #4157: the Workspace's code page already took this person's correct code
+  // and handed over a one-time token in memory. Redeem it at the platform door
+  // instead of asking for a second code. 2FA → the challenge step below; any
+  // failure (reload, expiry) → the ordinary code form, already filled in.
+  if (workspaceHandoff && authStore.workspaceHandoff) {
+    loadingMessage.value = 'Signing you in...'
+    if (await authStore.redeemWorkspaceHandoff(handoffEmail)) {
+      afterLogin()
+      return
+    }
   }
 
   // Populate SSO login buttons (no-op / empty in OSS-only builds).

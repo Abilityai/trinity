@@ -1,0 +1,3 @@
+## 2026-11-02 — pitfall — A restored source file can keep running its mutation
+**Context**: trinity-enterprise#1046 review — a mutation battery swapped `'vd'` for `'zz'` in an SQL string, restored the file, and the same test went on failing from clean source for the rest of the session (and the full suite reported it).
+**Lesson**: Python trusts a `.pyc` whose recorded source mtime (whole seconds) and size match. A same-length mutation restored within the same second leaves the mutated bytecode valid, so later runs, including later mutations, execute the mutant. Run a mutation battery with `PYTHONDONTWRITEBYTECODE=1` and clear `__pycache__` after each restore; a red that survives restoring the source is the cache before it is the code.

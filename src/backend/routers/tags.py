@@ -12,7 +12,9 @@ from typing import List, Optional
 
 from database import db
 from db.tags import ORG_TAG_PREFIXES
-from dependencies import get_current_user, AuthorizedAgent, OwnedAgent, is_fleet_admin
+from dependencies import (
+    get_current_user, AuthorizedAgent, OwnedAgent, is_fleet_admin, is_person_principal,
+)
 from services.agent_service.helpers import visible_agent_names
 from db_models import User, AgentTagList, AgentTagsUpdate, AllTagsResponse, TagWithCount
 
@@ -58,10 +60,11 @@ async def _broadcast_tags_changed(agent_name: str) -> None:
 def _guard_org_namespace(current_user: User, touched: List[str]) -> None:
     """Org-overlay namespaces (`dept-*`, `reports-to-*`) are HUMAN-only
     (trinity-enterprise#305; mirrors the #1578 reserved event namespace).
-    Agent-scoped principals resolve to the owner on REST, which would let a
-    prompt-injected agent silently redraw the org chart operators act on —
-    reject any write that touches a reserved prefix."""
-    if not current_user.agent_name:
+    A write that touches a reserved prefix requires a person
+    (`is_person_principal`: a signed-in session or the person's own `user`
+    key); every other principal may change plain tags only. An allowlist, so a
+    scope that ships later is refused too (trinity-enterprise#719)."""
+    if is_person_principal(current_user):
         return
     reserved = [t for t in touched if t.startswith(ORG_TAG_PREFIXES)]
     if reserved:
@@ -69,7 +72,7 @@ def _guard_org_namespace(current_user: User, touched: List[str]) -> None:
             status_code=403,
             detail=(
                 "Tags 'dept-*' and 'reports-to-*' carry the org chart and can "
-                "only be changed by a human operator, not an agent key. "
+                "only be changed by a person, not an agent- or system-scoped key. "
                 f"Blocked: {', '.join(sorted(reserved)[:5])}"
             ),
         )
@@ -135,9 +138,9 @@ async def set_agent_tags(
     Replace all tags for an agent.
 
     Only the agent owner or admin can modify tags. Tags are normalized
-    (lowercase, trimmed) and deduplicated. Agent-scoped keys cannot change
-    reserved org-overlay tags (`dept-*`, `reports-to-*`) — the guard checks
-    the DELTA, so an agent may still rewrite its own plain tags.
+    (lowercase, trimmed) and deduplicated. Only a person can change reserved
+    org-overlay tags (`dept-*`, `reports-to-*`) — the guard checks the DELTA,
+    so an agent may still rewrite its own plain tags.
     """
     # Same per-tag validation as the POST route — the overlay writes
     # exclusively via this PUT, and gridOrg.js mirrors a 50-char cap that
@@ -202,9 +205,9 @@ async def remove_agent_tag(
     """
     Remove a single tag from an agent.
 
-    Only the agent owner or admin can modify tags. Agent-scoped keys cannot
-    remove reserved org-overlay tags (an agent hiding itself from the org
-    chart is the same threat as it redrawing the chart).
+    Only the agent owner or admin can modify tags. Only a person can remove
+    reserved org-overlay tags (an agent hiding itself from the org chart is
+    the same threat as it redrawing the chart).
     """
     _guard_org_namespace(current_user, [tag.lower().strip()])
     tags = db.remove_agent_tag(name, tag)

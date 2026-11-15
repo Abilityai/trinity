@@ -2,6 +2,7 @@
 """
 MCP API Key management routes for the Trinity backend.
 """
+import logging
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -9,6 +10,7 @@ from models import User
 from database import db, McpApiKeyCreate, McpApiKey, McpApiKeyWithSecret
 from dependencies import (
     OPS_SCOPE,
+    OPS_WRITE_SCOPE,
     PORTAL_DELEGATE_SCOPE,
     _reject_connector_principal,
     agent_principal_name,
@@ -17,8 +19,12 @@ from dependencies import (
     reject_agent_principal,
     reject_non_interactive_principal,
     require_interactive,
+    require_person,
 )
+from services import live_connections
 from services.platform_audit_service import platform_audit_service, AuditEventType
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 
@@ -38,17 +44,18 @@ async def create_mcp_api_key_endpoint(
 
     Scope is `user` unless explicitly requested. `portal_delegate` (ent#163) is
     admin-only: it lets the holder act as any end user who has portal access, so
-    it must never be self-issuable by an ordinary account.
+    it must never be self-issuable by an ordinary account. `ops` (#2323) and
+    `ops_write` (#3180) are admin-only bounded machine credentials.
     """
     requested_scope = (getattr(key_data, "scope", None) or "user").strip()
     if requested_scope != "user":
-        if requested_scope not in (PORTAL_DELEGATE_SCOPE, OPS_SCOPE):
+        if requested_scope not in (PORTAL_DELEGATE_SCOPE, OPS_SCOPE, OPS_WRITE_SCOPE):
             raise HTTPException(
                 status_code=400,
                 detail=f"Unsupported key scope '{requested_scope}'",
             )
-        if requested_scope == OPS_SCOPE:
-            # #2323 — minting a credential is a GRANT, and the guards used for
+        if requested_scope in (OPS_SCOPE, OPS_WRITE_SCOPE):
+            # #2323 / #3180 — minting a credential is a GRANT, and the guards used for
             # `portal_delegate` below are the wrong shape for this one: both
             # `reject_agent_principal` and `assert_admin`'s named rejections are
             # no-ops for an ops principal, so an ops key could mint ops keys.
@@ -92,7 +99,9 @@ async def create_mcp_api_key_endpoint(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create MCP API key: {str(e)}")
+        # #4284: the exception text goes to the log, never the body.
+        logger.exception("Failed to create MCP API key")
+        raise HTTPException(status_code=500, detail=f"Failed to create MCP API key ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.get("/keys", response_model=List[McpApiKey])
@@ -113,7 +122,8 @@ async def list_mcp_api_keys_endpoint(
 
         return keys
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list MCP API keys: {str(e)}")
+        logger.exception("Failed to list MCP API keys")
+        raise HTTPException(status_code=500, detail=f"Failed to list MCP API keys ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.post("/keys/ensure-default", response_model=McpApiKeyWithSecret | None)
@@ -178,7 +188,8 @@ async def ensure_default_mcp_api_key(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to ensure default MCP API key: {str(e)}")
+        logger.exception("Failed to ensure default MCP API key")
+        raise HTTPException(status_code=500, detail=f"Failed to ensure default MCP API key ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.get("/keys/{key_id}", response_model=McpApiKey)
@@ -202,7 +213,7 @@ async def get_mcp_api_key_endpoint(
     return key
 
 
-@router.post("/keys/{key_id}/revoke")
+@router.post("/keys/{key_id}/revoke", dependencies=[Depends(require_person)])
 async def revoke_mcp_api_key_endpoint(
     key_id: str,
     request: Request,
@@ -224,6 +235,11 @@ async def revoke_mcp_api_key_endpoint(
     if not success:
         raise HTTPException(status_code=404, detail="MCP API key not found")
 
+    # abilityai/trinity-enterprise#863: close the event streams opened with this
+    # key, on every worker. Keyed on the key, not the caller: the owner's other
+    # connections stay open, and an admin revoking someone else's key reaches it.
+    live_connections.notify_key_changed(key_id)
+
     await platform_audit_service.log(
         event_type=AuditEventType.MCP_OPERATION,
         event_action="key_revoke",
@@ -239,7 +255,7 @@ async def revoke_mcp_api_key_endpoint(
     return {"message": f"MCP API key {key_id} revoked"}
 
 
-@router.delete("/keys/{key_id}")
+@router.delete("/keys/{key_id}", dependencies=[Depends(require_person)])
 async def delete_mcp_api_key_endpoint(
     key_id: str,
     request: Request,
@@ -255,6 +271,9 @@ async def delete_mcp_api_key_endpoint(
 
     if not success:
         raise HTTPException(status_code=404, detail="MCP API key not found")
+
+    # abilityai/trinity-enterprise#863: same as revoke above.
+    live_connections.notify_key_changed(key_id)
 
     await platform_audit_service.log(
         event_type=AuditEventType.MCP_OPERATION,

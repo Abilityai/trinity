@@ -208,15 +208,20 @@ def test_the_rated_agent_does_not_learn_WHO_was_unhappy():
 
 
 def test_a_platform_evaluator_name_is_left_alone():
-    """Only the workspace prefix is anonymised: a Tier-0 pass name carries no
-    person, and blanking it would cost the agent the ability to tell a machine
-    grade from a human one."""
+    """A Tier-0 pass name carries no person, and blanking it would cost the
+    agent the ability to tell a machine grade from a human one.
+
+    Re-pinned by ent#937 (ent#781): the redaction is now an allowlist, so the
+    name that passes is the one the Tier-0 writer actually stores
+    (`platform:tier0`); a bare name with no kind (`tier0`, which no writer
+    emits) reads `unknown`."""
     from routers import evaluations
     from models import User
-    row = {**_row_with_comment(), "evaluator": "tier0", "comment": None}
-    out = evaluations._redact_for_agent_principal(
-        row, User(id=1, username="o", role="user", agent_name=AGENT))
-    assert out["evaluator"] == "tier0"
+    agent = User(id=1, username="o", role="user", agent_name=AGENT)
+    row = {**_row_with_comment(), "evaluator": "platform:tier0", "comment": None}
+    assert evaluations._redact_for_agent_principal(row, agent)["evaluator"] == "platform:tier0"
+    row = {**row, "evaluator": "tier0"}
+    assert evaluations._redact_for_agent_principal(row, agent)["evaluator"] == "unknown"
 
 
 def test_the_prefix_matches_the_one_the_portal_writes():
@@ -578,13 +583,18 @@ def test_the_tally_prefix_matches_clients_rather_than_excluding_operators():
 
 def test_the_operator_evaluator_is_anonymised_to_the_agent_too():
     """The redaction must cover the new prefix, or an operator's address becomes
-    the one identity that still reaches the graded agent."""
-    import inspect
-    from routers import evaluations as mod
-    src = inspect.getsource(mod)
-    assert "OPERATOR_EVALUATOR_PREFIX" in src
-    fn = inspect.getsource(mod._redact_for_agent_principal)
-    assert "OPERATOR_EVALUATOR_PREFIX" in fn
+    the one identity that still reaches the graded agent.
+
+    Re-pinned by ent#937 (ent#781): the source-text check named a constant the
+    redaction no longer needs — it is an allowlist now, so the operator form is
+    covered without being named. Driven instead."""
+    from routers import evaluations
+    from models import User
+    row = {**_row_with_comment(), "evaluator": "operator:op@example.com"}
+    out = evaluations._redact_for_agent_principal(
+        row, User(id=1, username="o", role="user", agent_name=AGENT))
+    assert out["evaluator"] == "operator"
+    assert "op@example.com" not in str(out)
 
 
 def test_the_uniqueness_rule_is_declared_on_the_model_not_only_in_ddl():

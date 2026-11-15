@@ -44,7 +44,7 @@
     "src/frontend/tests/unit/portalFailedTurn.spec.js": 1,
     "src/frontend/tests/unit/portalFiles.spec.js": 2,
     "src/frontend/tests/unit/portalLeaveSpecificRoute.spec.js": 1,
-    "src/frontend/tests/unit/portalLoadingTreatment.spec.js": 14,
+    "src/frontend/tests/unit/portalLoadingTreatment.spec.js": 13,
     "src/frontend/tests/unit/portalLoops.spec.js": 3,
     "src/frontend/tests/unit/portalMarkdownTypography.spec.js": 1,
     "src/frontend/tests/unit/portalModelChoice.spec.js": 1,

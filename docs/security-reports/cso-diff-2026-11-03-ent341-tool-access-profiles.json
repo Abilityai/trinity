@@ -1,0 +1,50 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-03",
+  "mode": "diff-daily",
+  "scope": "branch feature/341-tool-access-profiles vs 13cce98b8 (trinity-enterprise#341)",
+  "counts_as_full_run": false,
+  "phases_run": [0, 1, 2, 7, 8, 9, 12, 13, 14],
+  "stack_cve_quicklist": [
+    {"component": "all rows", "verdict": "not reachable (why): the diff changes no pin, image, compose file or lockfile"}
+  ],
+  "attack_surface": {
+    "new_routes": ["GET /api/agents/{name}/tool-access", "PUT /api/agents/{name}/tool-access"],
+    "changed_routes": ["PUT /api/agents/{name}/read-only", "PUT /api/agents/{name}/guardrails", "GET /api/agents/{name}/guardrails"],
+    "new_sink_checks": 9,
+    "new_mcp_tools": 0,
+    "migrations": 0
+  },
+  "findings": [],
+  "hypotheses": [
+    {
+      "id": "H1",
+      "category": "agentic-delegated-send",
+      "asi": "ASI07",
+      "title": "A blocked agent can ask an unblocked agent to send",
+      "evidence": "HYPOTHESIS",
+      "note": "By the operator's ruling agent-to-agent tools are not sends; the sibling sends under its own identity and profile. Stated as a limit in requirements/security.md §28.10."
+    }
+  ],
+  "hardening_notes": [
+    {"id": "N1", "category": "failure-direction-unstated", "owasp_2025": "A10", "file": "src/backend/services/tool_access_guard.py", "status": "applied"},
+    {"id": "N2", "category": "getattr-discriminator", "owasp_2025": "A10", "file": "src/backend/services/tool_access_guard.py", "status": "applied"}
+  ],
+  "coverage_gaps": [
+    "Docker pass not run (no image/compose change in the diff)",
+    "Phase 3 supply chain: no dependency change, no scanner run",
+    "Phase 4 CI/CD: no workflow change",
+    "Phase 8: no shipped skill/template/plugin change; concealed-Unicode grep only",
+    "ent#926 agent-route tier census not on this base; rows added at the dev merge"
+  ],
+  "supply_chain_summary": {"scanner": "none (no dependency change in scope)"},
+  "checks": {
+    "secret_prefix_hits": 0,
+    "enterprise_guard_hits": 0,
+    "concealed_unicode_hits": 0,
+    "auth_guard_tests": "379 passed"
+  },
+  "filter_stats": {"candidates": 3, "below_gate": 3, "reported": 0},
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+  "trend": "diff run; no prior report at this root cause"
+}

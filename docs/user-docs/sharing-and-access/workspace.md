@@ -39,6 +39,8 @@ The button at the bottom of the sidebar signs out. For a platform user it is lab
 
 The main app and every Workspace tab in the same browser share one platform sign-in, and open tabs follow it. Sign out and back in on one tab, and a Workspace tab left open from the old session picks up the new one instead of ending it. Sign out on one tab, and the other tabs drop the session too, without a background tab jumping to the sign-in page. A client signed in with an email code is not sent to the operator sign-in page just because the same browser also holds an expired operator login.
 
+If your Trinity session ends while a Workspace tab is open (it expired, the backend restarted, or your password was changed somewhere else), the tab takes you to the Trinity sign-in page, and signing in brings you back to the chat you were on. If it ended because you signed out in another tab, the Workspace tab stays where it is and shows its sign-in form. **Have a Trinity account? Sign in** under the form takes you to the Trinity sign-in and back to the same page.
+
 ### The layout
 
 Three columns on a desktop screen: the **sidebar** on the left, the **conversation** in the middle, and a **side panel** on the right (the rail, or the agent's canvas during a voice call). The seam beside the sidebar, and the one beside the rail while it is open, are drag handles — drag to resize, double-click to reset. The conversation takes whatever is left, and the panel's maximum follows the viewport, so a width set on a large screen is clamped on a smaller one. On a phone the sidebar becomes a drawer behind the **Menu** button, and the rail becomes a strip above the composer that opens a bottom sheet.
@@ -54,7 +56,7 @@ Top to bottom:
 - **Trinity Workspace** — the wordmark. It links to the Inbox.
 - **Inbox** — a pinned row with two badges: the number of asks agents are waiting on you to answer, and the number of chats with something you haven't read. See [The Inbox](#the-inbox).
 - **Projects** — the list of your projects, on instances licensed for them; absent otherwise, with nothing holding its place. See [Workspace Projects](workspace-projects.md).
-- **New chat** — opens the agent picker.
+- **New room** — on instances with rooms, opens the agent picker in room words: pick one or more agents and a room is created, even for one, so colleagues can be seated in it.
 - **Search agents and chats…** — two characters or more. **⌘/** / **Ctrl+/** puts the cursor there from anywhere; pressed again from the field, it returns you to the message field. Agents filter in place; chat results replace the chat list below, and each half says separately when it matched nothing.
 - **Agents** — your roster, ordered by the agents you worked with most recently, then by name. Five rows show, with **Show all** to expand. A row carries the agent's display name, the title of your newest chat with it (or its slug when the name is a label), when you last heard from it, an availability chip when the agent is stopped or unreachable, an orange ring with a count when it has asks waiting on you, and a blue unread count. **Clicking an agent lands you on the chat that needs you**: its most recent chat with an unread reply; otherwise the chat you last had open with it in this browser tab; otherwise a chat where you left unsent text; otherwise its existing empty chat; otherwise a new, empty chat — with the cursor in the message field. Your earlier chats are its tabs, one click away.
 - **Starred** — chats you've starred, lifted out of the date groups so each chat appears exactly once.
@@ -80,7 +82,7 @@ Rows keep their place while you stay on a tab: a chat you read stays listed, dra
 
 ### Chats as tabs, and Main
 
-Every open chat you have with the active agent is a tab above the thread. **Main** is always first; the rest are ordered most recent first when you arrive on the agent and then hold their places while you stay — a reply, a send or a poll changes a badge, never a position. A chat born during the visit takes the slot after Main. Leave for the Inbox or a room and come back, and the strip is re-sorted. The tabs that don't fit collect under **N more**. Press **New chat** and a provisional **New chat** tab appears at once; the chat itself is created when you send the first message. A tab shows the chat's star when you starred it, and a chat with unread replies shows its blue count on the tab (and in the **N more** menu).
+Every open chat you have with the active agent is a tab above the thread. **Main** is always first; the rest are ordered most recent first when you arrive on the agent and then hold their places while you stay — a reply, a send or a poll changes a badge, never a position. The one exception: a chat that goes from read to unread while you are there moves up to just after Main, so a reply is never hidden under **N more** — the chat you have open keeps its place. A chat born during the visit takes the slot after Main. Leave for the Inbox or a room and come back, and the strip is re-sorted. The tabs that don't fit collect under **N more**. Press **New chat** and a provisional **New chat** tab appears at once; the chat itself is created when you send the first message. A tab shows the chat's star when you starred it, and a chat with unread replies shows its blue count on the tab (and in the **N more** menu).
 
 Every tab but Main has an **×** that closes the chat. Closing archives it — nothing is deleted — and an **Undo** toast follows. A closed chat leaves the tabs and the sidebar's date groups and is listed under **Archived**, where opening it reopens it. The open chat's **×** does nothing while its reply is in flight.
 
@@ -90,8 +92,8 @@ Every other chat can be renamed in place — from the pencil beside its title in
 
 ### Starting a chat
 
-- **New chat** in the sidebar opens the picker — **Start a chat**: pick one agent for a 1:1, or several to put them in the same conversation.
-- **New chat** in the conversation header (or **⌘J** / **Ctrl+J**) starts a fresh chat with the agent in front of you.
+- **New chat** in the conversation header (or **⌘J** / **Ctrl+J**) starts a fresh chat with the agent in front of you. With no agent in front of you, the hotkey opens the agent picker — one agent, one chat.
+- **New room** in the sidebar (where rooms exist) opens the picker — **Start a room**: pick one or more agents. A chat is always one-to-one; a conversation with several agents is a room.
 - Click an agent in the sidebar. You land on its chat with an unread reply, else the chat you last had open with it in this tab, else a draft, else its empty chat — and otherwise on a new chat. Nothing is created until you send, so opening an agent and leaving again leaves no empty chats behind. The address stays `/workspace/a/<name>` until the first send, so a reload or a copied link still names the agent. On a desktop the cursor lands in the message field; on a touch screen the on-screen keyboard is not raised until you tap the field.
 - **⌥↓** / **⌥↑** (**Alt+↓** / **Alt+↑**) steps to the next or previous agent in the sidebar. Walking the roster returns you to the chat you last had open with each agent in this browser tab, while it still exists; a reload starts fresh.
 - A direct link — `/workspace?agent=<name>` (or `/workspace/a/<name>`) lands on that agent the same way a click on its row does (an unread reply first, then the chat last open in this tab, then a draft, then a new chat), and `?new=1` still works. A link to an agent that isn't shared with you shows *You don't have access to …* with **Back to your chats**, and a link to a chat that isn't yours shows *This chat isn't available* — neither offers a message field, and neither quietly opens a different chat.
@@ -109,7 +111,7 @@ One box: the message field on top, the controls in a row inside it. Enter sends;
 - **Speak replies aloud** — a speaker button above the composer, shown only when the agent has a voice configured, reads each reply in the agent's ElevenLabs voice on your side. Click again to mute. It is hidden during a call, when the orb owns playback. See [Voice Replies](../advanced/voice-replies.md).
 - **Send** becomes **Stop** while a turn runs.
 
-A message can be up to 8,000 characters. Within the last 500 the composer shows a count (*7,650 of 8,000 characters*); past the limit it names the limit and holds **Send** until you shorten the message. Very long words and links wrap inside the message bubble.
+A message can be up to 100,000 characters, in a chat or a room. Within the last 500 the composer shows a count (*99,650 of 100,000 characters*); past the limit it names the limit and holds **Send** until you shorten the message. Very long words and links wrap inside the message bubble.
 
 An agent that is stopped or unreachable is labelled above the field before you type; the message still sends, and the server's refusal is the answer.
 
@@ -170,7 +172,7 @@ Clicking an agent no longer opens a report about it. Its numbers sit in a band u
 | **Suggested for you** | What is waiting on you and what you could do next — see [Suggestions](#suggestions). Platform users only |
 | **Role** | Shown when the agent has a seat on record, a canon, or a role declared in its template — see [The role card](#the-role-card) |
 | **Your chats** | The full list, unread counts included — Main shows as **Current conversation**, archived chats in grey |
-| **What it can do** | Capability cards; clicking one pre-fills the composer |
+| **What it can do** | Capability cards, each with its skill's description (or **No description yet**); clicking one pre-fills the composer. An agent exposing no skills shows its template's use cases here as **What you can ask** instead, and an agent that could not be reached says so rather than showing an empty list |
 | **Reports** | Structured reports the agent has published; expand one to read it — see [Agent Reports](../operations/agent-reports.md) |
 | **What it remembers about you** | The agent's notes about you, and a **Changes** list of the runs that rewrote them, with **Undo** |
 | **Decisions** | The seat's decision record — see [Decisions](#decisions) |
@@ -285,7 +287,7 @@ The open rail carries a small **shortcut tips** panel at its foot with the most-
 
 Workspace surfaces the agents already shared with a person's email — there is no separate access list. To give a client agents, share each one with their email using the normal [agent sharing](agent-sharing.md) and [access control](access-control.md) model; remove the share to revoke access.
 
-Capability cards come from the agent's exposed skills where an operator has configured them, and otherwise from the `use_cases` in its template — so what a client sees you can shape without touching Workspace itself. The model an external client's turns run on is the one set for the agent's public channels on its **Sharing** tab, falling back to the platform default.
+Capability cards come from the agent's exposed skills where an operator has configured them, and otherwise from the `use_cases` in its template (shown as **What you can ask**) — so what a client sees you can shape without touching Workspace itself. A card's description is the skill's `SKILL.md` `description:`, the one place a capability is described ([Skill frontmatter](../automation/skills-and-playbooks.md#skill-frontmatter-and-dependency-checks)). The model an external client's turns run on is the one set for the agent's public channels on its **Channels** tab, falling back to the platform default.
 
 ## For Agents
 
@@ -301,7 +303,7 @@ Workspace is a client-facing shell over the platform's existing agent behavior, 
 | `/agents/{name}/sessions/{id}` | PATCH | Rename a chat — `{title}`, one line, ≤100 characters |
 | `/agents/{name}/sessions/{id}/archive` | PUT / DELETE | Close (archive) a chat / reopen it. Nothing is deleted |
 | `/agents/{name}/history?session_id=&limit=` | GET | A chat's messages, the in-flight marker and the last turn's outcome. No message carries its cost |
-| `/agents/{name}/chat` | POST | Send a turn and wait for the reply — the synchronous integration surface; accepts `session_id`, `new_thread`, `model`, `open_canvas_id` (the canvas on screen, passed as context; an id the caller cannot see resolves to nothing) and `tags` (addresses of people to tag). `message` is at most 8,000 characters |
+| `/agents/{name}/chat` | POST | Send a turn and wait for the reply — the synchronous integration surface; accepts `session_id`, `new_thread`, `model`, `open_canvas_id` (the canvas on screen, passed as context; an id the caller cannot see resolves to nothing) and `tags` (addresses of people to tag). `message` is at most 100,000 characters |
 | `/agents/{name}/chat/stream` | POST | Begin a turn, returning an execution id to watch; same body |
 | `/agents/{name}/executions/{id}/stream` | GET | Live activity for one of your own turns (SSE) |
 | `/agents/{name}/executions/{id}/terminate` | POST | Stop one of your own turns |

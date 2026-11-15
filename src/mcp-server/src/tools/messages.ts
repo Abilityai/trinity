@@ -6,11 +6,45 @@
  */
 
 import { z } from "zod";
-import { TrinityClient } from "../client.js";
+import { ApiError, TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import { resolveExecutionId } from "./execution_id.js";
 import { DELEGATION_RULE } from "../delegation_contract.js";
 import { INTENT_KEY_TEACHING, intentKeyParams, intentResultFields } from "./intent_key.js";
+
+/** What the agent is told after a Workspace delivery (ent#1221). */
+const WORKSPACE_INBOX_NOTE =
+  "Delivered to their Workspace; they see it on their next visit — no notification is sent.";
+
+/**
+ * A served refusal's structured detail (`{code, message, channels?}`), or null
+ * for a plain-string body (ent#1221). Read from `ApiError.body` so a message
+ * that happens to contain "403" or "not found" is never reclassified.
+ */
+function structuredRefusal(error: unknown): Record<string, unknown> | null {
+  if (!(error instanceof ApiError)) return null;
+  try {
+    const detail = (JSON.parse(error.body) as { detail?: unknown }).detail;
+    if (detail && typeof detail === "object" && typeof (detail as { code?: unknown }).code === "string") {
+      const d = detail as { code: string; message?: unknown; channels?: unknown };
+      const flag =
+        error.status === 403 ? { not_authorized: true }
+        : error.status === 404 ? { recipient_not_found: true }
+        : d.code === "role_unassigned" ? { seat_unfilled: true }
+        : {};
+      return {
+        success: false,
+        code: d.code,
+        error: typeof d.message === "string" ? d.message : d.code,
+        ...(d.channels && typeof d.channels === "object" ? { channels: d.channels } : {}),
+        ...flag,
+      };
+    }
+  } catch {
+    // not JSON — the plain-string branches below handle it
+  }
+  return null;
+}
 
 /**
  * Create message tools with the given client
@@ -71,7 +105,9 @@ export function createMessageTools(
         "nobody fills, or that several people fill, is refused with a named reason. " +
         "The recipient must have opted in to receive proactive messages from this agent " +
         "(allow_proactive flag must be set in their sharing record). " +
-        "Messages are delivered via Telegram, Slack, or web based on the channel parameter. " +
+        "Messages are delivered via Telegram, Slack, or web based on the channel parameter; " +
+        "web is the person's Workspace conversation with you — delivered, but nothing notifies " +
+        "them: they see it on their next visit. A refusal names why per channel (`code`, `channels`). " +
         "Rate limited to 10 messages per recipient per hour. " +
         DELEGATION_RULE +
         " A send that errored without a named refusal may still have reached the person: never send it " +
@@ -91,7 +127,7 @@ export function createMessageTools(
         channel: z.enum(["auto", "telegram", "slack", "web"]).default("auto")
           .describe(
             "Target channel: 'auto' tries channels in order (telegram -> slack -> web), " +
-            "or specify a specific channel. Currently Telegram and Slack are supported."
+            "or specify a specific channel. web = the person's Workspace conversation with you."
           ),
         reply_to_thread: z.boolean().default(false)
           .describe("Continue in the last thread with this user if one exists (channel-dependent)"),
@@ -191,6 +227,9 @@ export function createMessageTools(
               ...(params.to ? { to: params.to } : { recipient_email: params.recipient_email }),
               channel: result.channel,
               message_id: result.message_id,
+              ...((result as { delivery?: string }).delivery === "workspace_inbox"
+                ? { delivery: "workspace_inbox", note: WORKSPACE_INBOX_NOTE }
+                : {}),
               ...intentResultFields(result as Record<string, unknown>),
             }, null, 2);
           } else {
@@ -202,6 +241,13 @@ export function createMessageTools(
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
           console.error(`[send_message] Error: ${errorMessage}`);
+
+          // ent#1221: a served refusal names its reason — read it first, so no
+          // substring check below can misclassify it.
+          const refusal = structuredRefusal(error);
+          if (refusal) {
+            return JSON.stringify(refusal, null, 2);
+          }
 
           // Parse specific error types.
           // #186: the backend agent-access dependency now returns a uniform 404
@@ -232,7 +278,7 @@ export function createMessageTools(
           if (errorMessage.includes("404") || errorMessage.includes("not found")) {
             return JSON.stringify({
               success: false,
-              error: "Recipient not found. They may not have Telegram or Slack configured.",
+              error: "No delivery channel reaches this recipient.",
               recipient_not_found: true,
             }, null, 2);
           }

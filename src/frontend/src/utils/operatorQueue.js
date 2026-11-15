@@ -116,6 +116,11 @@ export function decidedByOptions(item) {
  */
 export function queueResponseKind(item) {
   const type = item?.type
+  // trinity-enterprise#1066: a credential ask is answered ONLY through the
+  // secret field in the person's Workspace. Its own kind, so no surface falls
+  // through to a typed answer or an acknowledge — either would put text into
+  // `response`, which the backend refuses (`credential_answer_via_field`).
+  if (type === 'credential') return 'credential'
   if (type === 'approval') {
     return optionsOf(item).length > 0 ? 'approval' : 'question'
   }
@@ -177,6 +182,8 @@ export const QUEUE_TYPE_LABELS = Object.freeze({
   alert: 'Heads up',
   // #3130: the flood alarm became a budgeted platform type; it is still an alert.
   queue_flood: 'Heads up',
+  // trinity-enterprise#1066: an agent asking for a secret by name.
+  credential: 'Needs a credential',
 })
 
 /**
@@ -371,6 +378,16 @@ export const QUEUE_RESPONSE_NOT_ADDRESSEE =
   'This approval was addressed to someone else; only they can decide it.'
 
 /**
+ * abilityai/trinity-enterprise#1096 — the refusal names who the card waits for
+ * (the seat and the person, worded by the server). Prefer the server's
+ * `detail.message`; keep the generic line when it sends none (an older backend).
+ */
+export function notAddresseeMessage(err) {
+  const message = err?.response?.data?.detail?.message
+  return typeof message === 'string' && message.trim() ? message : QUEUE_RESPONSE_NOT_ADDRESSEE
+}
+
+/**
  * trinity-enterprise#611 — how an item ENDED, as ONE rule every surface renders
  * (ResolvedCard, the `/m` "Recently ended" strip, PortalAsks). `null` while the
  * item is still pending.
@@ -517,6 +534,11 @@ export function workspaceEndingText(ask) {
 const VERDICT_PAST = { approve: 'approved', reject: 'rejected' }
 export function workspaceOwnAnswer(ask) {
   if (!ask || ask.ended_by !== 'you' || !ask.answer) return null
+  // trinity-enterprise#1066: a credential ask's answer is the word `provided`
+  // (the value went to the agent, not to the row) — say it by name.
+  if (ask.kind === 'credential') {
+    return { past: null, text: `You provided ${ask.credential_name || 'the credential'}` }
+  }
   const past = ask.kind === 'approval'
     ? VERDICT_PAST[String(ask.answer).trim().toLowerCase()] || null
     : null
@@ -687,4 +709,43 @@ export function proposalRows(proposal) {
     key,
     value: typeof value === 'string' ? value : JSON.stringify(value),
   }))
+}
+
+/** `POST /api/operator-queue/bulk-cancel` takes at most this many ids (`models.BulkCancelRequest`). */
+export const BULK_CANCEL_MAX_IDS = 500
+
+/**
+ * #3302 — the bulk-cancel batches for a list longer than the route takes. The
+ * list is complete now, so Clear All can hold more than 500 asks. Each
+ * bulk-cancel ends its rows as ONE event, and the wake observer gives each
+ * agent one turn per event — so batches keep an agent's asks together (whole
+ * agents, in first-seen order, packed up to the limit) and Clear All still
+ * costs each agent one turn. Only an agent holding more than the limit by
+ * itself is split. `items` are `{id, agent_name}`; returns lists of ids.
+ */
+export function bulkCancelBatches(items, max = BULK_CANCEL_MAX_IDS) {
+  const byAgent = new Map()
+  for (const item of Array.isArray(items) ? items : []) {
+    const ids = byAgent.get(item.agent_name) || []
+    ids.push(item.id)
+    byAgent.set(item.agent_name, ids)
+  }
+  const batches = []
+  let batch = []
+  for (const ids of byAgent.values()) {
+    if (batch.length + ids.length > max && batch.length) {
+      batches.push(batch)
+      batch = []
+    }
+    for (let i = 0; i < ids.length; i += max) {
+      const part = ids.slice(i, i + max)
+      if (batch.length + part.length > max) {
+        batches.push(batch)
+        batch = []
+      }
+      batch = batch.concat(part)
+    }
+  }
+  if (batch.length) batches.push(batch)
+  return batches
 }

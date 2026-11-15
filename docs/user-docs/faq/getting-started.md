@@ -69,7 +69,7 @@ First check that Docker is actually running — Trinity can't start without it. 
 
 ## Where do I find the web UI, the API, and the interactive API docs?
 
-The web UI is at http://localhost, the backend API with interactive Swagger docs is at http://localhost:8000/docs, and the MCP server is at http://localhost:8080/mcp. Local and production deployments use the same ports; on a server install the production frontend also proxies `/mcp`, so MCP is reachable at the web UI's own hostname (`https://trinity.your-domain.com/mcp`). See [Setup](../getting-started/setup.md).
+The web UI is at http://localhost, the backend API with interactive Swagger docs is at http://localhost:8000/docs, and the MCP server is at http://localhost:8080/mcp. Local and production deployments use the same ports; on a server install the production frontend also proxies `/mcp`, so MCP is reachable at the web UI's own hostname (`https://trinity.your-domain.com/mcp`). Clients outside the Trinity server — Claude Code on your laptop included — are refused until an admin turns on **External MCP access** under Settings → MCP Keys; a fresh install starts with it off. See [Setup](../getting-started/setup.md) and [MCP Server](../integrations/mcp-server.md#external-mcp-access).
 
 ## How is the web UI organized?
 
@@ -78,6 +78,10 @@ The top navigation has five entries. **Dashboard** is the fleet, in three interc
 ## How do I create my first agent?
 
 On a fresh install, use the **Your first agent** step of first-run setup, which comes right after **Connect Claude** so the agent can actually think. **Show me** (**Watch Cornelius work**) opens a seeded agent's chat before you build anything; **Make me one** asks one question — pick what the agent should do (**Research a market or topic**, **Advise on strategy**, **Write content & reports**, **Start from scratch**) — and opens the real Create Agent form with the matching starter template pre-selected; **Done** at the end of the sequence opens that agent's chat. The step counts as done once you own an agent Trinity did not seed, and you can come back to it any time with `?onboarding=1` or **Settings → General → First-run setup**. You can also do it manually: click **Create Agent** in the Dashboard header (present in every view — Timeline, Grid and List), choose a source (a starter template, a registered GitHub template, any GitHub repository, or a blank agent), enter a lowercase slug, and click **Create Agent** — Trinity clones the template, builds the container, and starts the agent. On an install with no agents at all, the Dashboard's empty state shows a **Get started** button that opens the same form. See [Quick Start](../getting-started/quick-start.md).
+
+## I'm starting a new organisation on Trinity. Which agents should I build first, and how many?
+
+Start with one, not an org chart. Pick the job that hurts most today (marketing content, research, a weekly report), build a single agent for it, and run it until you understand how it works, what it needs and where it gets stuck. Add the next agent when a real need appears, and connect agents to each other only once each one does its own job well. The Library's starter templates, the seeded agents and the `create-agent` wizards in the abilities marketplace are starting points you can adjust instead of writing from scratch. See [Creating Agents](../agents/creating-agents.md) and the [create-agent plugin](../abilities/create-agent-plugin.md).
 
 ## Which agents come with a fresh install, and can I delete them?
 
@@ -105,7 +109,7 @@ It is the system agent, a platform orchestrator Trinity deploys for you. It is d
 
 ## Which database does a new install use?
 
-A local install from `./scripts/deploy/start.sh` runs on SQLite. SQLite reached end-of-support on 2026-09-01, and PostgreSQL is now the supported backend. A fresh server or one-click install (`start.sh --hosted`) starts on a bundled PostgreSQL automatically, while an existing SQLite install stays on SQLite until you migrate it. See [Setup → Prerequisites](../getting-started/setup.md#prerequisites) and the [Deployment FAQ](deployment-and-upgrades.md).
+Every install starts on a bundled PostgreSQL. SQLite reached end-of-support on 2026-09-01, and an existing SQLite install refuses to start until you copy its data. See [Setup → Prerequisites](../getting-started/setup.md#prerequisites) and the [Deployment FAQ](deployment-and-upgrades.md).
 
 ## What is a template?
 
@@ -118,6 +122,10 @@ Yes. Trinity is licensed under the Apache License 2.0 — free for any use, comm
 ## Are some features only available in an enterprise edition?
 
 Trinity is open-core: the open-source platform in the public repository is complete and fully functional on its own. Customers with an enterprise agreement additionally get access to a private companion repository that mounts as an optional module and unlocks extra capabilities under a separate commercial license; in the UI, those surfaces simply say they require an entitlement. You can check what your instance is running via `GET /api/version`, which reports `edition` (`oss` or `enterprise`) and the list of registered enterprise features — an empty list is normal for open-source installs. See [Enterprise Modules](../../ENTERPRISE.md).
+
+## When do I need the enterprise edition?
+
+Start on the open-source edition, which is complete on its own. An enterprise agreement becomes relevant once your organisation has requirements the open-source build does not cover, typically compliance or governance needs. In the UI, those surfaces say they require an entitlement. Talk to the Trinity team about what an agreement includes. This FAQ doesn't list the modules and doesn't cover pricing. `GET /api/version` shows which edition your instance runs. See [Enterprise Modules](../../ENTERPRISE.md).
 
 ## Where can I get help if I'm stuck?
 

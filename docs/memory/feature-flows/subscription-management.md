@@ -121,8 +121,8 @@ create_agent_internal()
 | **Settings Page: Delete Button** | `DELETE /api/subscriptions/{id}` | Delete with cascade confirmation |
 | MCP Tool: `register_subscription` | `POST /api/subscriptions` | Register new subscription — the SAME endpoint, so the #2572 sweep fires here too |
 | MCP Tool: `list_subscriptions` | `GET /api/subscriptions` | List all subscriptions with agents |
-| MCP Tool: `assign_subscription` | `PUT /api/subscriptions/agents/{agent_name}` | Assign subscription to agent |
-| MCP Tool: `clear_agent_subscription` | `DELETE /api/subscriptions/agents/{agent_name}` | Clear subscription from agent |
+| MCP Tool: `assign_subscription` | `PUT /api/subscriptions/agents/{agent_name}` | Assign subscription to agent. The route takes a signed-in session, so the tool is listed to no MCP key (trinity-enterprise#719) |
+| MCP Tool: `clear_agent_subscription` | `DELETE /api/subscriptions/agents/{agent_name}` | Clear subscription from agent. Listed to a person's own user-scoped key only (trinity-enterprise#719) |
 | MCP Tool: `get_agent_auth` | `GET /api/subscriptions/agents/{agent_name}/auth` | Get agent auth status |
 | MCP Tool: `delete_subscription` | `DELETE /api/subscriptions/{subscription_id}` | Delete subscription |
 | Fleet Dashboard | `GET /api/ops/auth-report` | Fleet-wide auth status report |
@@ -760,7 +760,7 @@ Note: No file injection step exists in SUB-002. The token is part of the contain
 ### Backend Endpoint (`src/backend/routers/subscriptions.py:190-253`)
 
 ```python
-@router.put("/agents/{agent_name}")
+@router.put("/agents/{agent_name}", dependencies=[Depends(require_interactive)])  # a signed-in session only (trinity-enterprise#719)
 async def assign_subscription_to_agent(
     agent_name: str,
     subscription_name: str = Query(..., description="Name of subscription to assign"),
@@ -788,7 +788,9 @@ async def assign_subscription_to_agent(
             await start_agent_internal(agent_name)
             restart_result = "success"
         except Exception as e:
-            restart_result = f"failed: {e}"
+            logger.error(..., exc_info=True)
+            # ent#1117: the class name, not the exception text
+            restart_result = f"failed: {e.__class__.__name__} — details in backend logs"
 
     return {
         "success": True,
@@ -804,7 +806,7 @@ async def assign_subscription_to_agent(
 When a subscription is cleared from a running agent, the agent is restarted so `ANTHROPIC_API_KEY` is restored and `CLAUDE_CODE_OAUTH_TOKEN` is removed.
 
 ```python
-@router.delete("/agents/{agent_name}")
+@router.delete("/agents/{agent_name}", dependencies=[Depends(require_person)])  # a session or the person's own user key
 async def clear_agent_subscription(agent_name: str, ...):
     """Clear subscription assignment from an agent."""
     db.clear_agent_subscription(agent_name)
@@ -816,7 +818,7 @@ async def clear_agent_subscription(agent_name: str, ...):
         await start_agent_internal(agent_name)  # Recreates container with API key
 ```
 
-Response includes `restart_result` field ("success" or "failed: {error}").
+Response includes `restart_result` field ("success" or "failed: {ExceptionClass} — details in backend logs"; the exception and its traceback go to the backend log).
 
 ---
 
@@ -1303,7 +1305,7 @@ All 6 subscription tools defined in `src/mcp-server/src/tools/subscriptions.ts`:
 |------|-------------|------------|--------|
 | `register_subscription` | Register long-lived token from `claude setup-token` | `name`, `token`, `subscription_type?`, `rate_limit_tier?` | Admin |
 | `list_subscriptions` | List all subscriptions with assigned agents | (none) | Admin |
-| `assign_subscription` | Assign subscription to agent (restarts if running) | `agent_name`, `subscription_name` | Owner |
+| `assign_subscription` | Assign subscription to agent (restarts if running) | `agent_name`, `subscription_name` | Owner, signed in: the backend refuses every MCP API key |
 | `clear_agent_subscription` | Clear subscription from agent (restarts if running) | `agent_name` | Owner |
 | `get_agent_auth` | Get auth status for an agent | `agent_name` | Owner |
 | `delete_subscription` | Delete subscription (cascades to clear agent assignments) | `subscription_name` | Admin |
@@ -1339,7 +1341,7 @@ MCP client methods: `src/mcp-server/src/client.ts:1079-1196`
 | Subscription not found (usage) | 404 | "Subscription not found" |
 | Usage query failure | 500 | "Failed to retrieve usage data" |
 | Subscription usage exhausted | 429 | "Subscription usage limit: [reset message]. To resolve: (1) wait for reset, (2) set ANTHROPIC_API_KEY, or (3) assign different subscription" |
-| Failed registration | 500 | "Failed to register subscription: {error}" |
+| Failed registration | 500 | "Failed to register subscription ({ExceptionClass} — details in backend logs)"; the logged traceback masks the token |
 
 ### Rate Limit Detection
 
@@ -1434,7 +1436,7 @@ The error flows through: Claude Code → `process_stream_line()` (stores in `met
 ### UI Testing (Agent Detail -- Auth Badge)
 
 #### Test: Auth Badge Shows Subscription Name
-1. Assign a subscription to an agent via MCP: `assign_subscription(agent_name: "my-agent", subscription_name: "eugene-max")`
+1. Signed in, assign a subscription to an agent from the **Funding** row of its **Settings** → **General**, or, as an admin, from **Settings** → **Integrations** → **Claude Subscriptions** (the backend refuses an MCP API key here; the Funding row offers an admin-registered subscription only to an admin)
 2. Navigate to Agent Detail page for "my-agent"
 3. Verify: Amber badge in header row shows "eugene-max"
 4. Verify: Hovering badge shows tooltip "Using subscription: eugene-max"
@@ -1479,7 +1481,7 @@ The error flows through: Claude Code → `process_stream_line()` (stores in `met
 
 #### Test: Assign to Agent
 1. Start an agent
-2. Via MCP: `assign_subscription(agent_name: "my-agent", subscription_name: "test-max")`
+2. Signed in as an admin, assign `test-max` to `my-agent` from the agent's **Settings** → **General** → **Funding** row or from **Settings** → **Integrations** → **Claude Subscriptions** (the backend refuses an MCP API key here)
 3. Verify: Response includes `restart_result: "success"` (if agent was running)
 4. Verify: Agent container has `CLAUDE_CODE_OAUTH_TOKEN` env var set
 5. Verify: Agent container does NOT have `ANTHROPIC_API_KEY` env var

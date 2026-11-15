@@ -31,6 +31,8 @@ from .state import agent_state
 from .services.execution_env import arm_subscription_auth_guard
 from .services import chat_session_marker
 from .services.trinity_mcp import inject_trinity_mcp_if_configured
+from .services import gemini_settings
+from .services.runtime_adapter import GEMINI_RUNTIMES
 from .auto_sync import schedule_auto_sync_if_enabled
 from .heartbeat import schedule_heartbeat
 from .services.result_callback import schedule_pending_result_resend
@@ -157,6 +159,12 @@ def run_server():
     # Phase: Agent-to-Agent Collaboration - Inject Trinity MCP if configured
     if inject_trinity_mcp_if_configured():
         logger.info("Trinity MCP server configured - agent-to-agent communication enabled")
+
+    # trinity-enterprise#986: a Gemini agent's usage-statistics opt-out is on
+    # disk before the first turn, with or without Trinity MCP (which also
+    # writes it). Re-asserted before every turn spawn in gemini_runtime.
+    if str(agent_state.agent_runtime).lower() in GEMINI_RUNTIMES:
+        gemini_settings.ensure_usage_statistics_disabled()
 
     # Bind to 0.0.0.0 for Docker internal network communication
     # Port is NOT exposed externally - backend proxies requests via Docker network

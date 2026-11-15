@@ -7,7 +7,7 @@ import {
 
 describe('ent#661 v2 — tasks', () => {
   it('names every status and gives each a badge', () => {
-    expect(TASK_STATUSES).toEqual(['active', 'blocked', 'needs-decision', 'paused', 'pending-verification', 'done'])
+    expect(TASK_STATUSES).toEqual(['todo', 'active', 'blocked', 'needs-decision', 'paused', 'pending-verification', 'done'])
     for (const s of TASK_STATUSES) {
       expect(taskStatusLabel(s)).not.toBe('Unknown')
       expect(TASK_STATUS_BADGE[s]).toBeTruthy()
@@ -71,6 +71,10 @@ describe('taskLogKindLabel — every kind the backend writes has words', () => {
   it('names each kind', () => {
     expect(['created', 'status', 'reopened', 'done_claim', 'note', 'imported'].map(taskLogKindLabel))
       .toEqual(['Created', 'Status', 'Reopened', 'Done claim', 'Note', 'Imported'])
+  })
+  // ent#1133 writes `edited`; `owner` (ent#981) read as "Note" until now.
+  it('names the content-edit and owner kinds', () => {
+    expect([taskLogKindLabel('edited'), taskLogKindLabel('owner')]).toEqual(['Edited', 'Owner'])
   })
   it('an unknown kind reads as a note, never blank', () => {
     expect(taskLogKindLabel('later')).toBe('Note')

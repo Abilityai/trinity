@@ -831,6 +831,8 @@ class TestRenameIsGatedOnVolumeBase:
         db.is_volume_base_reserved.return_value = True     # base claimed by another
         db.can_user_access_agent.return_value = True
         get_container = MagicMock(return_value=None)
+        # ent#1111 (T3): the stop/rename/DB steps moved behind the primitive, so
+        # "nothing was touched" is now "the primitive was never entered".
         stop = AsyncMock()
         # A human caller: rename is human-only (ent#69 Part 2 rejects agent
         # principals earlier), and an unstubbed MagicMock reads as agent-scoped.
@@ -841,7 +843,7 @@ class TestRenameIsGatedOnVolumeBase:
 
         with patch.object(mod, "db", db), \
              patch.object(mod, "get_agent_container", get_container), \
-             patch.object(mod, "container_stop", stop, create=True):
+             patch.object(mod, "rename_agent_now", stop):
             with pytest.raises(HTTPException) as exc:
                 await mod.rename_agent_endpoint(
                     "staging", MagicMock(new_name="prod"), MagicMock(), user

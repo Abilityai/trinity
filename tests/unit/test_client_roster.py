@@ -121,6 +121,14 @@ def _entry(channel, identity, last_active, count=0):
     }
 
 
+# ent#21: the access-state annotation's reads, all empty.
+_NO_ACCESS_STATE = dict(
+    list_channel_client_blocks=lambda name: [],
+    get_agent_shares=lambda name: [],
+    list_access_requests=lambda name, status: [],
+)
+
+
 class TestRosterService:
     def test_merges_channels_sorted_desc_nulls_last(self, monkeypatch):
         import services.client_roster_service as svc
@@ -135,6 +143,7 @@ class TestRosterService:
         fake_db = SimpleNamespace(
             list_telegram_clients_for_agent=lambda name: tg,
             list_whatsapp_clients_for_agent=lambda name: wa,
+            **_NO_ACCESS_STATE,
         )
         monkeypatch.setattr(svc, "db", fake_db)
 
@@ -153,6 +162,7 @@ class TestRosterService:
         fake_db = SimpleNamespace(
             list_telegram_clients_for_agent=boom,
             list_whatsapp_clients_for_agent=lambda name: wa,
+            **_NO_ACCESS_STATE,
         )
         monkeypatch.setattr(svc, "db", fake_db)
 

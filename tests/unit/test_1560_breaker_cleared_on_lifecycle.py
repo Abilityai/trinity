@@ -75,6 +75,7 @@ class _Recorder:
 
     def __init__(self):
         self.calls: list[tuple[str, str]] = []
+        self.deleted: list[str] = []
         self.slots_cleared = 0
 
 
@@ -120,7 +121,18 @@ def stubs(monkeypatch):
 
     ss = types.ModuleType("services.slot_service")
 
+    class _Redis:
+        """Records the raw `DEL`s the clear issues against name-keyed keys."""
+
+        def delete(self, key):
+            rec.deleted.append(key)
+            if "redis_delete" in raise_in:
+                raise raise_in["redis_delete"]
+            return 1
+
     class _SlotService:
+        redis = _Redis()
+
         async def force_clear_slots(self, name):
             rec.calls.append(("slots", name))
             if "slots" in raise_in:
@@ -130,10 +142,17 @@ def stubs(monkeypatch):
 
     ss.get_slot_service = lambda: _SlotService()
 
+    # #4257: the denied-claim counter's prefix is defined in `pull_pilot`, and
+    # `clear_agent_breakers` imports it from there at call time, so the stub
+    # must own that sys.modules key too — the real module pulls in the backend.
+    pp = types.ModuleType("services.pull_pilot")
+    pp.PULL_CLAIM_DENIED_KEY_PREFIX = "agent:pull_claim_denied:"
+
     pkg.heartbeat_service = hb
     pkg.agent_client = ac
     pkg.dispatch_breaker = dbk
     pkg.slot_service = ss
+    pkg.pull_pilot = pp
 
     for name, mod in (
         ("services", pkg),
@@ -141,6 +160,7 @@ def stubs(monkeypatch):
         ("services.agent_client", ac),
         ("services.dispatch_breaker", dbk),
         ("services.slot_service", ss),
+        ("services.pull_pilot", pp),
     ):
         monkeypatch.setitem(sys.modules, name, mod)
 
@@ -161,6 +181,33 @@ def test_clear_agent_breakers_clears_heartbeat_and_both_breakers(stubs):
         ("transport_circuit", "recycled"),
         ("dispatch_breaker", "recycled"),
     ]
+
+
+def test_clear_agent_breakers_deletes_the_denied_claim_counter(stubs):
+    """#4257: the refused-claim counter goes with the name it describes.
+
+    It is a COUNT, not a timestamp, so a recycled name would otherwise inherit
+    its predecessor's refusals and the stall alert would report "alive and
+    being turned away" about a pull-mode disagreement that no longer exists —
+    the #1560 class. Asserted on the start-safe entry point, because that is
+    the idempotent call site that actually runs on every start.
+    """
+    ars.clear_agent_breakers("recycled")
+
+    assert "agent:pull_claim_denied:recycled" in stubs.deleted
+
+
+def test_a_failing_counter_delete_does_not_block_the_breakers(stubs):
+    """Fail-open: a diagnostic counter must never raise into a lifecycle op."""
+    stubs.raise_in["redis_delete"] = RuntimeError("redis down")
+
+    ars.clear_agent_breakers("agent-x")  # must not raise
+
+    assert {subsystem for subsystem, _ in stubs.calls} == {
+        "heartbeat",
+        "transport_circuit",
+        "dispatch_breaker",
+    }
 
 
 def test_clear_agent_breakers_never_touches_slots(stubs):
@@ -346,11 +393,15 @@ def test_delete_path_sweeps_everything_and_replaces_the_heartbeat_only_clear():
 
 
 def test_rename_path_sweeps_both_the_old_and_the_new_name():
-    src = _src("routers/agent_rename.py")
+    # ent#1111 (T3): the rename's steps moved out of the route into the
+    # primitive every caller shares, so the sweep is pinned where it now lives.
+    src = _src("services/agent_service/rename.py")
 
-    assert "await clear_agent_runtime_state(agent_name)" in src
-    assert "await clear_agent_runtime_state(sanitized_name)" in src
+    assert "await clear_agent_runtime_state(old_name)" in src
+    assert "await clear_agent_runtime_state(new_name)" in src
     assert "heartbeat_service.clear_heartbeat" not in src
+    # And the route must not have kept a copy of it.
+    assert "clear_agent_runtime_state" not in _src("routers/agent_rename.py")
 
 
 def test_purge_sweeps_the_name_at_the_moment_it_becomes_reusable():

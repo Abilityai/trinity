@@ -163,9 +163,10 @@ def test_schedule_create_honours_explicit_optional_fields(monkeypatch):
 def test_unknown_schedule_keys_are_ignored(monkeypatch):
     """Keys `create_schedules` does not read are dropped, not forwarded.
 
-    ScheduleCreate has fields (timeout_seconds, model, allowed_tools,
-    max_retries, ...) that the manifest path never populates, so they keep
-    their model defaults regardless of what the manifest said.
+    ScheduleCreate has fields (timeout_seconds, allowed_tools, max_retries,
+    ...) that the manifest path never populates, so they keep their model
+    defaults regardless of what the manifest said. `model` is NOT one of them
+    since #4151: it was dropped silently and is now carried.
     """
     db = _install(monkeypatch, _RecordingDb())
     _create(
@@ -178,7 +179,7 @@ def test_unknown_schedule_keys_are_ignored(monkeypatch):
         },
     )
     payload = db.calls[0][2]
-    assert payload.model is None
+    assert payload.model == "opus"  # #4151
     assert payload.timeout_seconds is None
 
 

@@ -95,6 +95,20 @@ chat as an ordinary turn from the agent. Create-only would be a formality — cr
 without the field, PUT it a second later. Fail-closed on an unreadable ownership
 read, and clearing the target is never privileged.
 
+**An agent's own key addresses only its owner (trinity-enterprise#1063).** The
+agent key resolves to its owner, so the rule above would let an agent address
+anyone the owner could — and a schedule addressed to a person makes its runs that
+person's seat runs. `_refuse_agent_third_party` refuses an agent principal
+(`403 agent_cannot_address_another_person`) a third-party target on create and
+update, and every per-schedule action (update, delete, enable, disable, trigger,
+and every webhook route, through `_assert_can_manage_webhook`) on a schedule already
+addressed to someone else — so the agent can neither create, retarget, rewrite nor
+fire a turn in a colleague's seat. That includes revoking its webhook: a uniform rule,
+matching delete. `can_manage_webhook` reads false for that caller. Who the
+agent speaks to unprompted is the owner's grant (Invariant #8 grant vs use); the
+owner's own session keeps every control, and a schedule for the owner or with no
+target stays fully agent-manageable.
+
 ## Refusals are visible (AC 5)
 
 | reason | when |
@@ -149,6 +163,9 @@ needs a per-row discriminator `enterprise_portal_messages` does not carry.
 
 ## Honest limits
 
+- **A webhook URL already held survives a retarget.** If an agent minted a webhook while
+  its schedule had no address, and the owner then addresses it to a colleague, the URL
+  keeps its token and still fires. Rotating or revoking on retarget is undecided.
 - **Durable, not live-pushed.** The Workspace does not poll thread history, so the brief
   appears on the next load or thread switch. Acceptable at daily cadence; stated rather
   than implied.
@@ -176,8 +193,12 @@ scheduler ──► POST /api/internal/execute-task {deliver_to_workspace_email}
                  │
    agent ───► mcp write_user_memory(execution_id, memory_text)
                  │  routers/public_memory: seat_for_execution(row)
+                 │     row not running → 422 memory_turn_not_live
                  │     triggered_by == 'schedule' AND source_channel == 'portal'
                  │     → source_channel_client is the seat
+                 │     another live scope on the agent → 422 memory_turn_ambiguous (#4121)
+                 │  user_memory_guard.prepare_write(memory_text, previous=…)   ← ent#419 screen
+                 │     a hit → 422 {code, message, line}, nothing stored
                  ▼
               db.write_public_user_memory_agent_notes(...)   ← ONE boundary, records history
                  │
@@ -193,8 +214,11 @@ scheduler ──► POST /api/internal/execute-task {deliver_to_workspace_email}
   see the current notes would erase them. So the memory block rides `system_prompt` on
   both dispatch branches, composed only after the stamp landed. The #1205 public persona
   prompt is not folded in: a brief is not a public surface.
-- **One boundary (AC 2).** The router keeps a single writer for every trigger; the ent#419
-  screen lands there once. ent#419's third layer — write history with rollback — is built
+- **One boundary (AC 2).** The router keeps a single writer for every trigger, and the
+  ent#419 screen runs there once, for every trigger (`user_memory_guard.prepare_write`; see
+  [write-user-memory.md](write-user-memory.md#anti-poisoning-gates-trinity-enterprise419)).
+  The seat note asks for open loops stated as facts ("Open loop: her draft (<link>) is due
+  Friday"), because a link or address inside an instruction is refused. ent#419's third layer — write history with rollback — is built
   here: `public_user_memory_writes` (previous + new notes, execution, trigger, schedule).
 - **Visible and undoable (AC 3).** The Workspace agent details show what the agent
   remembers about the viewer and the writes behind it (schedule name, when, what it
@@ -223,6 +247,11 @@ rule; the address normaliser driven over **both** models so the update path cann
 than the create path; the stamp's add-only guard; every refusal reason; the ordering that
 puts the refusal ahead of both dispatch branches; the bounded wait; and that the scheduler
 resolves no session.
+
+`tests/unit/test_ent1063_agent_schedule_recipient.py` — with a real agent key: a
+third-party target refused on create and update; the owner's colleague schedule refused
+to the agent on update, trigger, enable, disable, delete and webhook mint; the owner keeps
+every control; the agent's own-owner schedules stay manageable.
 
 `tests/journeys/test_j11_brief_delivery_journey.py` — the J11 skeleton (`strict=True`
 xfail).

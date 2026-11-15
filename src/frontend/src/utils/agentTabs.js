@@ -35,6 +35,8 @@ export const TAB_ALIASES = Object.freeze({
   credentials: 'settings',
   folders: 'settings',
   access: 'settings',
+  // trinity-enterprise#225: the Sharing tab is called Channels.
+  sharing: 'channels',
 })
 
 export function buildTabs({
@@ -61,7 +63,11 @@ export function buildTabs({
   // show and no dashboard file to show them in. Both flags come from ONE
   // DB-only probe (`GET /api/agent-dashboard/{name}/exists`), so neither half
   // needs the agent to be running.
-  if (hasDashboardFlag || hasDeclaredMetrics) {
+  //
+  // trinity-enterprise#1006: an owner sees it with neither, because the
+  // Dashboard tab is where metrics are declared from the UI — hiding it until
+  // one exists would hide the only door to the first one.
+  if (hasDashboardFlag || hasDeclaredMetrics || (canShare && !isSystem)) {
     tabs.push({ id: 'dashboard', label: 'Dashboard' })
   }
 
@@ -91,7 +97,8 @@ export function buildTabs({
   // Access control tabs - hide for system agent (system agent has full access).
   // trinity-enterprise#891: the Access tab is Settings › People now.
   if (canShare && !isSystem) {
-    tabs.push({ id: 'sharing', label: 'Sharing' })
+    // trinity-enterprise#225: renamed from Sharing; `sharing` stays an alias.
+    tabs.push({ id: 'channels', label: 'Channels' })
     tabs.push({ id: 'permissions', label: 'Permissions' })
   }
 

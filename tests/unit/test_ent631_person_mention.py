@@ -267,6 +267,19 @@ def test_the_picker_suggests_only_people_who_exist_and_can_reach_the_agents(ment
     assert CAROL in service.room_people(_alice(), room["id"], "car")[0]["email"]
 
 
+def test_the_room_picker_never_lists_the_person_asking_even_when_they_match(mention_db, quiet_room):
+    """The asker is excluded by the seam (`requester_email`), not by luck of the
+    query: every query below matches Alice's email, username or name."""
+    from shared_sessions import service
+    room = _room()
+    # The control: an admin in the room asking the same query DOES get Alice.
+    from models import User
+    carol = User(id=3, username="carol", role="admin", email=CAROL)
+    assert ALICE in {p["email"] for p in service.room_people(carol, room["id"], "al")}
+    for q in ("al", "alice", "alice@example.com", "Archer"):
+        assert ALICE not in {p["email"] for p in service.room_people(_alice(), room["id"], q)}, q
+
+
 def test_the_picker_needs_a_query(mention_db, quiet_room):
     """Bounded (#450 pattern): no bare listing of every colleague."""
     from shared_sessions import service
@@ -331,6 +344,30 @@ def test_a_reader_who_can_see_the_room_gets_the_message_with_context(mention_db,
     assert detail.message.sender_label == "Alice Archer"
     assert any(m.content == "earlier line" for m in detail.context)
     assert detail.conversation.id == room["id"]
+
+
+def test_a_tag_preview_never_shows_what_the_reader_joined_after(mention_db, quiet_room):
+    """trinity-enterprise#701: a person seated mid-conversation reads from their
+    join point — and the Inbox preview of a tag is a read of the room, so it
+    is held to the same floor. It showed the lines before the join."""
+    from services import person_mention_service as pms
+    from shared_sessions import db as rdb
+    from utils.helpers import utc_now_iso
+    room = _room()
+    _post(room["id"], "BEFORE-JOIN secret line")
+    rdb.seat_person(room["id"], "user", "bob", "collaborator",
+                    rdb.max_seq(room["id"]) + 1, utc_now_iso())
+    _post(room["id"], "after the join")
+    _post(room["id"], "@Bob Baker please look", tags=[BOB])
+    item = pms.list_for_reader(_reader(BOB))[0]
+    detail = pms.open_for_reader(_reader(BOB), item.id)
+    assert detail.can_see is True
+    assert [m.content for m in detail.context if "BEFORE-JOIN" in m.content] == []
+    assert any(m.content == "after the join" for m in detail.context)
+    # A backscroll grant opens it, as it does in the room.
+    rdb.set_visible_from(room["id"], "user", "bob", 0)
+    detail = pms.open_for_reader(_reader(BOB), item.id)
+    assert any("BEFORE-JOIN" in m.content for m in detail.context)
 
 
 def test_the_admin_bypass_is_the_platform_doors_only(mention_db, quiet_room):
@@ -599,6 +636,15 @@ def test_the_chat_picker_is_a_platform_persons_and_needs_a_query(mention_db):
     assert service.chat_people(_portal(ALICE), AGENT, " ") == []
     with pytest.raises(service.ChatTagError):
         service.chat_people(_portal("client@outside.example", is_platform=False), AGENT, "bo")
+
+
+def test_the_chat_picker_never_lists_the_person_asking_even_when_they_match(mention_db):
+    from client_portal import service
+    # The control: the same query from a colleague DOES find Alice, so the
+    # absence below is the exclusion, not a non-matching query.
+    assert ALICE in {p["email"] for p in service.chat_people(_portal(BOB), AGENT, "al")}
+    for q in ("al", "alice", "alice@example.com", "Archer"):
+        assert ALICE not in {p["email"] for p in service.chat_people(_portal(ALICE), AGENT, q)}, q
 
 
 def test_the_inbox_door_lists_opens_and_reads_only_the_callers_own(mention_db, quiet_room):

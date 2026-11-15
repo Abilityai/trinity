@@ -6,7 +6,9 @@
  *   - get_operator_queue_item   — a single item by id
  *   - respond_to_operator_queue — resolve a pending item (answer / approve / deny);
  *                                 a PERSON's key only — the backend refuses
- *                                 agent- and system-scoped keys (#611)
+ *                                 agent- and system-scoped keys (#611), so
+ *                                 it is listed to user-scoped keys only
+ *                                 (abilityai/trinity-enterprise#719)
  *   - get_my_ask                — an agent reads back its OWN ask by the
  *                                 request_id it chose (#611, self-acting)
  *   - ask_operator              — an agent raises an ask as ITSELF, validated
@@ -15,6 +17,10 @@
  *   - withdraw_ask              — an agent ends one of its OWN pending asks
  *                                 with a reason and no successor (ent#901,
  *                                 self-acting)
+ *   - ask_for_credential        — an agent asks the person of the conversation
+ *                                 for a secret BY NAME; the value is typed into
+ *                                 a masked Workspace field, never through MCP
+ *                                 (trinity-enterprise#1066, self-acting)
  *
  * Access control crux: the backend resolves an agent-scoped MCP key to its
  * OWNER and filters by the owner's accessible agents — it does NOT enforce
@@ -24,16 +30,18 @@
  * `agent_names` and the backend also narrows agent keys, so the page is
  * complete before the limit (ent#815). The write tool resolves the item's
  * `agent_name` first, then
- * runs the SAME `checkAgentAccess` gate before proxying the response — an
- * agent-scoped key may resolve items for {self} ∪ permitted only. (#1104 v1
- * exposes `respond` only; `cancel` is deferred — wider blast radius.)
+ * runs the SAME `checkAgentAccess` gate before proxying the response. Since
+ * #611 the backend refuses every key but a person's there, and since
+ * abilityai/trinity-enterprise#719 no agent key is shown the tool, so the gate
+ * is a belt for the keys that are. (#1104 v1 exposes `respond` only; `cancel`
+ * is deferred — wider blast radius.)
  */
 
 import { z } from "zod";
 import { ApiError, TrinityClient, operatorQueueListTarget } from "../client.js";
 import { SOMETHING_ELSE } from "../types.js";
 import type { McpAuthContext, OperatorAskCreate } from "../types.js";
-import { accessDenied, resolveActingAgent } from "../access.js";
+import { ACT_AS_PARAM_DESCRIPTION, accessDenied, actingClient, HUMAN_ONLY_KEYS_NOT_SHOWN, humanOnlyToolAccess, resolveActingAgent } from "../access.js";
 
 /**
  * Pure helper: keep only items whose agent is in the allowed set. Used to gate
@@ -105,7 +113,7 @@ const askOperatorParameters = z.object({
     .max(256)
     .describe(
       "An id YOU choose for this ask: letters, digits, '.', '_', ':' or '-'. Raising again with the same id returns the first receipt as status replayed, with differs naming any field that is not the same, so a retry never makes a second ask; use a NEW request_id for a new ask. " +
-        "The receipt: status (created | replayed), id, to_role (the role it went to, never a person's email), resolved (true when a person's Workspace will show the ask — every person the role resolves to, when several fill it; false when nobody could be named and it went to the operators), ask_status, and wakes_on_ending (true when your owner has turned on waking you when your asks end).",
+        "The receipt: status (created | replayed), id, to_role (the role it went to, never a person's email), resolved (true when a person's Workspace will show the ask — every person the role resolves to, when several fill it; false when nobody could be named and it went to the operators), ask_status, and wakes_on_ending (true by default: a person's answer or cancel wakes you with one turn, so never ask the person to write to you again after answering; an expiry wakes nobody — read it on your next turn; false only when your owner switched the wake off).",
     ),
   title: z
     .string()
@@ -135,11 +143,23 @@ const askOperatorParameters = z.object({
   proposal: anyJsonObject()
     .optional()
     .describe("For an approval: the exact action you will take if it is approved, frozen with the ask — key it by option when the options differ in effect (JSON, up to 8 KB; larger is refused with field_too_large)."),
+  // trinity-enterprise#1007: the four kinds, or a canon role by id. The regex is
+  // the backend's ROLE_ID_RE behind a lower-case `role:` prefix (the backend
+  // lower-cases the id, so a retry spelt differently still replays). A union
+  // publishes as `anyOf`, which strictJsonSchema leaves alone. trinity-enterprise#1053:
+  // the answer to an `approver` ask is fenced to the seat (`ask_service.may_end`).
+  // trinity-enterprise#1134: `project` — the platform resolves the person from
+  // the turn's project; the answer is fenced to them like a role id's.
   to: z
-    .enum(["primary", "approver", "viewer", "operator"])
+    .union([
+      z.enum(["primary", "approver", "viewer", "operator", "project"]),
+      z.string().regex(/^role:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
+    ])
     .optional()
     .describe(
-      "Who should answer: primary (your owner — it also shows in their Workspace; the default for approval and question) or operator (the platform's operators; the default for alert). approver and viewer are refused with role_unassigned until someone fills them. A role several people fill reaches every one of them: the first answer wins.",
+      "Who should answer: primary (your owner — it also shows in their Workspace; the default for approval and question) or operator (the platform's operators; the default for alert). approver and viewer are refused with role_unassigned until someone fills them. approver: it reaches the seated approvers who can open you, and is refused with role_cannot_open_agent when none of them can (ask your owner to share you with them; do not send the approval to someone else instead); only a person seated as approver can answer (anyone else is refused with not_addressee). A role several people fill reaches every one of them: the first answer wins. " +
+        "Or role:<id> — a canon role on your own roster, reaching every person seated in it who can open you; refused by name with role_unavailable (the assignments module is absent, has no answer for the role or could not answer: address primary or operator), role_unassigned (nobody is seated) or role_cannot_open_agent (nobody seated can open you: ask your owner to share you with them). " +
+        "Or project — from a chat or room turn on a project you work on, reaching that project's steward, else its creator, even if they cannot open you; only they can answer; refused by name with project_unavailable (not on this install), not_in_project_turn (this turn is not on such a project) or project_unreachable (nobody on it can be reached): address primary or operator instead.",
     ),
   expires_at: z
     .string()
@@ -161,6 +181,71 @@ const askOperatorParameters = z.object({
         "Refused when it already ended (409 replaces_ended, with its ask_status and disposition: a person's answer stands — read it with get_my_ask) or is not your own pending ask (422 invalid_replaces). " +
         "Repeating a pending ask's proposal without naming it here is refused with 409 already_pending, which names that ask's request_id. " +
         "A retry of THIS request_id replays the first receipt and does not replace again. After an expiry use supersedes_expired, not this.",
+    ),
+});
+
+/** trinity-enterprise#1066: what an agent sends to ask for a credential by name. */
+const askForCredentialParameters = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(64)
+    .describe(
+      "The environment variable the credential will be stored under, e.g. OP_SERVICE_ACCOUNT_TOKEN: letters, digits and '_', not starting with a digit, at most 64 characters. Names the platform or the agent runtime writes itself (TRINITY_*, ANTHROPIC_API_KEY and the like) are refused with invalid_credential_name.",
+    ),
+  why: z
+    .string()
+    .min(1)
+    .describe("One or two sentences the person reads beside the field: what the credential is for and where they find it (up to 4000 characters). Never include a value."),
+  request_id: z
+    .string()
+    .min(1)
+    .max(256)
+    .optional()
+    .describe(
+      "Optional id YOU choose (letters, digits, '.', '_', ':' or '-'). Left out, it is derived from the name and the current turn, so a retry in the same turn returns the first receipt (status replayed) and never asks twice. Set a new one to ask again for the same name in the same turn, e.g. after the credential was rotated.",
+    ),
+  expires_at: z
+    .string()
+    .optional()
+    .describe("An ISO-8601 time WITH a timezone, at least 15 minutes out. When it passes unanswered the ask ends denied by timeout."),
+  destination: z
+    .object({
+      instance: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("The NAME of an instance an admin registered under Settings → Integrations → Outbound A2A endpoints. Send it with agent_name only."),
+      agent_name: z.string().min(1).max(64).describe("The agent there that the credential is for."),
+      instance_url: z
+        .string()
+        .min(1)
+        .max(512)
+        .optional()
+        .describe("Older form, with key_env: the other Trinity's base URL (https://host, no path)."),
+      key_env: z
+        .string()
+        .min(1)
+        .max(64)
+        .optional()
+        .describe("Older form, with instance_url: the NAME of the variable in YOUR OWN environment that holds your key to that Trinity. The key itself never travels: the platform reads it by name when it delivers."),
+    })
+    .superRefine((v, ctx) => {
+      // trinity-enterprise#1158: exactly one shape — {instance, agent_name} or
+      // {instance_url, agent_name, key_env}; the backend refuses the same
+      // mix with destination_invalid.
+      const byName = v.instance !== undefined;
+      const byUrl = v.instance_url !== undefined || v.key_env !== undefined;
+      if (byName && byUrl) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "send instance with agent_name only, or instance_url + agent_name + key_env — not both" });
+      } else if (!byName && (v.instance_url === undefined || v.key_env === undefined)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "send instance + agent_name, or instance_url + agent_name + key_env" });
+      }
+    })
+    .optional()
+    .describe(
+      "Where the value LANDS when that is not you — an agent on another Trinity. Name it with instance: the name of an instance an admin registered under Settings → Integrations → Outbound A2A endpoints; the platform delivers under the key stored for it — you never hold it. Outbound A2A must be switched on. The older form, instance_url + key_env, delivers under the key in your own environment variable of that name. The person's field says where the value goes, it is merged into that agent's .env there, nothing is kept here, and your wake says it was delivered (it is never in your environment). Left out, the value is stored in your own environment as before. Refusals at raise (422, reason says which): destination_invalid (both shapes or neither) / destination_instance_invalid / destination_agent_invalid / destination_url_invalid / destination_key_env_invalid; ask an admin for destination_outbound_disabled / destination_not_approved (no registered instance by that name) / destination_instance_no_credential (no key stored for it); destination_key_env_missing / destination_key_invalid (older form: nothing usable in that variable). Refusals at delivery (the person sees them; nothing is stored): destination_not_approved / instance_moved (the entry now points elsewhere — ask again), destination_unreadable, destination_key_refused (the key has no inject rights there).",
     ),
 });
 
@@ -516,8 +601,9 @@ export function createOperatorQueueTools(
         "re-ask the same action without new information. A dismissed ask is the " +
         "person you addressed choosing not to answer (response empty): do not " +
         "proceed, and do not raise the same ask again straight away. Acts as the agent your " +
-        "key belongs to — there is no agent parameter.",
+        "key belongs to (admin keys: agent_name).",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         request_id: z
           .string()
           .min(1)
@@ -525,13 +611,13 @@ export function createOperatorQueueTools(
           .describe("The id you gave the ask when you raised it."),
       }),
       execute: async (
-        params: { request_id: string },
+        params: { request_id: string; agent_name?: string },
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
         let agentName: string;
         try {
-          agentName = resolveActingAgent(authContext, "The get_my_ask tool");
+          agentName = resolveActingAgent(authContext, "The get_my_ask tool", params.agent_name);
         } catch (error) {
           return JSON.stringify(
             { success: false, error: error instanceof Error ? error.message : String(error) },
@@ -539,7 +625,7 @@ export function createOperatorQueueTools(
             2,
           );
         }
-        const apiClient = getClient(authContext);
+        const apiClient = actingClient(getClient(authContext), authContext, agentName);
         try {
           const ask = await apiClient.getMyAsk(agentName, params.request_id);
           return JSON.stringify(ask, null, 2);
@@ -590,16 +676,20 @@ export function createOperatorQueueTools(
         "invalid_<field> for a malformed field, and each field's description names its " +
         "other codes and the fix. 429 rate_limited or queue_full: too " +
         "many open asks, wait for some to end. Acts as the agent your key belongs to; " +
-        "there is no agent parameter.",
-      parameters: askOperatorParameters,
+        "admin keys pass agent_name.",
+      // ent#1024: `agent_name` is the TOOL's, never the body's — extended here
+      // so `askOperatorParameters.shape` (the body allowlist below) stays as is.
+      parameters: askOperatorParameters.extend({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+      }),
       execute: async (
-        params: OperatorAskCreate,
+        params: OperatorAskCreate & { agent_name?: string },
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
         let agentName: string;
         try {
-          agentName = resolveActingAgent(authContext, "The ask_operator tool");
+          agentName = resolveActingAgent(authContext, "The ask_operator tool", params.agent_name);
         } catch (error) {
           return JSON.stringify(
             { success: false, error: error instanceof Error ? error.message : String(error) },
@@ -616,13 +706,116 @@ export function createOperatorQueueTools(
             .filter((k) => given[k] !== undefined)
             .map((k) => [k, given[k]]),
         ) as unknown as OperatorAskCreate;
-        const apiClient = getClient(authContext);
+        const apiClient = actingClient(getClient(authContext), authContext, agentName);
         try {
           const receipt = await apiClient.raiseAsk(agentName, body, authContext?.executionId);
           return JSON.stringify(receipt, null, 2);
         } catch (error) {
           const refusal = askRefusal(error);
           console.error(`[ask_operator] refused: ${String(refusal.code ?? refusal.error)}`);
+          return JSON.stringify(refusal, null, 2);
+        }
+      },
+    },
+
+    // ========================================================================
+    // ask_for_credential (trinity-enterprise#1066)
+    // ========================================================================
+    askForCredential: {
+      name: "ask_for_credential",
+      // Kept under Claude Code's 2,048-character description cap (#3234); the
+      // name rules and the request_id derivation live in the parameters.
+      description:
+        "Ask the person you are talking with for a secret you need — an API key, " +
+        "a token, a password — BY NAME. Use it only in a conversation with the " +
+        "person who holds the credential: the ask reaches the person of the current " +
+        "chat; one raised from a schedule or another agent's call goes to your owner " +
+        "instead, and is refused with no_person when no single person can be named. The person sees a masked field in their Workspace thread " +
+        "and types the value there; it is stored in your environment under the name " +
+        "you gave and never appears in the chat, the ask, its answer or your wake. " +
+        "Never ask for a secret in a plain message, and never tell the person to " +
+        "paste it into the chat: the Workspace refuses a message that looks like a " +
+        "secret. Fire and park: raise it, end your turn. When the person fills the " +
+        "field the ask ends answered with the response provided and the name only: " +
+        "read the value from your environment on your next turn (environment " +
+        "variable NAME, or the .env file in your home) and never repeat, print or " +
+        "log it. Learn how it ended from the wake when the receipt says " +
+        "wakes_on_ending, or any time with get_my_ask and the receipt's request_id. " +
+        "A dismissed ask means the person chose not to give it: do not ask again " +
+        "straight away. If you no longer need it, withdraw_ask. Refusals come back " +
+        "as {success: false, status, code, message}: 422 no_person (no single person " +
+        "to ask — ask from a chat with them), 422 role_cannot_open_agent (neither your " +
+        "primary person nor your owner can open you in their Workspace — an admin " +
+        "shares you with them), 422 invalid_credential_name (a malformed " +
+        "or reserved name; reason says which), 429 rate_limited or queue_full. Acts " +
+        "as the agent your key belongs to; there is no agent parameter. For an " +
+        "agent on another Trinity, set destination with the registered instance (see the parameter).",
+      parameters: askForCredentialParameters,
+      execute: async (
+        params: {
+          name: string;
+          why: string;
+          request_id?: string;
+          expires_at?: string;
+          destination?:
+            | { instance: string; agent_name: string }
+            | { instance_url: string; agent_name: string; key_env: string };
+        },
+        context?: { session?: McpAuthContext },
+      ) => {
+        const authContext = context?.session;
+        let agentName: string;
+        try {
+          // trinity-enterprise#1024: credentials stay out of act-as, so this tool
+          // has no agent_name, and resolveActingAgent's "pass agent_name" is wrong here.
+          if (authContext?.scope === "user") {
+            throw new Error(
+              "The ask_for_credential tool: this call requires an agent-scoped key. Asking for a " +
+                "credential is not available on behalf of an agent, so a user-scoped key can't use it.",
+            );
+          }
+          agentName = resolveActingAgent(authContext, "The ask_for_credential tool");
+        } catch (error) {
+          return JSON.stringify(
+            { success: false, error: error instanceof Error ? error.message : String(error) },
+            null,
+            2,
+          );
+        }
+        // The body is built from the declared fields only: nothing else an
+        // agent passes — least of all a value — reaches the backend.
+        const turn = authContext?.executionId;
+        const derived = `credential-${params.name}${turn ? `-${turn}` : ""}`.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 256);
+        // trinity-enterprise#1109/#1158: the matched shape's declared fields
+        // only — an instance's NAME or a key's NAME, never a key.
+        const d = params.destination;
+        const destination = !d
+          ? {}
+          : "instance" in d && d.instance !== undefined
+            ? { credential_destination: { instance: d.instance, agent_name: d.agent_name } }
+            : {
+                credential_destination: {
+                  instance_url: (d as { instance_url: string }).instance_url,
+                  agent_name: d.agent_name,
+                  key_env: (d as { key_env: string }).key_env,
+                },
+              };
+        const body: OperatorAskCreate = {
+          request_id: params.request_id ?? derived,
+          type: "credential",
+          title: `Needs ${params.name}`,
+          question: params.why,
+          context: { credential_name: params.name, ...destination },
+          to: "primary",
+          ...(params.expires_at === undefined ? {} : { expires_at: params.expires_at }),
+        };
+        const apiClient = getClient(authContext);
+        try {
+          const receipt = await apiClient.raiseAsk(agentName, body, turn);
+          return JSON.stringify(receipt, null, 2);
+        } catch (error) {
+          const refusal = askRefusal(error);
+          console.error(`[ask_for_credential] refused: ${String(refusal.code ?? refusal.error)}`);
           return JSON.stringify(refusal, null, 2);
         }
       },
@@ -648,16 +841,18 @@ export function createOperatorQueueTools(
         "is not one of your own asks (a gate's approval or the platform's alarm is " +
         "not yours to withdraw); 422 invalid_reason for a blank reason or one over " +
         "500 characters. A queue-file entry cannot be withdrawn. Acts as the agent " +
-        "your key belongs to — there is no agent parameter.",
-      parameters: withdrawAskParameters,
+        "your key belongs to (admin keys: agent_name).",
+      parameters: withdrawAskParameters.extend({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+      }),
       execute: async (
-        params: { request_id: string; reason: string },
+        params: { request_id: string; reason: string; agent_name?: string },
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
         let agentName: string;
         try {
-          agentName = resolveActingAgent(authContext, "The withdraw_ask tool");
+          agentName = resolveActingAgent(authContext, "The withdraw_ask tool", params.agent_name);
         } catch (error) {
           return JSON.stringify(
             { success: false, error: error instanceof Error ? error.message : String(error) },
@@ -667,7 +862,7 @@ export function createOperatorQueueTools(
         }
         // Only the reason travels in the body: the backend refuses unknown
         // keys (`extra="forbid"`), and the row's state is the backend's to set.
-        const apiClient = getClient(authContext);
+        const apiClient = actingClient(getClient(authContext), authContext, agentName);
         try {
           const receipt = await apiClient.withdrawAsk(agentName, params.request_id, { reason: params.reason });
           return JSON.stringify(receipt, null, 2);
@@ -696,11 +891,15 @@ export function createOperatorQueueTools(
         "instruction_required, reserved_value, not_off_menu. Only items in the " +
         "'pending' state can be resolved — responding to an already-resolved, " +
         "expired, or cancelled item, or one past its deadline, returns a " +
-        "structured error. A person answers or cancels an ask: this works with a " +
-        "person's user-scoped key; agent- and system-scoped keys are refused " +
-        "by the platform (403 person_required). An agent can only replace its " +
+        "structured error. Only a person answers or cancels an ask. WHO MAY CALL: " +
+        "a person with access to the item's agent: a signed-in session or their own " +
+        "user-scoped key. " + HUMAN_ONLY_KEYS_NOT_SHOWN.person + " An agent can only replace its " +
         "own pending ask (ask_operator, replaces) or withdraw it (withdraw_ask); the platform expires one at " +
         "its deadline. To learn how one of your own asks ended, use get_my_ask.",
+      // The route refuses every principal but a person (reject_non_person_principal,
+      // trinity-enterprise#611), so it is listed to user keys only
+      // (abilityai/trinity-enterprise#719).
+      canAccess: humanOnlyToolAccess("person"),
       parameters: z.object({
         item_id: z.string().min(1).describe("Operator queue item id to resolve."),
         response: z

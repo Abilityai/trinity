@@ -39,14 +39,22 @@
  * direction for every flag in this group — `ssh_access_enabled` defaults to
  * `"false"` server-side, and a security control that cannot read its own state
  * must not claim the permissive one.
+ *
+ * `fallback` is for the one flag whose safe side is ON:
+ * `apply_unassign_on_failed_gate` (trinity-enterprise#1068) defaults to
+ * `"true"`, and reading an absent key as off would show the report-only mode
+ * the server is not in. It applies only when the key holds no string at all;
+ * a stored string is always read as written.
  */
-export function readOpsBool(payload, key) {
+export function readOpsBool(payload, key, fallback = false) {
   const entry = payload?.settings?.[key]
   const raw = entry !== null && typeof entry === 'object' ? entry.value : entry
   // Only a string can be `"true"`; a real boolean `true` is accepted too, since
   // the column is TEXT today but nothing here should break if that changes.
   if (raw === true) return true
-  return typeof raw === 'string' && raw.trim().toLowerCase() === 'true'
+  if (raw === false) return false
+  if (typeof raw !== 'string') return fallback
+  return raw.trim().toLowerCase() === 'true'
 }
 
 /**

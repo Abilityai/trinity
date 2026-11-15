@@ -26,11 +26,12 @@ export const DELEGATION_CONTRACT_LINES: readonly string[] = [
   "**The delegation contract: a receipt means the work is running. Never re-send on silence.**",
   "- A `chat_with_*` or `fan_out` call answers with the reply or with a receipt: an `execution_id` (a `fan_out_id` for a batch) in place of the reply, whatever its status (`accepted`, `queued`, `queued_timeout`, `fan_out_timeout`). The work arrived and is queued, running or done, even if your call timed out.",
   "- Never re-send because a call timed out or its delivery could not be confirmed. An exact repeat is normally answered with the original; a reworded one can run the work twice.",
-  "- Read the result with `get_execution_result(agent_name, execution_id)` (`get_fan_out_result` for a batch); `running` is not stuck. To finish later, call `set_reminder` with a message naming the `execution_id`, then end your turn. A receipt is not a result: never report the work as done.",
+  "- Read the result with `get_execution_result(agent_name, execution_id)` (`get_fan_out_result` for a batch); `running` is not stuck. A receipt is not a result: never report the work as done.",
   "- Confirmed `failed` or `cancelled`: re-send word for word to retry; same `execution_id` back: `set_reminder`, end your turn.",
   "- An error without an `execution_id` is not proof that nothing ran. Look for your exact message in `list_recent_executions(agent_name)`: one match is your receipt; otherwise re-send it word for word, same options. On `agent_busy` nothing ran: re-send after `retry_after_seconds`.",
   "- `pending_approval`: nothing ran. Do not retry or route it through another agent; its `message` says whether you will hear the outcome. On `retryable: false`, do what it says.",
-  "- For long work use `parallel=true, async=true`: the receipt comes back at once, and the run's end fires the target's `agent.task.completed` / `agent.task.failed`. A `subscribe_to_event` subscription to those wakes you for every run of that agent, so match the `execution_id`.",
+  "- For long work use `parallel=true, async=true`: the receipt comes back at once, and the run's end fires the target's `agent.task.completed` / `agent.task.failed` to any `subscribe_to_event` subscription.",
+  "- The receipt's `wake` field says who brings you the ending. `on_ending`: a turn is started on you when the run ends, so end your turn and never set a reminder for it. `none`: nobody will, and `wake_reason` says why — `set_reminder` to finish later.",
 ];
 
 export const DELEGATION_CONTRACT = DELEGATION_CONTRACT_LINES.join("\n");

@@ -208,6 +208,10 @@ Run on **both** engines (SQLite supported until EOS 2026-09-01), even though loc
 | T8.1 | Poison-park item renders in Operating Room | `poison-{eid}` visible + actionable. |
 | T8.2 | Feature-flag surface | `mcp_agent_chat_pull_enabled` / `redelivery_governor_enabled` correct in `/api/settings/feature-flags`. |
 | T8.3 | Standalone scheduler blind spot | `src/scheduler/database.py` writes the same table with raw non-CAS SQL, outside the #1082 AST guard. Verify it never touches leased/pull rows. |
+| T8.4 | Queue wait is readable (#4257) | A queued `/task` receipt carries `queued_at`, `queue_position` and `wait_reason`; on an idle pilot the reason is `worker_claim`, and `queued_at` still matches the original admission after a claim + release. |
+| T8.5 | Stall alert fires and clears (#4257) | Park a pilot's head past `queue_stall_alert_minutes` (lower it to 5 for the run): exactly one pending `dispatch_queue_stalled` row per agent within one maintenance tick, re-read updates it in place, and claiming the head clears it on the next tick. |
+| T8.6 | De-piloted worker is visible, not silent (#4257) | Remove a running pilot from `PULL_MODE_PILOT_AGENTS` and restart the backend: the worker's claims are refused, one WARNING per status per process on the worker side, `agent:pull_claim_denied:{name}` climbs, and the alert context shows recent polls WITH refusals. An unauthenticated `GET /api/internal/next-task?agent_name=<anything>` must create no such key and emit no WARNING. |
+| T8.7 | A push agent at capacity is not alerted as a drain (#4257) | Push agent, `max_parallel=1`, one long turn running and a second `/task` queued past the threshold: the alert reason is `capacity`, never `backlog_drain`. |
 
 ---
 
@@ -486,17 +490,19 @@ passed `overflow_policy="queue_persistent"`. Two of the three producers can:
 |---|---|---|---|
 | `task_execution_service` | scheduler — **all cron** and its RETRY-001 retries — webhooks, reminders, loops, fan-out, A2A, operator resumes | `queue_persistent` **when `pull_owns_dispatch` is true**, else `reject` | **Yes**, for every autonomous trigger it carries |
 | `dispatch_admission_service` | sequential `chat_with_agent`, human chat | `queue_in_memory` | **No** |
-| `chat_execution_service` (`POST /task`) | parallel `chat_with_agent`, MCP/manual task | `queue_persistent` | **Yes**, for `agent` / `event` |
+| `chat_execution_service` (`POST /task`) | parallel `chat_with_agent`, an agent's task to itself, MCP/manual task | `queue_persistent` | **Yes**, for `agent` / `event` / `self_task` |
 
 `POST /task` can only derive `triggered_by ∈ {self_task, agent, mcp, manual,
-event}`, contributing `agent` + `event`. `task_execution_service` contributes the
+event}`, contributing `agent`, `event` and `self_task` (#4105). `task_execution_service` contributes the
 autonomous triggers with **no synchronous result consumer**: `schedule`,
 `webhook`, `reminder` and `retry` (#2845 — RETRY-001's next attempt at a failed
 run), all of which reach it from the scheduler, which
 dispatches `async_mode=True` and then polls the DB for the terminal, plus `loop`
 (#2523) and `fan_out` (#2524) since their orchestrators stopped holding the work
 in a coroutine, plus `a2a` and `operator_response` (#2524) through
-`task_execution_service.dispatch_and_await_terminal`. The pullable set is
+`task_execution_service.dispatch_and_await_terminal`, plus `skill_gate` (#4105 —
+the wake of a requester whose gated request was decided; its caller ignores the
+result). The pullable set is
 therefore **every autonomous trigger** (`pull_pilot.PULL_REACHABLE_TRIGGERS`,
 which stays an enumerated allow-list on purpose — a trigger added to
 `_AUTONOMOUS_TRIGGERS` later must be classified, not inherit reach).
@@ -519,8 +525,10 @@ indistinguishable:
 Any pushed **autonomous** row on a pilot is now a real fault: check the backend
 actually has `PULL_MODE_PILOT_AGENTS` in its env (and see G1 in §6 — compose must
 forward it). The `[#2048]` diagnostic still exists but is unreachable by design —
-if you ever see it, a NEW trigger was added to `_AUTONOMOUS_TRIGGERS` without
-being classified against dispatch topology:
+if you ever see it, a trigger a producer writes is in no pull set (#4105:
+`self_task` was, and ran above `max_parallel_tasks` invisibly to M3 and S-02).
+It fires from `execute_task` and from `capacity_manager.acquire` (the `POST
+/task` route), once per agent and trigger:
 ```bash
 docker logs trinity-backend 2>&1 | grep '\[#2048\]'
 ```

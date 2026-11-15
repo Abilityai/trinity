@@ -1,0 +1,143 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-02",
+  "mode": "diff-daily",
+  "scope": "feature/871-capability-used-audit vs origin/dev (merge-base c8f67cb85)",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    12,
+    13,
+    14
+  ],
+  "stack_cve_quicklist": [
+    {
+      "component": "Starlette",
+      "verdict": "patched",
+      "note": "no gate reads request.url.path in dependencies.py or routers"
+    },
+    {
+      "component": "Claude Code",
+      "verdict": "patched",
+      "note": "pin 2.1.281"
+    },
+    {
+      "component": "Node CLIs in the base image",
+      "verdict": "patched",
+      "note": "gemini-cli and codex pinned"
+    }
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_routes": 1,
+    "new_mcp_tools": 0
+  },
+  "findings": [
+    {
+      "id": 1,
+      "title": "A capability holder reached the system agent",
+      "severity": "high",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "broken-access-control",
+      "owasp_2025": "A01",
+      "asi": "ASI03",
+      "llm": null,
+      "phase": 7,
+      "file": "src/backend/dependencies.py",
+      "symbol": "owner_owns_agent",
+      "origin": "pre-existing",
+      "resolution": "fixed on this branch"
+    },
+    {
+      "id": 2,
+      "title": "An edge skipped the owner bound on the file routes",
+      "severity": "medium",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "broken-access-control",
+      "owasp_2025": "A01",
+      "asi": "ASI03",
+      "llm": null,
+      "phase": 9,
+      "file": "src/backend/services/agent_service/files.py",
+      "symbol": "_require_skill_capability",
+      "origin": "pre-existing",
+      "resolution": "fixed on this branch"
+    },
+    {
+      "id": 3,
+      "title": "The create row named the raw body, not the agent",
+      "severity": "low",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "security-logging",
+      "owasp_2025": "A09",
+      "asi": null,
+      "llm": null,
+      "phase": 9,
+      "file": "src/backend/routers/agents.py",
+      "symbol": "_require_create_capability",
+      "origin": "new on this branch",
+      "resolution": "fixed on this branch"
+    }
+  ],
+  "hypotheses": [
+    {
+      "title": "CSV export writes formula cells raw",
+      "severity": "low",
+      "file": "src/backend/routers/audit_log.py",
+      "missing_link": "an admin must export and open the file; evaluation not shown",
+      "decision": "recorded, no action"
+    }
+  ],
+  "tracked_outside_diff": [
+    {
+      "ref": "#4025",
+      "title": "create-mode deploy overwrites the platform prompt",
+      "note": "reproduced for an agent key"
+    }
+  ],
+  "coverage_gaps": [
+    "Docker pass not run (no image change)",
+    "No dependency scanner run (no dependency change)",
+    "PostgreSQL not exercised (TEST_POSTGRES_URL unset)",
+    "Variant analysis stops at the capability paths named in the report"
+  ],
+  "supply_chain_summary": {
+    "scanner": "none (no dependency change)"
+  },
+  "filter_stats": {
+    "candidates": 8,
+    "reported": 3,
+    "hypotheses": 1,
+    "tracked_elsewhere": 1,
+    "dropped": 3
+  },
+  "verifier": "independent attacker pass, then a fresh verifier given only the claims; reproduced through real routers",
+  "totals": {
+    "critical": 0,
+    "high": 1,
+    "medium": 1,
+    "low": 1
+  },
+  "trend": {
+    "prior": "cso-diff-2026-11-01-4121-write-door-live-turn",
+    "resolved": 3,
+    "persistent": 0,
+    "new": 3
+  },
+  "counts_as_full_run": false
+}

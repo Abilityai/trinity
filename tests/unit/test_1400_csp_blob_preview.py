@@ -66,6 +66,10 @@ _CONNECT_SRC_FROZEN = frozenset({
     "wss:",
     "https://us-central1-mcp-server-project-455215.cloudfunctions.net",
     "https://intake.abilityai.dev",
+    # ent#967: the Nevermined widget SDK refreshes its session with two
+    # top-level fetch() calls, so the parent page CSP must allow both hosts.
+    "https://api.sandbox.nevermined.app",
+    "https://api.live.nevermined.app",
 })
 
 # Directives that MUST include blob: so blob: URLs render / are fetchable.

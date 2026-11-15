@@ -80,7 +80,7 @@ jobs:
           cd tests
           python -m pytest unit/ -m "not slow" \
             --timeout=300 --timeout-method=signal \
-            -n auto --dist loadfile \
+            -n logical --dist loadfile \
             -p randomly --randomly-seed=${{ matrix.seed }} \
             --junit-xml="$GITHUB_WORKSPACE/junit-dev-${{ matrix.seed }}.xml" \
             --tb=no -q || true

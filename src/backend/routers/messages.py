@@ -1,3 +1,4 @@
+# mcp: messages.ts (send_message → POST /api/agents/{name}/messages); the proactive-shares consent toggle (person-only, ent#872) and its read are owner UI, not exposed
 """
 Proactive Messaging Router (Issue #321).
 
@@ -17,6 +18,7 @@ from models import (
 
 from database import db
 from dependencies import get_current_user, AuthorizedAgentByName, assert_agent_owner, require_person
+from services.tool_access_guard import assert_tool_allowed
 from db_models import User
 from services import role_addressing
 from services.idempotency_service import EffectInProgressError, EffectUnguardedError
@@ -55,7 +57,11 @@ async def send_proactive_message(
     Rate limited to 10 messages per recipient per hour.
     """
 
+    # trinity-enterprise#341: refused when this agent's tool access removes send_message.
+    assert_tool_allowed(current_user, "send_message", as_agent=agent_name)
     recipient = _recipient(agent_name, request, current_user)
+    # ent#1221: only the agent's own key writes into a person's Workspace.
+    caller_agent = getattr(current_user, "agent_name", None)
     try:
         result = await proactive_message_service.send_message(
             agent_name=agent_name,
@@ -67,14 +73,16 @@ async def send_proactive_message(
             dedup_label=request.dedup_label,
             idempotency_key=request.idempotency_key,
             idempotency_ttl=request.idempotency_ttl,
+            as_agent_key=bool(caller_agent) and caller_agent == agent_name,
         )
 
-        # ent#665 fields are set only when a key was supplied, so with
-        # exclude_unset a keyless response is unchanged.
+        # ent#665 fields are set only when a key was supplied, and ent#1221's
+        # `delivery` only for a Workspace delivery, so with exclude_unset every
+        # other response is unchanged.
         intent_fields = {
-            k: getattr(result, k)
-            for k in ("sent", "suppressed_by", "first_sent_at", "first_execution_id")
-            if getattr(result, k) is not None
+            k: getattr(result, k, None)
+            for k in ("sent", "suppressed_by", "first_sent_at", "first_execution_id", "delivery")
+            if getattr(result, k, None) is not None
         }
         return SendMessageResponse(
             success=result.success,
@@ -103,9 +111,16 @@ async def send_proactive_message(
         raise HTTPException(status_code=429, detail=str(e))
 
     except RecipientNotFoundError as e:
-        raise HTTPException(status_code=404, detail=_role_only(
+        # ent#1221: say why, per channel — codes only, never an address.
+        channels = getattr(e, "channels", None) or (
+            {request.channel: e.reason} if getattr(e, "reason", None) else {})
+        role = _role_only(
             request, "role_no_channel",
-            "No delivery channel reaches the person in the {role} role.") or str(e))
+            "No delivery channel reaches the person in the {role} role.")
+        if role is not None:
+            raise HTTPException(status_code=404, detail={**role, "channels": channels})
+        raise HTTPException(status_code=404, detail={
+            "code": "no_channel", "message": str(e), "channels": channels})
 
     except ChannelDeliveryError as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -128,51 +143,21 @@ def _role_only(request: SendMessageRequest, code: str, message: str):
 
 
 def _recipient(agent_name: str, request: SendMessageRequest, current_user: User = None) -> str:
-    """The one person this message goes to (ent#606).
-
-    `to` names a role, resolved by the same rule asks and reports use
-    (`services/role_addressing`). A role nobody fills, or that several people
-    fill, is refused by name — a message has one recipient, and silently picking
-    one of several is exactly what the ruling forbids. `recipient_email` still
-    works for two releases and is logged as deprecated.
-
-    trinity-enterprise#904: `primary` with no seat written falls back to the
-    agent's owner HERE, on the message surface only. The resolver keeps the
-    ent#606 rule (asks go to the operators, a gate approval refuses), because
-    the same resolver decides who may approve a gated skill; this is an address,
-    not a grant. Without the stand-in, an agent on a fresh enterprise install has
-    no sanctioned way to message a person.
-    """
-    if not request.to:
-        # Same condition as reports: only an agent key choosing a person by
-        # email is the migration the log tracks; a human sender is not.
-        if current_user is not None and current_user.agent_name:
-            role_addressing.log_email_addressing(agent_name, "message")
-        return request.recipient_email
+    """The one person this message goes to (ent#606). The rule is the service's
+    (`role_addressing.resolve_single_recipient`, shared with send_voice_reply);
+    this only maps a refusal to its 422."""
     try:
-        r = role_addressing.resolve(agent_name, request.to)
-    except role_addressing.RoleRefused as e:
-        raise HTTPException(status_code=422, detail={
-            "code": e.code, "role": e.role, "message": e.message + " Message primary instead."})
-    if len(r.people) > 1:
-        raise HTTPException(status_code=422, detail={
-            "code": "role_resolves_to_several", "role": request.to, "count": len(r.people),
-            "message": f"{len(r.people)} people fill the {request.to} role and a message has "
-                       "one recipient — message primary, or raise an ask."})
-    if not r.single and request.to == "primary":
-        owner = role_addressing.owner_email(agent_name)
-        if owner:
-            return owner
-        raise HTTPException(status_code=422, detail={
-            "code": "role_unassigned", "role": request.to,
-            "message": "Nobody fills the primary role for this agent yet, and its owner has "
-                       "no email address. An admin can assign a primary in the agent's "
-                       "Access tab."})
-    if not r.single:
-        raise HTTPException(status_code=422, detail={
-            "code": "role_unassigned", "role": request.to,
-            "message": f"Nobody fills the {request.to} role for this agent yet."})
-    return r.single
+        return role_addressing.resolve_single_recipient(
+            agent_name,
+            to=request.to,
+            recipient_email=request.recipient_email,
+            surface="message",
+            # Same condition as reports: only an agent key choosing a person by
+            # email is the migration the log tracks; a human sender is not.
+            by_agent_key=bool(current_user is not None and current_user.agent_name),
+        )
+    except role_addressing.RecipientRefused as e:
+        raise HTTPException(status_code=422, detail=e.detail)
 
 
 @router.put("/{agent_name}/shares/proactive", response_model=dict)

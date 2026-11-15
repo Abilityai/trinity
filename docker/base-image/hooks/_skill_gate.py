@@ -31,10 +31,17 @@ before anything that could be steered by it is imported or called, and the
 request follows no proxy and no redirect.
 
 Not a boundary against an adversarial executor (passwordless sudo; acting on a
-SKILL.md it read; a nested `claude` it starts, with an execution id it sets or a
-`/<skill>` prompt that expands with no tool call) — the boundary
-is credential confinement. This stops the ordinary path: a request that names a
-gated skill in prose, and the model loading it.
+SKILL.md it read; a nested coding-agent CLI started past the Bash guardrail) —
+the boundary is credential confinement. This stops the ordinary path: a request
+that names a gated skill in prose, and the model loading it.
+
+A nested `claude` is out of this hook's reach: it is checked as whatever
+execution id it was started with, and in it a `/<skill>` prompt expands with no
+tool call. So on an agent with gates, `gated_bash_deny` refuses `claude`, `codex`
+and `gemini` from the Bash tool (`bash-guardrail.py`, trinity-enterprise#1002).
+That stops the ordinary spelling. A script file, an interpreter or a wrapper it
+does not list can still start the CLI; whether that CLI signs in depends on how
+the agent authenticates (CLI_FACTS_TO_REAUDIT).
 
 Stdlib only; runs under `-I -S`.
 """
@@ -77,6 +84,11 @@ CLI_FACTS_TO_REAUDIT = (
     "argv); Trinity agents run unsandboxed.",
     "The CLI reads user skills and agents from CLAUDE_CONFIG_DIR when it is set in its "
     "environment, else ~/.claude.",
+    "A Bash tool child does not inherit CLAUDE_CODE_OAUTH_TOKEN, so a nested claude on an agent "
+    "with only that token answers Not logged in; ANTHROPIC_API_KEY reaches the child, and "
+    "~/.claude/.credentials.json is read from disk, so either one signs a nested claude in.",
+    "A -p or --print before any `--` skips subcommand parsing, so `claude mcp -p x` is a model "
+    "session; --version and --help still exit first. gated_bash_deny relies on this.",
 )
 
 MARKER = "/opt/trinity/skill-gates-active"

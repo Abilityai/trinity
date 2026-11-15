@@ -6,11 +6,35 @@
  * - get_nevermined_config: Read payment config
  * - toggle_nevermined: Enable/disable payments
  * - get_nevermined_payments: Payment history
+ * - get_agent_spending: What the agent can still spend from its Nevermined card mandate (ent#966)
+ * - revoke_agent_delegation: Revoke the agent's Nevermined card mandate (ent#966)
  */
 
 import { z } from "zod";
-import { TrinityClient } from "../client.js";
+import { ApiError, TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { accessDenied, HUMAN_ONLY_WHO_MAY_CALL, humanOnlyToolAccess } from "../access.js";
+
+/**
+ * The backend `detail` of a refusal, readable: a string, or the
+ * `{code, message}` envelope the delegation routes and `require_person` use.
+ * Never the raw body — a 403 without a JSON `detail` gets a fixed sentence.
+ */
+function refusalDetail(error: ApiError): { message: string; code?: string } {
+  try {
+    const parsed = JSON.parse(error.body);
+    const d = parsed?.detail;
+    if (typeof d === "string") return { message: d };
+    if (d && typeof d.message === "string") {
+      return { message: d.message, ...(typeof d.code === "string" ? { code: d.code } : {}) };
+    }
+  } catch {
+    // not JSON — keep the fixed sentence; the body is never echoed
+  }
+  return { message: `Access denied (HTTP ${error.status})` };
+}
+
+const AGENT_NOT_FOUND = { error: "agent_not_found_or_no_access" };
 
 /**
  * Create Nevermined payment tools with the given client
@@ -39,8 +63,11 @@ export function createNeverminedTools(
       name: "configure_nevermined",
       description:
         "Configure Nevermined x402 payment settings for an agent. " +
-        "Requires owner or admin access. The NVM API key is encrypted at rest. " +
-        "Key format: 'env:jwt' (e.g., 'sandbox:eyJhbGci...').",
+        "The NVM API key is encrypted at rest. " +
+        "Key format: 'env:jwt' (e.g., 'sandbox:eyJhbGci...'). " +
+        HUMAN_ONLY_WHO_MAY_CALL.interactive +
+        " Configure it on the agent's Payments tab in the web UI instead.",
+      canAccess: humanOnlyToolAccess("interactive"),
       parameters: z.object({
         agent_name: z.string().describe("Agent name to configure"),
         nvm_api_key: z.string().describe("NVM API Key in 'env:jwt' format"),
@@ -117,7 +144,8 @@ export function createNeverminedTools(
       description:
         "Enable or disable Nevermined payments for an agent. " +
         "Agent must have a Nevermined config before enabling. " +
-        "Requires owner or admin access.",
+        HUMAN_ONLY_WHO_MAY_CALL.person,
+      canAccess: humanOnlyToolAccess("person"),
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),
         enabled: z.boolean().describe("Whether to enable (true) or disable (false) payments"),
@@ -152,6 +180,90 @@ export function createNeverminedTools(
         const apiClient = getClient(context?.session);
         const result = await apiClient.getNeverminedPayments(params.agent_name, params.limit);
         return JSON.stringify({ payments: result, count: result.length }, null, 2);
+      },
+    },
+
+    // ========================================================================
+    // get_agent_spending - Live budget of the agent's Nevermined card mandate (ent#966)
+    // ========================================================================
+    getAgentSpending: {
+      name: "get_agent_spending",
+      description:
+        "Read what this agent can still spend from its Nevermined card mandate " +
+        "(remaining cents, expiry, purchases used) — live from Nevermined, " +
+        "'unknown' if Nevermined is unreachable. Agent keys: own agent only.",
+      parameters: z.object({
+        agent_name: z.string().describe(
+          "Agent whose Nevermined spending to read. An agent-scoped key may only pass its own name.",
+        ),
+      }),
+      execute: async (
+        params: { agent_name: string },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const apiClient = getClient(context?.session);
+        try {
+          // 200 in every non-error state (configured:false, funded:false,
+          // live.status:"unknown") — the body is passed through as-is.
+          const result = await apiClient.getAgentSpending(params.agent_name);
+          return JSON.stringify(result, null, 2);
+        } catch (error) {
+          // Uniform 404 (#186): missing, inaccessible, or a sibling read with an
+          // agent key — one answer, never "configured: false".
+          if (error instanceof ApiError && error.status === 404) {
+            return JSON.stringify(AGENT_NOT_FOUND, null, 2);
+          }
+          throw error;
+        }
+      },
+    },
+
+    // ========================================================================
+    // revoke_agent_delegation - Revoke the agent's Nevermined card mandate (ent#966)
+    // ========================================================================
+    revokeAgentDelegation: {
+      name: "revoke_agent_delegation",
+      description:
+        "Revoke the agent's Nevermined card mandate. Immediate: Nevermined refuses " +
+        "the agent's next paid call; Trinity removes NVM_DELEGATION_ID from the agent. " +
+        HUMAN_ONLY_WHO_MAY_CALL.person,
+      // ent#966 (M6): the route takes `require_person`, which refuses agent and
+      // system keys alike, so it is listed to user keys only
+      // (abilityai/trinity-enterprise#719).
+      canAccess: humanOnlyToolAccess("person"),
+      parameters: z.object({
+        agent_name: z.string().describe("Agent whose Nevermined card mandate to revoke"),
+      }),
+      execute: async (
+        params: { agent_name: string },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const apiClient = getClient(context?.session);
+        try {
+          const result = await apiClient.revokeAgentDelegation(params.agent_name);
+          return JSON.stringify(result, null, 2);
+        } catch (error) {
+          if (!(error instanceof ApiError)) throw error;
+          if (error.status === 404) {
+            const { code, message } = refusalDetail(error);
+            // An agent with no active mandate is a named 404; anything else is
+            // the uniform agent 404.
+            if (code === "no_active_delegation") {
+              return JSON.stringify({ success: false, error: message, code }, null, 2);
+            }
+            return JSON.stringify(AGENT_NOT_FOUND, null, 2);
+          }
+          if (error.status === 403) {
+            const { code, message } = refusalDetail(error);
+            return accessDenied(context, {
+              success: false,
+              error: message,
+              ...(code ? { code } : {}),
+              not_authorized: true,
+            });
+          }
+          throw error;
+        }
       },
     },
   };

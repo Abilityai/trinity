@@ -24,15 +24,19 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, Depends
 
 from database import db
+from utils.log_masking import masked_traceback
 from services import channel_history, idempotency_service, rate_limiter
 from services.settings_service import get_proactive_rate_limit
 from services.telegram_group_context import flag_from_bot_info, group_context_status  # ent#600
 from dependencies import (
     AuthorizedAgentByName,
     OwnedAgentByName,
+    assert_person,
     get_current_user,
-    reject_agent_principal,
+    require_interactive,
+    require_person,
 )
+from services.tool_access_guard import assert_tool_allowed
 from models import (
     TelegramBindingResponse,
     TelegramConfigureRequest,
@@ -98,7 +102,11 @@ def _progress_indicator_enabled(binding: dict) -> bool:
     return v is None or v != 0
 
 
-@auth_router.get("/{agent_name}/telegram", response_model=TelegramBindingResponse)
+@auth_router.get(
+    "/{agent_name}/telegram",
+    response_model=TelegramBindingResponse,
+    dependencies=[Depends(require_person)],
+)
 async def get_telegram_binding(
     agent_name: AuthorizedAgentByName,
 ):
@@ -106,7 +114,9 @@ async def get_telegram_binding(
 
     Access hardened in ent#264 (previously any authenticated user): the
     response includes ``webhook_url``, which embeds the webhook secret —
-    owner/shared/admin only, uniform-404 accessor (Invariant #8).
+    owner/shared/admin only, uniform-404 accessor (Invariant #8). A person
+    only (trinity-enterprise#719): the response carries the webhook secret,
+    so the read is ruled on sensitivity. A person it is shared with keeps it.
     """
     binding = db.get_telegram_binding(agent_name)
     if not binding:
@@ -114,21 +124,29 @@ async def get_telegram_binding(
 
     bot_username = binding.get("bot_username")
     groups = db.get_telegram_groups_for_agent(agent_name)
+    # The column is never cleared: it counts only under the current Public URL.
+    from services.settings_service import settings_service
+    public_url = settings_service.get_public_chat_url_setting()
+    webhook_url = binding.get("webhook_url")
+    if not public_url or not (webhook_url or "").startswith(public_url + "/"):
+        webhook_url = None
     return TelegramBindingResponse(
         agent_name=agent_name,
         bot_username=bot_username,
         bot_id=binding.get("bot_id"),
-        webhook_url=binding.get("webhook_url"),
+        webhook_url=webhook_url,
         bot_link=f"https://t.me/{bot_username}" if bot_username else None,
         configured=True,
         group_count=len(groups),
         progress_indicator_enabled=_progress_indicator_enabled(binding),
+        public_url_set=bool(public_url),
     )
 
 
 @auth_router.put(
     "/{agent_name}/telegram/progress-indicator",
     response_model=TelegramBindingResponse,
+    dependencies=[Depends(require_person)],
 )
 async def set_telegram_progress_indicator(
     agent_name: OwnedAgentByName,
@@ -140,9 +158,11 @@ async def set_telegram_progress_indicator(
     Dedicated route (mirrors ``PUT /voip/enabled``) so toggling never requires
     re-entering the bot token. Human-only: an agent-scoped key resolves to the
     OWNER on REST, so ownership checks alone would let an agent flip its own
-    user-facing behavior toggle (ent#223 lesson).
+    user-facing behavior toggle (ent#223 lesson). The route gate is
+    ``require_person`` (trinity-enterprise#719): only a person passes. The
+    inline ``assert_person`` is the same allowlist, for direct callers.
     """
-    reject_agent_principal(current_user)
+    assert_person(current_user)
 
     binding = db.get_telegram_binding(agent_name)
     if not binding:
@@ -166,7 +186,11 @@ async def set_telegram_progress_indicator(
     )
 
 
-@auth_router.put("/{agent_name}/telegram", response_model=TelegramBindingResponse)
+@auth_router.put(
+    "/{agent_name}/telegram",
+    response_model=TelegramBindingResponse,
+    dependencies=[Depends(require_interactive)],
+)
 async def configure_telegram_bot(
     agent_name: OwnedAgentByName,
     config: TelegramConfigureRequest,
@@ -175,7 +199,9 @@ async def configure_telegram_bot(
     Configure a Telegram bot for an agent.
 
     Validates the bot token via getMe API, stores encrypted,
-    and registers the webhook if a public URL is available.
+    and registers the webhook if a public URL is available. Binding a bot
+    token binds a credential, so it takes a signed-in session
+    (``require_interactive``, trinity-enterprise#719).
     """
     bot_token = config.bot_token.strip()
 
@@ -200,7 +226,13 @@ async def configure_telegram_bot(
             bot_id = str(bot_info.get("id"))
 
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Could not reach Telegram API: {e}")
+        # py/stack-trace-exposure (ent#1117): the bot token is a path segment
+        # of every Telegram API URL, so the logged traceback masks it.
+        logger.error("Could not reach Telegram API: %s", masked_traceback(e, config.bot_token))
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not reach Telegram API ({e.__class__.__name__} — details in backend logs)",
+        )
 
     # Check bot_id isn't already bound to another agent
     existing = db.get_telegram_binding_by_bot_id(bot_id)
@@ -222,7 +254,7 @@ async def configure_telegram_bot(
 
     # Register webhook if public URL is available
     from services.settings_service import settings_service
-    public_url = settings_service.get_setting("public_chat_url", "")
+    public_url = settings_service.get_public_chat_url_setting()
     warning: Optional[str] = None
     if public_url:
         from adapters.transports.telegram_webhook import register_webhook
@@ -255,10 +287,11 @@ async def configure_telegram_bot(
         progress_indicator_enabled=(
             _progress_indicator_enabled(binding) if binding else True
         ),
+        public_url_set=bool(public_url),
     )
 
 
-@auth_router.delete("/{agent_name}/telegram")
+@auth_router.delete("/{agent_name}/telegram", dependencies=[Depends(require_person)])
 async def delete_telegram_binding(
     agent_name: OwnedAgentByName,
 ):
@@ -278,7 +311,35 @@ async def delete_telegram_binding(
     return {"ok": True, "message": f"Telegram bot removed from {agent_name}"}
 
 
-@auth_router.post("/{agent_name}/telegram/test")
+async def _ensure_webhook(agent_name: str, bot_token: str) -> Optional[str]:
+    """None when Telegram can deliver to this agent, else the reason.
+
+    Reads Telegram's own record (getWebhookInfo): the stored ``webhook_url``
+    column is never cleared, so it stays set after the Public URL changes or
+    is deleted. Registers the webhook when Telegram holds none, or one for
+    another URL (e.g. the Public URL was saved after the bot was connected
+    and that registration failed)."""
+    from services.settings_service import settings_service
+    from adapters.transports import telegram_webhook as tw
+    public_url = settings_service.get_public_chat_url_setting()
+    if not public_url:
+        return "no Public URL is set in Settings"
+    binding = db.get_telegram_binding(agent_name)
+    if not binding:
+        return "no Telegram binding for this agent"
+    info, error = await tw.get_webhook_info(bot_token)
+    if error:
+        return error
+    if info.get("url") != tw.webhook_url_for(public_url, binding["webhook_secret"]):
+        return await tw.set_webhook(agent_name, public_url)
+    # Telegram keeps the last error after delivery recovers; an update still
+    # waiting means delivery is failing now.
+    if info.get("last_error_message") and info.get("pending_update_count"):
+        return f"Telegram cannot deliver to {public_url}: {info['last_error_message']}"
+    return None
+
+
+@auth_router.post("/{agent_name}/telegram/test", dependencies=[Depends(require_person)])
 async def test_telegram_bot(
     agent_name: OwnedAgentByName,
     test: TelegramTestRequest,
@@ -301,15 +362,30 @@ async def test_telegram_bot(
                     db.set_telegram_can_read_all_group_messages(
                         agent_name, flag_from_bot_info(bot_info)
                     )
+                    username = bot_info.get("username")
+                    webhook_error = await _ensure_webhook(agent_name, bot_token)
+                    if webhook_error is None:
+                        msg = f"Bot @{username} is operational"
+                    else:
+                        msg = (
+                            f"Bot @{username} is reachable, but Telegram cannot "
+                            f"deliver messages to it: {webhook_error}"
+                        )
                     return {
-                        "ok": True,
-                        "message": f"Bot @{bot_info.get('username')} is operational",
+                        "ok": webhook_error is None,
+                        "message": msg,
+                        "webhook_registered": webhook_error is None,
+                        "webhook_error": webhook_error,
                         "bot_info": bot_info,
                     }
                 else:
                     return {"ok": False, "message": result.get("description", "Unknown error")}
         except Exception as e:
-            return {"ok": False, "message": str(e)}
+            logger.error("Could not verify the bot: %s", masked_traceback(e, bot_token))
+            return {
+                "ok": False,
+                "message": f"Could not verify the bot ({e.__class__.__name__} — details in backend logs)",
+            }
 
     # Send test message to specific chat
     try:
@@ -328,7 +404,11 @@ async def test_telegram_bot(
             else:
                 return {"ok": False, "message": result.get("description", "Failed to send")}
     except Exception as e:
-        return {"ok": False, "message": str(e)}
+        logger.error("Could not send the test message: %s", masked_traceback(e, bot_token))
+        return {
+            "ok": False,
+            "message": f"Could not send the test message ({e.__class__.__name__} — details in backend logs)",
+        }
 
 
 # =========================================================================
@@ -385,7 +465,9 @@ async def update_telegram_group(
     if config.allow_proactive is not None or config.context_enabled is not None:
         # ent#600: recording a group's conversation is the owner's privacy
         # decision — same grant-vs-use line as the consent arm above.
-        reject_agent_principal(current_user)
+        # trinity-enterprise#719: the PERSON allowlist — only a session or the
+        # person's own user key passes.
+        assert_person(current_user)
 
     # Validate trigger_mode if provided
     # Issue #349: Added 'observe' mode - agent sees all messages but can return [NO_REPLY]
@@ -431,7 +513,10 @@ async def update_telegram_group(
     return _group_config_response(binding, updated).model_dump()
 
 
-@auth_router.delete("/{agent_name}/telegram/groups/{group_config_id}")
+@auth_router.delete(
+    "/{agent_name}/telegram/groups/{group_config_id}",
+    dependencies=[Depends(require_person)],
+)
 async def delete_telegram_group(
     agent_name: OwnedAgentByName,
     group_config_id: int,
@@ -467,6 +552,7 @@ async def send_telegram_group_message(
     agent_name: OwnedAgentByName,
     chat_id: str,
     request: TelegramGroupMessageRequest,
+    current_user: User = Depends(get_current_user),
 ):
     """
     Send a proactive message to a Telegram group (Issue #349).
@@ -474,6 +560,8 @@ async def send_telegram_group_message(
     The agent must have an active binding for this group. Rate limited to
     prevent spam: 10 messages/hour/group and 100 messages/hour/agent.
     """
+    # trinity-enterprise#341: refused when this agent's tool access removes send_group_message.
+    assert_tool_allowed(current_user, "send_group_message", as_agent=agent_name)
     # Validate binding exists
     binding = db.get_telegram_binding(agent_name)
     if not binding:

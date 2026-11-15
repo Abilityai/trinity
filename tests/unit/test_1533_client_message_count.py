@@ -413,6 +413,7 @@ _OPEN = {"require_email": False, "open_access": True, "group_auth_mode": "none"}
 @contextmanager
 def _env(policy: dict):
     db = MagicMock()
+    db.is_channel_client_blocked.return_value = False  # ent#21: not blocked
     db.get_access_policy.return_value = policy
     db.email_has_agent_access.return_value = False
     db.get_or_create_public_chat_session.return_value = {"id": "s1"}

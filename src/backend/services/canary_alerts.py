@@ -124,6 +124,8 @@ class CanaryAlerts:
         "B-08": "Pull workers not alive",
         "R-01": "Zombie Claude process",
         "H-01": "Canary is blind (collector sees no fleet)",
+        "RD-04": "Git health not measured",
+        "RD-05": "Git maintenance falling behind",
     }
 
     # One-line runbook hint per invariant. Kept short on purpose —
@@ -262,6 +264,27 @@ class CanaryAlerts:
             "means the independent sources were unreachable, never read, or "
             "only Redis had anything to say (a slot key alone cannot tell a "
             "blind collector from an L-03 leak)."
+        ),
+        "RD-04": (
+            "A running git-bound agent has no git stats in `agent_sync_state`, "
+            "or none newer than 24 h (#4000). `never_measured` on a recent base "
+            "image means the agent's maintenance tick is not running: check the "
+            "agent log for the auto-sync loop and `repo_busy` skips. `stale` "
+            "with a fresh `last_sync_at` means the sync-health poller reads the "
+            "agent but the agent stopped measuring; an old base image needs a "
+            "recreate."
+        ),
+        "RD-05": (
+            "Loose objects or pack count is over 3x the agent's maintenance "
+            "trigger (#4000), so repacks are failing or being skipped. Read "
+            "`maintenance_failures` first: non-zero means the repack itself "
+            "fails (timeout, git error) — see the agent log for git "
+            "maintenance errors. Zero means it was skipped or never started: "
+            "read `maintenance_status` in the agent's `GET /api/git/status` "
+            "sync_state — `skipped_low_disk` means free disk is under 1.1x "
+            "the repo's pack + loose bytes (free disk or run `git gc` by hand), "
+            "`backoff` means an earlier failure is still backing off, anything "
+            "else means check the repo lock and the auto-sync loop."
         ),
     }
 
@@ -811,6 +834,35 @@ class CanaryAlerts:
                 )
             return "\n".join(lines)
 
+        if invariant_id == "RD-04":
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = _mrkdwn_safe(obs.get("agent_name"))
+                age = obs.get("measured_age_seconds")
+                when = ("never measured" if age is None
+                        else f"last measured {_format_duration(age)} ago")
+                up = _format_duration(obs.get("container_up_seconds"))
+                lines.append(f"  • *{agent}*: {when}, container up {up}")
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
+        if invariant_id == "RD-05":
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = _mrkdwn_safe(obs.get("agent_name"))
+                lines.append(
+                    f"  • *{agent}*: loose={_mrkdwn_safe(obs.get('loose_objects'))}, "
+                    f"packs={_mrkdwn_safe(obs.get('pack_count'))}, "
+                    f".git={_mrkdwn_safe(obs.get('git_dir_bytes'))} bytes, "
+                    f"maintenance failures={_mrkdwn_safe(obs.get('maintenance_failures'))}"
+                )
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
         # Fallback is deliberately STATE-FREE — an un-rendered invariant emits
         # no forensic block at all rather than a generic dump. Never replace
         # this with something that iterates `observed_state`: E-04 and G-04
@@ -1050,6 +1102,18 @@ class CanaryAlerts:
                 f"{_mrkdwn_safe(obs.get('evidence_agent_count'))}. "
                 f"Blind since {_mrkdwn_safe(obs.get('blind_since'), fallback='this cycle')}. "
                 "Every other green this cycle is unreliable."
+            )
+        if invariant_id == "RD-04":
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
+            return (
+                f"{len(agents)} running git-bound agent(s) with no git stats "
+                f"newer than 24 h: {', '.join(agents)[:160]}."
+            )
+        if invariant_id == "RD-05":
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
+            return (
+                f"{len(agents)} agent(s) with a git object backlog over 3x the "
+                f"maintenance trigger: {', '.join(agents)[:160]}."
             )
         # Fallback is deliberately COUNT-ONLY and state-free — same contract as
         # `_render_forensic`'s terminal `return None`. Never widen it to render

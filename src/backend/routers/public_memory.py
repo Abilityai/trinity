@@ -13,22 +13,31 @@ Security model:
   — or, since ent#637, is a scheduled run that ent#498 addressed to one
   person (the seat is read off the row's Workspace destination, never sent).
 - This prevents an agent from writing memory for an arbitrary user.
+- It is the agent's own door (#4121): a human is refused `agent_only`, because
+  the row the caller names decides whose notes are replaced, so anyone the agent
+  is shared with could otherwise name any person's run.
+- It serves the turn the agent is in (#4121, the ent#926 ledger rule, as
+  `search_memory` holds it): the named run must be live, and no other live turn
+  on the agent may resolve to a different scope.
 
 This is the ONE write boundary for agent_notes: every write records a
 `public_user_memory_writes` row (ent#419 layer 3, built for ent#637's undo), and
-the ent#419 screening gate, when it lands, goes here and covers every trigger.
+the ent#419 screen runs here, before the write, on every trigger
+(`services/user_memory_guard.prepare_write`): a hit is a 422 naming the rule and
+the line, and nothing is stored.
 """
 
+import asyncio
 import logging
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
-from models import WriteUserMemoryRequest
+from models import TaskExecutionStatus, WriteUserMemoryRequest
 
 from database import db
-from dependencies import get_current_user, assert_agent_access
+from dependencies import get_current_user, assert_agent_access, assert_own_agent
 from db_models import User
-from services import schedule_seat_memory
+from services import memory_service, memory_subject, schedule_seat_memory, user_memory_guard
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +45,9 @@ router = APIRouter(prefix="/api/agents", tags=["user-memory"])
 
 # Channels where a human user identity (verified email) is present.
 _USER_FACING_TRIGGERS = {"public", "slack", "telegram", "whatsapp"}
+# ent#419 AC 4: on these, the person is ent#549's one-to-one stamp, never
+# `source_user_email` — in a group that is the unlocker's address.
+_CHANNEL_TRIGGERS = {"slack", "telegram", "whatsapp"}
 
 # Lightweight email sanity check — not RFC-exhaustive, just catches obvious garbage.
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -58,16 +70,23 @@ async def write_user_memory(
     The user email is never accepted from the caller — it is looked up from the
     execution record to prevent cross-user memory poisoning.
     """
-    assert_agent_access(current_user, agent_name, detail="Not authorized")
     # An agent-scoped key writes only for the agent it was minted for. The key
     # resolves to its owner carrying the owner's role, so `assert_agent_access`
-    # alone lets a sibling agent under the same owner name this agent's finished
-    # seat run and replace that person's notes (mirrors reminders._self_gate).
-    if current_user.agent_name and current_user.agent_name != agent_name:
-        raise HTTPException(
-            status_code=403,
-            detail="Agent-scoped key may only write its own agent's user memory",
-        )
+    # alone lets a sibling agent inside its reach name this agent's finished seat
+    # run and replace that person's notes. First, before the access check, so an
+    # agent key outside its reach gets this same refusal (trinity-enterprise#840).
+    assert_own_agent(current_user, agent_name,
+                     detail="Agent-scoped key may only write its own agent's user memory")
+    # #4121: the agent's own door. The row named below decides whose notes are
+    # replaced, so a human the agent is merely shared with could name any
+    # person's run. Same shape as the search door's refusal.
+    if not current_user.agent_name:
+        raise HTTPException(status_code=403, detail={
+            "code": "agent_only",
+            "message": "This door is for the agent's own key. An agent writes a person's notes during "
+                       "that person's turn.",
+        })
+    assert_agent_access(current_user, agent_name, detail="Not authorized")
 
     execution = db.get_execution(body.execution_id)
     if not execution:
@@ -76,14 +95,42 @@ async def write_user_memory(
     if execution.agent_name != agent_name:
         raise HTTPException(status_code=403, detail="Execution does not belong to this agent")
 
+    # The door serves the turn the agent is IN. Nothing proves which turn a
+    # request comes from (ent#926: the ledger is the fact), so a run that is not
+    # running, whoever it served, is refused here; the other half of the rule
+    # needs the person, and runs once they are decided below (#4121).
+    if (getattr(execution, "status", None) or "").lower() != TaskExecutionStatus.RUNNING.value:
+        logger.info(f"[UserMemory] Refused write on {agent_name} (memory_turn_not_live, execution={body.execution_id})")
+        raise HTTPException(status_code=422, detail={
+            "code": "memory_turn_not_live",
+            "message": "That run is not running, so nothing was saved. Memory is written during the turn "
+                       "it serves. Tell the person the note was not saved.",
+        })
+
+    # trinity-enterprise#1022: the ONE "whose memory" rule, shared with the
+    # retrieval memory's capture seam — `services/memory_subject.resolve`. The
+    # seat (ent#637), the one-to-one channel speaker (ent#419 AC 4 / ent#549)
+    # and the signed-in person of a public turn resolve here; this endpoint
+    # keeps its own refusals for everything else.
     triggered_by = (execution.triggered_by or "").lower()
-    # ent#637: a scheduled run addressed to one person (ent#498) serves that
-    # seat. The seat comes off the row's Workspace destination — stamped
-    # backend-side after the roster/block checks — never from the caller, so
-    # MEM-001's "the agent never names the user" holds for this trigger too.
-    seat = schedule_seat_memory.seat_for_execution(execution)
-    if seat:
-        user_email = seat
+    subject = memory_subject.resolve(execution)
+    seat = subject.user_email if subject.reason == memory_subject.REASON_SEAT else None
+    if subject.is_person and subject.reason in (
+        memory_subject.REASON_SEAT, memory_subject.REASON_CHANNEL_ONE_TO_ONE,
+    ):
+        user_email = subject.user_email
+    elif subject.reason == memory_subject.REASON_CHANNEL_NOT_ONE_TO_ONE:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "memory_not_one_to_one",
+                "message": (
+                    "Memory is written only in a one-to-one conversation with a verified "
+                    "person. This channel turn is a group conversation or an unverified "
+                    "sender, so no one's memory can be written from it."
+                ),
+            },
+        )
     elif triggered_by in _USER_FACING_TRIGGERS:
         user_email = execution.source_user_email
     else:
@@ -105,13 +152,45 @@ async def write_user_memory(
             detail="No verified user email associated with this execution.",
         )
 
+    # #4121: no other live turn on this agent may resolve to a different scope;
+    # while one does, nothing tells the two turns apart, so the door fails closed.
+    # A scope, not a person: `scope_for` folds the owner into the agent scope a
+    # headless run also resolves to, so those two do not refuse each other.
+    scope = await asyncio.to_thread(memory_service.scope_for, agent_name, user_email)
+    if await asyncio.to_thread(memory_service.another_live_scope, agent_name, execution.id, scope):
+        logger.info(f"[UserMemory] Refused write on {agent_name} (memory_turn_ambiguous, execution={body.execution_id})")
+        raise HTTPException(status_code=422, detail={
+            "code": "memory_turn_ambiguous",
+            "message": ("Another turn that does not serve this person is running on this agent right now, so "
+                        "whose notes this write is for cannot be told apart. Nothing was saved. Tell the person "
+                        "the note was not saved; it can be written on a later turn."),
+        })
+
+    # ent#419: keep only the agent-notes part of a copy-back (the platform's
+    # margin, headings and envelope lines go; a copied summary or decisions
+    # block is never merged in), then the screen. A hit the stored notes
+    # already produced is not counted again, so notes written before the screen
+    # never lock a person's memory. The log names the rule and the line, never
+    # the text.
+    stored_text, refusal = user_memory_guard.prepare_write(
+        body.memory_text,
+        previous=db.get_public_user_memory_agent_notes(agent_name, user_email),
+    )
+    if refusal is not None:
+        logger.info(
+            f"[UserMemory] Refused agent_notes write for {user_email} on {agent_name} "
+            f"(rule={refusal.code}, line={refusal.line}, execution={body.execution_id}, "
+            f"trigger={triggered_by})"
+        )
+        raise HTTPException(status_code=422, detail=refusal.as_detail())
+
     # #895: write only the agent_notes section so the background
     # conversation summarizer can't clobber deliberate agent writes (and
     # vice versa). The row is created on demand inside the helper. ent#637:
     # the write is recorded (previous + new, which run) so the person can see
     # it and undo it.
     written = db.write_public_user_memory_agent_notes(
-        agent_name, user_email, body.memory_text,
+        agent_name, user_email, stored_text,
         execution_id=body.execution_id,
         triggered_by=triggered_by,
         schedule_id=getattr(execution, "schedule_id", None) if seat else None,
@@ -119,7 +198,7 @@ async def write_user_memory(
 
     logger.info(
         f"[UserMemory] Updated agent_notes for {user_email} on {agent_name} "
-        f"({len(body.memory_text)} chars, execution={body.execution_id}, "
+        f"({len(stored_text)} chars, execution={body.execution_id}, "
         f"trigger={triggered_by}, write={written.get('write_id')})"
     )
     return {

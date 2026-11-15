@@ -318,8 +318,10 @@ def test_an_unfilled_role_is_refused_by_name_never_defaulted(provider, setup):
 
 
 def test_the_kind_rule_still_refuses_a_role_id_as_an_unknown_role(provider):
-    """`ROLES` / `resolve` are untouched: an ask addressed `to: role:x` by an
-    agent stays `invalid_to` (role ids on asks are out of scope)."""
+    """`ROLES` / `resolve` are untouched: a report or a message addressed
+    `to: role:x` stays `invalid_to`. (An ASK may name a role id since
+    trinity-enterprise#1007, through `resolve_role_id_for_ask`, never through
+    this rule — test_ent1007_ask_to_canon_role.py.)"""
     with pytest.raises(role_addressing.RoleRefused) as info:
         role_addressing.resolve(AGENT, "role:finance")
     assert info.value.code == "invalid_to"

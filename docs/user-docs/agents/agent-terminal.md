@@ -36,8 +36,9 @@ ssh -i ~/.ssh/trinity_agent -p 2222 developer@<host>
 ```
 
 - **TTL** — `ttl_hours` defaults to 4; the minimum is 0.1 (six minutes) and the maximum is 24 (`SSH_ACCESS_MAX_TTL_HOURS` on the backend). The key is removed when it expires.
-- **Host** — taken from `SSH_HOST` in `.env` when set; otherwise Trinity derives it from `FRONTEND_URL`, a Tailscale address, `host.docker.internal`, or the Docker gateway, in that order.
-- **Port** — each agent has its own SSH port from the 2222–2262 range, recorded on the container.
+- **Host** — the interface the agent's SSH port is actually published on. By default that is the Trinity host's loopback (`127.0.0.1`), so the command works from the host itself, or through it with a jump: `ssh -J you@<host> -p <port> developer@127.0.0.1` — the response spells this out in `warnings` and `instructions`. When the port is published on every interface (an agent created before this default, or `AGENT_SSH_BIND_ADDRESS=0.0.0.0`), the host is taken from `SSH_HOST` in `.env` when set, otherwise derived from `FRONTEND_URL`, a Tailscale address, `host.docker.internal`, or the Docker gateway, in that order. `connection.bind_address` reports the published interface.
+- **Port** — each agent has its own SSH port from the 2222–2262 range, recorded on the container. Nothing listens on it until a grant is issued; the grant starts the agent's SSH server on demand.
+- **Reaching agents over a VPN directly** — set `AGENT_SSH_BIND_ADDRESS` in `.env` to that interface's IP (and `SSH_HOST` to the same value), restart the backend, and recreate the agents. Existing agents keep their previous binding until recreated; the response says so for each one.
 
 ### System agent
 

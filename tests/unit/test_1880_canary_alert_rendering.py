@@ -154,6 +154,26 @@ _OBSERVED_STATE = {
         "docker_available": True,
         "redis_available": True,
     },
+    "RD-04": {
+        "agent_name": "agent-a",
+        "reason": "stale",
+        "git_stats_at": "2026-07-28T12:00:00Z",
+        "last_sync_at": "2026-07-30T11:50:00Z",
+        "measured_age_seconds": 172800,
+        "container_up_seconds": 432000,
+        "snapshot_time": _SNAP,
+    },
+    "RD-05": {
+        "agent_name": "agent-a",
+        "loose_objects": 49289,
+        "pack_count": 12,
+        "git_dir_bytes": 47244640256,
+        "maintenance_failures": 3,
+        "git_stats_at": "2026-07-30T11:50:00Z",
+        "loose_limit": 20100,
+        "pack_limit": 60,
+        "snapshot_time": _SNAP,
+    },
 }
 
 

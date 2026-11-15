@@ -30,15 +30,19 @@ from typing import Optional
 
 from models import User, ChatMessageRequest, ExecutionSource
 from database import db
+from services import turn_tier_service  # ent#926: a dispatched turn is no higher than its parent
 from services import idempotency_service, skill_gate_service
 from services.capacity_manager import (
     AcquireResult,
     CapacityFull,
     CircuitOpen,
     EphemeralBudgetExhausted,
+    IN_MEMORY_DEPTH,
     get_capacity_manager,
 )
 from services import pull_pilot
+from services.slot_service import SLOT_TTL_BUFFER
+from utils.helpers import parse_iso_timestamp
 from services.task_execution_service import dispatch_breaker_active
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.activity_service import activity_service
@@ -118,7 +122,8 @@ async def _record_depth_refusal(*, exc, current_user, endpoint, x_via_mcp):
         target_type="agent",
         target_id=exc.target,
         endpoint=endpoint,
-        details={"depth": exc.depth, "max_depth": exc.max_depth},
+        details={"depth": exc.depth, "max_depth": exc.max_depth,
+                 "exhausted_by": exc.exhausted_by},
     )
     if exc.caller is None:
         # #2973: an unvouched event loopback names no calling agent; the audit
@@ -137,6 +142,7 @@ async def _record_depth_refusal(*, exc, current_user, endpoint, x_via_mcp):
             "error_code": INTER_AGENT_DEPTH_EXCEEDED,
             "depth": exc.depth,
             "max_depth": exc.max_depth,
+            "exhausted_by": exc.exhausted_by,
         },
     )
     await activity_service.complete_activity(
@@ -144,6 +150,32 @@ async def _record_depth_refusal(*, exc, current_user, endpoint, x_via_mcp):
         status=ActivityState.FAILED,
         error=f"{INTER_AGENT_DEPTH_EXCEEDED}: depth {exc.depth} > {exc.max_depth}",
     )
+
+
+def _exhausted_by(caller: Optional[str], from_rows: int, claimed: Optional[int]) -> Optional[dict]:
+    """Which hop set a refused depth (#4357). Read only on the refusal path.
+
+    The signed event claim when it is deeper than the caller's rows; otherwise
+    (a tie included) the caller's deepest running row. A read failure answers
+    None — the refusal stands either way.
+    """
+    if claimed is not None and claimed > from_rows:
+        return {"kind": "event_claim", "chain_depth": claimed}
+    if not caller:
+        return None
+    try:
+        row = db.get_deepest_running_chain_row(caller)
+    except Exception:  # noqa: BLE001 — naming the hop never blocks the refusal
+        logger.exception("[#4357] could not read the deepest running row of %s", caller)
+        return None
+    if not row:
+        return None
+    return {
+        "execution_id": row.get("id"),
+        "chain_depth": row.get("chain_depth"),
+        "triggered_by": row.get("triggered_by"),
+        "source_agent": row.get("source_agent_name"),
+    }
 
 
 async def enforce_inter_agent_depth(
@@ -172,12 +204,16 @@ async def enforce_inter_agent_depth(
     if caller is None and claimed is None:
         return None
     max_depth = _max_chain_depth()
-    depth = 1 + db.get_max_running_chain_depth(caller) if caller else 0
+    from_rows = 1 + db.get_max_running_chain_depth(caller) if caller else 0
+    depth = from_rows
     if claimed is not None:
         depth = max(depth, claimed)
     if depth <= max_depth:
         return depth
-    exc = InterAgentDepthExceeded(caller, target, depth, max_depth)
+    exc = InterAgentDepthExceeded(
+        caller, target, depth, max_depth,
+        exhausted_by=_exhausted_by(caller, from_rows, claimed),
+    )
     logger.warning("[#2806] refused %s (%s)", exc, endpoint)
     try:
         await _record_depth_refusal(
@@ -337,25 +373,34 @@ async def admit_chat_request(
             current_user, source_agent=x_source_agent, execution_id=x_trinity_execution_id),
         triggered_by=gate_trigger,
         occurrence_key=idempotency_key,
-        dispatch=skill_gate_service.frozen_dispatch(
-            triggered_by=gate_trigger,
-            model=request.model,
-            source_user_id=current_user.id,
-            source_user_email=current_user.email or current_user.username,
-            source_agent_name=x_source_agent,
-            source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
-            source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
-            chain_depth=chain_depth,
-        ),
+        dispatch={
+            **skill_gate_service.frozen_dispatch(
+                triggered_by=gate_trigger,
+                model=request.model,
+                source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+                source_user_email=turn_tier_service.turn_origin_email(db, current_user, current_user.email or current_user.username),
+                source_agent_name=x_source_agent,
+                source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+                source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
+                chain_depth=chain_depth,
+                continues_execution_id=turn_tier_service.turn_origin_execution_id(db, current_user),
+            ),
+            # ent#1105: a held request keeps the project it would have run for.
+            **skill_gate_service.frozen_project(
+                agent_name=name, principal=current_user,
+                requested_project_id=getattr(request, "project_id", None),
+                triggered_by=gate_trigger),
+        },
     )
 
     # RELIABILITY-006 (#525): idempotency gate. Short-circuit duplicate
     # requests before consuming a capacity slot. The header is optional — when
     # absent, dedup is off and the request proceeds normally (back-compat).
+    # trinity-enterprise#830: a client-chosen key is scoped to its caller.
     idem = idempotency_service.begin(
-        idempotency_service.make_agent_scope(name), idempotency_key
+        idempotency_service.make_caller_scope(name, current_user), idempotency_key
     )
-    idem = _reclaim_ended_receipt(idem, name=name)
+    idem = _reclaim_ended_receipt(_reclaim_stale_claim(idem, name=name), name=name)
     if idem.replay:
         await _audit_idempotent_replay(
             name=name, endpoint=f"/api/agents/{name}/chat", x_via_mcp=x_via_mcp,
@@ -404,7 +449,8 @@ async def admit_chat_request(
             idem=idem,
             execution_id=chat_execution_id,
             capacity_result=AcquireResult(
-                state="queued_persistent", execution_id=chat_execution_id
+                state="queued_persistent", execution_id=chat_execution_id,
+                pull=True,
             ),
             capacity=None,
             queue_result=queue_result,
@@ -490,6 +536,97 @@ def _decision_outcome(decision) -> str:
     return "in_flight" if decision.in_flight else "completed"
 
 
+def _stale_claim_lease_seconds(name: str) -> int:
+    """How long an ``in_flight`` claim is presumed alive (#3298).
+
+    The slowest legitimate ``begin → complete`` window on ``/chat`` and
+    ``/task`` is a SYNC turn: admission + capacity wait + the whole run, which
+    the agent's execution timeout bounds (the SUB-003 walk re-issues inside that
+    same wall clock, #2789). The slot reaper presumes a dispatch dead at
+    timeout + ``SLOT_TTL_BUFFER``; a claim uses the same horizon, read per call
+    so it tracks the agent's current timeout. Raises when the timeout is
+    unreadable — the caller then holds the claim."""
+    return int(db.get_execution_timeout(name)) + SLOT_TTL_BUFFER
+
+
+def _unnamed_claim_lease_seconds(name: str) -> int:
+    """The lease for a claim that never named a run (#3298 review).
+
+    A ``/chat`` turn whose ``create_task_execution`` returned None still runs,
+    with nothing on its claim to ask liveness of. It can wait behind up to
+    ``IN_MEMORY_DEPTH`` turns, each bounded by the agent's timeout, before its
+    own run starts, so the plain lease could reclaim a request that is only
+    queued and run it twice. Hold such a claim for the whole queue's worth of
+    turns plus its own, plus the slot buffer."""
+    return (IN_MEMORY_DEPTH + 1) * int(db.get_execution_timeout(name)) + SLOT_TTL_BUFFER
+
+
+def _reclaim_stale_claim(idem, *, name: str):
+    """Let a retry dispatch when the ``in_flight`` claim it hit was left by a
+    process that died (#3298). Shared by ``/chat`` and ``/task``.
+
+    Before #3298 such a claim answered 409 for the whole 24 h TTL: only the
+    claiming request's own ``complete``/``fail`` ever moved it. Now, at replay
+    time (no terminal writer gains a side effect, #1804), a claim is reclaimed
+    only when BOTH hold:
+
+    * its lease has passed — no move for the agent's timeout + slot buffer
+      (``_stale_claim_lease_seconds``; a claim that names no run waits out
+      a full in-memory queue, ``_unnamed_claim_lease_seconds``); and
+    * the run it names has ended or is gone (#3245's liveness), or it never
+      named one (the process died before creating the row). A run still live —
+      or one that SUCCEEDED — keeps the 409: re-dispatching a run that is
+      working, or that already did the work, is the duplicate this key exists
+      to prevent. The watchdog ends an orphaned live row, after which a retry
+      reclaims.
+
+    The reclaim is a compare-and-delete on the owner token the retry saw, and
+    the claim is taken again exactly once (no loop): two racing retries start
+    one run. The original request, if it was only slow, then finds its token
+    gone, so its late ``complete``/``fail`` changes nothing. ``sched:`` keys are
+    the scheduler's own and never reclaimed. Any doubt (unreadable timeout or
+    claim time, a liveness read that cannot tell, a delete error) holds.
+    """
+    if not (idem.replay and idem.in_flight):
+        return idem
+    if str(idem.key or "").startswith("sched:"):
+        return idem
+    try:
+        lease = (_stale_claim_lease_seconds(name) if idem.execution_id
+                 else _unnamed_claim_lease_seconds(name))
+        age = (idempotency_service._now() - parse_iso_timestamp(idem.claimed_at)).total_seconds()
+    except Exception as e:  # noqa: BLE001 — a claim that cannot be dated is held
+        logger.info("[#3298] claim_hold agent=%s reason=undatable (%s)", name, e)
+        return idem
+    if age < lease:
+        return idem
+    if idem.execution_id:
+        verdict = idempotency_service.execution_liveness(idem.execution_id, name).verdict
+        if verdict not in _FRESH_AFTER:
+            logger.info(
+                "[#3298] claim_hold agent=%s exec=%s verdict=%s age=%ds lease=%ds",
+                name, idem.execution_id, verdict, int(age), lease,
+            )
+            return idem
+    else:
+        verdict = "no_execution"
+    cas = idempotency_service.reclaim_in_flight(idem)
+    if not cas:
+        # None: the delete raised; False: another retry (or the owner) moved the
+        # claim first — answer what the key says now, without a second attempt.
+        logger.info(
+            "[#3298] claim_reclaim agent=%s exec=%s verdict=%s cas=%s outcome=in_flight",
+            name, idem.execution_id, verdict, "error" if cas is None else "no_match",
+        )
+        return idem
+    decision = idempotency_service.begin(idem.scope, idem.key)
+    logger.info(
+        "[#3298] claim_reclaim agent=%s stale_exec=%s verdict=%s age=%ds lease=%ds cas=deleted outcome=%s",
+        name, idem.execution_id, verdict, int(age), lease, _decision_outcome(decision),
+    )
+    return decision
+
+
 def _reclaim_ended_receipt(idem, *, name: str):
     """Let a retry dispatch fresh when the receipt it would replay names a run
     that ended without success (#3245). Shared by ``/chat`` and ``/task``.
@@ -544,6 +681,7 @@ def begin_task_idempotency(
     *,
     name: str,
     idempotency_key: Optional[str],
+    current_user,
 ):
     """Open the ``/task`` idempotency claim (#525).
 
@@ -553,10 +691,11 @@ def begin_task_idempotency(
     the caller's job (it must run under the request's audit context), done via
     ``audit_idempotent_replay`` below.
     """
+    # trinity-enterprise#830: a client-chosen key is scoped to its caller.
     idem = idempotency_service.begin(
-        idempotency_service.make_agent_scope(name), idempotency_key
+        idempotency_service.make_caller_scope(name, current_user), idempotency_key
     )
-    idem = _reclaim_ended_receipt(idem, name=name)
+    idem = _reclaim_ended_receipt(_reclaim_stale_claim(idem, name=name), name=name)
     if idem.replay:
         return idem, ChatAdmissionReplay(
             execution_id=idem.execution_id, in_flight=idem.in_flight, snapshot=idem.snapshot,

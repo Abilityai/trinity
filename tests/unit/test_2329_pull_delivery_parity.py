@@ -394,7 +394,7 @@ class TestQueuedActivityClose:
         async def _boom(*_a, **_kw):
             raise RuntimeError("metadata unreadable")
 
-        monkeypatch.setattr(activity_service, "_close_queued_activities", _boom)
+        monkeypatch.setattr(activity_service, "close_companion_activities", _boom)
         await activity_service.close_execution_activity(eid, TaskExecutionStatus.FAILED)
 
         assert db.get_activity(dispatch)["activity_state"] == "failed"

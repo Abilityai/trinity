@@ -27,6 +27,8 @@ from dependencies import (
     AuthorizedAgentByName,
     reject_agent_principal,
     _reject_connector_principal,
+    require_interactive,
+    require_person,
 )
 from models import (
     User,
@@ -34,6 +36,7 @@ from models import (
     ConnectorStatus,
     ConnectorKeySecret,
     ConnectorPlaybook,
+    McpExternalAccessStatus,
 )
 import config
 from database import db
@@ -44,6 +47,7 @@ from services.connector_service import (
     resolve_exposed_playbooks,
 )
 from routers.settings import resolve_mcp_url
+from services import settings_service
 
 router = APIRouter(prefix="/api/agents", tags=["mcp_connector"])
 
@@ -58,6 +62,7 @@ def _status(agent_name: str, request: Request) -> ConnectorStatus:
     # an anonymous MCP session is rejected otherwise, so the config would not
     # work. Independent of `has_key`: the two are alternative ways to share.
     inline_available = config.MCP_INLINE_AUTH_ENABLED
+    ext_enabled, ext_source = settings_service.is_mcp_external_access_enabled()
     return ConnectorStatus(
         agent_name=agent_name,
         enabled=bool(cfg["enabled"]) if cfg else False,
@@ -68,6 +73,7 @@ def _status(agent_name: str, request: Request) -> ConnectorStatus:
         snippets=build_snippets(agent_name, mcp_url, _KEY_PLACEHOLDER) if key_prefix else [],
         inline_auth_available=inline_available,
         keyless_snippets=build_keyless_snippets(agent_name, mcp_url) if inline_available else [],
+        external_access=McpExternalAccessStatus(enabled=ext_enabled, source=ext_source),
         created_at=cfg["created_at"] if cfg else None,
         updated_at=cfg["updated_at"] if cfg else None,
     )
@@ -78,7 +84,7 @@ async def get_connector(agent_name: OwnedAgentByName, request: Request):
     return _status(agent_name, request)
 
 
-@router.put("/{agent_name}/connector", response_model=ConnectorStatus)
+@router.put("/{agent_name}/connector", response_model=ConnectorStatus, dependencies=[Depends(require_person)])
 async def update_connector(agent_name: OwnedAgentByName, body: ConnectorConfigUpdate, request: Request):
     db.upsert_connector_config(
         agent_name,
@@ -89,7 +95,7 @@ async def update_connector(agent_name: OwnedAgentByName, body: ConnectorConfigUp
     return _status(agent_name, request)
 
 
-@router.post("/{agent_name}/connector/key", response_model=ConnectorKeySecret)
+@router.post("/{agent_name}/connector/key", response_model=ConnectorKeySecret, dependencies=[Depends(require_interactive)])
 async def regenerate_connector_key(
     agent_name: OwnedAgentByName,
     request: Request,
@@ -122,7 +128,7 @@ async def regenerate_connector_key(
     )
 
 
-@router.delete("/{agent_name}/connector/key")
+@router.delete("/{agent_name}/connector/key", dependencies=[Depends(require_person)])
 async def revoke_connector_key(agent_name: OwnedAgentByName):
     db.revoke_connector_key(agent_name)
     return {"revoked": True, "agent_name": agent_name}

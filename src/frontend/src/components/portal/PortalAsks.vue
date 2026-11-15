@@ -77,6 +77,13 @@
         </template>
       </div>
 
+      <!-- trinity-enterprise#1134: an ask the agent addressed `to: project`
+           says which seat brought it to this reader — never who else holds one. -->
+      <p
+        v-if="projectSeat(ask)"
+        class="mt-0.5 text-xs"
+        :data-testid="`${tid.prefix}-seat-${ask.id}`"
+      >To you as this project's {{ projectSeat(ask) }}</p>
       <p class="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">
         <AskMarkdown :text="ask.title" inline :data-testid="`${tid.prefix}-title-${ask.id}`" />
       </p>
@@ -84,8 +91,30 @@
            body goes through the one ask renderer (AskMarkdown → the app's
            sanitiser, #3115 — the same on every surface), never printed as its
            syntax (ent#610 sign-off). -->
+      <!-- trinity-enterprise#1066: a credential ask can come from any turn (a
+           schedule reaches the owner's Inbox), so the card itself says WHO asks
+           — whatever the surface's showAgent — and the reason is quoted as the
+           agent's own words, its claim, never the platform's. -->
+      <div
+        v-if="ask.kind === 'credential'"
+        class="mt-1 min-w-0 text-sm"
+        :data-testid="`${tid.prefix}-asker-${ask.id}`"
+      >
+        <p>
+          <span class="font-medium">{{ askerLabel(ask) }}</span> is asking you for
+          <code class="font-mono">{{ ask.credential_name }}</code><template v-if="ask.credential_destination">
+            <!-- trinity-enterprise#1109: the value lands elsewhere — say where, in plain words. Never "your": nothing here ties the host to the reader; an admin's registry ties it to the platform. -->
+            for the agent <span class="font-medium" :data-testid="`${tid.prefix}-destination-${ask.id}`">{{ ask.credential_destination.agent_name }}</span> on the Trinity at <span class="font-medium">{{ ask.credential_destination.host }}</span></template>.<template v-if="!ask.question"> It gave no reason.</template>
+        </p>
+        <figure v-if="ask.question" class="mt-1">
+          <figcaption class="text-xs" :data-testid="`${tid.prefix}-why-by-${ask.id}`">In {{ askerLabel(ask) }}’s words:</figcaption>
+          <blockquote class="mt-0.5 border-l-2 border-current pl-2" :data-testid="`${tid.prefix}-why-${ask.id}`">
+            <AskMarkdown :text="ask.question" />
+          </blockquote>
+        </figure>
+      </div>
       <AskMarkdown
-        v-if="ask.question && ask.question !== ask.title && !isGateCard(ask)"
+        v-else-if="ask.question && ask.question !== ask.title && !isGateCard(ask)"
         :text="ask.question"
         class="mt-0.5 min-w-0 text-gray-600 dark:text-gray-300"
         :data-testid="`${tid.prefix}-question-${ask.id}`"
@@ -128,6 +157,14 @@
           :title="withdrawReason(ask)"
           :data-testid="`${tid.prefix}-ending-reason`"
         >{{ withdrawReason(ask) }}</span>
+        <!-- abilityai/trinity-enterprise#1108 AC #4: the answer landed, the agent
+             was not running, and its next start picks it up — said plainly, so
+             "answered" never implies the agent is already on it. -->
+        <span
+          v-if="ask.wake_state === 'pending'"
+          class="mt-0.5 block"
+          :data-testid="`${tid.prefix}-wake-pending`"
+        >Agent not yet woken — it picks this up when it next runs.</span>
       </p>
       <!-- #3247: the agent's replacement names the ask it replaced, by
            request_id only — there is no deep link to a single item. -->
@@ -266,6 +303,15 @@
           </form>
         </template>
 
+        <!-- trinity-enterprise#1066: a credential ask is answered through the
+             masked secret field, never a typed answer — the value goes to the
+             agent's environment, the ask ends "provided" by name. -->
+        <PortalCredentialField
+          v-else-if="controlsKind(ask) === 'credential'"
+          :ask="ask"
+          @provided="(answered) => credentialProvided(ask, answered)"
+        />
+
         <!-- An alert only wants acknowledging; "Got it" mirrors desktop and /m. -->
         <button
           v-else-if="controlsKind(ask) === 'acknowledge'"
@@ -362,6 +408,8 @@ import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import QueueProposal from '../operator/QueueProposal.vue'
 import GatedSkillRequest from '../operator/GatedSkillRequest.vue'
 import QueueBrief from '../operator/QueueBrief.vue'
+import PortalCredentialField from './PortalCredentialField.vue'
+import { agentLabels } from './portalInbox'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
   expiredLabel, askThreadLink, answerConfirmation, ANSWER_CONFIRMATION_MS,
@@ -454,6 +502,9 @@ const props = defineProps({
 const emit = defineEmits(['open-thread'])
 
 const store = useClientPortalStore()
+// trinity-enterprise#1066: who is asking, by the name the person knows it by.
+const labelOf = computed(() => agentLabels(store.agents))
+const askerLabel = (ask) => props.agentLabel || labelOf.value[ask.agent_name] || ask.agent_name || 'An agent'
 const busyId = ref(null)
 const drafts = reactive({})   // question: the typed answer (the DECISION)
 const picks = reactive({})    // approval: the selected option
@@ -625,6 +676,12 @@ onBeforeUnmount(() => {
 // Workspace — both come from utils/operatorQueue, the single home #2370
 // established. An ask's `kind` is the queue row's `type` verbatim.
 const kindLabel = (kind) => queueTypeLabel(kind) || 'Question'
+// trinity-enterprise#1134: the seat a `to: project` ask reached this reader
+// through. Only the two seats the platform resolves; anything else says nothing.
+const PROJECT_SEATS = new Set(['steward', 'creator'])
+const projectSeat = (ask) => (
+  ask?.destination?.kind === 'project' && PROJECT_SEATS.has(ask.destination.seat) ? ask.destination.seat : null
+)
 const controlsKind = (ask) => queueResponseKind({ type: ask.kind, options: ask.options })
 
 // trinity-enterprise#747: an alert has nothing to decide, so nothing to
@@ -632,7 +689,9 @@ const controlsKind = (ask) => queueResponseKind({ type: ask.kind, options: ask.o
 // trinity-enterprise#816: not on a SHARED ask (one delivered to everyone a role
 // resolves to) — the server refuses both (`shared_ask`) until they are per
 // person, so the card does not offer them.
-const canDiscuss = (ask) => ask.kind !== 'alert' && !ask.shared
+// trinity-enterprise#1066: nor on a credential ask — a discussion chat is a
+// composer, which is exactly where the value must not be typed.
+const canDiscuss = (ask) => ask.kind !== 'alert' && ask.kind !== 'credential' && !ask.shared
   && !(ask.discussion_chat_id && ask.discussion_chat_id === props.currentSessionId)
 // trinity-enterprise#748: a question or an approval can be declined; an alert
 // is acknowledged ("Got it"), which already ends it without a decision.
@@ -663,6 +722,14 @@ function dismiss(ask) {
 
 async function undoDismiss(ask) {
   if (!store.undoDismissAsk(ask.id)) return
+  await nextTick()
+  cardEls.get(ask.id)?.focus?.({ preventScroll: true })
+}
+
+// trinity-enterprise#1066: the secret field answered — the same confirmation
+// and focus landing as a typed answer (below), nothing kept.
+async function credentialProvided(ask, answered) {
+  showConfirmation(answerConfirmation(answered, ask.agent_name))
   await nextTick()
   cardEls.get(ask.id)?.focus?.({ preventScroll: true })
 }

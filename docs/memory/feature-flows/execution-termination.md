@@ -287,6 +287,14 @@ async def terminate_agent_execution(
     # 5. Track activity
 ```
 
+### Pull-mode turns (#3618)
+
+On a pull pilot the worker's result POST usually reaches the backend before step 4. The pull result then decides the row's text:
+
+- `pull_worker._run_and_report` relabels a terminated turn `cancelled`. A failed body's `content` becomes "Execution terminated by user". A turn that finished keeps its reply.
+- `pull_coordination_service.handle_task_result` writes a CANCELLED row with `error = "Execution terminated by user"` (the terminate route's text), followed by the walk trail if there is one. `response` keeps the scrubbed `content`.
+- The result body follows `PullTaskResultRequest`. The model has no `error` field, and any key outside it is dropped.
+
 ---
 
 ## Frontend Layer
@@ -467,6 +475,15 @@ await activity_service.track_activity(
 )
 ```
 
+### Audit Row (#3180, #4475)
+
+The operator route (`POST /api/agents/{name}/executions/{execution_id}/terminate`) writes one `audit_log` row per ended turn: `event_type=execution`, `event_action=execution_terminate`, the principal as actor, the agent as target, and `execution_id` / `task_execution_id` / `status` in `details`. The service calls the route's `on_ended` hook when:
+- the queued cancel wins its CAS (`cancelled_while_queued`),
+- the parked cancel finds the turn parked (`cancelled_while_parked`), or
+- the agent answers `terminated`.
+
+The parked and container arms do not wait on their CANCELLED CAS. The request that started the turn usually writes the terminal row first (the agent's terminate waits up to 7 s for the process to exit). `chat_execution_service._audit_terminate_once` deduplicates repeats with a Redis first-claim `terminate_audit:{agent}:{execution_id}` (`SET NX`, 24 h TTL) on the id the agent or the call limiter verified. It fails open: with Redis unreachable the row is written. The hook returns the audit event id; when the write fails (`platform_audit_service.log` returns None) or the hook raises, the claim is released, so the next terminate records the turn. `already_finished` and every error arm write no row. The public-link and Workspace terminate routes pass no hook and write none.
+
 ### Queue State
 
 The execution queue is force-released after successful termination to allow new executions:
@@ -496,6 +513,8 @@ Claude Code handles SIGINT gracefully, finishing its current operation before ex
 **Process-group semantics (Issue #407)**: The claude subprocess is launched with `start_new_session=True` so it leads its own process group. Hook subprocesses (bash-guardrail, file-guardrail, output-scanner, …) and any grandchildren they fork are in the same group. Termination sends signals to the group via `os.killpg(pgid, …)` so hook grandchildren don't outlive claude and keep our stdout/stderr pipes open (which previously caused `readline()` to wedge, leaving a `<defunct>` zombie and pinning agent-server CPU until the container was restarted).
 
 The pgid is captured at spawn time (before `process.wait()` reaps the parent — after that, `os.getpgid(pid)` raises) and stored in the registry entry metadata so termination can signal the full tree even after the parent has exited. See `docker/base-image/agent_server/utils/subprocess_pgroup.py` for the helper functions (`capture_pgid`, `terminate_process_group`, `signal_process_tree`, `drain_reader_threads`).
+
+**Only a group the child leads (#4064)**: every registered runtime child (Claude, Codex, Gemini, headless) is spawned with `start_new_session=True` and registered with its spawn-captured `pgid`, pinned by an AST guard in `tests/unit/test_4064_gemini_process_group.py`. Gemini was the exception until #4064: its child shared the agent server's group, so `terminate()` resolved the pgid lazily to the server's own group — the container's PID-1 shell group, so a cancel could stop the whole container. As a backstop, `_signal_group_or_process` calls `os.killpg` only when `pgid == process.pid`, `pgid > 0` and `pgid != os.getpgrp()`; any other pgid (the caller's own group, 0, negative, or stale after a pid reuse) is refused with a WARNING and only the pid is signalled, leaving descendants to the cgroup sweep.
 
 ### Slow-path drain observability (#586)
 
@@ -529,7 +548,7 @@ For Stop-hook authoring guidance to avoid the orphan-killer slow path, see [`TRI
 | Already finished | 200 | status: "already_finished" |
 | Connection error | 502 | Failed to connect to agent |
 | Timeout | 504 | Timeout connecting to agent |
-| Termination error | 500 | Termination failed |
+| Termination error | 500 | Termination failed: {ErrorClass} (the exception text goes only to the agent log, credential-scrubbed; trinity#4284) |
 
 ---
 
@@ -555,6 +574,8 @@ For Stop-hook authoring guidance to avoid the orphan-killer slow path, see [`TRI
 
 | Date | Changes |
 |------|---------|
+| 2026-11-13 | **Audit Row decided on the arm's outcome** (#4475): the parked and container arms write `execution_terminate` when the turn is found parked or the agent answers `terminated`, whoever wins the CANCELLED CAS. A Redis first-claim per agent and execution id keeps it to one row; the claim is released when the audit write fails. |
+| 2026-10-16 | **Below the owner tier a caller ends only their own turn** (trinity-enterprise#875): `POST /api/agents/{name}/executions/{id}/terminate` resolves BOTH `execution_id` and `task_execution_id` before the service is called; for a share holder each must be a row of this agent whose `source_user_id` is theirs, and a missing row is a refusal, not a pass (uniform 404 `Execution not found in agent`). Owner, admin and agent keys are unchanged. See [security.md §5d](../architecture/security.md). |
 | 2026-03-22 | Fix: `/api/chat` path now passes `execution_id` to agent (was only `/api/task`). Added `execution_id` to `ChatRequest` model, `execute()` runtime interface, and backend chat payload. Terminate endpoint defaults `task_execution_id` to `execution_id` for DB update. |
 | 2026-01-13 | Added "Live" button entry point (lines 213-232) - green badge with pulsing dot for running tasks, navigates to Execution Detail page for real-time monitoring |
 | 2026-01-13 | Updated: Unified execution ID flow (backend passes to agent), status preservation in error handlers, frontend polling improvements, cancelled status styling |

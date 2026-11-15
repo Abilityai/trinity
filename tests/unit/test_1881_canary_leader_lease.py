@@ -37,9 +37,14 @@ placed only beside that suite would never go red.
 from __future__ import annotations
 
 import logging
+import sys
+from pathlib import Path
 from typing import Dict, Optional
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `_ent695_lua`
+import _ent695_lua as lua  # noqa: E402
 
 
 class FakeRedis:
@@ -66,26 +71,17 @@ class FakeRedis:
         self.ttls: Dict[str, int] = {}
 
     def register_script(self, src: str):
-        """Return a callable with redis-py's `Script` signature.
+        """Return a callable with redis-py's `Script` signature that EXECUTES
+        the script text (`_ent695_lua`, trinity#4028), so the lease's ownership
+        compare is the production script's own, not a re-implementation here.
 
-        Dispatches on the source so one emulator serves both scripts, and
-        resolves the target from the `client=` kwarg passed at CALL time rather
-        than closing over `self`. That is load-bearing for isolation:
-        `_LEASE_SCRIPTS` is a module-level `ScriptCache` that memoises the
-        registered scripts process-wide, so the objects registered by the FIRST
-        test would otherwise stay bound to that test's fake and silently mutate
-        it for every later one.
+        The target is resolved from the `client=` kwarg passed at CALL time,
+        never closed over, so a script registered on one test's fake can never
+        mutate another's.
         """
-        is_delete = "del" in src
-
         def _run(keys, args, client=None):
             target = client if client is not None else self
-            key, token = keys[0], args[0]
-            if target.get(key) != token:
-                return 0  # not ours — both scripts are no-ops
-            if is_delete:
-                return target.delete(key)
-            return 1 if target.expire(key, int(args[1])) else 0
+            return lua.run(src, target.store, target.ttls, keys, args)
 
         return _run
 
@@ -205,6 +201,23 @@ def test_refresh_extends_the_ttl(monkeypatch):
     fake.ttls[key] = 1  # simulate the lease nearly expired
     assert a._try_acquire_leadership() is True
     assert fake.ttls[key] == a._leader_ttl()
+
+
+def test_the_heartbeat_never_retakes_a_lapsed_lease(monkeypatch):
+    """`_refresh_lease` keeps a lease already won and never acquires one
+    (leadership changes only at `_is_cycle_leader`). The shared module also
+    holds a refresh-or-retake script one name away (trinity#4028); this is
+    what fails if the heartbeat ever picks it up."""
+    fake = FakeRedis()
+    _use_redis(monkeypatch, fake)
+    a = _svc()
+    key = _module().REDIS_KEY_LEADER
+
+    assert a._try_acquire_leadership() is True
+    fake.delete(key)  # our lease lapsed and nobody holds it
+
+    assert a._refresh_lease(fake, a._leader_ttl()) is False
+    assert key not in fake.store
 
 
 def test_release_hands_off_immediately(monkeypatch):

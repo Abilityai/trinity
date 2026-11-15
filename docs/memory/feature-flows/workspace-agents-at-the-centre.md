@@ -447,6 +447,22 @@ decisions, none obvious from the diff:
   room move, and scoping the test to human text would make exactly that relay
   arrive image-less — this bug, one hop along.
 
+**The sentence describes standing files, not this turn's upload (#4072).** The
+inbox is per person per agent, not per chat, so every file the person ever shared
+with the agent is listed on every turn, in the 1:1 chat and in every room. The
+old wording announced them as the client's fresh upload and told the agent to
+read whichever looked relevant, so agents opened a file from three
+conversations ago to answer an unrelated question. Every branch now hedges
+provenance (*"not necessarily with this message, and possibly from other
+conversations"*) and makes use conditional on *"the latest request"*, a referent
+that reads correctly for a 1:1 message and for a room delta alike. Each document
+also carries its age (*"shared 3 days ago"*, from the `uploaded_at` it already
+had, via `_age_phrase`), so *"summarise this"* still resolves to the file shared
+just now. The listing itself is unchanged: the agent can still find a file to
+offer help with. The true split between "attached to this message" and "already
+in your inbox" needs the per-turn attachment set, which only 1:1 chat records
+(#3265). It is a follow-up. Pinned by `tests/unit/test_4072_inbox_notice_wording.py`.
+
 Fail-safe throughout: no client email, an unreadable inbox or a raising collector
 each yield `("", [])` and the turn runs unchanged. `images` is `None` rather than
 `[]` when there is nothing, so a room without files is a byte-for-byte no-op.
@@ -468,6 +484,10 @@ the composer of the conversation this issue rebuilt.
 and were read by nothing — a client answering on a resume-enabled agent saw
 exactly what they would see with the feature off: the ask disappeared. **Decision:
 render** (ent#468 Option A), recorded on the issue.
+- abilityai/trinity-enterprise#1108 AC #4: `WorkspaceAsk.wake_state` (`pending` | `woken` | null) is the
+  OUTCOME, read on every listing — `pending` means the answer landed but the agent was
+  not running ("Agent not yet woken — it picks this up when it next runs." on the
+  card); the agent's next start delivers it and the card's line goes.
 
 - `portalUtils.js::answerConfirmation(answered, agentLabel)` is the rule and
   consumes **both** fields, which is the AC's "either both or neither":
@@ -484,8 +504,8 @@ render** (ent#468 Option A), recorded on the issue.
   surface unmounted at the same instant the confirmation was created, so the
   message would have rendered for zero frames. Timers are cleared on unmount —
   this surface unmounts on every chat switch.
-- **A chat draws only the asks its own turns raised, as rows of its thread (ent#610, the 2026-09-30 ruling as amended; data from ent#734).** `portalChatAsks.chatTurnAsks` keeps an ask whose `raised_in_turn === true` and whose `chat_id` is this chat; `placeAsksInThread` puts each among the messages by SERVER time only (before the first row strictly newer; history rows and a live reply carry the server's `created_at` as `at`; the person's own message, sent from here, is `local` and sits at the newest server time before it, so no browser clock takes part; a row with no time otherwise is a reply just received, the newest; while earlier messages are not shown, an ask older than the first row shown is left out). While it waits it is the one `PortalAsks` card (`testid-prefix="portal-tile-ask"`, thread link off, capped at 40rem); once ended it is one muted row, kind · title · ending with who · when (`askHistoryLine`, `data-testid="portal-chat-ask-ended"`, gray-500 in light, its full title as `title`, the title on its own line on a phone). **An answer collapses the card at once** (the team's ruling on #3101, 2026-10-01): the row carries the confirmation ("Answered by you · just now"), a persistent `aria-live` region (`portal-chat-ask-announce`) says it, and focus moves to the row (`tabindex=-1`) when the card took it down with it — never out of the composer. A failed answer leaves the ask waiting (the store writes only on success), so the card stays open with its error. One watcher over the chat and its waiting ids tells "ended while on screen" from "already ended" (only the first is announced) and survives a chat switch. The chat reads its own chat-turn asks too (`store.fetchChatTurnAsks` → `GET …/asks?chat_id=`, no 7-day window — the queue's retention is the bound), merged under the store's fresher rows; a read for a chat already left is dropped. The asks are read again when a turn's reply lands, and a new waiting tile counts toward "jump to latest". A background ask (schedule / loop / gate — `raised_in_turn` false, `chat_id` = Main as the reply target only) draws in no chat. Nothing sits between the thread and the composer (principle 30): the round 4–5 pinned box, its "N more asks" line and `splitChatAsks` / `pinnedAskIds` / `chatAsksLabel` / `chatAsksElsewhere` are gone. Specs: `portalChatAskTiles.spec.js`, `portalBackgroundAskInboxOnly.spec.js`, `portalChatAsksElsewhere.spec.js` (the retired line).
-- **The thread link is additive (#3055), and only for a chat-turn ask (ent#610 ruling).** `askThreadLink` returns a target only when `raised_in_turn === true` — a background ask's Main is not where it lives. ent#429's "Open the conversation" button has its own `v-if`, and the controls are `<template v-if="!isEnded(ask)">`, so an ask attached to another chat (Main, for every addressed ask) stays answerable in a non-Main chat; `threadLink` (default `true`) lets a host drop the link. Pinned by `portalAskCard.mount.spec.js`.
+- **A chat draws only the asks its own turns raised, as rows of its thread (ent#610, the 2026-09-30 ruling as amended; data from ent#734).** `portalChatAsks.chatTurnAsks` keeps an ask whose `raised_in_turn === true` and whose `chat_id` is this chat; `placeAsksInThread` puts each among the messages by SERVER time only (before the first row strictly newer; history rows and a live reply carry the server's `created_at` as `at`; the person's own message, sent from here, is `local` and sits at the newest server time before it, so no browser clock takes part; a row with no time otherwise is a reply just received, the newest; while earlier messages are not shown, an ask older than the first row shown is left out). While it waits it is the one `PortalAsks` card (`testid-prefix="portal-tile-ask"`, thread link off, capped at 40rem); once ended it is one muted row, kind · title · ending with who · when (`askHistoryLine`, `data-testid="portal-chat-ask-ended"`, gray-500 in light, its full title as `title`, the title on its own line on a phone). **An answer collapses the card at once** (the team's ruling on #3101, 2026-10-01): the row carries the confirmation ("Answered by you · just now"), a persistent `aria-live` region (`portal-chat-ask-announce`) says it, and focus moves to the row (`tabindex=-1`) when the card took it down with it — never out of the composer. A failed answer leaves the ask waiting (the store writes only on success), so the card stays open with its error. One watcher over the chat and its waiting ids tells "ended while on screen" from "already ended" (only the first is announced) and survives a chat switch. The chat reads its own chat-turn asks too (`store.fetchChatTurnAsks` → `GET …/asks?chat_id=`, no 7-day window — the queue's retention is the bound), merged under the store's fresher rows; a read for a chat already left is dropped. The asks are read again when a turn's reply lands, and a new waiting tile counts toward "jump to latest". A pure background ask (schedule / loop / gate — `raised_in_turn` false, `chat_id` = Main as the reply target only) draws in no chat; a reminder-wake ask addressed to the same person the reminder was set for is the exception: `raised_in_turn = true`, Main is its home (ent#1171). Nothing sits between the thread and the composer (principle 30): the round 4–5 pinned box, its "N more asks" line and `splitChatAsks` / `pinnedAskIds` / `chatAsksLabel` / `chatAsksElsewhere` are gone. Specs: `portalChatAskTiles.spec.js`, `portalBackgroundAskInboxOnly.spec.js`, `portalChatAsksElsewhere.spec.js` (the retired line).
+- **The thread link is additive (#3055), and only for a turn-matched ask (ent#610, as amended by ent#1171).** `askThreadLink` returns a target only when `raised_in_turn === true` — a pure background ask's (schedule/loop/gate) Main is not where it lives. ent#429's "Open the conversation" button has its own `v-if`, and the controls are `<template v-if="!isEnded(ask)">`, so an ask attached to another chat (Main, for every addressed ask) stays answerable in a non-Main chat; `threadLink` (default `true`) lets a host drop the link. Pinned by `portalAskCard.mount.spec.js`.
 
 ## Tests
 

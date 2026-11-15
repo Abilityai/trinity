@@ -518,6 +518,18 @@ class TestHttpTransport:
         with pytest.raises(McpValidationError, match="userinfo"):
             validate_mcp_config(cfg)
 
+    @pytest.mark.parametrize(
+        "host",
+        ["a..example.com", "a" * 64 + ".example.com"],
+        ids=["empty-label", "label-over-63"],
+    )
+    def test_unencodable_host_refused_not_raw_unicode_error(self, host):
+        """#3909: getaddrinfo's own idna encode raises UnicodeError for these
+        hosts before any lookup; it must fail closed as McpValidationError."""
+        cfg = _wrap({"r": {"type": "http", "url": f"https://{host}/mcp"}})
+        with pytest.raises(McpValidationError, match="SSRF guard"):
+            validate_mcp_config(cfg)
+
     def test_url_without_type_rejected(self):
         """Implicit transport from `url` is ambiguous — require explicit type."""
         cfg = _wrap({"r": {"url": "https://example.com/mcp"}})

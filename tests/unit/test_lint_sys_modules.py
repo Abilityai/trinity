@@ -467,3 +467,86 @@ def test_the_live_tree_has_no_unguarded_registry_scan_eviction():
     under the `_existing`/`__path__` guard (test_git_status_dual_ahead_behind.py)."""
     hard = [f for f in collect_findings() if f.hard]
     assert hard == [], "\n".join(f"{f.path}:{f.lineno}" for f in hard)
+
+
+# ---------------------------------------------------------------------------
+# #3390: `monkeypatch.delitem(sys.modules, <submodule>)` outside tests/unit/
+# ---------------------------------------------------------------------------
+
+_DELITEM_RULE = "monkeypatch.delitem of a submodule"
+
+
+@pytest.mark.parametrize("call", [
+    'monkeypatch.delitem(sys.modules, "services.docker_service", raising=False)',
+    'mp.delitem(sys.modules, "db.schedules")',
+    'monkeypatch.delitem(sys.modules, name=f"services.{x}")',
+    'monkeypatch.delitem(sys.modules, mod, raising=False)',
+], ids=["dotted literal", "any receiver", "keyword f-string", "loop variable"])
+def test_delitem_of_a_submodule_is_flagged_outside_the_unit_island(tmp_path, call):
+    findings = _check_source(
+        f"""
+        import sys
+        def test_x(monkeypatch, mp, x, mod):
+            {call}
+        """,
+        tmp_path,
+    )
+    assert [f.message.split(":")[0] for f in findings] == [_DELITEM_RULE]
+    assert "module_split_guard.evict" in findings[0].message
+
+
+def test_delitem_of_a_top_level_name_stays_allowed(tmp_path):
+    """No parent package, so no attribute to leave behind."""
+    findings = _check_source(
+        """
+        import sys
+        def test_x(monkeypatch):
+            monkeypatch.delitem(sys.modules, "database", raising=False)
+        """,
+        tmp_path,
+    )
+    assert findings == []
+
+
+def test_the_unit_island_is_exempt(tmp_path, monkeypatch):
+    """Its conftest repairs the package attribute after every test."""
+    import lint_sys_modules as lint
+
+    monkeypatch.setattr(lint, "SPLIT_HEALED_DIR", tmp_path)
+    findings = _check_source(
+        """
+        import sys
+        def test_x(monkeypatch):
+            monkeypatch.delitem(sys.modules, "services.docker_service")
+        """,
+        tmp_path,
+    )
+    assert findings == []
+
+
+def test_evict_is_not_flagged(tmp_path):
+    findings = _check_source(
+        """
+        import module_split_guard
+        def test_x(monkeypatch):
+            module_split_guard.evict(monkeypatch, "services.docker_service")
+        """,
+        tmp_path,
+    )
+    assert findings == []
+
+
+def test_the_snapshot_helper_pair_does_not_exempt_it(tmp_path):
+    """The pair restores sys.modules entries, not the package attribute."""
+    findings = _check_source(
+        """
+        import sys
+        _STUBBED_MODULE_NAMES = ["services.docker_service"]
+        def _restore_sys_modules():
+            pass
+        def test_x(monkeypatch):
+            monkeypatch.delitem(sys.modules, "services.docker_service")
+        """,
+        tmp_path,
+    )
+    assert [f.message.split(":")[0] for f in findings] == [_DELITEM_RULE]

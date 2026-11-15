@@ -3,10 +3,11 @@ SQLAlchemy engine factory — the configurable database backend seam (#300).
 
 `DATABASE_URL` selects the backend at startup:
 
-    sqlite:////data/trinity.db                 (default; derived from TRINITY_DB_PATH)
     postgresql://trinity:secret@postgres:5432/trinity
+    sqlite:////data/trinity.db                 (derived from TRINITY_DB_PATH when unset)
 
-SQLite stays the zero-config default — nothing changes without DATABASE_URL.
+Every compose file defaults DATABASE_URL to the bundled PostgreSQL, and the
+images refuse SQLite (#4175). SQLite remains for the unit tier until it is retired.
 
 All 44 db modules route through this engine via SQLAlchemy Core. The raw
 sqlite3 context manager in `db/connection.py` remains for sqlite-specific
@@ -43,6 +44,65 @@ def resolve_database_url() -> str:
 
 def is_sqlite(url: str | None = None) -> bool:
     return make_url(url or resolve_database_url()).get_backend_name() == "sqlite"
+
+
+SQLITE_GUIDE = "docs/migrations/SQLITE_TO_POSTGRES.md"
+_MIGRATE_COMMAND = "docker compose <your -f files> run --rm backend python -m db.sqlite_to_postgres"
+_STAY_ON_SQLITE = (
+    "To stay on SQLite for this release only, set both DATABASE_URL= (empty) and "
+    "TRINITY_ALLOW_SQLITE=1 in .env."
+)
+
+
+def postgres_required() -> bool:
+    """True inside a Trinity image (the Dockerfiles set this, #4175).
+
+    Keyed on an image-only variable because `init_database()` runs at import
+    across the SQLite unit tier, which keeps working until that tier is retired.
+    """
+    return os.getenv("TRINITY_REQUIRE_POSTGRES") == "1"
+
+
+def sqlite_db_path() -> str:
+    return os.getenv("TRINITY_DB_PATH", "/data/trinity.db")
+
+
+def sqlite_file_has_data() -> bool:
+    try:
+        return os.path.getsize(sqlite_db_path()) > 0
+    except OSError:
+        return False
+
+
+def refuse_sqlite_backend() -> None:
+    """Refuse SQLite inside an image, before anything touches the file (#4175)."""
+    if not postgres_required() or os.getenv("TRINITY_ALLOW_SQLITE") == "1":
+        return
+    if sqlite_file_has_data():
+        raise RuntimeError(
+            f"Refusing to start: this install has a SQLite database at {sqlite_db_path()}, and "
+            f"SQLite reached end-of-support on 2026-09-01. Move it to PostgreSQL: {_MIGRATE_COMMAND} "
+            f"(see {SQLITE_GUIDE}). {_STAY_ON_SQLITE}"
+        )
+    raise RuntimeError(
+        "Refusing to start: DATABASE_URL is empty, which selects SQLite, and SQLite reached "
+        "end-of-support on 2026-09-01. Remove the empty DATABASE_URL line from .env to use the "
+        f"bundled PostgreSQL, or set a postgresql:// URL (see {SQLITE_GUIDE})."
+    )
+
+
+def refuse_empty_postgres_beside_sqlite() -> None:
+    """Refuse to build an empty PostgreSQL next to an install's SQLite data (#4175).
+
+    Compose's default URL means the backend sees a valid postgresql:// URL on an
+    upgraded SQLite install, so this is the state that loses data silently: a new
+    empty database, a seeded admin, and every later boot passes.
+    """
+    raise RuntimeError(
+        f"Refusing to start: PostgreSQL has no users and this install has a SQLite database at "
+        f"{sqlite_db_path()}. Copy it across: {_MIGRATE_COMMAND} (see {SQLITE_GUIDE}). To start "
+        f"fresh instead, move that file aside. {_STAY_ON_SQLITE}"
+    )
 
 
 def _build_engine(url: str) -> Engine:

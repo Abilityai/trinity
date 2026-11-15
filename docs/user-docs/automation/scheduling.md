@@ -131,7 +131,13 @@ hours later on the first fire.
 **Who can set it.** You can always name yourself. Naming anyone else takes the agent's
 owner or an admin — on create and on update alike — so that someone the agent is merely
 shared with cannot put a recurring message of their choosing into a colleague's chat.
-Clearing the address is never restricted.
+A person may always clear the address.
+
+**What an agent can do.** With its own key, an agent can only address its owner. It can't
+point a schedule at anyone else. On a schedule that already delivers to someone else, it
+can't change, clear, enable, disable, trigger or delete it, or manage its webhook. It's
+refused with `agent_cannot_address_another_person`, even with the schedule-management
+permission. Who an agent speaks to unprompted is the owner's decision.
 
 **When it shows up.** The message is saved as soon as the run finishes, but the
 Workspace does not poll a conversation you already have open. So it appears the
@@ -160,6 +166,12 @@ button. A scheduled run that names no one still cannot write anyone's memory.
 complete updated notes, not just the new part. Every write is recorded, and the
 person can see what the agent changed and undo the latest write in their
 Workspace. Another agent cannot write through this agent's run.
+
+The platform refuses the write while another turn that serves someone else is
+running on the same agent, because it cannot tell the two turns apart. So if one
+agent briefs several people, give each schedule its own time: a brief cannot save
+its notes while another brief runs, and the agent is told to say the note was not
+saved.
 
 ### Held until a companion is marked ready
 
@@ -282,7 +294,7 @@ An optional executable shipped by an agent template that gates each cron tick be
 ### How It Works
 
 1. The template ships `~/.trinity/pre-check` as an executable file with a shebang (`#!/usr/bin/env python3`, `#!/bin/bash`, etc.).
-2. Before each scheduled cron tick, Trinity runs the file inside the agent container.
+2. Before each scheduled cron tick, Trinity runs the file inside the agent container, with the firing schedule's id, name and message in its environment (see [For Template Authors](#for-template-authors)).
 3. The scheduler acts on the output:
 
 | Pre-check result | Scheduler action |
@@ -304,6 +316,16 @@ An optional executable shipped by an agent template that gates each cron tick be
 
 Place the hook at `~/.trinity/pre-check` (no extension), make it executable (`chmod +x`), and include a shebang. The hook receives no arguments. It should print the work description to stdout if there is work, or print nothing (empty stdout) if there is nothing to do.
 
+The hook runs before **every** cron schedule on the agent, and what it prints replaces the message of the schedule that is firing. Trinity tells it which schedule that is through three environment variables:
+
+| Variable | Value |
+|---|---|
+| `TRINITY_SCHEDULE_ID` | The firing schedule's id |
+| `TRINITY_SCHEDULE_NAME` | The firing schedule's name, as shown on the **Schedules** tab |
+| `TRINITY_SCHEDULE_MESSAGE` | The firing schedule's configured message, verbatim |
+
+An agent with more than one schedule should branch on them: gate the schedule the hook is for, and print `TRINITY_SCHEDULE_MESSAGE` back for the others so they run their own task. A name can be edited on the **Schedules** tab; key on the id if the hook must survive a rename. Output is capped at 32,000 characters, so a longer message is cut when printed back. Versions of Trinity before these variables existed leave them unset — a hook that may run there should treat an unset `TRINITY_SCHEDULE_ID` as "schedule unknown" rather than as "some other schedule".
+
 Example (Python):
 ```python
 #!/usr/bin/env python3
@@ -312,6 +334,21 @@ import sys
 if new_items:
     print(f"Review {len(new_items)} new PRs: {', '.join(new_items)}")
 # else: exit 0 with empty stdout → Trinity records a skip
+```
+
+Example (bash) — an agent with an hourly refresh and a daily brief, where only the refresh is gated:
+```bash
+#!/bin/bash
+# Every schedule except the hourly refresh runs its own message unchanged.
+if [ -n "$TRINITY_SCHEDULE_ID" ] && [ "$TRINITY_SCHEDULE_NAME" != "Hourly refresh" ]; then
+  printf '%s\n' "$TRINITY_SCHEDULE_MESSAGE"
+  exit 0
+fi
+# ... check for new data ...
+if [ -n "$new_data" ]; then
+  echo "/update-dashboard"
+fi
+# else: empty stdout → Trinity records a skip for the hourly refresh only
 ```
 
 ## Per-Schedule Timeout

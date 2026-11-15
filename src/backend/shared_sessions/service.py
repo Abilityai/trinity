@@ -16,14 +16,17 @@ import contextvars
 import logging
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from config import ROOM_SOURCE_CHANNEL
 from services import person_mention_service
 from services.platform_prompt_service import build_user_facing_room_prompt
-from services.skill_gate_errors import SkillGateError
+from services.skill_gate_errors import SkillApprovalRequired, SkillGateError, hold_marker
+from utils.credential_sanitizer import sanitize_text
 from utils.helpers import utc_now_iso
+from utils.skill_invocation import find_gated_invocations
 
 from . import db
 
@@ -99,6 +102,11 @@ ROOM_DEFAULT_TTL_HOURS_KEY = "room_default_ttl_hours"
 # never be a value a caller would have been refused.
 MAX_MESSAGES_CEILING = 500
 MAX_TTL_HOURS = 168
+# #3495: the cost cap had no upper bound, so `max_cost_usd` was the one budget
+# field a caller could set to any figure. Per room, in USD. The operator default
+# shares it (`RoomBudgetDefaultsUpdate`), and a stored default above it is
+# CLAMPED to it by `_coerce_cost` — never read as "uncapped".
+MAX_COST_USD_CEILING = 1000.0
 MAX_PARTICIPANTS = 12
 
 # How much transcript a COLD agent gets when it has no resumable session.
@@ -116,7 +124,14 @@ ROOM_MAX_CHAIN_DEPTH = 8
 
 # The INBOUND cap: what a person, a workspace client or an agent calling the API
 # may post as one message (it mirrors `RoomMessageCreate.max_length`).
-MAX_CONTENT_CHARS = 8000
+# #3706: 100,000, the Workspace chat limit (`PortalChatRequest.message`) and
+# the agent reply bound below, so a person can paste a reference document for
+# the agents to work from. What an agent is SHOWN is bounded separately by
+# `ROOM_TRANSCRIPT_BUDGET_CHARS`, so this number does not set the size of a
+# wake. Kept at or below `MAX_AGENT_REPLY_CHARS`: `_fit_transcript` keeps two
+# messages whole (the newest and this agent's ask), and two at the larger of
+# these bounds must fit the transcript budget.
+MAX_CONTENT_CHARS = 100_000
 # #3210: the engine's own post of a turn's reply is NOT inbound, and was held to
 # the cap above anyway — so a 9,000-character research brief, the ordinary output
 # of a room turn, was billed and then discarded without a line. A reply has its
@@ -133,9 +148,10 @@ AGENT_REPLY_TAIL_CHARS = 10_000
 # #3210: the transcript one wake hands its agent. Raising the reply bound raises
 # what the NEXT agent is shown, and an unbounded transcript only moves the
 # failure one hop along: the turn overflows its context, and a cold wake repeats
-# it on every retry. 240,000 is what a cold wake could already receive
-# (ROOM_COLD_CONTEXT_MESSAGES x MAX_CONTENT_CHARS), so a room of ordinary
-# messages is shown exactly what it was.
+# it on every retry. A room of ordinary messages fits whole. It is a literal on
+# purpose: ROOM_COLD_CONTEXT_MESSAGES x MAX_CONTENT_CHARS is 3,000,000, far
+# past an agent's context. It must stay above 2 x max(MAX_CONTENT_CHARS, MAX_AGENT_REPLY_CHARS),
+# the two messages `_fit_transcript` always keeps whole.
 ROOM_TRANSCRIPT_BUDGET_CHARS = 240_000
 ROOM_TURN_TIMEOUT_SECONDS = 300
 # #3114: how long a room turn waits for a pull pilot's worker to claim it. A
@@ -158,6 +174,35 @@ class RoomError(Exception):
         self.detail = detail
         self.extra = extra
         super().__init__(detail)
+
+
+@dataclass(frozen=True)
+class Waker:
+    """Who a room turn runs for when no person posted
+    (abilityai/trinity-enterprise#1135): the engine itself, continuing an
+    agent on an ask it raised in this room. It acts for nobody.
+
+    The room engine reads a waker for three things, and each is explicit here
+    rather than borrowed from a person who did nothing: ``email`` is the turn's
+    client (``source_user_email``, ``source_channel_client``, the inbox
+    manifest) — set only when the person who ended the ask is seated in this
+    room, else None (ent#886: a resume turn names no person);
+    ``reach_principal`` is whose access the reply's @mentions are held to (the
+    room's moderator, rebuilt from its row; None reaches nobody); and the
+    engine reply lands under the agent's own membership, never the waker's.
+    A seam ent#442's system poster can build on — not that design.
+    """
+    kind: str
+    identity: str
+    email: Optional[str] = None
+    reach_principal: Any = None
+
+
+# What `_wake_agent` returns besides a dispatch result (ent#1135 reads them;
+# every @mention caller ignores the return value).
+GATE_HELD = "gate_held"     # the skill gate stopped the turn (#3402)
+LOCK_BUSY = "lock_busy"     # a pilot's earlier turn here still holds the lock
+DISPATCH_RAISED = "dispatch_raised"  # the dispatch raised: a turn may have started
 
 
 # --- identity helpers --------------------------------------------------------
@@ -202,6 +247,22 @@ WORKSPACE_KIND = "workspace_user"
 # `db.count_budget_messages`, and a new kind is far likelier to be an outside
 # person than a machine.
 FLEET_INTERNAL_PARTICIPANT_KINDS = frozenset({"agent", "system", "user"})
+
+# trinity-enterprise#701: the participant kinds that are PEOPLE. A person's seat
+# is personal: once they leave (or are removed) the room is gone for them, and a
+# person seated mid-conversation reads it from their join point
+# (`visible_from_seq`). Agents keep their own rules (see `db.seat_person`).
+PEOPLE_KINDS = frozenset({"user", WORKSPACE_KIND})
+
+# trinity-enterprise#701: the role of a person seated by a moderator. Reads and
+# talks; cannot approve, spend or reassign — approvals keep routing to the
+# agent's primary (#606). The creator stays `moderator`.
+COLLABORATOR_ROLE = "collaborator"
+
+# trinity-enterprise#701: seating a second person is an entitlement. The OSS
+# side is the edition-agnostic primitives (a person's read floor, leaving,
+# attribution); the module registering this id owns who may be seated.
+ROOM_SEATS_FEATURE_ID = "room_seats"
 
 
 def room_is_user_facing(participants: list[dict]) -> bool:
@@ -295,7 +356,12 @@ def _assert_can_reach_agent(current_user, agent_name: str) -> None:
 
 
 def _can_still_reach(current_user, agent_name: str) -> bool:
-    """`_assert_can_reach_agent` as a predicate, for the wake-time re-check."""
+    """`_assert_can_reach_agent` as a predicate, for the wake-time re-check.
+    An engine `Waker` lends the reach of its `reach_principal`, or none."""
+    if isinstance(current_user, Waker):
+        if current_user.reach_principal is None:
+            return False
+        current_user = current_user.reach_principal
     try:
         _assert_can_reach_agent(current_user, agent_name)
     except RoomError:
@@ -303,11 +369,24 @@ def _can_still_reach(current_user, agent_name: str) -> bool:
     return True
 
 
-def _require_membership(room_id: str, current_user) -> dict:
+def _require_membership(room_id: str, current_user, *, allow_departed: bool = False) -> dict:
     """Load a room the caller may see, else a UNIFORM 404.
 
     Never 403 on a room the caller isn't in — that would confirm the room exists
     (Invariant #8, enumeration-safety). Admins can see any room.
+
+    A participant who LEFT is not in the room (trinity-enterprise#959 fix round
+    1): a removed agent's own key could otherwise keep reading — and posting
+    into — the room it was removed from. Same uniform 404. Only agents can be
+    removed today.
+
+    `allow_departed` is for ONE caller: the engine posting a reply that was
+    already dispatched (`post_message` with `_sender_override`, never set by a
+    route). A wake runs under the WAKER's principal, and the waker may be an
+    agent that posted `@B` with its own key; if a moderator removes it while B
+    is still running, B's reply — already paid for — must still land (Codex
+    re-review, round 2). The participant row must still exist: only the
+    `left_at` check is relaxed, never membership itself.
     """
     kind, identity = _caller(current_user)
     is_admin = getattr(current_user, "role", None) == "admin" and kind == "user"
@@ -325,9 +404,31 @@ def _require_membership(room_id: str, current_user) -> dict:
         raise RoomError(404, "room_not_found", "Room not found")
     if is_admin:
         return room
-    if not participant:
+    # trinity-enterprise#701: anyone who left, or was removed, no longer sees the
+    # room — the same uniform 404 as never having been in it. An engine reply
+    # passes `allow_departed`: it was dispatched while its waker was a member and
+    # is already paid for, so it lands. No read path passes it.
+    if not participant or (participant.get("left_at") and not allow_departed):
         raise RoomError(404, "room_not_found", "Room not found")
     return room
+
+
+def _is_room_person(current_user) -> bool:
+    """May this caller change who is in a room? Only a PERSON may
+    (trinity-enterprise#719) — by moderating it or by recruiting with a mention.
+
+    A Workspace client is a verified email, a person by construction. A
+    platform principal is one only as `is_person_principal` says: a JWT session
+    or the person's own `user` key. A key resolves to its owner's account, role
+    and participant identity alike, so the participant kind alone cannot say.
+    An agent never is.
+    """
+    from dependencies import is_person_principal
+
+    kind, _identity = _caller(current_user)
+    if kind == WORKSPACE_KIND:
+        return True
+    return kind == "user" and is_person_principal(current_user)
 
 
 def _require_moderator(room_id: str, current_user) -> dict:
@@ -340,20 +441,34 @@ def _require_moderator(room_id: str, current_user) -> dict:
     managing the room (ent#220). Membership is checked first, so a non-member
     still gets the uniform 404; a non-moderator *member* (an agent) gets a 403,
     which discloses nothing it can't already see (access-first, Invariant #8).
+
+    trinity-enterprise#719: both branches below ask `_is_room_person` — the
+    admin bypass and the moderator row alike — so a platform principal
+    moderates only as a person. A caller that acts as a platform account
+    (participant kind `user`) but is not a person (the system key, an unknown
+    key scope, the event loopback) gets 403 `not_a_person`, the rename's
+    shape: it may resolve to the very account that holds the moderator row, so
+    `not_moderator` would name the wrong rule. Past membership, that code
+    depends only on the principal, never on the roster. An agent key acts as
+    its agent, not as the account, and keeps `not_moderator`. The admin
+    account sees every room, so its kind-`user` non-person keys get the 403 on
+    any room that exists and the uniform 404 on one that does not.
     """
     room = _require_membership(room_id, current_user)
     kind, identity = _caller(current_user)
-    if getattr(current_user, "role", None) == "admin" and kind == "user":
+    person = _is_room_person(current_user)
+    if person and kind == "user" and getattr(current_user, "role", None) == "admin":
         return room
     participant = db.get_participant(room_id, kind, identity)
     # ent#362: a workspace client moderates the room it created — otherwise it
     # could not add an agent mid-chat (ent#361 AC#3) or close its own room.
-    # The kind check still excludes AGENTS, which is what this gate is for: an
+    # The person check still excludes AGENTS, which is what this gate is for: an
     # agent is reachable via its own MCP key and is a prompt-injection surface,
     # so it must never rewrite a roster (ent#220).
-    if (kind in ("user", WORKSPACE_KIND) and participant
-            and participant.get("role") == "moderator"):
+    if person and participant and participant.get("role") == "moderator":
         return room
+    if kind == "user" and not person:
+        raise RoomError(403, "not_a_person", "Only a person can manage this room")
     raise RoomError(403, "not_moderator", "Only a room moderator can manage this room")
 
 
@@ -393,7 +508,11 @@ def _coerce_cost(raw):
     # its first message" — the `RoomCreate` validator refuses <= 0 for the same
     # reason, and a stored 0 must not become a stricter cap than the operator can
     # express through the API.
-    return value if value > 0 else None
+    if value <= 0:
+        return None
+    # Above the ceiling (a row written before #3495, or by hand): tighten to the
+    # ceiling. Treating it as invalid would fall back to NO cap — the unsafe way.
+    return min(value, MAX_COST_USD_CEILING)
 
 
 def budget_defaults() -> dict:
@@ -457,11 +576,13 @@ def set_budget_defaults(*, max_messages=None, max_cost_usd=None, ttl_hours=None,
 def _resolve_budget(current_user, max_messages, max_cost_usd, ttl_hours):
     """Decide the room's budget, and who was allowed to decide it (ent#387).
 
-    A **platform** principal (JWT user, MCP key, agent key) may bound a room
-    explicitly — that is the operator, and an unspecified field falls through to
-    the operator default. A **workspace client** may not: their values are
-    dropped, not refused, because the Workspace never offers the fields and a 4xx
-    would only advertise a control they cannot have.
+    A **platform** principal at `operator` or above (JWT user, MCP key, agent
+    key) may bound a room explicitly — that is the operator, and an unspecified
+    field falls through to the operator default. A **workspace client** may not,
+    and neither may a Workspace-only account (the `user` rung, an MCP key it
+    owns, or a role outside the ladder — #3495; `user` became a platform login in
+    #3488): their values are dropped, not refused, because the Workspace never
+    offers the fields and a 4xx would only advertise a control they cannot have.
 
     Ignoring rather than clamping is deliberate. A clamp still lets the bounded
     party choose anything up to the ceiling — including "the ceiling" — which is
@@ -486,10 +607,17 @@ def _resolve_budget(current_user, max_messages, max_cost_usd, ttl_hours):
         getattr(current_user, "is_platform", not getattr(current_user, "is_portal", False))
     )
 
-    if not is_platform and any(v is not None for v in (max_messages, max_cost_usd, ttl_hours)):
+    # #3495: being a platform principal is not enough — the Workspace-only rung
+    # logs in on the platform side too. A principal with no role at all fails
+    # closed here, as one without `is_portal` does above.
+    from dependencies import is_workspace_only_role
+
+    may_bound = is_platform and not is_workspace_only_role(getattr(current_user, "role", None))
+
+    if not may_bound and any(v is not None for v in (max_messages, max_cost_usd, ttl_hours)):
         logger.info(
-            "[rooms] ignoring caller-supplied budget from a workspace client — "
-            "operator defaults apply"
+            "[rooms] ignoring caller-supplied budget from a %s — operator defaults apply",
+            "workspace client" if not is_platform else "workspace-only account",
         )
         max_messages = max_cost_usd = ttl_hours = None
 
@@ -557,11 +685,42 @@ def create_room(current_user, name: str, agents: list[str], topic: Optional[str]
 def get_room(current_user, room_id: str, since_seq: int = 0) -> dict:
     room = _require_membership(room_id, current_user)
     participants = db.list_participants(room_id)
-    messages = db.get_messages(room_id, since_seq)
+    kind, identity = _caller(current_user)
+    # trinity-enterprise#701: a person seated mid-conversation reads from their
+    # join point. The floor is on THEIR participant row (an admin who is not a
+    # participant reads everything, as before). It bounds the READ, not a filter
+    # over its page: the page holds at most 500 rows and the room cap doesn't
+    # count system lines, so filtering after the limit could hand a person seated
+    # past row 500 an empty page on every poll.
+    me = next((p for p in participants
+               if p.get("kind") == kind and p.get("identity") == identity), None)
+    history_from = int((me or {}).get("visible_from_seq") or 0) if kind in PEOPLE_KINDS else 0
+    messages = db.get_messages(room_id, max(since_seq, history_from - 1))
+    # trinity#3402: an agent reading the room (MCP `read_room`) is not handed
+    # what its own skill gate stopped — the rule its wakes follow. People see
+    # everything. Fails closed: this read is not scanned by any gate.
+    if kind == "agent":
+        try:
+            held = db.gate_held_seqs(room_id, identity)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("room %s: gate holds unreadable for %s (%s)", room_id, identity, e)
+            raise RoomError(503, "room_unavailable", "Couldn't read the room right now.") from e
+        messages = [m for m in messages if m["seq"] not in held]
     own_tags = _annotate_own_tags(current_user, room_id, messages)
-    return {
+    return _project_for_reader(current_user, kind, identity, {
         **room,
         "participants": participants,
+        # trinity-enterprise#701: who is reading — so the Workspace can tell the
+        # caller's own messages from another person's — and the people in the
+        # room, departed ones included (the roster keeps who left).
+        "you": {"kind": kind, "identity": identity},
+        "people": _people(participants),
+        "history_from_seq": history_from,
+        "can_seat_people": _can_seat_people(room, current_user),
+        # trinity#4302: the live offer to continue a paused mention chain
+        # (`{"seq", "next"}`) or null — derived from the transcript at read
+        # time, for every reader; the route decides who may act on it.
+        "paused_chain": _paused_chain(room, participants),
         "messages": messages,
         # trinity-enterprise#631: the caller's tags across the WHOLE room, so a
         # tag on an older message turns `read` without a full reload.
@@ -570,7 +729,42 @@ def get_room(current_user, room_id: str, since_seq: int = 0) -> dict:
         "cost": db.room_cost(room_id),
         # Who is mid-turn, so a client that reloaded can show it again.
         "working": working_agents(room_id, participants),
-    }
+    })
+
+
+# trinity-enterprise#701 ruling 2: internal-only facts never reach a lower-privilege
+# reader. A collaborator reads and talks; these are the moderator's and an admin's.
+_COLLABORATOR_HIDDEN_ROOM_FIELDS = ("cost", "max_cost_usd")
+_COLLABORATOR_HIDDEN_MESSAGE_FIELDS = ("execution_id",)
+_COLLABORATOR_HIDDEN_PARTICIPANT_FIELDS = (
+    "cached_session_id", "last_read_seq", "visible_from_seq", "consecutive_resume_failures",
+)
+
+
+def _is_collaborator_reader(current_user, kind: str, identity: str, participants: list[dict]) -> bool:
+    # Only a person is ever seated as a collaborator (`seat_person`).
+    if getattr(current_user, "role", None) == "admin":
+        return False
+    return any(p.get("kind") == kind and p.get("identity") == identity
+               and p.get("role") == COLLABORATOR_ROLE for p in participants)
+
+
+def _without(row: dict, fields: tuple) -> dict:
+    return {k: v for k, v in row.items() if k not in fields}
+
+
+def _project_for_reader(current_user, kind: str, identity: str, payload: dict) -> dict:
+    """A room as this reader may see it. A collaborator keeps their own cursor."""
+    if not _is_collaborator_reader(current_user, kind, identity, payload["participants"]):
+        return payload
+    out = _without(payload, _COLLABORATOR_HIDDEN_ROOM_FIELDS)
+    out["messages"] = [_without(m, _COLLABORATOR_HIDDEN_MESSAGE_FIELDS) for m in payload["messages"]]
+    out["participants"] = [
+        p if (p.get("kind") == kind and p.get("identity") == identity)
+        else _without(p, _COLLABORATOR_HIDDEN_PARTICIPANT_FIELDS)
+        for p in payload["participants"]
+    ]
+    return out
 
 
 def list_rooms(current_user) -> dict:
@@ -595,6 +789,18 @@ def list_rooms(current_user) -> dict:
 
     for r in rooms:
         participants = participants_by_room.get(r["id"], [])
+        if _is_collaborator_reader(current_user, kind, identity, participants):
+            for field in _COLLABORATOR_HIDDEN_ROOM_FIELDS:
+                r.pop(field, None)
+        # trinity-enterprise#959: is the CALLER actively in this room? Off the
+        # admin path the list is ACTIVE membership (`list_rooms_for_participant`
+        # drops a room the caller left), so it is true there; an admin lists
+        # every room, and the Workspace Inbox shows only the rooms its reader
+        # is in, so it needs the bit rather than inferring it from a count.
+        r["member"] = any(
+            p.get("kind") == kind and p.get("identity") == identity and not p.get("left_at")
+            for p in participants
+        )
         r["message_count"] = counts_by_room.get(r["id"], 0)
         # Absent for an empty room; the client already falls back to `created_at`,
         # which for a room nobody has spoken in is the honest answer.
@@ -663,7 +869,7 @@ def add_participant(current_user, room_id: str, agent_name: str,
         if active_agents >= MAX_PARTICIPANTS:
             raise RoomError(422, "participant_cap",
                             f"At most {MAX_PARTICIPANTS} agent participants")
-    db.add_participant(room_id, "agent", agent_name, role, utc_now_iso())
+    db.add_participant(room_id, "agent", agent_name, role, utc_now_iso(), rejoin=True)
     _post_system(room_id, f"{agent_name} joined the room.")
     return {"room_id": room_id, "agent": agent_name, "added": True}
 
@@ -674,6 +880,85 @@ def remove_participant(current_user, room_id: str, agent_name: str) -> dict:
     if removed:
         _post_system(room_id, f"{agent_name} left the room.")
     return {"room_id": room_id, "agent": agent_name, "removed": removed}
+
+
+# --- people (trinity-enterprise#701) ------------------------------------------
+
+def _people(participants: list[dict]) -> list[dict]:
+    """The people in a room for its roster: present first, then who left."""
+    rows = [{"kind": p.get("kind"), "identity": p.get("identity"), "role": p.get("role"),
+             "joined_at": p.get("joined_at"), "left_at": p.get("left_at"),
+             "sees_history": not int(p.get("visible_from_seq") or 0)}
+            for p in participants if p.get("kind") in PEOPLE_KINDS]
+    rows.sort(key=lambda r: (bool(r["left_at"]), r["joined_at"] or "", r["identity"] or ""))
+    return rows
+
+
+def is_room_moderator(room_id: str, current_user) -> bool:
+    """`_require_moderator` as a predicate (no membership error leaks)."""
+    try:
+        _require_moderator(room_id, current_user)
+    except RoomError:
+        return False
+    return True
+
+
+def room_seats_entitled() -> bool:
+    try:
+        from services.entitlement_service import entitlement_service
+        return bool(entitlement_service.is_entitled(ROOM_SEATS_FEATURE_ID))
+    except Exception:  # noqa: BLE001 — a capability fails closed
+        return False
+
+
+def _can_seat_people(room: dict, current_user) -> bool:
+    """Whether to OFFER seating in this room to this caller. A capability for
+    the UI, never the authorization: the seating route checks again."""
+    # A platform person only: an outside client who moderates their own room
+    # does not seat the operator's colleagues into it.
+    if room.get("status") != "open" or _caller(current_user)[0] != "user":
+        return False
+    return room_seats_entitled() and is_room_moderator(room["id"], current_user)
+
+
+def leave_room(current_user, room_id: str) -> dict:
+    """A person leaves a room (trinity-enterprise#701 AC5).
+
+    Soft: the row keeps `left_at`, so the roster shows who left and their
+    messages stay attributed. The room is gone for them afterwards
+    (`_require_membership`). A moderator with other people still seated cannot
+    leave — they would strand the room without anyone who can manage it; they
+    close the room, or remove the others, first.
+    """
+    _require_membership(room_id, current_user)
+    kind, identity = _caller(current_user)
+    if kind not in PEOPLE_KINDS:
+        raise RoomError(403, "not_a_person", "Only a person can leave a room")
+    me = db.get_participant(room_id, kind, identity)
+    if not me or me.get("left_at"):
+        raise RoomError(409, "not_a_participant", "You are not in this room")
+    if me.get("role") == "moderator":
+        others = [p for p in db.list_participants(room_id)
+                  if p.get("kind") in PEOPLE_KINDS and not p.get("left_at")
+                  and (p.get("kind"), p.get("identity")) != (kind, identity)]
+        if others and not any(p.get("role") == "moderator" for p in others):
+            raise RoomError(409, "last_moderator",
+                            "You manage this room and others are still in it. Remove them "
+                            "or close the room before you leave.")
+    left = db.remove_participant(room_id, kind, identity, utc_now_iso())
+    if left:
+        _post_system(room_id, f"{identity} left the room.")
+        _broadcast("room_participants_changed", {"room_id": room_id})
+    return {"room_id": room_id, "left": left}
+
+
+def post_system_line(room_id: str, content: str) -> int:
+    """A system line in a room, for modules that manage its roster."""
+    return _post_system(room_id, content)
+
+
+def broadcast_participants_changed(room_id: str) -> None:
+    _broadcast("room_participants_changed", {"room_id": room_id})
 
 
 # --- budgets -----------------------------------------------------------------
@@ -760,6 +1045,59 @@ def _post_system_safe(room_id: str, content: str) -> None:
     except Exception:  # noqa: BLE001
         logger.warning("room %s: could not write the system line %r", room_id,
                        content, exc_info=True)
+
+
+def _names(agents: list[str]) -> str:
+    """'a' / 'a and b' / 'a, b and c' — for a line a person reads."""
+    if len(agents) <= 1:
+        return "".join(agents)
+    return f"{', '.join(agents[:-1])} and {agents[-1]}"
+
+
+def _post_pause_line(room_id: str, targets: list[str]) -> int:
+    """The stop at the chain cap, as a typed row (trinity#4302): `kind` is
+    `chain_paused`, `mentions` holds the agents that were next, and the content
+    states FACTS only. Agents read every system row as `System:` text on their
+    next wake, so the how-to-carry-on wording (Continue, or send a message) is
+    the Workspace's to render beside the control, never stored here."""
+    verb = "was" if len(targets) == 1 else "were"
+    content = (f"The agents paused after {ROOM_MAX_CHAIN_DEPTH} hand-offs and are "
+               f"waiting for a person. {_names(targets)} {verb} next.")
+    seq = db.append_message(uuid.uuid4().hex, room_id, "system", None, content,
+                            list(targets), "chain_paused", None, utc_now_iso())
+    _broadcast("room_message", {"room_id": room_id, "seq": seq})
+    return seq
+
+
+def _present_next(pause: dict, participants: list[dict]) -> list[str]:
+    """The agents a pause row named that are still seated, in the row's order."""
+    seated = {p.get("identity") for p in participants
+              if p.get("kind") == "agent" and not p.get("left_at")}
+    return [a for a in (pause.get("mentions") or []) if a in seated]
+
+
+def _paused_chain(room: dict, participants: list[dict]) -> Optional[dict]:
+    """The live Continue offer on an open room, or None (trinity#4302).
+
+    Derived at read time from the transcript — the newest `chain_paused` row
+    whose offer still stands (`db.offer_stands`: nothing conversational and no
+    later pause/continue row after it) and whose agents are still seated. Never
+    stored. An unreadable transcript gives None: no control is a smaller lie
+    than a wrong one.
+    """
+    if room.get("status") != "open":
+        return None
+    try:
+        pause = db.latest_pause(room["id"])
+        if not pause or not db.offer_stands(room["id"], pause["seq"]):
+            return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("room %s: could not read the paused-chain offer (%s)", room["id"], e)
+        return None
+    nxt = _present_next(pause, participants)
+    if not nxt:
+        return None
+    return {"seq": int(pause["seq"]), "next": nxt}
 
 
 def _broadcast(event: str, payload: dict) -> None:
@@ -886,6 +1224,67 @@ def resolve_mentions(content: str, participants: list[dict]) -> list[str]:
             seen.add(raw)
             found.append(raw)
     return found
+
+
+def seated_people_mentioned(content: str, participants: list[dict],
+                            sender_identity: Optional[str] = None) -> list[str]:
+    """Usernames of people seated in this room (platform accounts, still
+    present) that `content` @mentions, in order, the sender excluded.
+
+    An account made by email login has the email as its username, which an
+    @mention cannot spell, so `@bob` also names `bob@example.com` — by the
+    local part, case-insensitively, and only when exactly one seated person
+    has it (an ambiguous `@carol` names no one)."""
+    seated = [p["identity"] for p in participants
+              if p.get("kind") == "user" and not p.get("left_at")]
+    by_name: dict[str, str] = {u.lower(): u for u in seated}
+    local_counts: dict[str, int] = {}
+    for u in seated:
+        if "@" in u:
+            local = u.split("@", 1)[0].lower()
+            local_counts[local] = local_counts.get(local, 0) + 1
+    for u in seated:
+        if "@" in u:
+            local = u.split("@", 1)[0].lower()
+            if local_counts[local] == 1 and local not in by_name:
+                by_name[local] = u
+    found, seen = [], set()
+    for raw in _MENTION_RE.findall(content or ""):
+        who = by_name.get(raw.lower())
+        if who and who != sender_identity and who not in seen:
+            seen.add(who)
+            found.append(who)
+    return found
+
+
+def _with_seated_mentions(current_user, content: str, participants: list[dict],
+                          sender_identity: Optional[str], tagger, tagged: list):
+    """Add a tag for each seated person the text @mentions (AC7).
+
+    Best-effort and per person, unlike the explicit tags: a mention is text, so
+    one that cannot be delivered stays plain text rather than refusing a
+    message the person meant to send. Returns `(tagger, tagged)`.
+    """
+    names = seated_people_mentioned(content, participants, sender_identity)
+    if not names:
+        return tagger, tagged
+    try:
+        tagger = tagger or person_mention_service.tagger_for(current_user)
+    except person_mention_service.TagError:
+        return tagger, tagged            # someone who cannot tag reaches no one
+    from database import db as platform_db
+    have = {p.email for p in tagged}
+    agents = _room_agents(participants)
+    for name in names:
+        try:
+            email = ((platform_db.get_user_by_username(name) or {}).get("email") or "").strip().lower()
+            if not email or email in have:
+                continue
+            tagged = tagged + person_mention_service.resolve_tags([email], agents, tagger)
+            have.add(email)
+        except Exception:  # noqa: BLE001 — a mention that cannot land stays text
+            logger.info("room: @%s is seated but could not be tagged", name, exc_info=True)
+    return tagger, tagged
 
 
 def _join_mentioned_newcomers(current_user, room_id: str, room: dict,
@@ -1050,7 +1449,9 @@ def _fit_transcript(messages: list[dict], agent_name: str) -> list[dict]:
     last = len(messages) - 1
     keep = {last}
     for i in range(last, -1, -1):
-        if agent_name in (messages[i].get("mentions") or []):
+        # A pause or Continue line names who is next; it is not the ask (#4302).
+        if (messages[i].get("sender_kind") != "system"
+                and agent_name in (messages[i].get("mentions") or [])):
             keep.add(i)
             break
 
@@ -1075,8 +1476,32 @@ def _fit_transcript(messages: list[dict], agent_name: str) -> list[dict]:
     return fitted
 
 
+def _people_line(participants: Optional[list[dict]]) -> str:
+    """trinity-enterprise#701 AC4: when more than one person is in the room, say
+    so — who they are, and what each may decide. Empty with one person or none."""
+    people = [p for p in (participants or [])
+              if p.get("kind") in PEOPLE_KINDS and not p.get("left_at")]
+    if len(people) < 2:
+        return ""
+    parts = []
+    for p in people:
+        role = p.get("role")
+        if role == COLLABORATOR_ROLE:
+            parts.append(f"{p['identity']} (collaborator: can read and talk here, but "
+                         "cannot approve, spend or reassign)")
+        elif role == "moderator":
+            parts.append(f"{p['identity']} (started this room)")
+        else:
+            parts.append(str(p["identity"]))
+    return (f" {len(people)} people are in this room: " + "; ".join(parts) + ". Every "
+            "message below names who wrote it — answer the person who asked. Approvals "
+            "and spending still go to your primary, whoever asks for them.")
+
+
 def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: bool,
-                       user_facing: bool = False) -> str:
+                       user_facing: bool = False,
+                       participants: Optional[list[dict]] = None,
+                       ask_block: Optional[str] = None) -> str:
     # The old header claimed "Other agents and people are in this room"
     # UNCONDITIONALLY — false in an agent-only room, and far too weak in front of
     # a customer to count as a disclosure (trinity-enterprise#363). It now says
@@ -1091,14 +1516,20 @@ def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: boo
         + (f" — topic: {room['topic']}" if room.get("topic") else "")
         + ".\n\n"
         + who
-        + " You were @mentioned, so it is "
-        "your turn to reply. Reply with your message only — it will be posted to "
+        + _people_line(participants)
+        + (" An ask you raised in this room ended; continue the work that was "
+           "waiting on it." if ask_block else
+           " You were @mentioned, so it is your turn to reply.")
+        + " Reply with your message only — it will be posted to "
         "the room as you. To bring in another participant, @mention them by name. "
         # #3210: a hint, not a limit — a long reply still lands whole. It is here
         # because every agent woken afterwards re-reads what was posted.
         "For a long deliverable, consider sharing it as a file and posting a "
         "summary here; post it in full when the room needs the full text.\n\n"
     )
+    if ask_block:
+        # ent#1135: the ending, framed as data, before the transcript it continues.
+        header += ask_block + "\n\n"
     if cold:
         header += ("[You are joining the conversation now — here is the recent "
                    "transcript for context]\n")
@@ -1184,7 +1615,16 @@ async def post_message(current_user, room_id: str, content: str,
         raise RoomError(413, "message_too_large",
                         f"Message exceeds {MAX_CONTENT_CHARS} characters")
 
-    room = _require_membership(room_id, current_user)
+    # An engine reply (`_sender_override`) was dispatched while its waker was a
+    # member; it lands even if the waker has since been removed (ent#959 r2).
+    if is_agent_reply and isinstance(current_user, Waker):
+        # ent#1135: an engine waker is nobody's membership — the agent's own
+        # was verified by the engine before the turn ran.
+        room = db.get_room(room_id)
+        if not room:
+            raise RoomError(404, "room_not_found", "Room not found")
+    else:
+        room = _require_membership(room_id, current_user, allow_departed=is_agent_reply)
 
     # A human/external post is INBOUND — reject it if the room is closed, expired
     # or already at budget. An agent reply (``_sender_override`` set) is an
@@ -1229,11 +1669,20 @@ async def post_message(current_user, room_id: str, content: str,
     # every agent its operator can reach. A human's mention is a decision; an
     # agent's is text it generated.
     if not is_agent_reply:
-        joined = _join_mentioned_newcomers(current_user, room_id, room, content, participants)
-        if joined:
-            participants = db.list_participants(room_id)
+        # trinity-enterprise#719: `is_agent_reply` covers only the engine's own
+        # post of a turn. An agent posting through the API, or any other
+        # platform principal that is not a person, recruits nobody either.
+        if _is_room_person(current_user):
+            joined = _join_mentioned_newcomers(current_user, room_id, room, content, participants)
+            if joined:
+                participants = db.list_participants(room_id)
 
     mentions = resolve_mentions(content, participants)
+    # trinity-enterprise#701 AC7: an @mention of a person SEATED here reaches
+    # them — as a tag (one Unread item in their Inbox), never as a wake.
+    if not is_agent_reply:
+        tagger, tagged = _with_seated_mentions(current_user, content, participants,
+                                               sender_identity, tagger, tagged)
 
     message_id = uuid.uuid4().hex
     seq = db.append_message(message_id, room_id, sender_kind, sender_identity,
@@ -1311,11 +1760,25 @@ async def _after_landing(current_user, room_id: str, room: dict, sender_kind: st
         targets = _apply_wake_cap(room_id, sender_kind, sender_identity, targets)
 
     if targets and _chain_depth >= ROOM_MAX_CHAIN_DEPTH:
-        _post_system(room_id,
-                     f"Mention chain stopped at depth {ROOM_MAX_CHAIN_DEPTH} "
-                     f"(would have woken {', '.join(targets)}).")
-        targets = []
+        # trinity#4302: the stop is a typed row the room payload turns into an
+        # offer — a person wakes these agents from `/continue` at a fresh
+        # depth, or by posting. Nobody is woken here.
+        _post_pause_line(room_id, targets)
+        return []
 
+    return await _wake_targets(current_user, room_id, targets, _chain_depth)
+
+
+async def _wake_targets(current_user, room_id: str, targets: list[str],
+                        _chain_depth: int) -> list[str]:
+    """Wake ``targets`` in order, each at ``_chain_depth + 1``; returns them.
+
+    The one loop both a landed message (`_after_landing`) and a person's
+    Continue (`continue_chain`, at depth 0 — a fresh count) run, so the shield
+    and the per-target catch cannot drift between the two (trinity#4302). The
+    reach check and the wake cap stay with the callers, which run them in
+    different orders.
+    """
     for agent_name in targets:
         # ent#220 item 2 — SHIELDED against client-disconnect cancellation.
         #
@@ -1366,6 +1829,70 @@ async def _after_landing(current_user, room_id: str, room: dict, sender_kind: st
                               f"{agent_name} could not be woken ({type(e).__name__}).")
 
     return [t for t in targets]
+
+
+async def continue_chain(current_user, room_id: str, seq: int) -> dict:
+    """A person wakes the agents a paused chain left waiting (trinity#4302).
+
+    Order (access-first, Invariant #8; the receipt last among the checks):
+    membership (uniform 404) → person (403 `not_a_person`: an agent-callable
+    Continue would let the bounded thing lift its bound) → budgets (410, says
+    why, closes an expired/over-budget room as a post would) → the offer at
+    ``seq`` must be the room's newest pause and still stand (409
+    `room_moved_on`) → someone named must still be seated (409
+    `no_one_to_wake`) → the continuer must still reach at least one of them
+    (403 `agent_not_accessible`, nothing consumed) → the `chain_continued`
+    receipt, inserted under the offer predicate (a racer that lost gets 409
+    `room_moved_on`) → wake cap → the wakes, at depth 1 like a human post's.
+
+    The receipt is a system row: a Continue spends no message budget; the turns
+    it wakes are costed and counted as today.
+    """
+    room = _require_membership(room_id, current_user)
+    if not _is_room_person(current_user):
+        raise RoomError(403, "not_a_person", "Only a person can continue a paused conversation")
+    _enforce_budgets(room)
+
+    pause = db.latest_pause(room_id)
+    if not pause or int(pause["seq"]) != int(seq) or not db.offer_stands(room_id, seq):
+        raise RoomError(409, "room_moved_on",
+                        "The conversation has moved on since the agents paused")
+    participants = db.list_participants(room_id)
+    nxt = _present_next(pause, participants)
+    if not nxt:
+        raise RoomError(409, "no_one_to_wake", "The agents that were next have left the room")
+    reachable = [t for t in nxt if _can_still_reach(current_user, t)]
+    if not reachable:
+        raise RoomError(403, "agent_not_accessible",
+                        f"You no longer have access to {_names(nxt)}")
+
+    kind, identity = _caller(current_user)
+    receipt_seq = db.append_continue_receipt(
+        uuid.uuid4().hex, room_id, seq, f"{identity} asked {_names(reachable)} to carry on.",
+        reachable, utc_now_iso())
+    if receipt_seq is None:
+        raise RoomError(409, "room_moved_on",
+                        "The conversation has moved on since the agents paused")
+    _broadcast("room_message", {"room_id": room_id, "seq": receipt_seq})
+
+    # The receipt has LANDED: the offer is consumed and the person's action is
+    # in the record. From here nothing may fail the Continue (#3210's rule for
+    # a post) — a wake's failure is reported in the room by the wake itself.
+    try:
+        unreachable = [t for t in nxt if t not in reachable]
+        if unreachable:
+            _post_system(room_id,
+                         f"{', '.join(unreachable)} could not be reached "
+                         f"(no longer shared with the sender).")
+        targets = _apply_wake_cap(room_id, kind, identity, reachable)
+        woke = await _wake_targets(current_user, room_id, targets, 0)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("room %s: continue receipt %s landed, but the wakes failed",
+                       room_id, receipt_seq, exc_info=True)
+        _post_system_safe(room_id, "The agents were asked to carry on, but could not be "
+                                   f"woken ({type(e).__name__}).")
+        woke = []
+    return {"room_id": room_id, "seq": receipt_seq, "woke": woke}
 
 
 # --- who is mid-turn, readable after a reload -------------------------------
@@ -1469,47 +1996,215 @@ _held_wake_locks: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
 )
 
 
-async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: int) -> None:
+async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: int,
+                      ask_block: Optional[str] = None,
+                      ask_request_text: str = ""):
     """Serialise wakes of one pull-pilot agent in one room, then run the turn (#3114).
 
     Two posts that both mention an agent wake it twice. Unserialised, both
     read the same cursor, delta and cached session id and both answer the same
     messages. The lock spans the whole turn, so the second wake reads what the
     first left; it waits up to one turn's length, then gives up visibly.
+
+    Returns what `_wake_agent_locked` returns, or `LOCK_BUSY`.
     """
     from services.pull_pilot import pull_owns_dispatch
     from services.session_turn_service import ResumeLock, ResumeLockBusy
 
     # Pull pilots only. Push agents keep their wake behaviour unchanged.
+    turn = dict(ask_block=ask_block, ask_request_text=ask_request_text)
     if not pull_owns_dispatch(agent_name, "room"):
-        await _wake_agent_locked(current_user, room_id, agent_name, chain_depth)
-        return
+        return await _wake_agent_locked(current_user, room_id, agent_name, chain_depth, **turn)
     key = f"room_wake_lock:{room_id}:{agent_name}"
     held = _held_wake_locks.get()
     if key in held:
-        await _wake_agent_locked(current_user, room_id, agent_name, chain_depth)
-        return
+        return await _wake_agent_locked(current_user, room_id, agent_name, chain_depth, **turn)
     ttl = (ROOM_TURN_TIMEOUT_SECONDS + _room_queue_allowance(agent_name)
            + ROOM_WAKE_LOCK_BUFFER_SECONDS)
     try:
         async with ResumeLock(agent_name, None, "", ttl, key=key, wait_seconds=ttl):
             token = _held_wake_locks.set(held | {key})
             try:
-                await _wake_agent_locked(current_user, room_id, agent_name, chain_depth)
+                return await _wake_agent_locked(current_user, room_id, agent_name,
+                                                chain_depth, **turn)
             finally:
                 _held_wake_locks.reset(token)
     except ResumeLockBusy:
         logger.warning("room %s: %s still busy with an earlier turn after %ss",
                        room_id, agent_name, ttl)
         _post_system(room_id, f"{agent_name} is still busy with an earlier turn.")
+        return LOCK_BUSY
+
+
+def _without_gate_holds(room_id: str, agent_name: str, delta: list[dict]) -> list[dict]:
+    """trinity#3402: ``delta`` minus what this agent's skill gate already stopped
+    — a post it held (or refused for good) and the notice line. The transcript
+    AND the text the gate scans are built from what this returns, so nothing is
+    shown that is not scanned. Fails OPEN: unread, the post is scanned again and
+    held again (one more ask) — over-gating, never an unchecked request."""
+    try:
+        held = db.gate_held_seqs(room_id, agent_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("room %s: gate holds unreadable for %s (%s) — showing the delta "
+                       "unfiltered; the gate still scans all of it", room_id, agent_name, e)
+        return delta
+    kept = [m for m in delta if m.get("seq") not in held]
+    # The SAME list when nothing was removed: the caller reads identity as
+    # "this delta held nothing this agent's gate stopped".
+    return delta if len(kept) == len(delta) else kept
+
+
+def _gated_posts(shown: list[dict], gates) -> list[dict]:
+    """The shown posts whose OWN text invokes a skill gated on this agent — the
+    gate's own matcher, which cannot match across the line the transcript joins
+    posts with. What a hold records and what the approver's card shows."""
+    return [m for m in shown
+            if m.get("sender_kind") != "system" and find_gated_invocations(m.get("content"), gates)]
+
+
+def _room_gate_card(agent_name: str, shown: list[dict], ask_request_text: str,
+                    requester: tuple[str, str]):
+    """trinity#4505: (the card's posts, the `gate_replay` keys) for this wake.
+    The card holds the gated posts and the requester's posts (the oldest ungated
+    ones dropped while the card is over the size limit), each line
+    naming its sender as the transcript does, plus the ask answer; the keys carry
+    it as the replay message and the scanned parts for the gate's coverage check. The card is what the approver reads,
+    what is size-checked and what Approve runs, so another participant's long
+    post (or this agent's own reply) never makes a short request refusable, and
+    an agent's gated line never reads as the person's. The scan still reads the
+    whole slice. ([], None) when the map is unreadable or empty, or nothing
+    names a gated skill. A gated name only in the ask answer still gets this
+    card (the answer under its label, plus the requester's posts), so
+    every room card goes through `_format_card`."""
+    from services import skill_gate_service
+
+    try:
+        gates = skill_gate_service.read_gates(agent_name)
+    except Exception:  # noqa: BLE001 — the backstop's own read refuses gate_unavailable
+        return [], None
+    if not gates:
+        return [], None
+    gated = _gated_posts(shown, gates)
+    if not gated and not find_gated_invocations(ask_request_text, gates):
+        return [], None
+    # PR #4552 review 4: each post (and the ask answer) is sanitised by itself
+    # before it is labelled, so a redaction never reaches across into the next
+    # post or its sender label. The card is not sanitised again: Approve runs
+    # it as shown. The requester's posts are on it, for context.
+    mine = [m for m in shown if (m.get("sender_kind"), m.get("sender_identity")) == requester]
+    pairs = [(m, {**m, "content": sanitize_text(m.get("content") or "")}) for m in shown
+             if m in gated or m in mine]
+    answer = sanitize_text(ask_request_text or "")
+    # PR #4552: the requester's ungated posts are context. The oldest leave the
+    # card first until it fits, so an old long post to another agent cannot make
+    # every gated ask too long. Gated posts and the requester's latest stay.
+    from services.skill_gate_service import CARD_INPUT_MAX_BYTES, _json_bytes
+    droppable = [m for m in mine[:-1] if m not in gated]
+    while True:
+        posts = [p for _, p in pairs]
+        card = _format_card(posts, answer)
+        if not droppable or _json_bytes(card) <= CARD_INPUT_MAX_BYTES:
+            break
+        oldest = droppable.pop(0)
+        pairs = [(m, p) for m, p in pairs if m is not oldest]
+    return posts, {skill_gate_service.REPLAY_MESSAGE: card,
+                   skill_gate_service.REQUEST_PARTS: _gate_parts(shown, ask_request_text)}
+
+
+def _gate_parts(shown: list[dict], ask_request_text: str) -> list[str]:
+    """What the skill gate scans on a room wake: each post the agent is shown,
+    then the ask answer."""
+    return ([m.get("content") or "" for m in shown if m.get("sender_kind") != "system"]
+            + ([ask_request_text] if ask_request_text else []))
+
+
+# PR #4552 review: what starts each continuation line of a post on the card.
+CARD_CONTINUATION = "  | "
+# What starts the ask reply's first line on the card: the answer (or the
+# cancel reason) to the ask this turn continues. The responder is withheld
+# from the agent (ent#715), and the replay is the agent's message. No agent
+# name or email starts with "(", so no post's sender line reads as this.
+CARD_ASK_ANSWER = "(ask reply): "
+
+
+def _format_card(posts: list[dict], ask_answer: str = "") -> str:
+    """The gate card's posts: `_format_delta`'s sender lines, then the ask
+    reply under `CARD_ASK_ANSWER`, with every further line of each (on any
+    line break a renderer honours) prefixed by `CARD_CONTINUATION`, so a
+    newline inside one cannot start a line that reads as a sender's. The agent
+    transcript keeps `_format_delta`."""
+    entries = [_format_delta([m]) for m in posts]
+    if ask_answer:
+        entries.append(CARD_ASK_ANSWER + ask_answer)
+    lines = []
+    for entry in entries:
+        first, *rest = entry.splitlines() or [""]
+        lines += [first] + [CARD_CONTINUATION + line for line in rest]
+    return "\n".join(lines)
+
+
+def _too_long_notice(posts: list[dict], requester_identity: str, exc: SkillGateError) -> str:
+    """trinity#4505 AC3: a too-long refusal names text the requester can change.
+    When a gated post on the card is someone else's and the requester's own
+    post is not what overflows, say whose. Every gated post
+    on the card is recorded as held (`_record_gate_hold`), so asking again
+    leaves it out."""
+    theirs = [m for m in posts
+              if m.get("sender_identity") and m.get("sender_identity") != requester_identity]
+    others = sorted({m["sender_identity"] for m in theirs})
+    message = getattr(exc, "message", None) or str(exc)
+    if not others:
+        return message
+    from services.skill_gate_service import CARD_INPUT_MAX_BYTES, _json_bytes
+    # The requester's own post is on the card too: when the others' posts fit
+    # by themselves, the requester's post is what to shorten.
+    if _json_bytes(_format_card(theirs)) <= CARD_INPUT_MAX_BYTES:
+        return message
+    return (f"This request is too long for an approver to read in full (over "
+            f"{CARD_INPUT_MAX_BYTES} bytes). It includes a post by {', '.join(others)} "
+            f"that names a skill needing approval; that post is not passed on again. Ask again.")
+
+
+def _record_gate_hold(room_id: str, agent_name: str, shown: list[dict],
+                      notice_seq: Optional[int], exc: SkillGateError) -> None:
+    """trinity#3402: never put this request to this agent again. Without it the
+    next wake asks a second time (or refuses forever) and a cold one replays
+    the post as prose. Recorded: each shown post whose OWN text invokes a skill
+    gated on this agent — the gate's own matcher, which cannot match across the
+    line the transcript joins posts with — and the notice line. A refusal that
+    clears by itself records nothing: the next wake delivers the post again."""
+    from services import skill_gate_service
+
+    if not (isinstance(exc, SkillApprovalRequired)
+            or getattr(exc, "code", None) in skill_gate_service.STANDING_REFUSALS):
+        return
+    try:
+        gates = skill_gate_service.read_gates(agent_name)
+    except Exception:  # noqa: BLE001 — unreadable now: the next wake re-holds it once
+        gates = {}
+    seqs = [m["seq"] for m in _gated_posts(shown, gates) if m.get("seq") is not None]
+    seqs.append(notice_seq)
+    try:
+        db.record_gate_holds(room_id, agent_name, seqs, hold_marker(exc), utc_now_iso())
+    except Exception:  # noqa: BLE001
+        logger.error("room %s: could not record what %s's skill gate stopped — its next "
+                     "wake raises it again", room_id, agent_name, exc_info=True)
 
 
 async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
-                             chain_depth: int) -> None:
+                             chain_depth: int, ask_block: Optional[str] = None,
+                             ask_request_text: str = ""):
     """One agent turn: delta -> execute_task -> auto-post the reply.
 
     Every wake is an ORDINARY execution through the standard path, so slots, the
     circuit breaker, cost and observability all come for free.
+
+    ``ask_block`` (ent#1135): the ending of an ask the agent raised here,
+    framed as data. It IS the turn's content, so the turn runs even when the
+    unread delta is empty or holds only what the gate stopped. Returns the
+    dispatch result when a dispatch returned, `GATE_HELD` when the skill gate
+    stopped it, `DISPATCH_RAISED` when the dispatch raised, else None (nothing
+    dispatched).
     """
     participant = db.get_participant(room_id, "agent", agent_name)
     if not participant or participant.get("left_at"):
@@ -1525,20 +2220,28 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
     cold = not cached
     if cold:
         delta = db.get_recent_messages(room_id, ROOM_COLD_CONTEXT_MESSAGES)
-    if not delta:
+    if not delta and not ask_block:
         return
 
-    top_seq = max(m["seq"] for m in delta)
+    top_seq = max((m["seq"] for m in delta), default=cursor)
+    # trinity#3402: never what this agent's gate already stopped — not shown,
+    # so not scanned (one list feeds both). Left with nothing to answer, the
+    # wake is over. The cursor stays (it moves on a reply): the next wake reads
+    # these rows again and leaves them out again.
+    visible = _without_gate_holds(room_id, agent_name, delta)
+    if (visible is not delta and not ask_block
+            and not any(m.get("sender_kind") != "system" for m in visible)):
+        return
     # #3210: what the agent is SHOWN is bounded; what it is marked as having
     # read is not — the cursor still moves past every message in the delta,
     # omitted ones included, or each later wake would be handed the same
     # overflow again. (`top_seq` is read above, from the rows the table
     # returned: the line standing in for an omitted run has no seq.)
-    shown = _fit_transcript(delta, agent_name)
-    if shown is not delta:
+    shown = _fit_transcript(visible, agent_name)
+    if shown is not visible:
         logger.info("room %s: transcript for %s is over budget — showing %d of %d "
                     "messages", room_id, agent_name,
-                    sum(1 for m in shown if m.get("seq") is not None), len(delta))
+                    sum(1 for m in shown if m.get("seq") is not None), len(visible))
     # The WS broadcast reaches clients that are CONNECTED right now. A client
     # that reloads mid-turn missed it and has nothing to re-derive the state
     # from — the room looked idle while two agents were thinking. So the state
@@ -1560,8 +2263,10 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
     # unreadable roster means we do not know who is watching, and a needless
     # caution in an agent-only room costs a slightly more careful answer while a
     # missed signal in front of a customer is the disclosure this prevents.
+    roster = None
     try:
-        user_facing = room_is_user_facing(db.list_participants(room_id))
+        roster = db.list_participants(room_id)
+        user_facing = room_is_user_facing(roster)
     except Exception as e:  # noqa: BLE001
         logger.warning("room %s: participant read for the user-facing signal "
                        "failed (%s) — assuming a person is reading", room_id, e)
@@ -1584,17 +2289,26 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         surface="room", agent_name=agent_name, chat_id=room_id,
         person_email=client_email, internal_audience=not user_facing))
 
+    gated_posts: list[dict] = []
+
     try:
+        # Inside the `try`: the `finally` below clears the working state.
+        gated_posts, gate_replay = _room_gate_card(agent_name, shown, ask_request_text,
+                                                   _caller(current_user))
         # #3114: on a pull pilot the turn is queued under this room's key and
         # awaited here.
         result = await dispatch_and_await_terminal(
             agent_name=agent_name,
-            message=turn_prefix + manifest_prefix + _build_turn_prompt(room, agent_name, shown, cold, user_facing),
+            message=turn_prefix + manifest_prefix + _build_turn_prompt(
+                room, agent_name, shown, cold, user_facing, roster, ask_block=ask_block),
             # trinity-enterprise#751: the skill gate reads what the participants
             # wrote that this agent is SHOWN (the #3210 budget-fitted delta),
             # never the transcript scaffolding.
-            request_text="\n".join(m.get("content") or "" for m in shown
-                                    if m.get("sender_kind") != "system"),
+            # ent#1135: plus the person's answer to the ask this turn continues.
+            request_text="\n".join(_gate_parts(shown, ask_request_text)),
+            # trinity#4505: what the card shows and Approve runs — the posts
+            # that name a gated skill, never the whole slice.
+            gate_replay=gate_replay,
             triggered_by="room",
             conversation_key=f"room:{room_id}",
             system_prompt=room_prompt,
@@ -1630,12 +2344,21 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         raise
     except SkillGateError as e:
         # trinity-enterprise#751: nothing ran; say why in the room.
-        _post_system(room_id, getattr(e, "message", None) or str(e))
-        return
+        notice = (_too_long_notice(gated_posts, _caller(current_user)[1], e)
+                  if getattr(e, "code", None) == "request_too_long"
+                  else getattr(e, "message", None) or str(e))
+        notice_seq = _post_system(room_id, notice)
+        # trinity#3402: and never put that request to this agent again. The
+        # cursor keeps its rule — it moves on a reply — so anything else in
+        # this delta is delivered on the next wake.
+        _record_gate_hold(room_id, agent_name, shown, notice_seq, e)
+        return GATE_HELD
     except Exception as e:  # noqa: BLE001 — a failed turn is VISIBLE, never silent
         logger.warning("room %s: turn for %s raised: %s", room_id, agent_name, e)
         _post_system(room_id, f"{agent_name} could not respond ({type(e).__name__}).")
-        return
+        # ent#1135: not None — a turn may have started before the raise, so the
+        # ask return must not fall through to a second, ordinary wake.
+        return DISPATCH_RAISED
     finally:
         _clear_agent_working(room_id, agent_name)
         _broadcast("room_participant_state",
@@ -1696,18 +2419,21 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
     # answered is re-delivered on the next wake.
     if status == "cancelled":
         _post_system(room_id, f"{agent_name}'s turn was stopped.")
-        return
+        return result
 
     if status == "failed" or not reply:
         # A dead resume handle is the common cause — drop it so the next wake is
         # cold instead of failing the same way forever (Session-tab idiom).
         if cached:
             db.clear_cached_session(room_id, agent_name)
+        # Every room member reads this line, external Workspace clients
+        # included: the row error stays operator-only (#4482).
+        from services.channel_completion_report import person_safe_failure
         err = (getattr(result, "error", "") or "").strip()
         _post_system(room_id,
                      f"{agent_name} could not respond"
-                     + (f": {err[:200]}" if err else " (no response)."))
-        return
+                     + (f": {person_safe_failure(status, err)}" if err else " (no response)."))
+        return result
 
     # POST FIRST, then advance the cursor (ent#220 item 1).
     #
@@ -1740,7 +2466,7 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
                        room_id, agent_name, execution_id, exc_info=True)
         _post_system_safe(room_id,
                           f"{agent_name}'s reply could not be posted ({type(e).__name__}).")
-        return
+        return result
 
     # Cursor advances only on SUCCESS — a failed turn re-delivers its delta.
     try:
@@ -1749,6 +2475,7 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         logger.warning("room %s: could not advance the read cursor of %s — its "
                        "next wake re-reads this delta", room_id, agent_name,
                        exc_info=True)
+    return result
 
 
 def sweep_expired_rooms() -> int:
@@ -1759,3 +2486,323 @@ def sweep_expired_rooms() -> int:
             _post_system(room["id"], "Room closed (expired).")
             closed += 1
     return closed
+
+
+# --- asks raised in a room (abilityai/trinity-enterprise#1135) ----------------
+#
+# An agent that raises an ask (`ask_operator`) from inside a room turn asked in
+# front of everyone in that room — so the room hears that it is waiting, hears
+# how the ask ended, and gets the continuation as a room turn. The platform
+# knows the raising turn: every room turn's execution row is stamped with this
+# room (#2792), and the ask route passes the platform-set execution id.
+
+def room_for_execution(agent_name: str, execution_id: Optional[str]) -> Optional[str]:
+    """The room ``execution_id`` is a turn of, iff it is a still-RUNNING room
+    turn of THIS agent in an open room the agent is a current participant of —
+    else None. The room analogue of ``client_portal.service.chat_for_execution``
+    (ent#734), with its trust bound: the id is a platform-set header, but the
+    agent's own process can send any of its executions' ids, so what remains
+    forgeable is another RUNNING room turn of the same agent — never another
+    agent's room, a room it is not in, or a finished turn. Raises like any
+    other read; the caller owns the fail-soft."""
+    if not execution_id:
+        return None
+    from database import db as core_db
+    from models import TaskExecutionStatus
+
+    execution = core_db.get_execution(execution_id)
+    status = getattr(execution, "status", None)
+    if (execution is None or execution.agent_name != agent_name
+            or getattr(status, "value", status) != TaskExecutionStatus.RUNNING.value
+            or execution.triggered_by != "room"
+            or getattr(execution, "source_channel", None) != ROOM_SOURCE_CHANNEL):
+        return None
+    room_id = getattr(execution, "source_channel_chat_id", None)
+    if not room_id:
+        return None
+    key = getattr(execution, "conversation_key", None)
+    if key and key != f"room:{room_id}":
+        return None
+    participant = db.get_participant(room_id, "agent", agent_name)
+    if not participant or participant.get("left_at"):
+        return None
+    room = db.get_room(room_id)
+    if not room or room["status"] != "open":
+        return None
+    expires_at = room.get("expires_at")
+    if expires_at and expires_at <= utc_now_iso():
+        return None
+    return room_id
+
+
+# The ask title is agent text spoken in the platform's voice (a system line):
+# quoted, whitespace-collapsed and capped, whatever cap the raise applied.
+ASK_LINE_TITLE_MAX_CHARS = 120
+
+# Privacy rule (requirements/security.md §26.12): who an ask waits on, or who
+# ended it, is named by participant identity only when that person is SEATED in
+# this room; anyone else is a role word — never a non-member's email.
+_ASK_ROLE_WORDS = {
+    "primary": "its primary",
+    "approver": "its approver",
+    "viewer": "its viewer",
+    "operator": "an operator",
+}
+
+
+def _ask_title(title) -> str:
+    text = " ".join(str(title or "").split())
+    if len(text) > ASK_LINE_TITLE_MAX_CHARS:
+        text = text[:ASK_LINE_TITLE_MAX_CHARS - 1] + "…"
+    return f"“{text}”"
+
+
+def _ask_role_words(to_role) -> str:
+    from services import role_addressing
+
+    if role_addressing.parse_role_id(to_role) is not None:
+        return f"the {role_addressing.role_label(to_role)} role"
+    return _ASK_ROLE_WORDS.get(str(to_role or ""), "an operator")
+
+
+def _seated_identity(room_id: str, email: Optional[str]) -> Optional[str]:
+    """The participant identity of the person behind ``email`` when they are
+    seated in this room now, else None. A Workspace client is seated by its
+    email; a platform account by its username."""
+    email = (email or "").strip().lower()
+    if not email:
+        return None
+    seat = db.get_participant(room_id, WORKSPACE_KIND, email)
+    if seat and not seat.get("left_at"):
+        return seat["identity"]
+    from database import db as core_db
+
+    user = core_db.get_user_by_email(email)
+    username = (user or {}).get("username")
+    if username:
+        seat = db.get_participant(room_id, "user", username)
+        if seat and not seat.get("left_at"):
+            return seat["identity"]
+    return None
+
+
+def _ask_context(row: dict) -> dict:
+    context = row.get("context")
+    if isinstance(context, str):
+        try:
+            import json
+            context = json.loads(context)
+        except ValueError:
+            return {}
+    return context if isinstance(context, dict) else {}
+
+
+def ask_room_of(row: dict) -> Optional[str]:
+    """The room an ask was raised in (the platform key), or None."""
+    from services.operator_queue_service import _WORKSPACE_ROOM_KEY
+
+    room_id = _ask_context(row).get(_WORKSPACE_ROOM_KEY)
+    return room_id if isinstance(room_id, str) and room_id else None
+
+
+def post_ask_raised_line(room_id: str, agent_name: str, row: dict) -> None:
+    """One system line while the ask is open: who asked what, waiting on whom.
+    Never raises — the ask stands whether or not the room heard about it."""
+    try:
+        people = row.get("resolved_to") or []
+        if isinstance(people, str):
+            people = [people]
+        addressee = row.get("addressed_to_email") or (people[0] if len(people) == 1 else None)
+        who = (_seated_identity(room_id, addressee) if addressee else None) \
+            or _ask_role_words(row.get("to_role"))
+        _post_system(room_id, f"{agent_name} asked: {_ask_title(row.get('title'))} — "
+                              f"waiting on {who}.")
+    except Exception:  # noqa: BLE001
+        logger.warning("room %s: could not post the line for an ask %s raised",
+                       room_id, agent_name, exc_info=True)
+
+
+def _ending_who(room_id: str, row: dict, actor_email: Optional[str]) -> str:
+    seated = _seated_identity(room_id, actor_email)
+    if seated:
+        return seated
+    actor = (actor_email or "").strip().lower()
+    if actor and actor == (row.get("addressed_to_email") or "").strip().lower():
+        return _ask_role_words(row.get("to_role"))
+    return "an operator"
+
+
+def _ending_clause(event, row: dict, room_id: str) -> str:
+    """How one ask ended, in the room's words — the disposition and a coarse
+    who; never the answer, the notes or the cancel reason."""
+    from services import ask_service
+
+    kind = ask_service.agent_ending_kind(row)
+    if kind == ask_service.REPLACED:
+        return "was replaced by a newer ask"
+    if kind == ask_service.WITHDRAWN:
+        return f"was withdrawn by {row.get('agent_name')}"
+    if event.disposition == ask_service.EXPIRED:
+        return "expired — denied by timeout"
+    verb = {ask_service.ANSWERED: "answered", ask_service.DISMISSED: "dismissed"}.get(
+        event.disposition, "cancelled")
+    return f"was {verb} by {_ending_who(room_id, row, event.actor_email)}"
+
+
+def on_ask_ending(event) -> None:
+    """The ask sink's ending observer (abilityai/trinity-enterprise#1135): one
+    system line per (room, agent, ending event) for the asks raised in a room —
+    every disposition, whether or not a wake runs (a stopped agent, an owner who
+    switched the wake off, an expiry and an agent's own replace or withdraw all
+    still leave the room showing how the ask ended). The ONE writer of ending
+    lines; the return turn never posts one. Best-effort per room."""
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for row in event.rows or ():
+        room_id = ask_room_of(row)
+        if room_id and row.get("agent_name"):
+            groups.setdefault((room_id, row["agent_name"]), []).append(row)
+    for (room_id, agent_name), rows in groups.items():
+        try:
+            if len(rows) == 1:
+                row = rows[0]
+                content = (f"{agent_name}'s ask {_ask_title(row.get('title'))} "
+                           f"{_ending_clause(event, row, room_id)}.")
+            else:
+                from services.operator_resume_service import ENDING_LIST_MAX
+
+                clause = _ending_clause(event, rows[0], room_id)
+                clause = clause.replace("was ", "were ", 1)
+                titles = "; ".join(_ask_title(r.get("title")) for r in rows[:ENDING_LIST_MAX])
+                more = (f"; …and {len(rows) - ENDING_LIST_MAX} more"
+                        if len(rows) > ENDING_LIST_MAX else "")
+                content = f"{len(rows)} asks by {agent_name} {clause}: {titles}{more}."
+            _post_system(room_id, content)
+        except Exception:  # noqa: BLE001 — the ending is committed; a line never undoes it
+            logger.warning("room %s: could not post how %s's ask ended", room_id,
+                           agent_name, exc_info=True)
+
+
+def register_ask_observers() -> None:
+    """Hook the ending observer into the ask sink. Called from `main.py`
+    beside the skill gate's (not at import: the unit island pops modules)."""
+    from services import ask_service
+
+    ask_service.register_ending_observer(on_ask_ending)
+
+
+# The return turn's outcome (`return_ask_to_room`).
+RETURN_DECLINED = "declined"   # nothing spent: the caller wakes the agent outside the room
+RETURN_RAN = "ran"             # a room turn was dispatched; `result` says how it went
+RETURN_HELD = "held"           # the skill gate stopped it — its own observer continues
+RETURN_RAISED = "raised"       # the room dispatch raised: no wake now; it stays re-offerable
+
+
+@dataclass(frozen=True)
+class RoomReturn:
+    kind: str
+    result: Any = None
+
+
+def _reach_principal(room_id: str):
+    """Whose access the return turn's @mentions are held to: the room's
+    moderator, rebuilt from its row the way a request would resolve it. A
+    missing or suspended account lends no reach (the `get_current_user`
+    rule). Never raises."""
+    try:
+        from database import db as core_db
+
+        moderator = next((p for p in db.list_participants(room_id)
+                          if p.get("role") == "moderator" and p.get("kind") in PEOPLE_KINDS
+                          and not p.get("left_at")), None)
+        if moderator is None:
+            return None
+        if moderator["kind"] == "user":
+            from models import User
+
+            row = core_db.get_user_by_username(moderator["identity"])
+            if not row or row.get("suspended_at"):
+                return None
+            return User(id=row["id"], username=row["username"], email=row.get("email"),
+                        role=row.get("role") or "user")
+        from shared_sessions.router import WorkspacePrincipal
+
+        email = moderator["identity"]
+        account = core_db.get_user_by_email(email)
+        if account and account.get("suspended_at"):
+            return None
+        # A Workspace creator with a platform account reaches the agents it
+        # owns through the platform path (`agent_on_roster(include_owned=...)`).
+        return WorkspacePrincipal(email=email, is_platform=bool(account))
+    except Exception:  # noqa: BLE001
+        logger.warning("room %s: could not rebuild the moderator's reach", room_id,
+                       exc_info=True)
+        return None
+
+
+def _ask_waker(room_id: str, agent_name: str, actor_email: Optional[str]) -> Waker:
+    seated = _seated_identity(room_id, actor_email)
+    return Waker(kind="ask", identity=agent_name,
+                 email=(actor_email or "").strip().lower() if seated else None,
+                 reach_principal=_reach_principal(room_id))
+
+
+def _decline(room_id: str, agent_name: str, reason: Optional[str]) -> RoomReturn:
+    if reason:
+        _post_system_safe(room_id, f"{agent_name} continues outside the room: {reason}.")
+    return RoomReturn(RETURN_DECLINED)
+
+
+async def return_ask_to_room(room_id: str, agent_name: str, *, ask_block: str,
+                             request_text: str = "",
+                             actor_email: Optional[str] = None) -> RoomReturn:
+    """Continue an agent IN the room where it raised an ask that just ended
+    (abilityai/trinity-enterprise#1135): a room turn through the engine, with
+    the room's unread delta, gate-hold filter, prompt, transcript budget, wake
+    cap, cursor and mention cascade, and ``ask_block`` (the ending, framed as
+    data) as its content. The ending LINE is not posted here — the ending
+    observer is its one writer.
+
+    `RETURN_DECLINED` when nothing was spent — the room is closed or expired,
+    the agent left, the room is over budget, the agent's own wake cap is spent,
+    or a pull pilot's earlier turn holds the room lock; the room then says, in
+    one clause, that the agent continues outside it (a cap adds that clause to
+    its own line) and the caller runs today's wake. `RETURN_RAISED` when the
+    room dispatch raised: a turn may have started, so the caller runs no
+    ordinary wake now — but the wake is left re-offerable, so the agent's next
+    start may wake it again. Never raises."""
+    try:
+        room = db.get_room(room_id)
+        if not room:
+            return RoomReturn(RETURN_DECLINED)
+        expires_at = room.get("expires_at")
+        if room["status"] != "open" or (expires_at and expires_at <= utc_now_iso()):
+            return _decline(room_id, agent_name, "the room is closed")
+        participant = db.get_participant(room_id, "agent", agent_name)
+        if not participant or participant.get("left_at"):
+            return _decline(room_id, agent_name, f"{agent_name} has left the room")
+        over = _budget_exceeded_reason(room)
+        if over:
+            return _decline(room_id, agent_name,
+                            "the room is over its message budget" if over == "max_messages"
+                            else "the room is over its cost budget")
+        # The cap is the agent's own sender budget in this room — never a
+        # bystander's. A cap decline writes its own line, then says where the
+        # agent continues.
+        if not _apply_wake_cap(room_id, "agent", agent_name, [agent_name]):
+            return _decline(room_id, agent_name, "its wake limit here is spent")
+        waker = _ask_waker(room_id, agent_name, actor_email)
+        out = await _wake_agent(waker, room_id, agent_name, 0, ask_block=ask_block,
+                                ask_request_text=request_text)
+    except Exception:  # noqa: BLE001 — the answer must never be lost to the room path
+        logger.warning("room %s: the ask return for %s failed before a turn ran",
+                       room_id, agent_name, exc_info=True)
+        return RoomReturn(RETURN_DECLINED)
+    if out == LOCK_BUSY:
+        return _decline(room_id, agent_name, "it is still busy with an earlier turn here")
+    if out == GATE_HELD:
+        return RoomReturn(RETURN_HELD)
+    if out == DISPATCH_RAISED:
+        return RoomReturn(RETURN_RAISED)
+    if out is None:
+        return RoomReturn(RETURN_DECLINED)
+    return RoomReturn(RETURN_RAN, out)

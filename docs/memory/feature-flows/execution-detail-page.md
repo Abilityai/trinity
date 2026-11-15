@@ -65,16 +65,16 @@ v-if="!task.id.startsWith('local-') || task.execution_id"
 ### Execution ID Format
 
 The `:executionId` parameter uses the **Database Execution ID** format:
-- Format: `token_urlsafe(16)` - 22 characters, URL-safe base64
+- Format: `token_urlsafe(16)` - 22 characters, URL-safe base64; `/chat` rows use UUID v4
 - Storage: SQLite `schedule_executions.id` column
 - Example: `abc123XYZ789abcd12`
 
-**Important**: This is different from the Queue Execution ID (UUID format) used internally for Redis queue management. The chat API response includes both:
+`/chat` rows take the admission's UUID instead, so the row id equals the capacity slot member (#3989). The chat API response carries both fields, holding the same id:
 ```json
 {
   "execution": {
-    "id": "uuid-format-queue-id",           // Queue ID (transient)
-    "task_execution_id": "abc123XYZ789..."  // Database ID (use this for navigation)
+    "id": "uuid-format-id",           // Same as task_execution_id
+    "task_execution_id": "uuid-format-id"  // Database ID (use this for navigation)
   }
 }
 ```

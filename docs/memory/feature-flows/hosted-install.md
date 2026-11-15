@@ -132,7 +132,7 @@ start.sh --provision --cloud <digitalocean|vultr> [--machine-only | --site-only]
 | **Inert on a laptop** | Off by default. It installs packages, resets ufw and claims :80/:443, so it refuses unless root, Linux and a reachable metadata service, which no laptop satisfies. `--cloud` accepts only `digitalocean`; the metadata URL is the one per-cloud difference |
 | **Caddy is pinned, with a floor** | 2.11.4, and the installed version is asserted ≥ 2.11.3: earlier Caddy cannot issue a Let's Encrypt IP certificate (caddyserver/caddy#7399), and the no-domain HTTPS story rests on one. Not `apt-mark hold`, which would block security updates |
 | **Certificate verified, never fatal** | The site phase polls `https://<ip>/` with normal verification for ~150 s. Trinity is not up yet, so Caddy answers 502 — a zero curl exit means the chain validated. A failure is recorded and warned, and the install continues |
-| **One `.env` writer** | `scripts/deploy/env-file.sh::set_env_key` rewrites the line rather than `sed`-substituting a user-controlled value, where `&`, `\` and the delimiter corrupt it silently. `start.sh` also writes an `ADMIN_PASSWORD` from the environment into `.env` when `.env` has none — the installer's user-data relies on this |
+| **One `.env` writer** | `scripts/deploy/env-file.sh::set_env_key` rewrites the line rather than `sed`-substituting a user-controlled value, where `&`, `\` and the delimiter corrupt it silently. `start.sh` also writes an `ADMIN_PASSWORD` from the environment into `.env` when `.env` has none. The DigitalOcean installer's user-data passes no password; it exports `ADMIN_PASSWORD_SOURCE=browser` (#3799) |
 | **`X-DO-MARKETPLACE` follows provenance** | DigitalOcean's 1-Click header is emitted only for `do-marketplace`, not for every DigitalOcean install — the doc install did not come from the catalog |
 
 ### Host firewall — no port list (`scripts/deploy/docker-firewall.sh`)
@@ -148,7 +148,7 @@ Docker's published-port rules are evaluated ahead of ufw's chain, so `ufw deny 8
 
 Users reach Caddy on 80/443 — host ports, which never traverse this chain (Caddy proxies `127.0.0.1:8081`). Naming what is inside rather than the public interface also closes a private VPC interface. The chain is rebuilt only when its final DROP is missing and the jump is inserted only once the chain is populated, so no run leaves an empty chain live; the systemd unit reapplies it on every boot (it replaces `iptables-persistent`, which ufw `Breaks:`). IPv4 only: Docker maintains an IPv6 `DOCKER-USER` only with daemon IPv6 enabled, which no Trinity compose file sets.
 
-**The metadata block.** DigitalOcean serves a droplet's user-data verbatim from `169.254.169.254` for the life of the machine, and the installer's user-data carries the admin password. An agent container is precisely the untrusted-code case, so the whole RFC 3927 range is dropped, and the rule must sit **ahead of** the bridge RETURNs or container traffic leaves the chain before reaching it. `tests/unit/test_2380_provision_single_source.py` pins the ordering.
+**The metadata block.** DigitalOcean serves a droplet's user-data verbatim from `169.254.169.254` for the life of the machine, and a 1-Click created with `write_files` carries the admin password in it. An agent container is precisely the untrusted-code case, so the whole RFC 3927 range is dropped, and the rule must sit **ahead of** the bridge RETURNs or container traffic leaves the chain before reaching it. `tests/unit/test_2380_provision_single_source.py` pins the ordering.
 
 ### The installer — `scripts/deploy/trinity-do-create.sh`
 
@@ -156,9 +156,9 @@ Runs on the **operator's** machine, fetched from a release tag, and ends with an
 
 ```
 checks (before any prompt): doctl installed + signed in; a snap doctl needs $HOME
-prompts: admin password (×2, ≥12 chars, guessable prefixes refused) · region · name
+prompts: region · name  (no admin password: ADMIN_PASSWORD_SOURCE=browser, admin created at /setup, #3799)
          · confirm the monthly cost  (no Claude credential: the onboarding overlay's Connect Claude step, ent#582)
-user-data (umask 077 temp file, removed on exit):
+user-data (temp file, removed on exit; no secret in it):
     clone the pinned tag → /opt/trinity
     start.sh --provision --cloud digitalocean --hosted --unattended
 doctl compute droplet create (ubuntu-24-04-x64, s-4vcpu-8gb, the account's SSH keys) --wait
@@ -167,8 +167,9 @@ poll https://<ip>/ with verification for 15 min → print the address, or the co
 
 | Concern | Resolution |
 |---|---|
-| **Prompts, not a file to edit** | A guide that says "change four lines" fails its audience and leaves the admin password on disk. `read -rs` keeps it off the terminal, out of shell history, and out of every file but the droplet's user-data |
-| **Portability (#2683)** | A full `mktemp` template (GNU rejects `-t NAME`). A snap `doctl` has a private `/tmp`, so the file goes under `$HOME` (non-hidden: snap's `home` interface denies dotfiles), and an unset `$HOME` is refused before the first prompt. Every value in the user-data — the password and the tag — is `'\''`-quoted, because a `'` in a valid password broke first boot after the droplet was already billing. An empty SSH-key array under `set -u` on macOS's bash 3.2 |
+| **Prompts, not a file to edit** | A guide that says "change four lines" fails its audience |
+| **No password in user-data (#3799)** | cloud-init rewrites `user-data.txt` every boot, pickles it into `obj.pkl`, and the metadata service serves it for the droplet's life, so nothing on the droplet can scrub it. The droplet boots admin-less (`ADMIN_PASSWORD_SOURCE=browser`) and the operator claims it at `/setup` |
+| **Portability (#2683)** | A full `mktemp` template (GNU rejects `-t NAME`). A snap `doctl` has a private `/tmp`, so the file goes under `$HOME` (non-hidden: snap's `home` interface denies dotfiles), and an unset `$HOME` is refused before the first prompt. Every value in the user-data (the tag) is `'\''`-quoted, because a `'` breaks first boot after the droplet is already billing. An empty SSH-key array under `set -u` on macOS's bash 3.2 |
 | **A shell to support it** | Every SSH key already on the account is attached; without one, DigitalOcean emails a root password and the browser console is the only way in |
 | **Release pin** | The default tag is tied to `VERSION` by `tests/unit/test_2380_installer_release_pin.py`, so a release cut cannot ship an installer that installs the previous RC |
 | **Provenance** | `do-script` — guide-eligible, not a marketplace install ([install-provenance.md](install-provenance.md)) |
@@ -176,6 +177,23 @@ poll https://<ip>/ with verification for 15 min → print the address, or the co
 ### A domain is a Settings field
 
 The provisioned Caddyfile has two HTTPS sites: the bare IP on the `shortlived` profile, and a catch-all with `tls { on_demand }` gated by `ask http://127.0.0.1:8000/api/public/tls-allowed`. So Caddy obtains a certificate for the saved Public URL's host on its first request and refuses every other name; the operator never needs a root shell on the host. The gate's contract — exact parsed host, unauthenticated, fails closed — lives in [install-provenance.md](install-provenance.md) → *The step*.
+
+## Marketplace Release Layer — `packer/digitalocean/scripts/` (trinity-enterprise#1094)
+
+A full `/release` runs these on the operator's machine, in order. Each takes `DIGITALOCEAN_TOKEN`; none prompts.
+
+| Script | Does | Output |
+|---|---|---|
+| `mp-status.sh` | Reads the Vendor Portal listing | Exit 0 clear, 3 queued, 4 rejected or unknown, 1 API failure |
+| `mp-build.sh <tag>` | Refuses when baked files differ from the tag; runs Packer with a fixed SSH key and a per-run droplet tag | Snapshot ID on the last line |
+| `boot-check.sh <id> <tag>` | Boots a throwaway droplet, claims `/setup`, checks first boot, TLS, images, database, firewall, sign-in and agent creation, then destroys it | `~/.trinity-marketplace/<id>.pass` |
+| `mp-submit.sh <id>` | Requires the pass record and `mp-status.sh` exit 0; PATCHes the listing; in `softwareIncluded` it moves the Trinity version, adds PostgreSQL if missing and keeps the rest | Listing status |
+
+`/health` through Caddy is a static nginx 200, so backend health is checked over SSH on `localhost:8000`. `/data/trinity.db` is a path inside the backend container.
+
+### The Caddyfile is Trinity's; operators' sites live in `Caddyfile.d` (#4149)
+
+`/etc/caddy/Caddyfile` is rewritten on every render (first boot, `--site-only`, `--caddy-only`, the IP refresh, the managed upgrade) and ends with `import /etc/caddy/Caddyfile.d/*.caddy`, a directory Trinity creates `0755` and never writes. Whether the live file may be replaced is read off the FILE, never off which caller renders (`provision_caddyfile_is_ours`): absent; matching the checksum Trinity recorded when it last wrote it (`Caddyfile.trinity-sha256`); with no record, the apt package's unedited `:80` default, or a file made only of lines Trinity has ever rendered in its top-level shape. Anything else is refused unless `--caddy-overwrite` (which keeps `Caddyfile.bak-<timestamp>`, and refuses if that copy fails). The check runs before `provision_apply_ip` touches `.env`, so a refused refresh applies nothing. A `Caddyfile.d` entry the `caddy` user cannot read is refused too (root's `caddy validate` reads it, the restart would not). An unchanged Caddyfile with a changed `Caddyfile.d` (digest in `Caddyfile.d.trinity-sha256`) is a `systemctl reload caddy`, not a restart. `--dry-run` previews the `--caddy-only` render and is refused with any other phase.
 
 ## Stop Layer — `scripts/deploy/stop.sh`
 
@@ -211,8 +229,10 @@ A plain `docker compose -f docker-compose.hosted.yml pull` skips the base image 
 | `tests/unit/test_2280_hosted_compose_parity.py` | Wholesale prod↔hosted service parity, third-party pin equality, top-level volumes/networks, the 8 GB floor in the header, `FRONTEND_PORT` in both files |
 | `tests/unit/test_2280_publish_workflow_and_stop.py` | The verify step never passes a mixed-case owner as an image reference and lowercases the one it builds; `flavor: latest=false`; every non-sha tag gated on `github.event_name == 'push'` and the sha tag on nothing; `stop.sh` never runs `compose down` and selects its file from the compose label |
 | `tests/unit/test_2390_start_sh_env_and_project_name.py` | `env_value()` dotenv parity with compose (quotes, inline comments, last-wins) and `compose_project_name()` against compose's real derivation, including the `_`/`-`-bearing directory names that made the data guard fail open |
+| `tests/unit/test_ent1094_marketplace_release.py` | Runs the marketplace release scripts against fake `doctl`, `curl`, `ssh`, `packer` and `git`: status codes, submit refusals, every boot-check failure destroying the droplet, signal handling, secrets outside argv |
 | `tests/unit/test_2380_provision_single_source.py` | The Packer tree calls `start.sh --provision` for both phases and re-implements nothing (no packages, no Caddyfile); the firewall has no port list, RETURNs `ESTABLISHED` before it drops, and drops link-local ahead of the bridge RETURNs; ufw and `iptables-persistent` never both installed; the unit reapplies on boot; `--provision` refuses a workstation; the Caddyfile's `ask` gate and the endpoint's exact-host, fail-closed match |
 | `tests/unit/test_2380_installer_portability.py` | Full `mktemp` template; snap `doctl` gets the file under `$HOME` and a missing `$HOME` is refused before any question; every single-quoted user-data interpolation is quoted, executed round-trip through a shell; the installer run against a stub `doctl` with no SSH keys |
+| `tests/unit/test_4149_caddyfile_operator_sites.py` | Through the real `start.sh` (ent#873 harness): an operator's file is refused by the upgrade, `--caddy-only` and the refresh (which then applies nothing); the packaged default and Trinity's own legacy file are replaced; a legacy file with any line Trinity never rendered is refused; `--caddy-overwrite` keeps a backup; `--dry-run` writes nothing and is refused outside `--caddy-only`; `Caddyfile.d` is `0755` under umask 077, an unreadable drop-in is refused, a changed one reloads Caddy |
 | `tests/unit/test_2380_installer_release_pin.py` | The installer's default tag matches `VERSION` and is `v`-prefixed |
 | `tests/unit/test_2528_compose_file_sets.py` | `quickstart.sh` is an alias for `start.sh` (static + argv passthrough); the data-switch guard executed under `bash` with a `docker` shim — reverse refusal names prod, both-stores-present warns naming the store in use, clean states silent; both standalone compose headers state they are not overlays; every supported file set renders locally (skips without a Compose CLI) and is listed verbatim in `container-security.yml` → `verify-compose-file-sets` |
 

@@ -43,7 +43,7 @@ def _execution(**over):
         id="e1", agent_name="analyst", triggered_by="schedule",
         source_user_email=None, source_channel="portal",
         source_channel_chat_id="sess-1", source_channel_client="seat@example.com",
-        schedule_id="sch-1",
+        schedule_id="sch-1", status="running",
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -98,6 +98,7 @@ def _router(monkeypatch, execution, *, recorded):
     import routers.public_memory as pm
     monkeypatch.setattr(pm, "assert_agent_access", lambda *a, **k: None)
     monkeypatch.setattr(pm.db, "get_execution", lambda _id: execution)
+    monkeypatch.setattr(pm.db, "get_running_turn_attribution", lambda _agent: [])  # #4121: alone on the agent
 
     def _write(agent, email, notes, *, execution_id, triggered_by, schedule_id=None):
         recorded.append(dict(agent=agent, email=email, notes=notes, execution_id=execution_id,
@@ -186,8 +187,11 @@ def test_a_sibling_agents_key_cannot_write_this_agents_seat_memory(monkeypatch):
         _call(pm, agent_key_for="other-agent")
     assert ei.value.status_code == 403
     assert recorded == []
-    # A human principal (no agent_name) is unaffected.
-    assert _call(pm, agent_key_for=None)["success"] is True
+    # #4121: a human (no agent_name) is refused too; this is the agent's own door.
+    with pytest.raises(HTTPException) as ei:
+        _call(pm, agent_key_for=None)
+    assert ei.value.status_code == 403 and ei.value.detail["code"] == "agent_only"
+    assert recorded == []
 
 
 def test_there_is_one_write_boundary_for_every_trigger():
@@ -298,7 +302,10 @@ def test_the_person_sees_a_run_now_fire_as_a_scheduled_run(monkeypatch):
     from client_portal import agent_page
     monkeypatch.setattr(agent_page.db, "get_or_create_public_user_memory",
                         lambda a, e: {"agent_notes": "v2", "updated_at": "t2"})
-    monkeypatch.setattr(agent_page.db, "list_public_user_memory_writes", lambda a, e, n: [
+    # ent#962: the page reads one page past the limit, with a cursor and the
+    # notes section, and decides `undoable` from the store's latest open write.
+    monkeypatch.setattr(agent_page.db, "latest_open_public_user_memory_writes", lambda a, e: {"notes": "w2"})
+    monkeypatch.setattr(agent_page.db, "list_public_user_memory_writes", lambda a, e, n, **k: [
         {"id": "w2", "execution_id": "e2", "triggered_by": "manual", "schedule_id": "sch-1",
          "previous_notes": "v1", "new_notes": "v2", "written_at": "t2", "undone_at": None},
         {"id": "w1", "execution_id": "e1", "triggered_by": "public", "schedule_id": None,
@@ -336,6 +343,7 @@ def test_a_companion_serving_two_seats_keeps_them_apart(real_db, monkeypatch):
             "e-bob": _execution(id="e-bob", source_channel_client="bob@example.com", schedule_id="s-b")}
     monkeypatch.setattr(pm, "assert_agent_access", lambda *a, **k: None)
     monkeypatch.setattr(pm.db, "get_execution", lambda _id: runs[_id])
+    monkeypatch.setattr(pm.db, "get_running_turn_attribution", lambda _agent: [])  # one run at a time (#4121)
     monkeypatch.setattr(pm.db, "write_public_user_memory_agent_notes",
                         real_db.write_user_memory_agent_notes)
     for eid, text in (("e-alice", "Alice's loops"), ("e-bob", "Bob's loops")):

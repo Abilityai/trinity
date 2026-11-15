@@ -1,13 +1,19 @@
 // @vitest-environment jsdom
 /**
  * #3695 — the Workspace sidebar's top controls read, top to bottom:
- * Inbox, Projects, New chat, Search. The two navigation destinations sit
- * together, then the two actions on the chat list. With New chat between
+ * Inbox, Projects, New room, Search. The two navigation destinations sit
+ * together, then the two actions on the chat list. With an action between
  * them Projects read as a chat-list control rather than a place to go.
+ *
+ * #4353: New chat LEFT the sidebar — a roster click already lands on a new
+ * chat (ent#784) and the conversation header carries New chat with its hotkey
+ * (ent#451), so the sidebar button was a slower route to both, and its
+ * multi-select was a second door to a room (ent#701 owns that with New room).
+ * The one action that remains is New room, and only where rooms exist.
  *
  * Mounted, so the DOM order (which is the tab order) is what is pinned — a
  * regex over the template would pass with the blocks swapped if their text
- * happened to match. Without the capability the order is Inbox, New chat,
+ * happened to match. Without the capability the order is Inbox, New room,
  * Search with nothing between them (#3672: no held slot).
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
@@ -58,23 +64,32 @@ function topOrder(w) {
   return [...block.children].map((el) => {
     if (el.getAttribute('data-testid') === 'sidebar-inbox') return 'inbox'
     if (el.getAttribute('data-testid') === 'sidebar-projects') return 'projects'
+    if (el.getAttribute('data-testid') === 'sidebar-new-room') return 'new-room'
     if (el.tagName === 'BUTTON' && el.textContent.includes('New chat')) return 'new-chat'
     if (el.querySelector('input[type="search"]')) return 'search'
     return `?${el.tagName}`
   })
 }
 
-describe('#3695 — Inbox, Projects, New chat, Search', () => {
-  it('with Projects available the order is Inbox, Projects, New chat, Search', async () => {
-    const w = sidebar({ projectsAvailable: true })
+describe('#3695 / #4353 — Inbox, Projects, New room, Search', () => {
+  it('with Projects and rooms the order is Inbox, Projects, New room, Search', async () => {
+    const w = sidebar({ projectsAvailable: true, roomsAvailable: true })
     await flushPromises()
-    expect(topOrder(w)).toEqual(['inbox', 'projects', 'new-chat', 'search'])
+    expect(topOrder(w)).toEqual(['inbox', 'projects', 'new-room', 'search'])
   })
 
-  it('without Projects the order is Inbox, New chat, Search — no slot, no gap', async () => {
-    const w = sidebar({ projectsAvailable: false })
+  it('without Projects the order is Inbox, New room, Search — no slot, no gap', async () => {
+    const w = sidebar({ projectsAvailable: false, roomsAvailable: true })
     await flushPromises()
-    expect(topOrder(w)).toEqual(['inbox', 'new-chat', 'search'])
+    expect(topOrder(w)).toEqual(['inbox', 'new-room', 'search'])
+  })
+
+  it('#4353: without rooms the top block is Inbox, Search — no New chat button anywhere', async () => {
+    const w = sidebar({ projectsAvailable: false, roomsAvailable: false })
+    await flushPromises()
+    expect(topOrder(w)).toEqual(['inbox', 'search'])
+    expect(w.findAll('button').some((b) => b.text().includes('New chat'))).toBe(false)
+    expect(w.emitted('new-chat')).toBeUndefined()
   })
 
   it('tab order follows: the first focusable after the Inbox row is Projects', async () => {
@@ -95,14 +110,23 @@ describe('#3695 — Inbox, Projects, New chat, Search', () => {
     expect(w.emitted('open-projects')).toHaveLength(1)
   })
 
-  it('New chat and the search field keep their contracts', async () => {
-    const w = sidebar({ projectsAvailable: true })
+  it('New room and the search field keep their contracts', async () => {
+    const w = sidebar({ projectsAvailable: true, roomsAvailable: true })
     await flushPromises()
-    const newChat = w.findAll('button').find((b) => b.text().includes('New chat'))
-    await newChat.trigger('click')
-    expect(w.emitted('new-chat')).toHaveLength(1)
+    const newRoom = w.find('[data-testid="sidebar-new-room"]')
+    await newRoom.trigger('click')
+    expect(w.emitted('new-room')).toHaveLength(1)
+    expect(w.findAll('button').some((b) => b.text().includes('New chat'))).toBe(false)
     expect(w.find('input[type="search"]').attributes('aria-keyshortcuts')).toBeTruthy()
     w.vm.focusSearch()
     expect(w.vm.searchHasFocus() || document.activeElement === w.find('input[type="search"]').element).toBe(true)
+  })
+
+  it('#4353: New room is disabled with an empty roster, like the button it replaced', async () => {
+    const w = sidebar({ roster: [], roomsAvailable: true })
+    await flushPromises()
+    const newRoom = w.find('[data-testid="sidebar-new-room"]')
+    expect(newRoom.attributes('disabled')).toBeDefined()
+    expect(newRoom.attributes('title')).toBe('No agents available yet')
   })
 })

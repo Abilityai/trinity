@@ -15,6 +15,10 @@ are needed and they fail differently: session revocation is a Redis cutoff and
 is best-effort, so with Redis down a blocked client's live token would still
 decode. This check reads the durable block row, so the block holds regardless —
 it is the layer that makes "blocked" mean blocked.
+
+A deactivated platform account (`users.suspended_at`) is refused by the same
+check (trinity-enterprise#1258): its email may also hold a share, and a portal
+session knows the email only.
 """
 from __future__ import annotations
 
@@ -28,7 +32,9 @@ from dependencies import (
     PORTAL_MINT_OTP,
     oauth2_scheme,
     decode_portal_session,
+    is_interactive_principal,
     is_person_principal,
+    portal_session_is_interactive,
     portal_session_minted_by,
     portal_session_needs_rotation,
     reject_agent_principal,
@@ -38,6 +44,10 @@ from dependencies import (
 
 logger = logging.getLogger(__name__)
 
+
+
+# trinity#3894: the refusal code for a platform account with no email.
+ACCOUNT_HAS_NO_EMAIL = "account_has_no_email"
 
 def _reject_if_blocked(email: str) -> None:
     """403 a blocked client. Fail-closed — a lookup failure denies.
@@ -55,6 +65,16 @@ def _reject_if_blocked(email: str) -> None:
         logger.error("[#281] block lookup failed for %s; denying: %s", email, exc)
         raise HTTPException(status_code=403, detail="Access has been revoked.")
     if blocked:
+        raise HTTPException(status_code=403, detail="Access has been revoked.")
+    # trinity-enterprise#1258: the same refusal for a deactivated platform
+    # account (`users.suspended_at`, #995). A portal session carries an email
+    # and no account, so nothing else on this path reads the column, and a
+    # session minted before the suspension would outlive it. Here, because this
+    # is the one check every consumer of a portal session already makes (the
+    # two below and `routers/terms.py`). Fail-closed inside the helper.
+    from .service import email_account_suspended
+
+    if email_account_suspended(email):
         raise HTTPException(status_code=403, detail="Access has been revoked.")
 
 
@@ -116,6 +136,18 @@ class PortalPrincipal(NamedTuple):
     #: an authorization input): `portal_session:<minted_by>`, `platform_session`
     #: or `mcp_key:<scope>`.
     credential: str = "unknown"
+    #: trinity-enterprise#959 — the platform USERNAME, for one decision: which
+    #: room participant this credential reads as. Rooms seat a platform account
+    #: as `user`+username and a Workspace session as `workspace_user`+email
+    #: (ent#362) — two identity spaces — so the email alone cannot say which
+    #: rooms are the caller's. None for a portal token, which has no username.
+    username: str | None = None
+    #: trinity-enterprise#1165 — a platform person who signed in INTERACTIVELY
+    #: (a JWT session, ``mcp_scope is None``: the predicate behind
+    #: ``dependencies.is_interactive_principal``). Every MCP key is False —
+    #: user-scoped, system, ops — and so is a portal token. An authorization
+    #: input, unlike ``credential``: a company-wide read is offered only here.
+    is_interactive: bool = False
 
 
 #: Response header carrying a rotated Workspace session token (ent#375). The
@@ -175,6 +207,17 @@ async def get_portal_principal(
     email = decode_portal_session(token)
     if email:
         _reject_if_blocked(email)
+        # trinity-enterprise#1107 ruling A(1): a portal session is a Workspace
+        # person, and is asked for the terms like every other visit — after
+        # the block (a blocked client is refused, not shown terms), before the
+        # slide (a refused session is not handed a fresh token). Asked only
+        # when the session carries the SPA's `interactive` claim (ruling A: a
+        # harness-minted or delegate-minted token is not a visit). The terms
+        # routes are marked `@terms_route` and accept this same token, so the
+        # refusal can be ended; sign-out is client-side and needs no route.
+        from services import terms_gate
+        terms_gate.enforce_portal_session(
+            request, email, interactive=portal_session_is_interactive(token))
         # Slide the session AFTER the block check, so a blocked client is never
         # handed a fresh token on its way out.
         _maybe_rotate(token, response)
@@ -218,7 +261,19 @@ async def get_portal_principal(
     row = db.get_user_by_username(user.username)
     email = (row or {}).get("email") if row else None
     if not email:
-        raise HTTPException(status_code=403, detail="No email is associated with this account")
+        # trinity#3894: the Workspace identifies a person by email (rosters,
+        # messages, shares), so an account without one — the built-in `admin`
+        # on a default install — cannot be seated. Say how to fix it, and name
+        # the case with a code the Workspace renders as that remedy instead of
+        # a "Try again" that can never succeed.
+        from services.chat_execution_service import ERROR_CODE_HEADER
+        raise HTTPException(
+            status_code=403,
+            detail=("This Trinity account has no email address, and the Workspace identifies people "
+                    "by email. Add one under Settings → General (Admin sign-in email), then reload "
+                    "the Workspace."),
+            headers={ERROR_CODE_HEADER: ACCOUNT_HAS_NO_EMAIL},
+        )
     email = email.lower()
     # The operator-preview path is gated too: previewing as a blocked client must
     # show what that client sees, and an operator whose OWN email is blocked has
@@ -230,6 +285,8 @@ async def get_portal_principal(
         email, True, is_person, _is_admin_principal(user),
         self_approves=is_person,
         credential="platform_session" if scope is None else f"mcp_key:{scope}",
+        username=user.username,
+        is_interactive=is_interactive_principal(user),
     )
 
 

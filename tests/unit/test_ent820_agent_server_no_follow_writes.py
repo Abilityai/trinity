@@ -129,6 +129,17 @@ def test_a_file_used_as_a_directory_is_a_400(home):
     assert r.status_code == 400, r.text
 
 
+@pytest.mark.parametrize("path", [".", "/home/developer"])  # "" is already a named 400
+def test_a_put_of_the_home_itself_is_a_named_400_not_a_500(home, path):
+    """ent#949: the home has no parent inside the home, so the walk raised a
+    ValueError that escaped as a 500; mkdir and DELETE already guarded it."""
+    _mod, base, client = home
+    client_no_raise = TestClient(client.app, raise_server_exceptions=False)
+    r = _put(client_no_raise, str(base) if path == "/home/developer" else path, "x")
+    assert r.status_code == 400 and "Not a file" in r.json()["detail"], r.text
+    assert base.is_dir()
+
+
 # ---- a link in the same class keeps working ---------------------------------
 
 def test_a_write_through_a_same_class_link_succeeds(home):

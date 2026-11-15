@@ -472,6 +472,10 @@ Signal: file predicate per running agent — for each `SELECT skill_name FROM ag
 `skill_sources.enabled = 1 AND last_sync_at IS NOT NULL` ⇒ `last_sync_status = 'success' OR last_error IS NOT NULL` — either the last sync worked, or the row says why it did not.
 Signal: `SELECT count(*) FROM skill_sources WHERE enabled = 1 AND last_sync_at IS NOT NULL AND last_sync_status <> 'success' AND last_error IS NULL` → must be 0.
 
+**SK-04** A skill's description is one fact on every surface *(Tier A, 🟡)* — trinity-enterprise#584.
+A capability is described once, in its `SKILL.md` frontmatter `description:`. For every running agent and every user-invocable skill it lists, the description the agent's own listing serves (`GET /api/agents/{name}/playbooks`), the Workspace hint for it (`/briefings`, when exposed) and the connector's `list_playbooks` entry are the same string, and are `null` exactly when the frontmatter `description:` is missing, empty or whitespace. The `/` typeahead carrying no descriptions (#2213) is the one permitted difference.
+Signal: per running agent, for each skill in `/playbooks` → `{name: description}`; the same map from the agent's `/briefings` hints (playbook tier, by name) and from `list_playbooks` must be equal on the shared keys, and no value may be `""` or whitespace. Journey-only.
+
 ---
 
 ## 17. Repo-bound deployment (`agent_git_config` / `agent_sync_state`)
@@ -490,6 +494,14 @@ Signal: `SELECT count(*) FROM agent_sync_state WHERE (last_sync_status = 'failed
 When the owner opted in (`agent_git_config.freeze_schedules_if_sync_failing = 1`) and sync is failing (`agent_sync_state.last_sync_status = 'failed' AND consecutive_failures >= SYNC_FAILURE_FREEZE_THRESHOLD`, `src/scheduler/database.py`), the scheduler fires nothing for that agent: no `schedule_executions` row with `triggered_by = 'schedule'` is created after the failing state was recorded. The scheduler's own check is fail-OPEN (an error fires anyway — a freeze-on-error would stop the fleet), so this invariant is the only thing that notices a freeze that stopped freezing.
 Signal: `SELECT count(*) FROM schedule_executions e JOIN agent_git_config g ON g.agent_name = e.agent_name JOIN agent_sync_state s ON s.agent_name = e.agent_name WHERE g.freeze_schedules_if_sync_failing = 1 AND s.last_sync_status = 'failed' AND s.consecutive_failures >= <SYNC_FAILURE_FREEZE_THRESHOLD> AND e.triggered_by = 'schedule' AND e.started_at > s.updated_at` → must be 0.
 Since trinity-enterprise#706 the freeze also fires for a **work agent** (`source_mode = 0 OR auto_sync_enabled = 1`) whose `agent_sync_state.diverged_since` is more than 24 h old, provided `last_check_at` is within 15 minutes (the freshness clause fails open). The signal above covers the `sync_failing` clause only; the divergence clause depends on the observation's age at fire time, so it is pinned by `tests/unit/test_1808_sync_freeze_enforcement.py` rather than by a standing SQL check. Both clauses write a `skipped` row whose `skip_reason` starts `Git sync frozen:`.
+
+**RD-04** Git health is measured *(Tier B ≤ 24 h, 🟡)* — ✅ **SHIPPED #4000** (registry id `RD-04`).
+Every running git-bound agent (`agent_git_config.sync_enabled = 1`, container in Docker's running list) whose container has been up longer than `STARTUP_GRACE_SECONDS` (7200 s: first maintenance tick = 900 s interval + up to 900 s jitter + up to 1800 s repack, doubled for margin) has `agent_sync_state.git_dir_bytes / pack_count / loose_objects` measured within the last 24 h. Measurement time is `agent_sync_state.git_stats_at`; while that is NULL and the stats are present, `last_sync_at` stands in (an agent built before #4000 measures on its sync cycle and never writes the column). An unknown container start time never fires. Before #4000 a self-pushing agent never measured, so the stats stayed NULL and the `git_bloat` alert could not fire.
+Signal: `SELECT g.agent_name FROM agent_git_config g JOIN agent_ownership o ON o.agent_name = g.agent_name LEFT JOIN agent_sync_state s ON s.agent_name = g.agent_name WHERE g.sync_enabled = 1 AND o.deleted_at IS NULL AND ((s.git_dir_bytes IS NULL AND s.pack_count IS NULL AND s.loose_objects IS NULL) OR COALESCE(s.git_stats_at, s.last_sync_at) < now() - 24h)`, intersected with running containers started more than 7200 s ago → must be empty.
+
+**RD-05** Git maintenance keeps up *(Tier B ≤ 24 h, 🟡)* — ✅ **SHIPPED #4000** (registry id `RD-05`).
+A measured repo stays under 3x the agent's own maintenance trigger: `loose_objects <= 3 × 6700` and `pack_count <= 3 × 20` (the agent defaults of `GIT_MAINTENANCE_LOOSE_THRESHOLD` / `GIT_MAINTENANCE_PACK_THRESHOLD`; a parity test pins the backend constants to them). The agent repacks at 1x, so 3x means maintenance has failed, been skipped or been out-run for many ticks. The violation carries `maintenance_failures`: non-zero means the repack fails, zero means it never starts. Level-triggered; a separate id from RD-04 so each persistent state pages on its own green→red.
+Signal: `SELECT s.agent_name FROM agent_sync_state s JOIN agent_git_config g ON g.agent_name = s.agent_name JOIN agent_ownership o ON o.agent_name = s.agent_name WHERE g.sync_enabled = 1 AND o.deleted_at IS NULL AND (s.loose_objects > 20100 OR s.pack_count > 60)` → must be empty.
 
 ---
 
@@ -547,6 +559,8 @@ The first column is the module, on purpose: a table whose first cell is an id is
 | `h01_collector_blindness.py` | H-01 | H-01 | #1813 Phase 5 |
 | `l03_delete_cascades.py` | L-03 | L-03 | #653 Phase 1 |
 | `r01_no_zombie_claude.py` | R-01 | R-01 | #882 Phase 3 |
+| `rd04_git_measurement_blind.py` | RD-04 | RD-04 | #4000 |
+| `rd05_git_maintenance_behind.py` | RD-05 | RD-05 | #4000 |
 | `s01_slot_row_bijection.py` | S-01 | S-01 | #653 Phase 1 |
 | `s02_no_overbooking.py` | S-02 | S-02 | #882 Phase 2 |
 | `s03_slot_ttl_floor.py` | S-03 | S-03 | #882 Phase 3 |

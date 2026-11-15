@@ -142,7 +142,9 @@ describe('#3692 — the goal renders as markdown', () => {
     projects.fetchTasks = vi.fn()
     projects.tasks = { prj_1: { rows: [task], loaded: true, error: null } }
     projects.fetchTask = vi.fn().mockResolvedValue(task)
-    mount(ProjectTasks, { props: { projectId: 'prj_1', canContribute: true }, attachTo: document.body })
+    // A reader: ent#1133 replaces the rendered block with an editable field for
+    // a contributor on an open task, so this is the audience that reads it.
+    mount(ProjectTasks, { props: { projectId: 'prj_1', canContribute: false }, attachTo: document.body })
     await flushPromises()
     byTestId('project-task-T-001').click()
     await flushPromises()
@@ -380,5 +382,25 @@ describe('ent#896 — the verification rule on Tasks', () => {
     mount(ProjectTasks, { props: { projectId: 'prj_1', canContribute: true }, attachTo: document.body })
     await flushPromises()
     expect(byTestId('project-tasks-verification-rule')).toBeNull()
+  })
+})
+
+// --- trinity-enterprise#1155 — the page hands its members to the Tasks tab ----------
+
+describe('ent#1155 — a task owner who is a member reads by name on the page', () => {
+  it('the Tasks tab names the owner with the member label the page carries', async () => {
+    projects.fetchTasks = vi.fn()
+    projects.tasks = { prj_1: { rows: [{ id: 'T-001', title: 'Draft', status: 'active', priority: 'p2',
+      owner: 'carol@example.com', agent: null, updated_at: '2026-09-30T10:00:00Z' }], loaded: true, error: null } }
+    const w = await page(project({ members: [
+      { email: ME, role: 'creator', label: 'Eva Evans' },
+      { email: 'carol@example.com', role: 'member', label: 'Carol Chen' },
+    ] }))
+    w.findComponent({ name: 'OverflowTabs' }).vm.$emit('update:modelValue', 'tasks')
+    await flushPromises()
+    const row = byTestId('project-task-T-001')
+    expect(row).not.toBeNull()
+    expect(row.textContent).toContain('Carol Chen')
+    expect(row.textContent).not.toContain('carol@example.com')
   })
 })

@@ -16,8 +16,8 @@ Not for you if Trinity already runs on a private network or behind a reverse pro
 |---|---|
 | Caddy on ports 80 and 443 | A browser-trusted Let's Encrypt certificate for the droplet's **IP address**, so there is no warning and no domain required. Certificates on this profile last about six days and renew while the server runs — an instance switched off for longer comes back to a browser warning until renewal catches up |
 | Host firewall | Inbound 22, 80 and 443 only |
-| Container ports | Not reachable from off-box. Docker publishes past ordinary firewall rules, so Trinity installs its own rules that drop anything arriving at a container from outside. The backend, MCP server and log collector are reachable only through Caddy, or from the droplet itself |
-| Admin account | On a 1-Click droplet created without a password: none until someone claims it in a browser — **whoever opens it first becomes the admin**. On AWS the claim also requires the EC2 instance ID, so finding the IP is not enough. The install script, or a password supplied at create time, provisions it at first boot instead |
+| Container ports | Not reachable from off-box. Docker publishes past ordinary firewall rules — `ufw allow`/`deny` never sees a published container port, because Docker's own rules are evaluated first — so Trinity installs its own rules (`scripts/deploy/docker-firewall.sh`, the `DOCKER-USER` chain) that drop anything arriving at a container from outside. The backend, MCP server, log collector and every agent's SSH port (2222–2262) are reachable only through Caddy, or from the droplet itself. Agent SSH ports are also published on `127.0.0.1` only (`AGENT_SSH_BIND_ADDRESS`), so even without those rules they would not answer the public interface |
+| Admin account | On a 1-Click droplet created without a password, or a droplet from the install script: none until someone claims it in a browser — **whoever opens it first becomes the admin**. On AWS the claim also requires the EC2 instance ID, so finding the IP is not enough. A password supplied at create time provisions it at first boot instead |
 
 Everything except the web interface is already closed. What stays open is Trinity itself: the web UI and the API answer anyone on the internet who finds the address, and your login is the only thing in the way.
 
@@ -129,7 +129,8 @@ Order matters — the tailnet rule has to exist before the deny takes effect. (T
 Two more things specific to this image:
 
 - **Install Tailscale *after* provisioning, never before.** The installer resets the host firewall when it provisions a machine, discarding rules you added by hand. If you re-run provisioning later, re-add these.
-- **Container ports stay unreachable over the tailnet.** 8000 for the API, 8080 for MCP, 8686 for the log collector — a firewall rule cannot open them, because Trinity's container rules are evaluated first.
+- **Container ports stay unreachable over the tailnet.** 8000 for the API, 8080 for MCP, 8686 for the log collector, 2222–2262 for agent SSH — a firewall rule cannot open them, because Trinity's container rules are evaluated first. (On this image MCP's 8080 and the agent SSH ports are published on `127.0.0.1` only anyway — `MCP_BIND_ADDRESS` and `AGENT_SSH_BIND_ADDRESS`; MCP clients use `https://your-domain.com/mcp`, once External MCP access is on.)
+- **Agent SSH over the tailnet.** The SSH grant (`get_agent_ssh_access`, or `POST /api/agents/<name>/ssh-access`) tells you how to connect to each agent; with the loopback default that is from the droplet itself, or through it: `ssh -J you@trinity -p <port> developer@127.0.0.1`. To dial agents directly at the tailnet address instead, set `AGENT_SSH_BIND_ADDRESS` to the output of `tailscale ip -4` (and `SSH_HOST` to the same value), restart the backend, and recreate the agents you want reachable. Two costs: Trinity's container rules still drop that traffic unless you add a `DOCKER-USER` rule for `tailscale0`, and every agent start then needs the tailnet interface up — after a reboot, agents restart-loop until `tailscaled` is. The default plus `-J` has neither cost.
 
 Worth knowing: a new tailnet's default policy lets **every** device on your tailnet reach this one, not only the laptop you joined from. And Slack is the one integration that survives this path, because Trinity connects outward to Slack over a WebSocket — though installing the Slack app the first time still needs a public address for the OAuth callback.
 
@@ -154,7 +155,7 @@ sudo ./scripts/deploy/start.sh --provision --cloud digitalocean --caddy-only
 
 `--caddy-only` rewrites the web-server config and nothing else. A plain restart does not pick the variable up, and re-running the full provisioning would also rewrite this instance's recorded address and install provenance, so it is the wrong tool for a one-variable change. The generated configuration is checked before the web server is reloaded — an invalid one leaves the running config alone rather than taking the site down.
 
-Now `http://<tailnet-ip>` serves Trinity. Requests from anywhere else keep redirecting to HTTPS exactly as before.
+Now `http://<tailnet-ip>` serves Trinity, and so does the machine's MagicDNS name (`http://<machine-name>`). What decides it is the address the request comes from, so either name works from inside the tailnet. Requests from anywhere else keep redirecting to HTTPS exactly as before.
 
 The rule matches the **source address of the connection**, not a header, so a request from the public internet cannot claim to be local to get the login page in cleartext. Setting the value to `0.0.0.0/0` is refused for the same reason.
 
@@ -206,6 +207,7 @@ The full six-probe check is in [Monitoring](monitoring.md) — run it if anythin
 | Telegram or WhatsApp stopped delivering after saving the domain | The webhooks were re-pointed at the new address before it was live | Confirm the domain loads, then re-save the Public URL to re-register them |
 | Site unreachable after closing 80/443 | The tunnel is not carrying traffic | Reopen the ports, check `docker logs trinity-cloudflared`, re-check the ingress rules, then close them again |
 | MCP client cannot connect over the tailnet | It is pointed at a container port, which the container firewall drops | Point it at `https://your-domain.com/mcp`, or tunnel to `127.0.0.1:8081` over SSH |
+| MCP client connects but gets `403 external_mcp_access_off` | External MCP access is off — the default on a fresh install; every client outside the server, through the domain or a tunnel, counts as outside | An admin turns it on under **Settings → MCP Keys → External MCP access** — [MCP Server](../../integrations/mcp-server.md#external-mcp-access) |
 | Browser cannot reach the UI after joining a tailnet and closing the ports | A tailnet address has no certificate and cannot get one | Set `PRIVATE_NETWORK_CIDRS` and re-render — [Reaching the UI over the tailnet](#reaching-the-ui-over-the-tailnet) |
 
 **Clearing the Public URL** stops Trinity handing the name out, but if the address was also baked into the server's environment at install time, the web server keeps serving certificates for it. Settings then reads *not configured* while that is still true — change the environment value and restart if you need it genuinely gone.

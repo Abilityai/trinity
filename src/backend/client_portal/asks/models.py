@@ -1,9 +1,9 @@
 """Pydantic models for Workspace asks (ent#364). OSS core since ent#428."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class WorkspaceAsk(BaseModel):
@@ -17,7 +17,7 @@ class WorkspaceAsk(BaseModel):
     """
     id: str
     agent_name: str
-    kind: str                       # question | approval | alert
+    kind: str                       # question | approval | alert | credential
     priority: str
     title: str
     question: str
@@ -68,6 +68,11 @@ class WorkspaceAsk(BaseModel):
     # when they did. Platform-written; Discuss on an ask that has one continues
     # it instead of opening a second.
     discussion_chat_id: Optional[str] = None
+    # trinity-enterprise#981: the project a row the platform raised about this
+    # person is attached to — `{id, task_id, event}` — from the platform-written
+    # context keys only (stripped from agent content at both ingestion
+    # boundaries); None when the row carries no project.
+    project: Optional[Dict[str, Any]] = None
     # #2915: what the platform last established about the agent's own copy of
     # this ask, COARSE on purpose — `confirmed | changed | closed | unconfirmed`.
     # A client never sees the reason (it names the operator's infrastructure)
@@ -105,6 +110,49 @@ class WorkspaceAsk(BaseModel):
     # cross.
     agent_ending: Optional[str] = None
     ending_reason: Optional[str] = None
+    # trinity-enterprise#1066: for a `credential` ask, the NAME of the
+    # environment variable the person is filling — the one context key this
+    # projection forwards, because it is what the secret field is labelled
+    # with. Never a value: the value goes to the agent's environment and to
+    # nothing a reader sees.
+    credential_name: Optional[str] = None
+    # abilityai/trinity-enterprise#1108 AC #4: the answer wake's status, plain —
+    # `pending` ("agent not yet woken": the answer landed, the agent was not
+    # running, its next start picks it up) | `woken` | None (no wake owed).
+    wake_state: Optional[str] = None
+    # trinity-enterprise#1109: where the value LANDS when that is not the
+    # asking agent — `{agent_name, host}` in plain words for the field's
+    # caption. Never the name of the variable that holds the asking agent's
+    # key to that instance.
+    credential_destination: Optional[Dict[str, str]] = None
+    # trinity-enterprise#1134: where the ask went, as the reader is told —
+    # `{"kind": "project", "seat": "steward" | "creator"}` on an ask addressed
+    # `to: project` (which rule picked this reader), None on every other ask.
+    # The same field carries `{"kind": "operators", "reason": …}` on a
+    # `WorkspaceAskNotice`; ent#1135's room line reads it in this shape.
+    destination: Optional[Dict[str, str]] = None
+
+
+class WorkspaceAskNotice(BaseModel):
+    """trinity-enterprise#1134 (AC4): an ask a chat's own turn raised that fell
+    to the operators — nobody is assigned as primary and the owner cannot
+    stand in. One row in THAT chat's read, for the chat's owner only.
+
+    Content-free on purpose: the person in the chat is not the ask's
+    addressee, so no title, question, options, proposal or context — only what
+    kind of ask, its state, when, and where it went and why. `notice` is
+    required (never defaulted) so a full ask can never validate as a notice in
+    the route's response union."""
+    notice: Literal[True]
+    id: str
+    agent_name: str
+    kind: str
+    status: str
+    created_at: str
+    chat_id: str
+    # `{"kind": "operators", "reason": "owner_no_email" | "no_owner"}`; the
+    # reason is absent when the ownership row could not be read at raise time.
+    destination: Dict[str, str]
 
 
 class WorkspaceAskAnswer(BaseModel):
@@ -124,6 +172,17 @@ class WorkspaceAskAnswer(BaseModel):
     response_text: Optional[str] = Field(default=None, max_length=4000)
     # #2915: see `OperatorResponse.acknowledge_divergence`.
     acknowledge_divergence: bool = False
+
+
+class WorkspaceCredentialValue(BaseModel):
+    """The secret field's body (trinity-enterprise#1066): the value the person
+    typed for a `credential` ask. TYPES ONLY — no `max_length`, no pattern:
+    every bound is the sink's (`credential_sink._check_value`), so the one
+    refusal a value gets is a named 422 that never echoes it, and no validator
+    path ever handles the value a second time. Unknown fields are refused."""
+    model_config = ConfigDict(extra="forbid")
+
+    value: str
 
 
 # --- trinity-enterprise#610 PR A2, §3g L7 (E1): an ask's context ---------------

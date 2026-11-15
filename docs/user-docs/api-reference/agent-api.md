@@ -38,6 +38,11 @@ Core REST API endpoints for agent lifecycle management, configuration, files, an
 | `/api/agents/{name}/metrics/points` | POST | Record a batch of metric points (all-or-nothing; accepts `Idempotency-Key`). An agent key records only as itself |
 | `/api/agents/{name}/metrics/definitions` | GET | The declared-metric registry built from `template.yaml` `metrics:` |
 | `/api/agents/{name}/metrics/definitions/refresh` | POST | Re-read `template.yaml` into the registry (agent must be running) |
+| `/api/agents/{name}/metrics/declarations` | GET | What `template.yaml metrics:` declares, as written, with the `template_hash` every write sends back (owner tier) |
+| `/api/agents/{name}/metrics/declarations` | POST | Declare a metric: add one `metrics:` entry to `template.yaml` (owner tier, agent running) |
+| `/api/agents/{name}/metrics/declarations/{metric}` | PUT | Edit one declared metric; name and type cannot change (owner tier, agent running) |
+| `/api/agents/{name}/metrics/declarations/{metric}/references` | GET | What still uses a metric: recorded points, objectives, dashboard widgets, linked projects |
+| `/api/agents/{name}/metrics/declarations/{metric}` | DELETE | Retire a metric: remove its entry (`?base_hash=`; `?acknowledge_references=true` when it is in use) |
 | `/api/agents/{name}/objectives` | GET | Objectives joined to metrics — target, actual, freshness, gap. An agent key reads only its own |
 
 See [Dynamic Dashboards → Declared Metrics](../advanced/dynamic-dashboards.md#declared-metrics).

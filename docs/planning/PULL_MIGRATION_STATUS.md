@@ -7,7 +7,8 @@
 > carries the live to-do list. **Design:** `TARGET_ARCHITECTURE.md` (v2 / Direction B, #1404).
 
 **Last verified against `dev` and the tracker: 2026-09-09.** When you change the migration's state,
-change this file in the same PR.
+change this file in the same PR. (2026-11-09: Phase 4's status corrected to merged; nothing else in
+this file was re-verified on that date.)
 
 ---
 
@@ -27,7 +28,7 @@ behind **`PULL_MODE_PILOT_AGENTS`** (default empty ⇒ inert).
 | **Phase 1** | Dark pull endpoints — atomic claim + result CAS | ✅ done |
 | **Phase 2** | Agent worker pool behind `PULL_MODE_PILOT_AGENTS`; scoped-key auth | ✅ done |
 | **Phase 3** | Lease reaper + `MAX_REDELIVERY` + capacity shadow meter + canary lease-awareness | ✅ done (Alembic `0017`) |
-| **Phase 4** | Sync edge adapter + async fan-out join | 🔶 **in review — [#2532](https://github.com/abilityai/trinity/pull/2532)** |
+| **Phase 4** | Sync edge adapter + async fan-out join | ✅ done — [#2532](https://github.com/abilityai/trinity/pull/2532), merged 2026-09-15 |
 | **Phase 5** | Default-ON + delete ZSET / overflow LIST / dispatch-breaker-gate / canary S-01–S-03 and B-02's push arm (B-02 stays as the pull check, alongside B-08 pull-worker liveness, #2840) | ⬜ blocked — see §4 |
 
 ## 3. Trigger reach — which work can actually reach the queue
@@ -36,10 +37,15 @@ Dispatch topology, not policy. `pull_pilot.PULL_REACHABLE_TRIGGERS` is the sourc
 
 | | triggers | state |
 |---|---|---|
-| **On `dev` today** | `agent`, `event`, `schedule`, `webhook`, `reminder`, `loop` | 6 of 9 |
-| **Adds with Phase 4** | `fan_out`, `a2a`, `operator_response` | → 9 of 9 |
+| **Autonomous (`PULL_REACHABLE_TRIGGERS`)** | `agent`, `event`, `schedule`, `webhook`, `reminder`, `loop`, `fan_out`, `a2a`, `operator_response`, `operator_ending`, `retry` (#2845), `self_task` (#4105), `skill_gate` (#4105) | every autonomous trigger is pulled on pilots |
 | **Interactive (#3114, #3127)** | `manual`, `mcp`, `chat`, `session`, `public`, `voice`, `voip`, `room`, `user`, `paid`, `slack`, `telegram`, `whatsapp`, plus `validation` (`pull_pilot.PULL_REACHABLE_NON_AUTONOMOUS`) | routed on pilots; sync callers wait through `dispatch_and_await_terminal`. Every interactive path is pulled |
-| **Unreached, unclassified** | `retry` | in neither trigger set — #2845. 4.7% of `eu2` traffic; looks like an oversight, not a decision |
+| **Excluded on purpose (`PULL_UNPULLED_TRIGGERS`)** | none | each entry carries its reason in code |
+
+`tests/unit/test_4105_pull_trigger_census.py` fails on any trigger a producer writes that is in none of the three rows. A trigger
+passed through a runtime variable escapes that scan; on a pilot it logs once (`[#2048] pull pilot … neither pull trigger set`)
+from `execute_task` or `capacity_manager.acquire`.
+
+A sync `/task` an agent sends to itself on a pilot waits for a free worker; with `max_parallel_tasks=1` it waits out its timeout.
 
 `schedule` / `webhook` / `reminder` landed with #2391; `loop` with #2523. Before #2391 the pilot flag was
 inert for the fleet's dominant traffic class, so a cron-driven agent was not a viable pilot. It is now.
@@ -53,9 +59,8 @@ The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effec
 
 **All three are built** (fail-closed injection by #2392). The full remaining list, in order:
 
-1. **Land Phase 4** — [#2532](https://github.com/abilityai/trinity/pull/2532). Rebased on `dev`, migration
-   renumbered to `0059`, full unit suite matched against unmodified `dev` (same single pre-existing
-   failure, 21 net new tests). Blocked only on review.
+1. **Land Phase 4** — done: [#2532](https://github.com/abilityai/trinity/pull/2532) merged 2026-09-15
+   (migration `0059`).
 2. **Fail-closed `execution_id` injection** — [#2392](https://github.com/abilityai/trinity/issues/2392).
    The agent's MCP config sends each turn's id as `X-Trinity-Execution-Id`; on a pull-mode agent an effect
    without a usable id is refused with an operator alarm, and a person's terminal session (`manual`) is sent

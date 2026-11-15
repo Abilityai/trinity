@@ -27,7 +27,7 @@ This release is **outbound only** — agents place calls; they do not answer inc
 
 The agent **owner** configures the binding — either in the UI or via the API.
 
-**UI:** open the agent's **Sharing** tab → **Channels** → **Voice calls** row → **Configure** (the row appears only when VoIP is enabled platform-wide). The dialog ("Voice Calls (Twilio / VoIP)") takes the Twilio Account SID, Auth Token, From Number, and an optional daily call cap. Once connected, an **Enable/Disable** control flips calling on and off without re-entering credentials, and an **Agent voice** picker selects the Gemini voice used on calls (see below).
+**UI:** open the agent's **Channels** tab → **Voice calls** row → **Configure** (the row appears only when VoIP is enabled platform-wide). The dialog ("Voice Calls (Twilio / VoIP)") takes the Twilio Account SID, Auth Token, From Number, and an optional daily call cap. Once connected, an **Enable/Disable** control flips calling on and off without re-entering credentials, and an **Agent voice** picker selects the Gemini voice used on calls (see below).
 
 **API:**
 
@@ -142,7 +142,7 @@ A Gemini key (shared with voice chat — **Settings → Integrations** or `GEMIN
 ## Limitations
 
 - **Outbound only** — Agents cannot receive calls in this release.
-- **No call history UI** — Binding setup is in the Sharing tab, but call logs are API-only for now.
+- **No call history UI** — Binding setup is in the Channels tab, but call logs are API-only for now.
 - **10-minute cap** — Calls end automatically at `VOIP_MAX_CALL_DURATION`.
 - **Public deployment required** — Twilio must reach your instance over WSS; VoIP does not work on a localhost-only install.
 - **Owner pays** — Calls bill to the agent owner's Twilio account at Twilio's voice rates.

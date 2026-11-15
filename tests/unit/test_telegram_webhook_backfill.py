@@ -34,6 +34,11 @@ _STUBBED_MODULE_NAMES = [
     "services",
     "services.settings_service",
     "services.platform_audit_service",
+    "services.operator_intake_service",
+    "services.telemetry_sharing_service",
+    "services.subscription_headroom_alerts",
+    "services.reserved_settings",
+    "services.terms_service",
     "services.agent_service",
     "services.agent_service.capabilities",
     "adapters",
@@ -112,6 +117,8 @@ def _load_settings_module():
         assert_agent_owner=MagicMock(),
         assert_owns_or_admin=MagicMock(),
         assert_owns=MagicMock(),
+        # ent#1174: settings reads/writes gate reserved keys on the caller.
+        is_interactive_principal=MagicMock(return_value=True),
     )
 
     _stub(
@@ -146,6 +153,9 @@ def _load_settings_module():
         AGENT_DEFAULT_REQUIRE_EMAIL=True,
         get_agent_default_require_email=MagicMock(return_value=True),
         MAX_PARALLEL_TASKS_CEILING_KEY="max_parallel_tasks_ceiling",  # #506
+        # #4257: the generic PUT blocks this key so a junk threshold cannot
+        # silence the stall monitor; it imports the name at module level.
+        QUEUE_STALL_ALERT_MINUTES_KEY="queue_stall_alert_minutes",
         MAX_PARALLEL_TASKS_CEILING_DEFAULT=10,
         MAX_PARALLEL_TASKS_CEILING_MIN=1,
         MAX_PARALLEL_TASKS_CEILING_MAX=32,
@@ -164,6 +174,42 @@ def _load_settings_module():
     # settings.py module-level imports VALID_CPU/VALID_MEMORY from the
     # container-spec module (#1197); stub it so the standalone load completes.
     services_mod = _stub("services", __path__=[])
+    # #4257: `generic.py` also does `from services import operator_intake_service,
+    # telemetry_sharing_service` at module level. The stubbed `services` package
+    # has an empty `__path__`, so that import resolves only through the
+    # IMPORT_FROM fallback to `sys.modules["services.<name>"]` — which means it
+    # passed only when some EARLIER test file in the same worker had imported
+    # the real module. Under `--dist loadfile` which files share a worker is a
+    # function of the seed, so this file borrowed another's import and failed on
+    # a shard where it ran alone. Own both stubs instead.
+    intake_mod = _stub("services.operator_intake_service", get_config=MagicMock())
+    telemetry_mod = _stub(
+        "services.telemetry_sharing_service",
+        get_settings=MagicMock(),
+        set_enabled=MagicMock(),
+    )
+    headroom_mod = _stub(
+        "services.subscription_headroom_alerts",
+        THRESHOLD_SETTING="subscription_headroom_alert_threshold_pct",
+        MIN_THRESHOLD_PCT=1,
+        MAX_THRESHOLD_PCT=100,
+    )
+    services_mod.operator_intake_service = intake_mod
+    services_mod.telemetry_sharing_service = telemetry_mod
+    # ent#1174: the settings routes import `reserved_settings` lazily; own the
+    # stub for the same reason as the two above. No key is reserved here.
+    reserved_mod = _stub(
+        "services.reserved_settings",
+        managed_by=MagicMock(return_value=None),
+    )
+    services_mod.subscription_headroom_alerts = headroom_mod
+    services_mod.reserved_settings = reserved_mod
+    # `generic.py` imports `SETTING_KEYS` from terms_service at module level;
+    # without its own stub the load borrows whatever an earlier file imported.
+    services_mod.terms_service = _stub(
+        "services.terms_service",
+        SETTING_KEYS=frozenset({"terms_required", "terms_version", "terms_text", "terms_title"}),
+    )
     agent_service_mod = _stub("services.agent_service", __path__=[])
     capabilities_mod = _stub(
         "services.agent_service.capabilities",

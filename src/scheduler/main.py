@@ -23,7 +23,7 @@ from aiohttp import web
 
 from .config import config
 from .models import ExecutionOrigin
-from .service import SchedulerService
+from .service import SchedulerService, frame_webhook_context
 
 
 def _redact_redis_url(url: str) -> str:
@@ -196,6 +196,7 @@ class SchedulerApp:
         # itself must not depend on its audit metadata being well-formed.
         triggered_by = "manual"
         origin = ExecutionOrigin()
+        context = None
         try:
             if request.content_type == "application/json" and request.content_length:
                 body = await request.json()
@@ -203,6 +204,10 @@ class SchedulerApp:
                 if raw in ("manual", "webhook"):
                     triggered_by = raw
                 origin = ExecutionOrigin.from_payload(body)
+                # #4369: the backend forwards a webhook caller's context. It is
+                # honoured on webhook triggers only.
+                if triggered_by == "webhook" and isinstance(body.get("context"), str):
+                    context = body["context"]
         except Exception:
             pass  # malformed body — default to "manual"
 
@@ -245,7 +250,7 @@ class SchedulerApp:
             execution = self.scheduler_service.db.create_execution(
                 schedule_id=schedule.id,
                 agent_name=schedule.agent_name,
-                message=schedule.message,
+                message=frame_webhook_context(schedule.message, context),
                 triggered_by=triggered_by,
                 model_used=schedule.model,
                 source_user_id=origin.user_id,
@@ -289,6 +294,7 @@ class SchedulerApp:
                 origin=origin,
                 lock=lock,
                 execution=execution,
+                context=context,
             )
         )
         self._inflight_triggers.add(task)
@@ -311,6 +317,7 @@ class SchedulerApp:
         origin: Optional[ExecutionOrigin] = None,
         lock=None,
         execution=None,
+        context: Optional[str] = None,
     ):
         """Execute a manually or webhook-triggered schedule.
 
@@ -345,12 +352,16 @@ class SchedulerApp:
                 )
                 return
 
+        # #4369: pass the webhook context only when there is one, so the
+        # signature stays unchanged for every other caller.
+        extra = {"context": context} if context else {}
         try:
             await self.scheduler_service._execute_schedule_with_lock(
                 schedule_id,
                 triggered_by=triggered_by,
                 origin=origin,
-                execution=execution
+                execution=execution,
+                **extra,
             )
         except Exception as e:
             logger.error(

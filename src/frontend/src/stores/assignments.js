@@ -65,6 +65,13 @@ export const useAssignmentsStore = defineStore('assignments', () => {
     }
   }
 
+  // ent#1154: the people the "Person" / "New primary" pickers may offer — the
+  // agent-scoped read through the one people search, never the account list.
+  async function fetchCandidates(agent, q, kind) {
+    const { data } = await api.get(`${base(agent)}/candidates`, { params: { q, kind } })
+    return Array.isArray(data) ? data : []
+  }
+
   async function run(agent, step) {
     if (step.op === 'create') return api.post(base(agent), step.body)
     if (step.op === 'update') return api.patch(`${base(agent)}/${encodeURIComponent(step.id)}`, step.body)
@@ -144,7 +151,7 @@ export const useAssignmentsStore = defineStore('assignments', () => {
 
   return {
     byAgent, users, usersLoaded, usersError, canonRoles, loadCanonRoles,
-    entry, peek, load, loadUsers, add, setKind, remove, replacePrimary,
+    entry, peek, load, loadUsers, fetchCandidates, add, setKind, remove, replacePrimary,
     setRole, setSeatHolder, clearSeatHolder,
   }
 })

@@ -20,7 +20,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -43,8 +43,13 @@ def _call(handler, *, method="put", model="invalid-model-xyz"):
 
     running = SimpleNamespace(status="running")
     user = SimpleNamespace(id=1, username="owner", role="user")
+    # #4442: an accepted model is also stored; the store is not under test here.
+    fake_db = SimpleNamespace(set_default_model=lambda name, model: True)
+    audit = SimpleNamespace(log=AsyncMock())
     with patch.object(chat, "agent_httpx_client", _agent(handler)), \
-            patch.object(chat, "get_agent_container", lambda name: running):
+            patch.object(chat, "get_agent_container", lambda name: running), \
+            patch.object(chat, "db", fake_db), \
+            patch.object(chat, "platform_audit_service", audit):
         if method == "put":
             coro = chat.set_agent_model(ModelChangeRequest(model=model), name="agent-a", current_user=user)
         else:

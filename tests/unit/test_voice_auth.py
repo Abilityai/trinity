@@ -13,12 +13,22 @@ lease at connect and releases it on every exit — because the behavioural bridg
 harness (the importlib load of `routers/voice.py`, `_FakeWebSocket`, the stubbed
 voice service) lives in this file and nowhere else.
 
+Since trinity-enterprise#595 the socket authenticates with the single-use
+ticket a start route issues, sent as its FIRST FRAME after the transport is
+accepted — so an accepted transport no longer means an authorized caller. These
+tests pin what does: `auth_ok`, the session lookup, and the effects (provider,
+lease) that only follow a successful admission. Tickets here are minted directly
+through `ws_ticket_service` into a shared fakeredis; for the non-owner and admin
+cases that is SYNTHETIC defence coverage — no product route issues a ticket for
+another account's session.
+
 Issue: https://github.com/abilityai/trinity/issues/600
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -227,26 +237,72 @@ def _restore_sys_modules():
 
 
 from fastapi import HTTPException  # noqa: E402
-from jose import jwt  # noqa: E402
-from config import SECRET_KEY, ALGORITHM  # noqa: E402
 
 
 # ── Test helpers ─────────────────────────────────────────────────────────────
 
-def _make_jwt(username: str) -> str:
-    return jwt.encode({"sub": username, "mode": "prod"}, SECRET_KEY, algorithm=ALGORITHM)
+# The users the fake account store knows, by username. Roles are deliberate:
+# `alice` and `bob` are Workspace-only (`user`), so their tickets are minted
+# with the Workspace origin; `root` is an admin.
+_USERS = {
+    "alice": {"id": 1, "username": "alice", "email": "alice@example.com", "role": "user", "suspended_at": None},
+    "bob": {"id": 2, "username": "bob", "email": "bob@example.com", "role": "user", "suspended_at": None},
+    "root": {"id": 99, "username": "root", "email": "root@example.com", "role": "admin", "suspended_at": None},
+}
+
+
+def _auth_globals():
+    """The `voice_auth_service` namespace `routers.voice` actually calls into —
+    reached through the router's own function so a re-imported copy of the
+    service can never be the one patched."""
+    return voice_router.authenticate_voice_socket.__globals__
+
+
+def _mint(username, sid, *, origin="workspace", user_id=None, claims=None):
+    """Mint a voice ticket straight through the ticket service (SYNTHETIC: the
+    start routes only issue for the caller's own new session)."""
+    uid = _USERS[username]["id"] if user_id is None and username in _USERS else user_id
+    extra = {"user_id": uid, "origin": origin} if claims is None else claims
+    return _auth_globals()["mint_ticket"](username, scope=f"voice:{sid}", ttl_seconds=30, claims=extra)
+
+
+def _auth(ticket):
+    return json.dumps({"type": "auth", "ticket": ticket})
+
+
+@pytest.fixture(autouse=True)
+def _ticket_store(monkeypatch):
+    """One fakeredis behind the ticket service the router uses."""
+    import fakeredis
+    store = fakeredis.FakeRedis(decode_responses=True)
+    ticket_globals = _auth_globals()["consume_ticket"].__globals__
+    monkeypatch.setitem(ticket_globals, "get_redis_client", lambda: store)
+    return store
 
 
 class _FakeWebSocket:
-    """Minimal WebSocket that records accept/close/send activity."""
+    """Minimal WebSocket that records accept/close/send activity.
 
-    def __init__(self, queue=None):
+    `receive()` serves the admission read (a str is a text frame, a dict is a
+    raw ASGI message); `receive_text()` serves the bridge loop. Both pop the
+    same queue, in order."""
+
+    def __init__(self, queue=None, query_params=None):
         self.accepted = False
         self.closed = False
         self.close_code = None
         self.close_reason = None
         self.sent = []
         self._queue = list(queue or [])
+        self.query_params = dict(query_params or {})
+
+    async def receive(self):
+        if not self._queue:
+            return {"type": "websocket.disconnect", "code": 1000}
+        item = self._queue.pop(0)
+        if isinstance(item, dict):
+            return item
+        return {"type": "websocket.receive", "text": item}
 
     async def accept(self):
         self.accepted = True
@@ -270,6 +326,7 @@ class _FakeWebSocket:
 def _reset_voice_service():
     _voice_service._sessions.clear()
     _voice_service.connect_and_stream.reset_mock()
+    _voice_service.get_session.reset_mock()
     yield
     _voice_service._sessions.clear()
 
@@ -282,77 +339,127 @@ def alice_session():
 
 
 def _patch_db(monkeypatch, users_by_username):
-    """Stub voice_router.db.get_user_by_username to return canned dicts."""
+    """Stub the account store: `voice_router.db` (the REST paths) and the
+    `database.db` the ticket's account re-read resolves by id."""
+    rows = {u: {"username": u, "email": f"{u}@example.com", "suspended_at": None, **row}
+            for u, row in users_by_username.items()}
+    by_id = {row["id"]: row for row in rows.values()}
     fake_db = MagicMock()
-    fake_db.get_user_by_username = MagicMock(side_effect=lambda u: users_by_username.get(u))
+    fake_db.get_user_by_username = MagicMock(side_effect=lambda u: rows.get(u))
+    fake_db.get_user_by_id = MagicMock(side_effect=lambda i: by_id.get(i))
     monkeypatch.setattr(voice_router, "db", fake_db)
+    import database
+    monkeypatch.setattr(database.db, "get_user_by_id", fake_db.get_user_by_id)
     return fake_db
+
+
+def _status_messages(ws):
+    return [f.get("message") for f in ws.sent if f.get("type") == "status"]
 
 
 # ── WebSocket auth tests ─────────────────────────────────────────────────────
 
+def _admitted(ws):
+    return any(f.get("type") == "auth_ok" for f in ws.sent)
+
+
 class TestVoiceWebSocketAuth:
+    """The #600 close codes, through the first-frame ticket (ent#595). The
+    transport is always accepted now — the credential is in the first frame —
+    so admission is read off `auth_ok` and the provider start instead."""
 
-    def test_no_token_rejects_4001(self, alice_session, monkeypatch):
-        ws = _FakeWebSocket()
-        _run(voice_router.voice_websocket(ws, "vs_alice", token=None))
-        assert ws.close_code == 4001
-        assert ws.accepted is False
+    def _assert_refused_before_lookup(self, ws, code=4001):
+        assert ws.accepted is True
+        assert ws.close_code == code
+        assert not _admitted(ws)
+        assert _voice_service.get_session.await_count == 0
+        _voice_service.connect_and_stream.assert_not_called()
+        assert _status_messages(ws), "a refusal says why before it closes"
 
-    def test_invalid_token_rejects_4001(self, alice_session, monkeypatch):
+    def test_no_auth_frame_rejects_4001(self, alice_session, monkeypatch):
         ws = _FakeWebSocket()
-        _run(voice_router.voice_websocket(ws, "vs_alice", token="garbage.not.jwt"))
-        assert ws.close_code == 4001
-        assert ws.accepted is False
+        _run(voice_router.voice_websocket(ws, "vs_alice"))
+        self._assert_refused_before_lookup(ws)
+
+    def test_garbage_ticket_rejects_4001(self, alice_session, monkeypatch):
+        ws = _FakeWebSocket(queue=[_auth("garbage.not.a.ticket")])
+        _run(voice_router.voice_websocket(ws, "vs_alice"))
+        self._assert_refused_before_lookup(ws)
 
     def test_unknown_session_rejects_4004(self, monkeypatch):
-        ws = _FakeWebSocket()
+        """An AUTHENTICATED caller learns the session is gone; only after auth."""
         _patch_db(monkeypatch, {"alice": {"id": 1, "role": "user"}})
-        token = _make_jwt("alice")
-        _run(voice_router.voice_websocket(ws, "vs_does_not_exist", token=token))
+        ws = _FakeWebSocket(queue=[_auth(_mint("alice", "vs_does_not_exist"))])
+        _run(voice_router.voice_websocket(ws, "vs_does_not_exist"))
+        assert ws.accepted is True
         assert ws.close_code == 4004
-        assert ws.accepted is False
+        assert not _admitted(ws)
+        assert _voice_service.get_session.await_count == 1
+        _voice_service.connect_and_stream.assert_not_called()
 
     def test_unknown_user_rejects_4001(self, alice_session, monkeypatch):
-        ws = _FakeWebSocket()
         _patch_db(monkeypatch, {})
-        token = _make_jwt("ghost")
-        _run(voice_router.voice_websocket(ws, "vs_alice", token=token))
-        assert ws.close_code == 4001
-        assert ws.accepted is False
+        ws = _FakeWebSocket(queue=[_auth(_mint("ghost", "vs_alice", user_id=5))])
+        _run(voice_router.voice_websocket(ws, "vs_alice"))
+        self._assert_refused_before_lookup(ws)
 
     def test_owner_passes_auth_gate(self, alice_session, monkeypatch):
-        """Alice connecting to her own session reaches accept()."""
-        ws = _FakeWebSocket()
+        """Alice attaching to her own session is acknowledged, then streams."""
         _patch_db(monkeypatch, {"alice": {"id": 1, "role": "user"}})
-        token = _make_jwt("alice")
-        _run(voice_router.voice_websocket(ws, "vs_alice", token=token))
-        assert ws.accepted is True
+        ws = _FakeWebSocket(queue=[_auth(_mint("alice", "vs_alice"))])
+        _run(voice_router.voice_websocket(ws, "vs_alice"))
+        assert _admitted(ws)
+        _voice_service.connect_and_stream.assert_called_once()
         assert ws.closed is True  # closed at end of finally — but we got past the gate
 
     def test_other_user_rejected_4003(self, alice_session, monkeypatch):
-        """Bob holding a valid JWT cannot attach to Alice's session."""
-        ws = _FakeWebSocket()
+        """Bob holding a valid ticket for Alice's session id cannot attach.
+        SYNTHETIC: no start route would mint this ticket for him."""
         _patch_db(monkeypatch, {"bob": {"id": 2, "role": "user"}})
-        token = _make_jwt("bob")
-        _run(voice_router.voice_websocket(ws, "vs_alice", token=token))
+        ws = _FakeWebSocket(queue=[_auth(_mint("bob", "vs_alice"))])
+        _run(voice_router.voice_websocket(ws, "vs_alice"))
         assert ws.close_code == 4003
-        assert ws.accepted is False
+        assert not _admitted(ws)
+        _voice_service.connect_and_stream.assert_not_called()
 
     def test_admin_bypasses_ownership(self, alice_session, monkeypatch):
-        """Admins can attach to any session for support purposes."""
-        ws = _FakeWebSocket()
+        """The #600 admin exception stays in the gate. SYNTHETIC: neither start
+        route offers an admin a ticket for another account's session."""
         _patch_db(monkeypatch, {"root": {"id": 99, "role": "admin"}})
-        token = _make_jwt("root")
-        _run(voice_router.voice_websocket(ws, "vs_alice", token=token))
-        assert ws.accepted is True
+        ws = _FakeWebSocket(queue=[_auth(_mint("root", "vs_alice", origin="operator"))])
+        _run(voice_router.voice_websocket(ws, "vs_alice"))
+        assert _admitted(ws)
 
-    def test_token_missing_sub_rejects_4001(self, alice_session, monkeypatch):
-        ws = _FakeWebSocket()
-        token = jwt.encode({"mode": "prod"}, SECRET_KEY, algorithm=ALGORITHM)
-        _run(voice_router.voice_websocket(ws, "vs_alice", token=token))
-        assert ws.close_code == 4001
-        assert ws.accepted is False
+    def test_ticket_without_an_account_id_rejects_4001(self, alice_session, monkeypatch):
+        _patch_db(monkeypatch, {"alice": {"id": 1, "role": "user"}})
+        ws = _FakeWebSocket(queue=[_auth(_mint("alice", "vs_alice", claims={"origin": "workspace"}))])
+        _run(voice_router.voice_websocket(ws, "vs_alice"))
+        self._assert_refused_before_lookup(ws)
+
+    def test_a_query_string_credential_is_refused_with_reload_words(self, alice_session, monkeypatch):
+        """D1 hard cut: a tab from before the protocol gets words, and the
+        handler never reads the frame queue at all."""
+        _patch_db(monkeypatch, {"alice": {"id": 1, "role": "user"}})
+        good = _auth(_mint("alice", "vs_alice"))
+        for param in ("token", "ticket"):
+            ws = _FakeWebSocket(queue=[good], query_params={param: "legacy-marker"})
+            _run(voice_router.voice_websocket(ws, "vs_alice"))
+            self._assert_refused_before_lookup(ws)
+            assert _status_messages(ws) == ["Voice was updated. Reload this page, then start a new call."]
+            assert ws._queue == [good]
+
+    def test_a_ticket_is_single_use(self, alice_session, monkeypatch):
+        _patch_db(monkeypatch, {"alice": {"id": 1, "role": "user"}})
+        ticket = _mint("alice", "vs_alice")
+        first = _FakeWebSocket(queue=[_auth(ticket)])
+        _run(voice_router.voice_websocket(first, "vs_alice"))
+        assert _admitted(first)
+        _voice_service.add(_FakeVoiceSession("vs_alice", agent_name="alice-agent", user_id=1))
+        _voice_service.get_session.reset_mock()
+        _voice_service.connect_and_stream.reset_mock()
+        replay = _FakeWebSocket(queue=[_auth(ticket)])
+        _run(voice_router.voice_websocket(replay, "vs_alice"))
+        self._assert_refused_before_lookup(replay)
 
 
 # ── voice_stop ownership tests ──────────────────────────────────────────────
@@ -619,11 +726,12 @@ class TestWorkspaceLiveCallMarker:
 
     def _drive(self, ws, sid="vs_p", user="alice"):
         """Run the bridge to completion, then let cancellations land. Returns
-        the tasks still pending afterwards — the leak pin."""
-        token = _make_jwt(user)
+        the tasks still pending afterwards — the leak pin. The socket
+        authenticates first (ent#595): its first frame is the ticket."""
+        ws._queue.insert(0, _auth(_mint(user, sid)))
 
         async def _go():
-            await voice_router.voice_websocket(ws, sid, token=token)
+            await voice_router.voice_websocket(ws, sid)
             for _ in range(4):
                 await asyncio.sleep(0)
             return [t for t in asyncio.all_tasks()
@@ -693,13 +801,18 @@ class TestWorkspaceLiveCallMarker:
             async def receive_text(self):
                 await asyncio.sleep(3600)
 
-        ws = _SlowWebSocket()
-        token = _make_jwt("alice")
+        ws = _SlowWebSocket(queue=[_auth(_mint("alice", "vs_p"))])
 
         async def _go():
-            task = asyncio.create_task(voice_router.voice_websocket(ws, "vs_p", token=token))
-            for _ in range(3):
+            task = asyncio.create_task(voice_router.voice_websocket(ws, "vs_p"))
+            # Synchronise on the authorization milestone, not a tick count:
+            # cancel once the bridge acknowledged the caller and is reading.
+            for _ in range(200):
                 await asyncio.sleep(0)
+                if _admitted(ws):
+                    break
+            assert _admitted(ws), "the bridge never admitted the caller"
+            await asyncio.sleep(0)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 

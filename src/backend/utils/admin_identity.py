@@ -20,6 +20,7 @@ disagreed with reality, trusted by an unauthenticated endpoint.
 Stdlib only. No imports from ``db`` / ``services`` / ``config`` — ``database.py``
 imports this at module import time, and every one of those would be a cycle.
 """
+import json
 import os
 
 #: The username `_ensure_admin_user` provisions when `ADMIN_USERNAME` is unset.
@@ -53,3 +54,74 @@ def is_usable_password_hash(value) -> bool:
     admin, and the wizard is its only way in).
     """
     return isinstance(value, str) and value.strip() != ""
+
+
+#: `system_settings` key holding a bcrypt of the `ADMIN_PASSWORD` value the boot
+#: step last applied (or found already in force), as JSON
+#: ``{"username": ..., "hash": ...}`` (#3825). It is what lets boot tell "the
+#: operator put a new value in `.env`" (re-apply) from "the admin changed the
+#: password in the app" (leave it). Reserved: the generic settings routes neither
+#: return nor accept it, because a key-only caller could otherwise read a crackable
+#: hash of the env value, or delete the row so the next restart re-applies it.
+ADMIN_ENV_FINGERPRINT_KEY = "admin_env_fingerprint"
+
+#: What boot does with `ADMIN_PASSWORD` against an EXISTING admin row.
+ENV_APPLY = "apply"   # write the env value's hash to the admin row
+ENV_SKIP = "skip"     # the admin changed it in the app since this env value was applied
+ENV_KEEP = "keep"     # nothing to write to the admin row
+
+
+def fingerprint_value(username: str, hashed: str) -> str:
+    """The JSON stored under `ADMIN_ENV_FINGERPRINT_KEY`."""
+    return json.dumps({"username": username, "hash": hashed})
+
+
+def _fingerprint_matches(env_value, fingerprint_raw, username, verify) -> bool:
+    """True when the stored fingerprint is for this admin and this env value.
+
+    A missing, unparsable, other-user or unverifiable fingerprint is "no
+    fingerprint", never an error: boot must not fail on it, and treating it as
+    absent re-applies `.env`, which is today's behaviour."""
+    try:
+        record = json.loads(fingerprint_raw) if fingerprint_raw else None
+        if not isinstance(record, dict) or record.get("username") != username:
+            return False
+        hashed = record.get("hash")
+        return isinstance(hashed, str) and bool(verify(env_value, hashed))
+    except Exception:
+        return False
+
+
+def env_apply_decision(env_value, stored_hash, fingerprint_raw, username, verify):
+    """Decide what boot does with `ADMIN_PASSWORD` for an existing admin (#3825).
+
+    Returns ``(action, record_fingerprint)``. Shared by the SQLite and the
+    PostgreSQL boot paths, which cannot share a query; `verify(plain, hashed)` is
+    injected so this stays stdlib-only.
+
+    Before #3825 boot re-applied the env value whenever it no longer verified
+    against the stored hash, so a password changed in the app reverted on the
+    next restart. Now it re-applies only when the env value differs from the one
+    it last applied. Editing `.env` to a NEW value and restarting still rotates
+    (and recovers) the password; putting back the value that was already applied
+    does not, and boot says so.
+    """
+    if not env_value:
+        return ENV_KEEP, False
+    if not stored_hash:
+        return ENV_APPLY, True
+    if not stored_hash.startswith("$2"):
+        # A legacy plaintext row: migrate it only when it IS the env value.
+        if stored_hash == env_value:
+            return ENV_APPLY, True
+        return ENV_KEEP, False
+    try:
+        in_force = bool(verify(env_value, stored_hash))
+    except Exception:
+        in_force = False
+    known = _fingerprint_matches(env_value, fingerprint_raw, username, verify)
+    if in_force:
+        return ENV_KEEP, not known
+    if known:
+        return ENV_SKIP, False
+    return ENV_APPLY, True

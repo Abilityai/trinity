@@ -121,11 +121,11 @@ def _client(file_content, *, reads=None, write=None):
 
 
 def _wire(monkeypatch, db, client, audit=None):
-    monkeypatch.setattr(oqs, "db", db)
-    monkeypatch.setattr(oqs, "AgentClient", lambda name: client)
+    monkeypatch.setattr(oqs.deps, "db", db)
+    monkeypatch.setattr(oqs.deps, "AgentClient", lambda name: client)
     monkeypatch.setattr(oqs.rate_limiter, "check", lambda *a, **k: RateLimitResult(True, 10, 0, 60))
     audit = audit if audit is not None else AsyncMock()
-    monkeypatch.setattr(oqs, "_audit_sync", audit)
+    monkeypatch.setattr(oqs.deps, "_audit_sync", audit)
     svc = OperatorQueueSyncService()
     return svc, audit
 
@@ -317,11 +317,11 @@ class TestReadFailures:
 class TestPollCycle:
     def _run_cycle(self, monkeypatch, states, db=None):
         db = db or _fake_db()
-        monkeypatch.setattr(oqs, "db", db)
+        monkeypatch.setattr(oqs.deps, "db", db)
         # trinity-enterprise#611: expiry goes through the ask sink, whose own `db`
         # is the real one — stubbed to the fake so the cycle stays hermetic.
         from types import SimpleNamespace
-        monkeypatch.setattr(oqs, "ask_service", SimpleNamespace(
+        monkeypatch.setattr(oqs.deps, "ask_service", SimpleNamespace(
             expire=lambda: SimpleNamespace(rows=list(db.mark_operator_queue_expired() or []))))
         import services.docker_service as ds
         monkeypatch.setattr(ds, "agent_container_states", lambda: states)
@@ -954,7 +954,7 @@ class TestRound2PollCycle:
             {"id": "uuid-x", "status": "responded", "agent_name": "b"},
         ]
         audit = AsyncMock()
-        monkeypatch.setattr(oqs, "_audit_sync", audit)
+        monkeypatch.setattr(oqs.deps, "_audit_sync", audit)
         db, svc, _ = self._run_cycle(monkeypatch, {"a": "running", "b": "stopped"}, db=db)
         call = db.mark_operator_queue_undelivered_for_stopped_agents.call_args
         assert call.kwargs["running_agents"] == ["a"]

@@ -1,100 +1,47 @@
-# Running Trinity on PostgreSQL (instead of SQLite)
+# Running Trinity on PostgreSQL
 
-> **Status: experimental, opt-in (#300).** SQLite remains the zero-config
-> default and its behavior is unchanged. PostgreSQL is selected entirely by a
-> single environment variable (`DATABASE_URL`). Nothing about the SQLite path
-> changes unless you explicitly set it.
-
-This guide covers standing up a **new** Trinity instance backed by PostgreSQL.
-It does **not** cover migrating existing SQLite data into PostgreSQL — there is
-no ETL tool yet (see [Limitations](#limitations--not-yet-supported)). Enabling
-PostgreSQL today gives you a **fresh, empty** database.
+> Every compose file runs a bundled `postgres:16-alpine` service by default (#3159, #4175).
+> SQLite reached end-of-support on 2026-09-01 and the images refuse it. Moving existing data:
+> [migrations/SQLITE_TO_POSTGRES.md](migrations/SQLITE_TO_POSTGRES.md).
 
 ---
 
 ## 1. How the backend is selected
 
-The backend is chosen at process startup from one environment variable,
-resolved in `src/backend/db/engine.py:resolve_database_url()`:
+The backend is chosen at process startup from one environment variable, resolved in
+`src/backend/db/engine.py:resolve_database_url()`:
 
-| `DATABASE_URL` value | Backend used |
-|----------------------|--------------|
-| *unset* | **SQLite** at `TRINITY_DB_PATH` (default `/data/trinity.db`) |
-| *empty string* (`DATABASE_URL=`) | **SQLite** (empty is treated as unset) |
-| `sqlite:////data/trinity.db` | **SQLite** (explicit) |
-| `postgresql://user:pass@host:5432/dbname` | **PostgreSQL** |
+| `DATABASE_URL` in `.env` | Result |
+|--------------------------|--------|
+| *unset* | The bundled PostgreSQL (compose default) |
+| `postgresql://user:pass@host:5432/dbname` | That PostgreSQL server |
+| *empty string* (`DATABASE_URL=`) | SQLite, refused unless `TRINITY_ALLOW_SQLITE=1` |
 
-Key properties (all verified live):
-
-- **SQLite is the default.** With no `DATABASE_URL`, or an empty one, you get
-  SQLite — no Postgres container is even started (it is gated behind a compose
-  profile, see below).
-- **The flag is the *only* selector and it is not sticky.** Set it →
-  PostgreSQL; comment it out → SQLite, on the very next restart. Switching is
-  non-destructive (the two stores are independent files/volumes).
-- **Both the backend and the standalone scheduler read the same
-  `DATABASE_URL`** (`docker-compose.yml` passes it to both services), so the
-  scheduler talks to whichever database the backend uses.
-
-Internally, every `db/` module runs on **SQLAlchemy Core**, so the same code
-generates dialect-correct SQL for either backend. There is no separate
-PostgreSQL code path to maintain.
+Both the backend and the standalone scheduler read the same `DATABASE_URL`. Every `db/` module runs
+on SQLAlchemy Core.
 
 ---
 
 ## 2. Prerequisites
 
-- A Trinity checkout that includes #300 (the configurable-backend work).
-- Docker + Docker Compose (the bundled `postgres:16-alpine` service is the
-  easiest path; an external managed Postgres also works — just point
-  `DATABASE_URL` at it).
-- The backend/scheduler images already include the driver (`psycopg2-binary`)
-  and `sqlalchemy`. No image changes needed.
+Docker and Docker Compose. The backend and scheduler images already include `psycopg2-binary` and
+`sqlalchemy`.
 
 ---
 
-## 3. Setup — bundled PostgreSQL container (recommended)
+## 3. Setup: bundled PostgreSQL container
 
 ### 3.1 Configure `.env`
 
-Add (or uncomment) these lines in your `.env`:
+`./scripts/deploy/start.sh` generates `POSTGRES_PASSWORD` and writes `DATABASE_URL`. Running compose
+directly: set `POSTGRES_PASSWORD` yourself (`openssl rand -hex 24`) and leave `DATABASE_URL` unset. Dev
+compose also honours `POSTGRES_DB` and `POSTGRES_USER`; prod and hosted fix both at `trinity`.
+
+### 3.2 Start the stack
 
 ```bash
-# --- PostgreSQL backend (#300) ---
-POSTGRES_DB=trinity
-POSTGRES_USER=trinity
-POSTGRES_PASSWORD=<choose-a-strong-password>     # do NOT use the 'trinity' default in production
-
-# Point Trinity at it. Host = the compose service name 'postgres'.
-DATABASE_URL=postgresql://trinity:<choose-a-strong-password>@postgres:5432/trinity
+./scripts/deploy/start.sh     # or: docker compose up -d
 ```
-
-Notes:
-- The host in `DATABASE_URL` must be **`postgres`** (the compose service /
-  Docker-DNS name), not `localhost`, because the backend reaches it over the
-  Docker network.
-- `POSTGRES_PASSWORD` and the password embedded in `DATABASE_URL` must match.
-- The Postgres container lives on `trinity-platform-network` only — **agents
-  can never reach it** (network topology, Issue #589). This is by design.
-
-### 3.2 Start the stack with the `postgres` profile
-
-The Postgres service is gated behind a compose **profile**, so it only starts
-when you ask for it:
-
-```bash
-# Start the database first (or include it in the same up command)
-docker compose --profile postgres up -d postgres
-
-# Then the rest of the platform. Because DATABASE_URL is set in .env,
-# backend + scheduler will connect to Postgres automatically.
-docker compose --profile postgres up -d
-```
-
-If you use `./scripts/deploy/start.sh`, set `DATABASE_URL` in `.env` first; the
-script reads `.env` and the profile must still be supplied
-(`COMPOSE_PROFILES=postgres ./scripts/deploy/start.sh` or add `postgres` to
-`COMPOSE_PROFILES` in your environment).
 
 ### 3.3 What happens on first (cold) start
 
@@ -215,22 +162,10 @@ For PostgreSQL the engine uses a real connection pool with `pool_pre_ping`
 
 ---
 
-## 7. Rollback to SQLite
+## 7. Rollback
 
-Switching back is a one-line change + restart (non-destructive — your Postgres
-volume is untouched and can be re-enabled later):
-
-```bash
-# In .env, comment out the selector:
-# DATABASE_URL=postgresql://trinity:...@postgres:5432/trinity
-
-# Restart without the postgres profile:
-docker compose up -d
-```
-
-The backend resolves SQLite again (`sqlite:////data/trinity.db`) and the
-Postgres container is not started. Verified: the flag toggles cleanly in both
-directions.
+Restore a `pg_dump` backup. For a move from SQLite, see the rollback note in
+[migrations/SQLITE_TO_POSTGRES.md](migrations/SQLITE_TO_POSTGRES.md).
 
 ---
 

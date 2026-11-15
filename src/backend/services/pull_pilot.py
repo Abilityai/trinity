@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional, Set
+from typing import Dict, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,14 @@ PULL_POLL_KEY_PREFIX = "agent:pull_poll:"
 # Hygiene only: B-08 measures silence from the later of this value and the
 # container start, so an expired key cannot fire on its own.
 PULL_POLL_TTL_SECONDS = 86400
+# Per-agent count of claims the BACKEND refused (#4257), stamped by
+# `routers/internal.py` on the `_pull_authorized` 403 branch. The twin of the
+# key above, and the half it cannot see: a pool that polls happily while every
+# claim is turned away looks alive to B-08 and empty to the worker, which is
+# exactly the state a queued row can hide in. Same 24 h window, so the two
+# ages read against each other.
+PULL_CLAIM_DENIED_KEY_PREFIX = "agent:pull_claim_denied:"
+PULL_CLAIM_DENIED_TTL_SECONDS = 86400
 
 
 def _pilot_allowlist() -> Set[str]:
@@ -76,7 +84,8 @@ def pull_queue_allowance(agent_name: str) -> int:
 #
 #   task_execution_service   → "reject" | "queue_persistent"  ← #2391, pilot-gated
 #                              scheduler/ALL cron, webhooks, reminders, loops,
-#                              fan-out, A2A, operator resumes
+#                              fan-out, A2A; operator resumes opt in with
+#                              ``queue_on_capacity=True`` on every agent (ent#1108)
 #   dispatch_admission_svc   → "queue_in_memory"   — POST /chat (push agents;
 #                              on a pilot /chat skips acquire and is pulled, #3127)
 #   chat_execution_service   → "queue_persistent"  — POST /task
@@ -121,6 +130,24 @@ def pull_queue_allowance(agent_name: str) -> int:
 # first failed, ran on the path with no lease and no reaper recovery. A manual
 # run is itself pulled on a pilot (#3114), so its retry stays on the same path.
 #
+# ``self_task`` (#4105) is an agent's ``POST /task`` to itself — the same
+# producer as ``agent`` and ``event``, already dispatching with
+# ``overflow_policy="queue_persistent"``. Pushed, it was admitted on free Redis
+# slots while the pulled turn that queued it held a worker, so a pilot ran
+# above ``max_parallel_tasks`` where neither M3 nor canary S-02 could see it.
+# A sync self-call now waits for a free worker, as a non-pilot's waits for a
+# slot: with ``max_parallel_tasks=1`` it waits out its timeout.
+#
+# ``skill_gate`` (#4105) is the wake of a requester after its gated request was
+# decided (``skill_gate_service._wake_requester_agent``). ``execute_task``
+# creates the row before the producer gate runs, and the caller ignores the
+# result, so it is as pullable as a cron fire.
+#
+# ``caller_wake`` (trinity-enterprise#1102) is the ``operator_ending`` shape for
+# a delegation: ``caller_wake_service`` wakes the agent that delegated a run
+# when that run ends, through the same ``dispatch_and_await_terminal`` adapter,
+# for the same receipt (the audit row records ``result.status``).
+#
 # **The set is currently equal to ``_AUTONOMOUS_TRIGGERS``, and it stays an
 # explicit allow-list anyway.** That is the point of it: a trigger added to the
 # autonomous set later must be reviewed against dispatch topology rather than
@@ -132,8 +159,25 @@ def pull_queue_allowance(agent_name: str) -> int:
 # still drops it here, and widening reach is a deliberate edit to this set.
 PULL_REACHABLE_TRIGGERS = frozenset(
     {"agent", "event", "schedule", "webhook", "reminder", "loop", "fan_out",
-     "a2a", "operator_response", "operator_ending", "retry"}
+     "a2a", "operator_response", "operator_ending", "retry", "self_task",
+     "skill_gate", "caller_wake",
+     # trinity-enterprise#1236: the project steward wake is dispatched through
+     # `execute_task` like a loop iteration, so it reaches a pull pilot.
+     "project_steward"}
 )
+
+
+# Triggers a producer writes that are deliberately in NEITHER pull set, each
+# with the reason. ``test_4105_pull_trigger_census.py`` fails on a
+# written trigger that is in no pull set and not listed here, and
+# ``note_unreachable_pull_trigger`` stays quiet for the ones listed.
+PULL_UNPULLED_TRIGGERS: Dict[str, str] = {
+    "summarizer": (
+        "labels a public_user_memory_writes history row written by the MEM-001 "
+        "background summarizer (trinity-enterprise#962); it is never an "
+        "execution's trigger and dispatches no agent work"
+    ),
+}
 
 
 # Triggers with a CALLER waiting in-line on the reply. A pull worker claims
@@ -244,9 +288,8 @@ _UNREACHABLE_NOTED: Set[tuple] = set()
 
 
 def note_unreachable_pull_trigger(agent_name: str, triggered_by: Optional[str]) -> bool:
-    """Record that a PILOT agent's autonomous row is being pushed because its
-    producer cannot reach the durable queue. Returns True when a line was
-    emitted. Never raises (#2048).
+    """Record that a PILOT agent's row is being pushed because its trigger is
+    in no pull set. Returns True when a line was emitted. Never raises (#2048).
 
     This is the observability half of the issue: before it, a pushed autonomous
     row on a pilot agent had two indistinguishable causes — the flag was not
@@ -264,11 +307,14 @@ def note_unreachable_pull_trigger(agent_name: str, triggered_by: Optional[str]) 
     why gets a truthful answer from the backend log instead of a wrong one from
     the runbook.
 
-    #2391, #2523 and #2524 emptied the stranded set entirely, so this is
-    currently **unreachable by design** — kept as the runtime half of the
-    ``PULL_REACHABLE_TRIGGERS`` allow-list, for the trigger somebody adds to
-    ``_AUTONOMOUS_TRIGGERS`` next without checking whether dispatch can deliver
-    it. A silently-stale reach set is exactly the bug #2048 was.
+    Every trigger a producer writes is classified today, so this is
+    **unreachable by design** — kept as the runtime half of the pull allow-lists
+    for the next trigger somebody adds without classifying it. It fires for any
+    trigger ``pull_owns_dispatch`` would not claim and ``PULL_UNPULLED_TRIGGERS``
+    does not list, autonomous or not: #4105's ``self_task`` was in no set at all,
+    so an autonomous-only check never saw it. Called from both push producers —
+    ``execute_task`` and ``capacity_manager.acquire`` (``POST /task``
+    pre-acquires its slot, so ``execute_task``'s call never sees that route).
 
     Fail-safe like everything else here: a bookkeeping error must never
     interfere with dispatching a real execution.
@@ -278,11 +324,16 @@ def note_unreachable_pull_trigger(agent_name: str, triggered_by: Optional[str]) 
             return False
         from services.task_execution_service import _AUTONOMOUS_TRIGGERS
 
+        # A missing or non-string value is not a trigger anyone added.
+        if not isinstance(triggered_by, str) or not triggered_by:
+            return False
         # Only the genuinely-stranded case. A reachable trigger arriving here is
         # not stranded — it simply took a producer that had a slot free.
-        if triggered_by not in _AUTONOMOUS_TRIGGERS:
+        if triggered_by in PULL_REACHABLE_NON_AUTONOMOUS:
             return False
-        if triggered_by in PULL_REACHABLE_TRIGGERS:
+        if triggered_by in (_AUTONOMOUS_TRIGGERS & PULL_REACHABLE_TRIGGERS):
+            return False
+        if triggered_by in PULL_UNPULLED_TRIGGERS:
             return False
 
         key = (agent_name, triggered_by)
@@ -291,14 +342,16 @@ def note_unreachable_pull_trigger(agent_name: str, triggered_by: Optional[str]) 
         _UNREACHABLE_NOTED.add(key)
 
         logger.warning(
-            "[#2048] pull pilot %r: trigger %r is autonomous but CANNOT reach the "
-            "durable queue — its caller consumes the execution result synchronously, "
-            "so this row is dispatched with overflow_policy='reject' and pushed "
-            "regardless of PULL_MODE_PILOT_AGENTS. The flag is applied and correct; "
-            "the dispatch topology is the limit. Reachable triggers today: %s. "
-            "Every autonomous trigger is pullable as of #2524, so seeing this "
-            "at all means a NEW trigger was added without being classified — "
-            "see docs/planning/PULL_MIGRATION_TESTING.md §9.",
+            "[#2048] pull pilot %r: trigger %r is in neither pull trigger set, so "
+            "this row is PUSHED regardless of PULL_MODE_PILOT_AGENTS and runs "
+            "outside the agent's worker-pool capacity. The flag is applied and "
+            "correct; the dispatch topology has no entry for this trigger. "
+            "Reachable autonomous triggers today: %s. Every trigger a producer "
+            "writes is classified as of "
+            "#4105, so seeing this at all means a NEW trigger was added without "
+            "being placed in pull_pilot.PULL_REACHABLE_TRIGGERS, "
+            "PULL_REACHABLE_NON_AUTONOMOUS or PULL_UNPULLED_TRIGGERS — see "
+            "docs/planning/PULL_MIGRATION_TESTING.md §9.",
             agent_name, triggered_by, sorted(PULL_REACHABLE_TRIGGERS),
         )
         return True

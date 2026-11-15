@@ -514,7 +514,7 @@ db.create_health_check(
 #### Test 5: Subscription Assignment Error Reporting
 
 1. **Action**: Assign subscription to a running agent whose internal API is temporarily unreachable
-2. **Expected**: Response includes `injection_result.status: "failed"` with error details
+2. **Expected**: Response includes `injection_result.status: "failed"` and `injection_result.error: "Agent restart failed (<ExceptionClass> — details in backend logs)"`; the exception text is in the backend log, not the response
 3. **Verify**: API response JSON contains full `injection_result` object
 
 ---

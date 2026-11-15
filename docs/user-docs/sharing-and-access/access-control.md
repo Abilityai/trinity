@@ -12,11 +12,11 @@ Unified access control across all channels (web, Telegram, Slack). Verified emai
 
 ## How It Works
 
-![Agent Sharing tab showing Identity Proof (require verified email, open access) and Team Sharing allow-list controls](../../screenshots/agent-sharing-access.png)
+![Agent Channels tab showing Identity Proof (require verified email, open access) and Team Sharing allow-list controls](../../screenshots/agent-sharing-access.png)
 
 ### Email Verification
 
-Verification is not a separate switch on the Sharing tab. Both positions of the **Restricted ↔ Open** control (below) require a verified email — the control writes `require_email: true` every time — so users verify before chatting either way. Turning verification off entirely (`require_email: false`) is only possible through the access-policy API.
+Verification is not a separate switch on the Channels tab. Both positions of the **Restricted ↔ Open** control (below) require a verified email — the control writes `require_email: true` every time — so users verify before chatting either way. Turning verification off entirely (`require_email: false`) is only possible through the access-policy API.
 
 ### Fleet-Wide Default for New Agents
 
@@ -25,7 +25,7 @@ Admins can set the default `require_email` policy that newly created agents star
 1. Go to **Settings → General**.
 2. Toggle **Require verified email for new agents**.
 
-This default is **on** out of the box (secure-by-default). It applies at agent-creation time only — existing agents are never rewritten, and owners can still override the setting per agent in the agent's Sharing tab.
+This default is **on** out of the box (secure-by-default). It applies at agent-creation time only — existing agents are never rewritten, and owners can still override the setting per agent in the agent's Channels tab.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -44,7 +44,7 @@ This default is **on** out of the box (secure-by-default). It applies at agent-c
 
 ### Access Modes
 
-The Sharing tab presents this as a single **Restricted ↔ Open** switch under "Who can chat with this agent?":
+The Channels tab presents this as a single **Restricted ↔ Open** switch under "Who can chat with this agent?":
 
 **🔒 Restricted (default)**: Only owner, admins, and explicitly approved users can chat. Others see "Your access request is pending approval."
 
@@ -54,7 +54,7 @@ The Sharing tab presents this as a single **Restricted ↔ Open** switch under "
 
 When someone requests access:
 
-1. Their request appears in the **Sharing** tab as a "Pending requests" list under the Restricted/Open switch.
+1. Their request appears in the **Channels** tab as a "Pending requests" list under the Restricted/Open switch.
 2. Click **Approve** to grant access (adds them to the share list).
 3. Click **Deny** to reject.
 

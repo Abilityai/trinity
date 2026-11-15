@@ -19,7 +19,11 @@
           Declared Metrics
         </h3>
         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-          From <code class="rounded bg-gray-100 px-1 py-0.5 dark:bg-gray-700">template.yaml</code>
+          {{ canManage ? 'Saved in' : 'From' }} <code class="rounded bg-gray-100 px-1 py-0.5 dark:bg-gray-700">template.yaml</code>
+          <template v-if="canManage && payload">
+            <span class="mx-1">·</span>
+            <span class="tabular-nums" data-testid="declared-metrics-count">{{ activeCount }} of {{ MAX_DECLARED_METRICS }} declared</span>
+          </template>
           <span class="mx-1">·</span>
           <span :title="STALE_RULE_TITLE">stale = no point within 2× cadence</span>
         </p>
@@ -47,7 +51,27 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
         </button>
+        <!-- trinity-enterprise#1006: owners declare from here. The form
+             writes template.yaml, the same definition a hand edit makes. -->
+        <BaseButton
+          v-if="canManage && metrics.length > 0"
+          size="sm"
+          :disabled="atCap"
+          :title="atCap ? CAP_TITLE : undefined"
+          data-testid="declare-metric-button"
+          @click="openDeclare"
+        >+ Declare metric</BaseButton>
       </div>
+    </div>
+
+    <div
+      v-if="savedNote"
+      class="flex items-center gap-3 rounded-lg border border-status-success-200 bg-status-success-50 px-4 py-3 text-sm text-status-success-800 dark:border-status-success-500/30 dark:bg-status-success-500/10 dark:text-status-success-300"
+      role="status"
+      data-testid="declared-metrics-saved"
+    >
+      <span class="min-w-0 flex-1">{{ savedNote }}</span>
+      <BaseButton variant="ghost" size="sm" aria-label="Dismiss" @click="savedNote = ''">Dismiss</BaseButton>
     </div>
 
     <!-- First load: a skeleton with the tiles' own footprint (p4, p12) — a
@@ -81,8 +105,21 @@
       class="rounded-lg border border-dashed border-gray-300 p-6 text-center dark:border-gray-700"
       data-testid="declared-metrics-empty"
     >
-      <p class="text-sm text-gray-600 dark:text-gray-300">
-        {{ payload?.message || 'No metrics are declared for this agent.' }}
+      <p class="text-base font-semibold text-gray-900 dark:text-white">No metrics declared yet</p>
+      <p class="mx-auto mt-2 max-w-xl text-sm text-gray-600 dark:text-gray-300">
+        A metric is a number this agent is responsible for, such as tickets resolved or first-reply time.
+        Declare one and the agent can record it. It then shows up here, in objectives and in Workspace projects.
+      </p>
+      <BaseButton
+        v-if="canManage"
+        class="mt-4"
+        data-testid="declared-metrics-empty-declare"
+        @click="openDeclare"
+      >+ Declare a metric</BaseButton>
+      <p v-else class="mt-3 text-sm text-gray-600 dark:text-gray-300">Ask the agent's owner to declare one.</p>
+      <p class="mt-3 text-xs text-gray-600 dark:text-gray-300">
+        Prefer editing files? Add a <code class="rounded bg-gray-100 px-1 py-0.5 dark:bg-gray-700">metrics:</code>
+        block to template.yaml. Both ways write the same definition.
       </p>
     </div>
 
@@ -160,6 +197,11 @@
           <div v-if="metric.description" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
             {{ metric.description }}
           </div>
+          <div
+            v-if="metric.recorded_by"
+            class="mt-1 text-xs text-gray-600 dark:text-gray-300"
+            data-testid="metric-recorded-by"
+          >Recorded by {{ metric.recorded_by }}</div>
 
           <SparklineChart
             v-if="sparkline(metric).length > 1"
@@ -218,9 +260,34 @@
             class="mt-2 text-xs text-gray-500 dark:text-gray-400"
             data-testid="metric-empty-message"
           >{{ metric.message }}</p>
+
+          <div
+            v-if="canManage && metric.status !== 'retired'"
+            class="mt-3 flex gap-2 border-t border-gray-100 pt-2 dark:border-gray-750"
+            data-testid="metric-tile-actions"
+          >
+            <BaseButton variant="ghost" size="sm" :aria-label="`Edit ${metric.label || metric.name}`" data-testid="metric-edit" @click="openEdit(metric)">Edit</BaseButton>
+            <BaseButton variant="ghost" size="sm" :aria-label="`Retire ${metric.label || metric.name}`" data-testid="metric-retire" @click="openRetire(metric)">Retire…</BaseButton>
+          </div>
         </div>
       </div>
     </template>
+
+    <MetricDeclarationModal
+      v-if="canManage"
+      v-model="declarationOpen"
+      :agent-name="agentName"
+      :metric="editing"
+      @saved="onSaved"
+      @retire="onRetireFromEdit"
+    />
+    <RetireMetricDialog
+      v-if="canManage"
+      v-model="retireOpen"
+      :agent-name="agentName"
+      :metric="retiring"
+      @retired="onRetired"
+    />
   </section>
 </template>
 
@@ -249,6 +316,10 @@ import SparklineChart from './SparklineChart.vue'
 import LoadFailed from './LoadFailed.vue'
 import InlineError from './InlineError.vue'
 import BaseSelect from './base/BaseSelect.vue'
+import BaseButton from './base/BaseButton.vue'
+import MetricDeclarationModal from './MetricDeclarationModal.vue'
+import RetireMetricDialog from './RetireMetricDialog.vue'
+import { MAX_DECLARED_METRICS } from '../utils/metricDeclaration'
 import { viewState, staleBannerMessage } from '../utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '../utils/timestamps'
 import {
@@ -269,6 +340,9 @@ const props = defineProps({
   // Poll cadence, matched to the dashboard panel's default so the two surfaces
   // on one tab do not tick against each other.
   refreshSeconds: { type: Number, default: 30 },
+  // Owner tier (trinity-enterprise#1006): shows Declare / Edit / Retire. The
+  // backend enforces the same tier; this only hides controls a viewer can't use.
+  canManage: { type: Boolean, default: false },
 })
 
 const WINDOW_OPTIONS = [
@@ -291,6 +365,42 @@ const selectedWindow = ref('auto')
 let refreshInterval = null
 
 const metrics = computed(() => payload.value?.metrics || [])
+const activeCount = computed(() => metrics.value.filter((m) => m.status !== 'retired').length)
+const atCap = computed(() => activeCount.value >= MAX_DECLARED_METRICS)
+const CAP_TITLE = `This agent has ${MAX_DECLARED_METRICS} metrics, the most allowed. Retire one to declare another.`
+
+// ---- declaring, editing, retiring (trinity-enterprise#1006) ---------------
+const declarationOpen = ref(false)
+const editing = ref(null)
+const retireOpen = ref(false)
+const retiring = ref(null)
+const savedNote = ref('')
+
+function openDeclare() {
+  editing.value = null
+  declarationOpen.value = true
+}
+function openEdit(metric) {
+  editing.value = metric
+  declarationOpen.value = true
+}
+function openRetire(metric) {
+  retiring.value = metric
+  retireOpen.value = true
+}
+function onRetireFromEdit(metric) {
+  declarationOpen.value = false
+  openRetire(metric)
+}
+function afterWrite(result, verb) {
+  const synced = 'Saved to template.yaml and carried to the repo on the agent\'s next git sync.'
+  savedNote.value = result?.registry_refreshed === false && result?.message
+    ? `${verb} ${result.label}. ${result.message}`
+    : `${verb} ${result.label}. ${synced}`
+  load()
+}
+const onSaved = (result) => afterWrite(result, result?.op === 'replace' ? 'Updated' : 'Declared')
+const onRetired = (result) => afterWrite(result, 'Retired')
 const findings = computed(() => payload.value?.findings || [])
 
 // `loading` stays "fetch in flight" for the retry label only; the template

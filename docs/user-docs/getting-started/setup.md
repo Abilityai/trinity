@@ -24,7 +24,7 @@ Install Trinity, log in as the admin, and meet the starter fleet a fresh install
 - At least 8 GB of RAM
 - A modern web browser
 
-**Database.** A local install runs on SQLite, which reached end-of-support on 2026-09-01: it still works, but PostgreSQL is now the supported backend. A fresh server or one-click install (`start.sh --hosted`) starts on a bundled PostgreSQL automatically; an existing SQLite install stays on SQLite until you migrate. See [Backup and Restore](../guides/deploying/backup-and-restore.md) and the [SQLite → PostgreSQL guide](../../migrations/SQLITE_TO_POSTGRES.md).
+**Database.** A local install runs on a bundled PostgreSQL container, and `./scripts/deploy/start.sh` generates its password. SQLite reached end-of-support on 2026-09-01, and an existing `trinity.db` is refused at start until it moves: see `docs/migrations/SQLITE_TO_POSTGRES.md`.
 
 ### Installation
 
@@ -60,7 +60,7 @@ Install Trinity, log in as the admin, and meet the starter fleet a fresh install
 
 If the backend started with a **blank** `ADMIN_PASSWORD`, every page redirects to a one-page **"Create your admin account"** form at `/setup` until an admin exists. These installs land here:
 
-- **A DigitalOcean Marketplace 1-Click droplet created without a password.** This is by design: the 1-Click create page has no input form, so the image boots with `ADMIN_PASSWORD` blank and `ADMIN_PASSWORD_SOURCE=browser`, and the droplet's login banner prints the URL to claim it — never a password. A droplet you gave a password at create time (cloud-init user-data, or the `trinity-do-create.sh` installer) has its admin provisioned at boot and never shows the form. A Vultr Marketplace server behaves the same way.
+- **A DigitalOcean droplet created without a password** (the Marketplace 1-Click, or the `trinity-do-create.sh` installer). This is by design: the 1-Click create page has no input form, so the image boots with `ADMIN_PASSWORD` blank and `ADMIN_PASSWORD_SOURCE=browser`, and the droplet's login banner prints the URL to claim it — never a password. A 1-Click droplet you gave a password at create time (cloud-init user-data) has its admin provisioned at boot and never shows the form; that password stays in the droplet's user-data for the droplet's life ([#3942](https://github.com/abilityai/trinity/issues/3942)). A Vultr Marketplace server behaves the same way.
 - **An AWS install created without a password** (`start.sh --provision --cloud aws`, the CloudFormation stack, or the AWS Marketplace AMI). The form also asks for the EC2 instance ID — see **Instance-ID claim** below.
 - **A bare `docker compose up -d` or a hand-rolled backend** brought up with the password blank. The installer does not allow this on a normal install. A hosted compose started by hand with a blank password and no `ADMIN_PASSWORD_SOURCE=browser` marker is refused: set `ADMIN_PASSWORD` in `.env` and restart, or run `./scripts/deploy/start.sh --hosted`.
 
@@ -118,7 +118,7 @@ Seeded agents appear on the Dashboard as soon as they exist; closing first-run s
 |---------|-----|
 | Web UI | http://localhost |
 | Backend API docs | http://localhost:8000/docs |
-| MCP Server | http://localhost:8080/mcp (on a server install also `https://trinity.your-domain.com/mcp`) |
+| MCP Server | http://localhost:8080/mcp (on a server install also `https://trinity.your-domain.com/mcp`). Clients outside the Trinity server — Claude Code on your laptop included — need **External MCP access** turned on once under Settings → MCP Keys; a fresh install starts with it off. See [MCP Server](../integrations/mcp-server.md#external-mcp-access) |
 
 ### Stopping and Starting
 
@@ -205,7 +205,7 @@ Both calls take a signed-in browser session; no MCP key can change a sign-in ide
 - Email login requires a configured email service. Without one, codes are written to the backend log and the login page says so; admin password login always works.
 - Trinity requires Docker. It cannot run without it.
 - Seeding Cornelius needs outbound access to GitHub at first boot; a failed pass is retried on the next start.
-- SQLite is past its end-of-support date (2026-09-01) and PostgreSQL is the supported backend. A local install still defaults to SQLite, so plan a move to PostgreSQL for any instance you keep.
+- PostgreSQL is the database backend. See [Single-Server Deployment → Database backend](../guides/deploying/single-server.md#database-backend).
 
 ## See Also
 

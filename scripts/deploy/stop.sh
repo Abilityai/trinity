@@ -45,6 +45,9 @@ esac
 # forbidden verb was a standing contradiction; `stop` is the reversible
 # operation the summary documents, and `start.sh` brings the same containers
 # back up.
+# Compose renders the whole file for any command, and an upgraded install may not
+# have POSTGRES_PASSWORD yet (#4175). `stop` never reads the value.
+export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-unused-by-stop}"
 docker compose "${COMPOSE_FILES[@]}" stop
 
 echo ""

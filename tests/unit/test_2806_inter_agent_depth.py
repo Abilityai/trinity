@@ -349,7 +349,13 @@ def _assert_named_403(resp, depth, max_depth, target=B):
     assert detail["error"] == CODE
     assert (detail["depth"], detail["max_depth"]) == (depth, max_depth)
     assert (detail["caller"], detail["target"]) == (A, target)
-    assert "Do not retry" in detail["message"]
+    assert "Do not retry this call or route it through another agent" in detail["message"]
+    # #4357: the refusal names the running row that exhausted the depth.
+    hop = detail["exhausted_by"]
+    assert set(hop) == {"execution_id", "chain_depth", "triggered_by", "source_agent"}
+    assert hop["chain_depth"] == depth - 1
+    assert hop["execution_id"] in detail["message"]
+    assert detail["resets"]
 
 
 @pytest.mark.parametrize(
@@ -701,3 +707,86 @@ def test_2806_self_task_is_a_hop_too(world):
         )
     assert (ei.value.caller, ei.value.target) == (A, A)
     world.sync_dispatch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 9. #4357 — the refusal names the hop that exhausted the depth
+# ---------------------------------------------------------------------------
+
+DO_NOT_RETRY = "Do not retry this call or route it through another agent"
+
+
+def _refuse(principal) -> InterAgentDepthExceeded:
+    with pytest.raises(InterAgentDepthExceeded) as ei:
+        _enforce(principal)
+    return ei.value
+
+
+def test_4357_the_refusal_names_the_deepest_running_row(world):
+    _running_row(A, 3)
+    _running_row(A, None)
+    deep = db.create_task_execution(
+        agent_name=A, message="in-flight turn", triggered_by="caller_wake",
+        fields=TaskExecutionFields(
+            chain_depth=8, source_agent_name=B, source_user_email="person@example.com",
+        ),
+    ).id
+    exc = _refuse(_agent_principal(world))
+    detail = exc.detail()
+    # The caller's own row: ids, depth, the trigger enum and the agent that
+    # called it — no person, no channel, no text.
+    assert detail["exhausted_by"] == {
+        "execution_id": deep, "chain_depth": 8, "triggered_by": "caller_wake", "source_agent": B,
+    }
+    assert deep in detail["message"] and "caller_wake" in detail["message"]
+    assert DO_NOT_RETRY in detail["message"]
+    assert "person@example.com" not in str(detail)
+    assert "finishes" in detail["resets"]
+    # The audit row carries the hop too (ids only).
+    assert _count("audit_log", "event_action = :a AND details LIKE :d", a=CODE, d=f"%{deep}%") == 1
+
+
+def test_4357_the_hop_is_read_only_on_the_refusal_path(world, monkeypatch):
+    probe = MagicMock(side_effect=AssertionError("admission must not read the hop"))
+    monkeypatch.setattr(db, "get_deepest_running_chain_row", probe)
+    _running_row(A, 7)
+    assert _enforce(_agent_principal(world)) == 8
+    probe.assert_not_called()
+
+
+def test_4357_an_unreadable_hop_still_refuses_with_a_null_hop(world, monkeypatch):
+    monkeypatch.setattr(
+        db, "get_deepest_running_chain_row",
+        MagicMock(side_effect=RuntimeError("db hiccup")),
+    )
+    _running_row(A, 8)
+    exc = _refuse(_agent_principal(world))
+    assert exc.detail()["exhausted_by"] is None
+    assert DO_NOT_RETRY in exc.detail()["message"]
+
+
+def test_4357_an_event_claim_deeper_than_the_rows_is_named_as_the_claim(world):
+    _running_row(A, 2)
+    exc = _refuse(_agent_principal(world, loopback_chain_depth=9))
+    assert exc.depth == 9
+    assert exc.detail()["exhausted_by"] == {"kind": "event_claim", "chain_depth": 9}
+    assert DO_NOT_RETRY in exc.detail()["message"]
+
+
+def test_4357_a_claim_tied_with_the_rows_names_the_row(world):
+    deep = _running_row(A, 8)
+    exc = _refuse(_agent_principal(world, loopback_chain_depth=9))
+    assert exc.detail()["exhausted_by"]["execution_id"] == deep
+
+
+def test_4357_the_deepest_row_read_skips_roots_and_finished_rows(world):
+    assert db.get_deepest_running_chain_row(A) is None
+    _running_row(A, None)
+    assert db.get_deepest_running_chain_row(A) is None
+    _running_row(A, 6, status="success")
+    _running_row(A, 7, status="queued")
+    two = _running_row(A, 2)
+    _running_row(B, 5)
+    assert db.get_deepest_running_chain_row(A) == {
+        "id": two, "chain_depth": 2, "triggered_by": "agent", "source_agent_name": None,
+    }

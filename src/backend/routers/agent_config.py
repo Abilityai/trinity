@@ -1,5 +1,5 @@
-# mcp: none — owner configuration surface (autonomy / timeout / resources / capabilities) — a grant, not a use; deliberately unexposed (Invariant #8)
-"""Per-agent configuration endpoints: api-key, autonomy, read-only, resources, capabilities, capacity, timeout."""
+# mcp: permissions.ts (get_agent_capability_grants → GET /capability-grants, read-only, ent#991); everything else — the owner configuration surface (autonomy / timeout / resources / capabilities / tool access — trinity-enterprise#341: no tool reads or writes a profile, agent self-selection is a later grant) and the capability-grant PUT — is a grant, not a use; deliberately unexposed (Invariant #8)
+"""Per-agent configuration endpoints: api-key, autonomy, read-only, tool access, resources, capabilities, capacity, timeout."""
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -10,9 +10,11 @@ from models import (
 )
 from database import db
 from dependencies import (
+    row_is_viewers,
+    viewer_row_scope,
     require_person_or_capability,
     require_admin,
-    reject_non_interactive_principal,
+    assert_interactive_admin,
     OwnedAgentByName,
     get_current_user,
     AuthorizedAgentByName,
@@ -21,6 +23,7 @@ from dependencies import (
     require_person,
 )
 from services import settings_service
+from services.agent_model_service import resolve_default_model
 from services.docker_service import get_agent_container
 from services.agent_service import (
     get_agent_api_key_setting_logic,
@@ -135,20 +138,53 @@ async def get_agent_read_only_status(
 async def set_agent_read_only_status(
     agent_name: str,
     body: dict,
+    request: Request,
     current_user: User = Depends(require_person_or_capability("agents.manage", self_person_only=True))
 ):
     """
-    Set the read-only mode status for an agent.
+    The header and list Read-only toggle: a shortcut to the Strict read-only
+    tool-access profile (trinity-enterprise#341).
 
     Body:
-    - enabled: True to enable read-only mode, False to disable
+    - enabled: True selects Strict read-only; False returns to the profile it
+      came from (409 when read-only belongs to another profile)
     - config: Optional dict with 'blocked_patterns' and 'allowed_patterns' lists
 
-    When enabled, the agent cannot modify files matching blocked patterns.
-    Files matching allowed patterns can still be written (e.g., content/, output/).
+    When the read-only layer is on, the agent cannot modify files matching
+    blocked patterns. Files matching allowed patterns can still be written
+    (e.g., content/, output/).
     """
     from services.agent_service.read_only import set_read_only_status_logic
-    return await set_read_only_status_logic(agent_name, body, current_user)
+    return await set_read_only_status_logic(agent_name, body, current_user, request)
+
+
+# ============================================================================
+# Tool access (GUARD-008, trinity-enterprise#341)
+# ============================================================================
+
+@router.get("/{agent_name}/tool-access")
+async def get_agent_tool_access(agent_name: OwnedAgentByName):
+    """The agent's tool-access profile, the five cards with their per-runtime
+    coverage, and whether a restart is waiting. Owner tier: it shows Custom's
+    remembered list."""
+    from services.agent_service.tool_access import get_tool_access_logic
+    return await get_tool_access_logic(agent_name)
+
+
+@router.put("/{agent_name}/tool-access")
+async def set_agent_tool_access(
+    agent_name: str,
+    body: dict,
+    request: Request,
+    current_user: User = Depends(require_person_or_capability("agents.manage", self_person_only=True)),
+):
+    """Select a tool-access profile. Body: `{profile, custom?: {read_only,
+    disallowed_tools}}`. Owner-only (or another agent holding `agents.manage`,
+    never the agent on itself); the system agent is refused. The read-only
+    layer applies now, the tool list on restart (`restart_required`)."""
+    assert_agent_owner(current_user, agent_name, detail="Only agent owners can change tool access")
+    from services.agent_service.tool_access import set_tool_access_logic
+    return await set_tool_access_logic(agent_name, body, current_user, request)
 
 
 # ============================================================================
@@ -418,6 +454,20 @@ async def get_agent_capacity(
     capacity = get_capacity_manager()
     slot_state = await capacity.get_slot_state(agent_name, max_tasks)
 
+    # ent#875: a slot carries the first 100 characters of the prompt that holds it
+    # and that turn's execution id. A share holder sees only the slots their own
+    # turns hold; the counts below (`active_slots`, `available_slots`) are numbers,
+    # not text, so they keep describing the whole agent.
+    scope = viewer_row_scope(current_user, agent_name)
+
+    def _visible(slot) -> bool:
+        if scope is None:
+            return True
+        row = db.get_execution(slot.execution_id)
+        return bool(row) and getattr(row, "agent_name", None) == agent_name and row_is_viewers(
+            scope, getattr(row, "source_user_id", None)
+        )
+
     # Convert to response model
     slots = [
         SlotInfo(
@@ -428,6 +478,7 @@ async def get_agent_capacity(
             duration_seconds=s.duration_seconds
         )
         for s in slot_state.slots
+        if _visible(s)
     ]
 
     return AgentCapacity(
@@ -618,10 +669,13 @@ async def get_public_channel_model(
 
     override = db.get_public_channel_model(agent_name)
     platform_default = settings_service.get_platform_default_model()
+    # ent#1202: with no override a public turn runs on the agent's own model
+    # first, then the platform default — the same resolver the turn uses.
+    inherited = resolve_default_model(agent_name).model
     return {
         "agent_name": agent_name,
         "public_channel_model": override,                       # None = inherit
-        "resolved_model": override or platform_default,
+        "resolved_model": override or inherited or platform_default,
         "is_overridden": override is not None,
         "platform_default": platform_default,
         "available_models": sorted(settings_service.PUBLIC_CHANNEL_MODELS),
@@ -674,11 +728,12 @@ async def set_public_channel_model(
     )
 
     platform_default = settings_service.get_platform_default_model()
+    inherited = None if model else resolve_default_model(agent_name).model  # ent#1202
     return {
         "message": "Public-channel model updated",
         "agent_name": agent_name,
         "public_channel_model": model,
-        "resolved_model": model or platform_default,
+        "resolved_model": model or inherited or platform_default,
         "is_overridden": model is not None,
     }
 
@@ -693,6 +748,8 @@ _GUARDRAILS_NUMBER_BOUNDS = {
     "execution_timeout_sec": (60, 7200),
 }
 _GUARDRAILS_LIST_FIELDS = ("extra_bash_deny", "extra_path_deny", "disallowed_tools")
+# Same contract as the tool-access Custom editor (tool_access_profiles.MAX_*,
+# trinity-enterprise#341; a parity test holds them equal).
 _GUARDRAILS_MAX_LIST = 50
 _GUARDRAILS_MAX_STRING = 256
 
@@ -741,6 +798,13 @@ def _validate_guardrails_payload(body: dict) -> dict:
                 )
         cleaned[field] = value
 
+    # ent#926: may channel and public-link visitors' turns use the shell (and run
+    # on Gemini/Codex)? Read live per turn by turn_tier_service; absent = on.
+    if "visitor_shell" in body:
+        if not isinstance(body["visitor_shell"], bool):
+            raise HTTPException(status_code=400, detail="visitor_shell must be true or false")
+        cleaned["visitor_shell"] = body["visitor_shell"]
+
     return cleaned
 
 
@@ -757,9 +821,12 @@ async def get_agent_guardrails(
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
+    # trinity-enterprise#341: the profile id only — Custom's remembered list is
+    # owner-tier (GET /tool-access); this read is access-tier.
+    from services.tool_access_profiles import public_guardrails_view
     return {
         "agent_name": agent_name,
-        "guardrails": db.get_guardrails_config(agent_name),
+        "guardrails": public_guardrails_view(db.get_guardrails_config(agent_name)),
     }
 
 
@@ -779,14 +846,15 @@ async def set_agent_guardrails(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     cleaned = _validate_guardrails_payload(body)
-    success = db.set_guardrails_config(agent_name, cleaned or None)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to update guardrails")
+    # trinity-enterprise#341: the stored tool-access profile is kept (never
+    # taken from the body), and once one is stored the tool list belongs to it.
+    from services.agent_service.tool_access import apply_guardrails_put
+    stored = apply_guardrails_put(agent_name, cleaned)
 
     return {
         "message": "Guardrails updated (restart agent to apply)",
         "agent_name": agent_name,
-        "guardrails": cleaned,
+        "guardrails": stored,
     }
 
 
@@ -821,7 +889,7 @@ async def set_agent_capability_grant(
     grant-vs-use: an admin in a signed-in session only — never a key, never an
     agent, and answering a `permission-request` ask does not do it. Idempotent
     both ways; every change is audited."""
-    reject_non_interactive_principal(admin_user)
+    assert_interactive_admin(admin_user)  # the one spelling of the grant gate (ent#1030)
     from services import capability_grant_service
     from services.capability_grant_service import CapabilityGrantRefused
 
@@ -831,26 +899,9 @@ async def set_agent_capability_grant(
     except CapabilityGrantRefused as e:
         raise HTTPException(status_code=e.status_code, detail=e.as_detail())
     if result["changed"]:
-        try:  # best-effort: the grant has already committed
-            await platform_audit_service.log(
-                event_type=AuditEventType.AUTHORIZATION,
-                # One verb per capability whichever door granted it (#3236
-                # review): `skills.manage` keeps the skill-manager route's
-                # verb, so an audit query for it finds both doors.
-                event_action=(
-                    ("skill_manager_grant" if body.granted else "skill_manager_revoke")
-                    if capability == "skills.manage"
-                    else ("capability_grant" if body.granted else "capability_revoke")
-                ),
-                source="api",
-                actor_user=admin_user,
-                actor_ip=request.client.host if request.client else None,
-                endpoint=request.scope["path"],
-                request_id=getattr(request.state, "request_id", None),
-                target_type="agent",
-                target_id=agent_name,
-                details={"capability": capability, "granted": body.granted},
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning("capability grant audit failed for %s", agent_name)
+        # One verb per capability whichever door granted it (#3236 review);
+        # the shared helper is what keeps this door and the manifest's equal.
+        await capability_grant_service.audit_grant_change(
+            agent_name, capability, body.granted, admin_user, request=request,
+            log=platform_audit_service.log)
     return SkillManagerGrantResult(**result)

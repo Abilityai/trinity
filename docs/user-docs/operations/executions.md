@@ -25,7 +25,7 @@ View, monitor, and manage task executions across all agents. Executions are crea
 | `room` | A turn inside a shared multi-agent room |
 | `a2a` | A task sent in by an external A2A orchestrator |
 | `operator_response` | An answer to a parked request waking the agent, on an agent with the ask-ending wake turned on (see [Approvals](../automation/approvals.md)) |
-| `operator_ending` | A parked request that was cancelled or expired waking the agent — one turn per agent per sweep or expiry, same switch |
+| `operator_ending` | A parked request that was cancelled or dismissed waking the agent — one turn per agent per sweep, same switch; an expiry wakes nobody |
 | `validation` | The audit run that follows a scheduled run with post-run validation on (see [Scheduling](../automation/scheduling.md#post-run-validation)). Recorded and shown on the row, but not accepted as a `triggered_by` filter |
 | `skill_gate` | A request for a gated skill that waited for an operator's approval, run once it was approved (see [Approvals](../automation/approvals.md)) |
 
@@ -68,6 +68,8 @@ The fleet execution list lives on the **Executions** tab of the [Operations page
 Evaluations are written by the platform or by a human admin — never by the agent being graded, which is the entire point of keeping them apart from [reports](agent-reports.md) (an agent publishes its own reports). An ungraded run has no quality score at all; that is different from scoring zero.
 
 An agent can read its own evaluations — seeing its own bad score is the feedback loop. Only humans with admin rights can write one.
+
+What a reader sees of **who graded** depends on who is reading. The agent's owner and admins — signed in, or using their own user-scoped MCP key — see the full grader, for example `admin:you@example.com`. Agents, other machine keys, and people the agent is only shared with see just the kind of grader: `admin`, `workspace` (a Workspace user's rating) or `operator` (an owner's preview rating), and never the person's name or email. The stored evaluation is not changed; only what each reader is shown.
 
 ### Execution Detail Page
 

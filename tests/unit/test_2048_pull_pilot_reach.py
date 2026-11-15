@@ -70,7 +70,8 @@ pytestmark = pytest.mark.unit
 _STRANDED: list = []
 # All of them, now.
 _REACHABLE = ["agent", "event", "schedule", "webhook", "reminder", "loop",
-              "fan_out", "a2a", "operator_response", "retry"]
+              "fan_out", "a2a", "operator_response", "operator_ending", "retry",
+              "self_task", "skill_gate", "caller_wake"]
 # Stands in for "a trigger somebody adds without classifying it", so the
 # diagnostic below is still covered now that nothing real trips it.
 _SYNTHETIC_STRANDED = "agent"
@@ -100,12 +101,12 @@ def test_reachable_set_is_what_the_two_queueing_producers_can_actually_emit():
 
       * `POST /task` (`chat_execution_service`) — `_derive_task_trigger` can only
         ever produce `{self_task, agent, mcp, manual, event}`, which contributes
-        `agent` + `event`.
+        `self_task` (#4105), `agent` + `event`.
       * `task_execution_service` — contributes the autonomous triggers with no
         synchronous result consumer: everything the scheduler dispatches
         async-and-polls (`schedule`, `webhook`, `reminder`), plus `loop` (#2523)
         and `fan_out` (#2524), whose orchestrators stopped holding the work in a
-        coroutine.
+        coroutine, and `skill_gate` (#4105), whose caller ignores the result.
 
     Derived here rather than hardcoded so the constant cannot quietly disagree
     with the reasoning that justifies it.
@@ -126,9 +127,18 @@ def test_reachable_set_is_what_the_two_queueing_producers_can_actually_emit():
     # the dispatch's return value. trinity-enterprise#611's `operator_ending`
     # (the wake for a cancelled or expired ask) records the same receipt the
     # same way.
-    adapter_served = {"a2a", "operator_response", "operator_ending"}
+    # trinity-enterprise#1102: `caller_wake` — the delegation-ending wake —
+    # is dispatched by `caller_wake_service` through the same adapter.
+    adapter_served = {"a2a", "operator_response", "operator_ending", "caller_wake"}
+    # #4105: `skill_gate_service` wakes the requester through `execute_task`
+    # and ignores the result, so nothing reads the dispatch's return value.
+    # trinity-enterprise#1236: the project steward wake is the same shape — the
+    # private module dispatches through `execute_task` without awaiting it and
+    # reads the terminal back from the execution row.
+    result_ignored = {"skill_gate", "project_steward"}
     assert PULL_REACHABLE_TRIGGERS == (
-        (task_route_can_emit | scheduler_async_polled | db_joined | adapter_served)
+        (task_route_can_emit | scheduler_async_polled | db_joined | adapter_served
+         | result_ignored)
         & _AUTONOMOUS_TRIGGERS
     )
     assert PULL_REACHABLE_TRIGGERS == _AUTONOMOUS_TRIGGERS

@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import httpx
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -45,6 +45,7 @@ from dependencies import get_current_user, assert_admin
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services import operator_intake_service, platform_keys_service, telemetry_sharing_service
 from services.secret_settings import SecretSettingValueError
+from utils.log_masking import masked_traceback
 
 from services.subscription_service import (
     connect_agents_to_first_credential,
@@ -121,6 +122,20 @@ from services.subscription_headroom_alerts import (
 router = APIRouter()
 
 
+def _log_failure(what: str, e: BaseException, *held: Optional[str]) -> None:
+    """py/stack-trace-exposure + #4284 (ent#1117): callers answer with a fixed
+    text plus the class name; the detail is logged here. An exception can echo
+    the credential the handler holds (an httpx header error repeats the header),
+    so the traceback is logged with every ``held`` value masked, not exc_info."""
+    logger.error("%s: %s", what, masked_traceback(e, *held))
+
+
+def _server_error(what: str, e: BaseException, *held: Optional[str]) -> HTTPException:
+    """Log ``e`` as above and build the 500 the caller raises."""
+    _log_failure(what, e, *held)
+    return HTTPException(status_code=500, detail=f"{what} ({e.__class__.__name__} — details in backend logs)")
+
+
 def mask_api_key(key: str) -> str:
     """Mask an API key for display, showing only last 4 characters."""
     if not key or len(key) < 8:
@@ -181,7 +196,7 @@ async def get_api_keys_status(
             "gemini": _status(get_gemini_api_key(), 'google_api_key'),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get API keys status: {str(e)}")
+        raise _server_error("Failed to get API keys status", e)
 
 
 @router.put("/api-keys/anthropic")
@@ -235,7 +250,7 @@ async def update_anthropic_key(
     except (HTTPException, SecretSettingValueError):
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update API key: {str(e)}")
+        raise _server_error("Failed to update API key", e, body.api_key)
 
 
 # #2572 Trigger A2 — the instance Anthropic key can be cleared through TWO
@@ -339,7 +354,7 @@ async def delete_anthropic_key(
             "fallback_configured": bool(env_key)
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete API key: {str(e)}")
+        raise _server_error("Failed to delete API key", e)
 
 
 @router.post("/api-keys/anthropic/test")
@@ -398,9 +413,10 @@ async def test_anthropic_key(
             "error": "Request timed out. Please try again."
         }
     except Exception as e:
+        _log_failure("Error testing key", e, body.api_key)
         return {
             "valid": False,
-            "error": f"Error testing key: {str(e)}"
+            "error": f"Error testing key ({e.__class__.__name__} — details in backend logs)",
         }
 
 
@@ -437,8 +453,9 @@ async def update_github_pat(
             propagation = await propagate_github_pat(key)
             propagation_payload: Dict[str, Any] = propagation.model_dump()
         except Exception as e:
-            logger.exception("GitHub PAT propagation failed")
-            propagation_payload = {"error": f"Propagation failed: {str(e)}"}
+            _log_failure("GitHub PAT propagation failed", e, key)
+            # Settings.vue keys on `error` being truthy — the key stays.
+            propagation_payload = {"error": f"Propagation failed ({e.__class__.__name__} — details in backend logs)"}
 
         # SEC-001: audit GitHub PAT change
         await platform_audit_service.log(
@@ -460,7 +477,7 @@ async def update_github_pat(
     except (HTTPException, SecretSettingValueError):
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update GitHub PAT: {str(e)}")
+        raise _server_error("Failed to update GitHub PAT", e, body.api_key)
 
 
 @router.delete("/api-keys/github")
@@ -500,7 +517,7 @@ async def delete_github_pat(
             "fallback_configured": bool(env_key)
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete GitHub PAT: {str(e)}")
+        raise _server_error("Failed to delete GitHub PAT", e)
 
 
 @router.post("/api-keys/github/test")
@@ -597,9 +614,10 @@ async def test_github_pat(
             "error": "Request timed out. Please try again."
         }
     except Exception as e:
+        _log_failure("Error testing token", e, body.api_key)
         return {
             "valid": False,
-            "error": f"Error testing token: {str(e)}"
+            "error": f"Error testing token ({e.__class__.__name__} — details in backend logs)",
         }
 
 
@@ -650,7 +668,7 @@ async def get_slack_settings_status(
             }
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get Slack settings: {str(e)}")
+        raise _server_error("Failed to get Slack settings", e)
 
 
 @router.put("/slack")
@@ -688,7 +706,7 @@ async def update_slack_settings(
     except SecretSettingValueError:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update Slack settings: {str(e)}")
+        raise _server_error("Failed to update Slack settings", e, body.client_secret, body.signing_secret)
 
 
 @router.delete("/slack")
@@ -727,7 +745,7 @@ async def delete_slack_settings(
             "fallback_configured": fallback_configured
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete Slack settings: {str(e)}")
+        raise _server_error("Failed to delete Slack settings", e)
 
 
 @router.get("/slack/status")
@@ -810,6 +828,7 @@ async def connect_slack_transport(
     mode = get_slack_transport_mode()
     adapter = SlackAdapter()
     transport = None
+    app_token = signing_secret = None  # held for the failure log's mask
 
     try:
         if mode == "socket":
@@ -841,8 +860,7 @@ async def connect_slack_transport(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to start Slack transport: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to connect: {str(e)}")
+        raise _server_error("Failed to connect", e, body.app_token, app_token, signing_secret)
 
 
 @router.post("/slack/install")

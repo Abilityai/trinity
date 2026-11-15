@@ -147,6 +147,89 @@ class SecurityMixin:
                     return {}
             return {}
 
+    # =========================================================================
+    # Tool access (GUARD-008, trinity-enterprise#341) — the guardrails blob
+    # and the read-only columns as ONE row, read and written together
+    # =========================================================================
+
+    def get_tool_access_row(self, agent_name: str) -> Optional[dict]:
+        """The fields a tool-access write reads and compares, or None.
+
+        ``guardrails_raw`` is the stored TEXT exactly as it is, so the write
+        below can compare-and-set on it; ``guardrails`` is its parsed form ({}
+        when unset or malformed).
+        """
+        stmt = select(
+            agent_ownership.c.guardrails_config,
+            func.coalesce(agent_ownership.c.read_only_mode, 0).label("read_only_mode"),
+            agent_ownership.c.read_only_config,
+        ).where(
+            and_(
+                agent_ownership.c.agent_name == agent_name,
+                agent_ownership.c.deleted_at.is_(None),
+            )
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        if not row:
+            return None
+        raw = row["guardrails_config"]
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            parsed = {}
+        try:
+            ro_config = json.loads(row["read_only_config"]) if row["read_only_config"] else None
+        except json.JSONDecodeError:
+            ro_config = None
+        return {
+            "guardrails_raw": raw,
+            "guardrails": parsed if isinstance(parsed, dict) else {},
+            "read_only": bool(row["read_only_mode"]),
+            "read_only_config": ro_config,
+        }
+
+    _KEEP = object()
+
+    def write_tool_access_row(
+        self,
+        agent_name: str,
+        *,
+        expected_guardrails_raw: Optional[str],
+        expected_read_only: bool,
+        guardrails: Optional[dict],
+        read_only: bool,
+        read_only_config=_KEEP,
+    ) -> bool:
+        """Write the guardrails blob and the read-only layer in ONE UPDATE,
+        only if neither moved since ``get_tool_access_row`` read them.
+
+        False means another writer got there first (or the agent is gone): the
+        caller answers 409 rather than leave a profile and a read-only layer
+        that disagree. ``read_only_config`` is left as stored unless given, so
+        turning read-only off keeps the owner's patterns for the next time.
+        """
+        values = {
+            "guardrails_config": json.dumps(guardrails) if guardrails else None,
+            "read_only_mode": 1 if read_only else 0,
+        }
+        if read_only_config is not SecurityMixin._KEEP:
+            values["read_only_config"] = json.dumps(read_only_config) if read_only_config else None
+        stmt = (
+            update(agent_ownership)
+            .where(
+                and_(
+                    agent_ownership.c.agent_name == agent_name,
+                    agent_ownership.c.deleted_at.is_(None),
+                    agent_ownership.c.guardrails_config.is_not_distinct_from(expected_guardrails_raw),
+                    func.coalesce(agent_ownership.c.read_only_mode, 0) == (1 if expected_read_only else 0),
+                )
+            )
+            .values(**values)
+        )
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount > 0
+
     def set_guardrails_config(self, agent_name: str, config: Optional[dict]) -> bool:
         """Store per-agent guardrails overrides as a JSON blob. None clears."""
         payload = json.dumps(config) if config else None

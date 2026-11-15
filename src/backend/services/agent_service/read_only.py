@@ -114,10 +114,18 @@ async def get_read_only_status_logic(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     read_only_data = db.get_read_only_mode(agent_name)
+    # trinity-enterprise#341: read-only mode is the Strict read-only profile.
+    # `enabled` is the header/list toggle (ON for Strict only); the read-only
+    # LAYER is also on under Read-only + report and a Custom choice.
+    from services import tool_access_profiles as tap
+    resolved = tap.resolve(db.get_guardrails_config(agent_name), read_only_data["enabled"])
 
     return {
         "agent_name": agent_name,
-        "enabled": read_only_data["enabled"],
+        "enabled": resolved["profile"] == tap.STRICT,
+        "read_only_layer": read_only_data["enabled"],
+        "profile": resolved["profile"],
+        "applied": resolved["applied"],
         "config": read_only_data["config"] or get_default_config()
     }
 
@@ -125,34 +133,27 @@ async def get_read_only_status_logic(
 async def set_read_only_status_logic(
     agent_name: str,
     body: dict,
-    current_user: User
+    current_user: User,
+    request=None,
 ) -> dict:
     """
-    Set the read-only mode status for an agent.
+    The header and list Read-only toggle (trinity-enterprise#341: a shortcut to
+    the Strict read-only tool-access profile).
 
-    When enabling:
-    - Configuration is saved to database
-    - If agent is running, config file is written immediately
+    - enabled: True selects Strict read-only and remembers the profile it came
+      from; False returns to that profile (Full access if none). False on
+      another profile whose read-only layer is on is a 409 naming it.
+    - config: optional 'blocked_patterns' / 'allowed_patterns', stored when sent.
 
-    When disabling:
-    - Setting is saved to database
-    - Config file is removed (the home copy is written with
-      enabled: false) so the baked-in guard exits 0 on the next invocation
-
-    Body:
-    - enabled: True to enable read-only mode, False to disable
-    - config: Optional dict with 'blocked_patterns' and 'allowed_patterns'
+    The read-only layer applies live to a running agent; the send block on
+    Strict's tool list is refused by the backend at once and leaves the agent's
+    tool list on its next restart (`restart_required`).
     """
     if not (db.can_user_share_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name, manage=True)):
         raise HTTPException(status_code=403, detail="Only the owner can modify read-only settings")
 
-    container = get_agent_container(agent_name)
-    if not container:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    if db.is_system_agent(agent_name):
-        raise HTTPException(status_code=403, detail="Cannot modify read-only mode for system agent")
-
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
     enabled = body.get("enabled")
     if enabled is None:
         raise HTTPException(status_code=400, detail="enabled is required")
@@ -168,36 +169,28 @@ async def set_read_only_status_logic(
         if "allowed_patterns" in config and not isinstance(config["allowed_patterns"], list):
             raise HTTPException(status_code=400, detail="allowed_patterns must be a list")
 
-    if enabled and config is None:
-        config = get_default_config()
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
 
-    db.set_read_only_mode(agent_name, enabled, config)
+    from .tool_access import set_read_only_shortcut_logic
+    view = await set_read_only_shortcut_logic(agent_name, enabled, config, current_user, request,
+                                              container=container)
 
-    config_written = False
-    if container.status == "running":
-        try:
-            if enabled:
-                result = await inject_read_only_hooks(agent_name, config)
-            else:
-                result = await remove_read_only_hooks(agent_name)
-            config_written = result.get("success", False)
-        except Exception as e:
-            logger.warning(f"Failed to update read-only config in running agent {agent_name}: {e}")
-
-    logger.info(
-        f"Read-only mode {'enabled' if enabled else 'disabled'} for agent {agent_name} "
-        f"by {current_user.username}. Config written: {config_written}"
-    )
-
+    from services import tool_access_profiles as tap
+    strict = view["profile"] == tap.STRICT
+    applied = view.get("read_only_applied")
     return {
+        **view,
         "status": "updated",
-        "agent_name": agent_name,
-        "enabled": enabled,
-        "config": config,
-        "hooks_injected": config_written,
-        "message": f"Read-only mode {'enabled' if enabled else 'disabled'}." + (
-            " Config will be applied on next agent start." if enabled and not config_written else ""
-        )
+        "enabled": strict,
+        "read_only_layer": view["read_only"],
+        "config": db.get_read_only_mode(agent_name).get("config"),
+        "hooks_injected": bool(applied),
+        "message": (
+            f"{tap.label(view['profile'])} selected."
+            + (" File protection applies when the agent next starts." if applied is False else "")
+        ),
     }
 
 

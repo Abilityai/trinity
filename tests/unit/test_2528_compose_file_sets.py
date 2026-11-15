@@ -161,7 +161,7 @@ def _extract_guard_block() -> str:
     return text[start:end]
 
 
-def _run_guard(tmp_path: Path, *, hosted: bool, db_file: bool, dev_volume: bool) -> subprocess.CompletedProcess:
+def _run_guard(tmp_path: Path, *, hosted: bool, db_file: bool, dev_volume: bool, dev_db: bool | None = None) -> subprocess.CompletedProcess:
     """Execute the guard with a `docker` shim whose `volume inspect` answer is
     the only thing it consults, and a data dir that may or may not hold a DB."""
     bin_dir = tmp_path / "bin"
@@ -170,6 +170,7 @@ def _run_guard(tmp_path: Path, *, hosted: bool, db_file: bool, dev_volume: bool)
     docker.write_text(
         "#!/bin/bash\n"
         'if [ "$1" = "volume" ] && [ "$2" = "inspect" ]; then exit "${SHIM_VOLUME_RC:-1}"; fi\n'
+        'if [ "$1" = "run" ]; then exit "${SHIM_DEV_DB_RC:-${SHIM_VOLUME_RC:-1}}"; fi\n'
         "exit 1\n"
     )
     docker.chmod(0o755)
@@ -196,6 +197,7 @@ def _run_guard(tmp_path: Path, *, hosted: bool, db_file: bool, dev_volume: bool)
         env={
             "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
             "SHIM_VOLUME_RC": "0" if dev_volume else "1",
+            "SHIM_DEV_DB_RC": "0" if (dev_volume if dev_db is None else dev_db) else "1",
         },
     )
 
@@ -215,6 +217,10 @@ def test_dev_stack_refusal_names_prod_as_well_as_hosted(tmp_path: Path) -> None:
     assert "docker compose -f docker-compose.prod.yml up -d" in proc.stderr, (
         "a source-built production host needs the prod invocation as a remedy, not only --hosted"
     )
+    # #3007: the prod remedy alone drops the enterprise overlay — the refusal
+    # must name the overlay invocation and the shape-detecting update command.
+    assert "-f docker-compose.prod.yml -f docker-compose.prod.enterprise.yml up -d" in proc.stderr
+    assert "./scripts/deploy/update.sh" in proc.stderr
     assert "installed with --hosted, and" not in proc.stderr, (
         "the refusal must not assert the install was hosted — a prod source build produces the same state"
     )
@@ -225,6 +231,14 @@ def test_hosted_refusal_is_unchanged(tmp_path: Path) -> None:
     proc = _run_guard(tmp_path, hosted=True, db_file=False, dev_volume=True)
     assert proc.returncode == 1
     assert "dev-stack database that --hosted cannot see" in proc.stderr
+
+
+@_BASH
+def test_hosted_passes_an_empty_dev_volume(tmp_path: Path) -> None:
+    """#4175: the dev volume always exists, and stays empty on PostgreSQL."""
+    proc = _run_guard(tmp_path, hosted=True, db_file=False, dev_volume=True, dev_db=False)
+    assert proc.returncode == 0, proc.stderr
+    assert "GUARD_PASSED" in proc.stdout
 
 
 @_BASH
@@ -315,7 +329,7 @@ def test_supported_file_set_renders(file_set: tuple[str, ...]) -> None:
             "ADMIN_PASSWORD": secrets.token_urlsafe(18) + "Aa1!",
             "REDIS_PASSWORD": secrets.token_hex(24),
             "REDIS_BACKEND_PASSWORD": secrets.token_hex(24),
-            "POSTGRES_PASSWORD": secrets.token_hex(24),  # hosted (#3159)
+            "POSTGRES_PASSWORD": secrets.token_hex(24),  # every compose file (#3159, #4175)
         },
     )
     assert proc.returncode == 0, f"{_flags(file_set)} does not render:\n{proc.stderr}"

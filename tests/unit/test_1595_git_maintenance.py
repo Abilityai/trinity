@@ -331,7 +331,7 @@ class TestMaintenanceTrigger:
         _maybe_run_git_maintenance(repo, stats)
         flat = [" ".join(argv) for argv in fake_maintenance_runs]
         assert any("--unpack-unreachable=1.hour.ago" in c for c in flat)
-        assert any("--prune=1.hour.ago" in c for c in flat)
+        assert any("--expire=1.hour.ago" in c for c in flat)  # #4000: prune, not gc
         assert not any("--prune=now" in c for c in flat)
 
     def test_backoff_gate_skips(self, repo, fake_maintenance_runs):
@@ -446,16 +446,17 @@ class TestAutoSyncCycle:
         # Skip is not a failure — no sync-state write.
         assert not (repo / ".trinity" / "sync-state.json").exists()
 
-    def test_failure_path_carries_metrics(self, repo):
-        """A failing push must still report pack/loose counts — the sickest
-        repos are exactly the ones that must not go dark."""
+    def test_maintenance_pass_carries_metrics(self, repo):
+        """#4000: metrics come from the maintenance pass the loop runs after
+        every cycle — the sickest repos (failing push) must not go dark."""
         shutil.rmtree(repo.parent / "remote")
         (repo / "newfile.txt").write_text("change")
-        result = _run_auto_sync_once(repo)
-        assert result["status"] == "failed"
+        assert _run_auto_sync_once(repo)["status"] == "failed"
+        git_mod._run_git_maintenance_once(repo)
         state = _read_sync_state_file(repo)
         assert state["pack_count"] is not None
         assert state["loose_objects"] is not None
+        assert state["last_sync_status"] == "failed"
 
     def test_swept_git_status_fails_loudly(self, repo, monkeypatch):
         """rc −9 / empty stdout from a swept `git status` must fail the cycle,
@@ -471,13 +472,11 @@ class TestAutoSyncCycle:
         result = _run_auto_sync_once(repo)
         assert result["status"] == "failed"
 
-    def test_success_records_maintenance_status(self, repo, monkeypatch):
+    def test_maintenance_pass_records_maintenance_status(self, repo, monkeypatch):
         monkeypatch.setattr(
             git_mod, "_maybe_run_git_maintenance", lambda h, s: "repacked 25->1"
         )
-        (repo / "newfile.txt").write_text("change")
-        result = _run_auto_sync_once(repo)
-        assert result["status"] == "success"
+        result = git_mod._run_git_maintenance_once(repo)
         assert result["maintenance"] == "repacked 25->1"
         assert _read_sync_state_file(repo)["maintenance_status"] == "repacked 25->1"
 
@@ -583,4 +582,5 @@ class TestCollectGitObjectStats:
         stats = _collect_git_object_stats(tmp_path)
         assert stats == {
             "loose_objects": None, "pack_count": None, "size_pack_kb": None,
+            "size_loose_kb": None,
         }

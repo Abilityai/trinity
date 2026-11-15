@@ -195,6 +195,30 @@ def test_admitted_full_endpoint_path_succeeds():
     assert post.await_args.kwargs["timeout"] == 3610
 
 
+def test_slot_and_row_share_one_execution_id():
+    """#3989: the slot member, the row id and the released id are one id.
+
+    Canary S-01 compares slot members with running row ids, so a row minted
+    under its own id made every running /chat turn a false violation.
+    """
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json.return_value = {"response": "hi back", "metadata": {}, "session": {}}
+
+    with _env(_idem(replay=False)) as m, \
+         patch.object(_CE, "activity_service",
+                      MagicMock(track_activity=AsyncMock(return_value="act1"),
+                                complete_activity=AsyncMock())), \
+         patch.object(_CE, "agent_post_with_retry", AsyncMock(return_value=resp)), \
+         patch.object(_CE, "compose_system_prompt", return_value="sys"), \
+         patch.object(_CE, "is_execution_context_enabled", return_value=False):
+        _call()
+
+    slot_id = m["cap"].acquire.await_args.kwargs["execution_id"]
+    assert m["db"].create_task_execution.call_args.kwargs["execution_id"] == slot_id
+    m["cap"].release.assert_awaited_once_with("agent1", slot_id)
+
+
 # --- #1026 slice 2: _prepare_chat_execution -------------------------------
 
 def _prep(x_source_agent=None):
@@ -229,6 +253,9 @@ def test_prepare_returns_full_context():
     assert ctx.collaboration_activity_id is None   # not agent-to-agent
     assert ctx.is_queued is False
     m["isvc"].attach_execution.assert_called_once()  # exec linked to idem claim
+    # #3989: the row takes the admission id (also the slot member on push and
+    # the queued id on a pull pilot), so both paths go through this one call.
+    assert m["db"].create_task_execution.call_args.kwargs["execution_id"] == "cex1"
     m["db"].add_chat_message.assert_called_once()    # inbound user message logged
     bcast.assert_not_awaited()                       # no collaboration for human caller
 

@@ -33,6 +33,7 @@ A turn whose run ends in an error is a failed execution, recorded with the run's
 Pull mode is an experimental, operator-only setting: agents named in `PULL_MODE_PILOT_AGENTS` take their work from Trinity's durable queue instead of having it pushed to them (see [Agent Network](../collaboration/agent-network.md)). On those agents only:
 
 - `POST /chat`, the Workspace, the session API, public links, Slack/Telegram/WhatsApp, rooms and paid chat all enqueue the turn and wait for a worker to claim it. A turn no worker claims within the agent's timeout fails as a capacity error (the session API answers `429`). A caller that disconnects while its turn is still queued cancels it.
+- An async `/task` always answers `queued`, idle or not; its `message` says the task is queued for the agent's worker pool.
 - `/chat` memory is per caller: each person (or key owner) gets their own conversation with the agent, resumed turn to turn, instead of the one conversation every caller shares. A second turn on the same conversation waits up to 30 seconds, then gets `429`; other callers' turns run in parallel.
 - `GET /chat/history` returns *your* conversation from the database. `DELETE /chat/history` makes every caller's next turn start fresh and closes the conversations `/chat` was using.
 
@@ -42,11 +43,11 @@ Agents not in the pilot are unchanged.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/enterprise/client-portal/agents/{name}/voice/start` | POST | Start a Workspace voice call bound to a chat (`portal_session_id`); 409 while a reply is in flight |
-| `/api/agents/{name}/voice/start` | POST | Start a per-agent voice session (retained for API clients; the UI starts calls in the Workspace) |
+| `/api/enterprise/client-portal/agents/{name}/voice/start` | POST | Start a Workspace voice call bound to a chat (`portal_session_id`); returns a single-use `websocket_ticket`; 409 while a reply is in flight |
+| `/api/agents/{name}/voice/start` | POST | Start a per-agent voice session (retained for API clients; the UI starts calls in the Workspace). Signed-in sessions only; returns a single-use `websocket_ticket` |
 | `/api/agents/{name}/voice/stop` | POST | Stop session |
 | `/api/agents/{name}/voice/status` | GET | Session status |
-| `/ws/voice/{session_id}` | WS | Audio WebSocket bridge (URL returned by `voice/start`) |
+| `/ws/voice/{session_id}` | WS | Audio WebSocket bridge (URL returned by `voice/start`). Send `{"type":"auth","ticket":...}` as the first frame and wait for `auth_ok`; no credential goes in the URL — see [Connecting the voice socket](../advanced/voice-chat.md#connecting-the-voice-socket) |
 
 The per-agent voice prompt, voice name and canvas panel routes are listed in [Voice Chat](../advanced/voice-chat.md#api-endpoints).
 

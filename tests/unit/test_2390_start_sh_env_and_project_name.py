@@ -208,7 +208,10 @@ def test_port_preflight_probes_the_configured_frontend_port():
     it does."""
     text = _START.read_text()
     assert "for _pp in 80 8000 8080 6379" not in text
-    assert 'for _pp in "$_preflight_frontend_port" 8000 8080 6379' in text
+    # ent#873 gathers the ports into a list (hosted adds the PROXY-protocol
+    # listener's loopback port); the configured frontend port still leads it.
+    assert '_preflight_ports=("$_preflight_frontend_port" 8000 8080 6379)' in text
+    assert 'for _pp in "${_preflight_ports[@]}"' in text
 
 
 def test_hosted_platform_pull_failure_is_explained():

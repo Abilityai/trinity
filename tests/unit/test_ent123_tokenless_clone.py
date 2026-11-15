@@ -318,7 +318,7 @@ class TestValidateGithubAccessTokenless:
         with pytest.raises(HTTPException) as exc:
             _run(crud._validate_github_access(cfg, "o/r", None))
         assert exc.value.status_code == 400
-        assert "Branch 'main' not found" in exc.value.detail
+        assert "Branch or tag 'main' not found" in exc.value.detail
 
     def test_tokenless_never_touches_rest_api(self, crud_env):
         crud, _gs = crud_env

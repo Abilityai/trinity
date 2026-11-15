@@ -3,8 +3,9 @@
     Settings › General — "What this agent is" (trinity-enterprise#887).
 
     Every control here moved from somewhere else: the label and id edits and
-    the avatar from the header, tags / read-only / funding / memory-and-CPU
-    from the header rows, parallel capacity from the old Settings cards, the
+    the avatar from the header, tags / funding / memory-and-CPU from the
+    header rows (read-only mode is now a tool-access profile in Guardrails,
+    trinity-enterprise#341), parallel capacity from the old Settings cards, the
     description and template details from the Info tab. The execution timeout
     (ent#353) is new — its endpoints existed, its control never shipped. Two
     of these have a quick path back on the header since trinity-enterprise#955
@@ -239,18 +240,6 @@
         </template>
       </SettingRow>
 
-      <SettingRow label="Read-only mode" hint="Blocks every write to the agent's source files. For audits and demos." testid="general-read-only">
-        <template #value>
-          <span class="text-[12.5px] text-gray-600 dark:text-gray-400">{{ agent.read_only_enabled ? 'On' : 'Off' }}</span>
-          <BaseToggle
-            :model-value="!!agent.read_only_enabled"
-            aria-label="Read-only mode"
-            :disabled="!canEdit || readOnlyLoading"
-            @update:model-value="$emit('toggle-read-only')"
-          />
-        </template>
-      </SettingRow>
-
       <SettingRow label="Memory and CPU" hint="Container limits. A change applies on the next restart." testid="general-resources">
         <template #badge>
           <BaseBadge v-if="resourcesPending" variant="warning" size="sm">restart</BaseBadge>
@@ -361,7 +350,6 @@ import SettingRow from './SettingRow.vue'
 import BaseButton from '../base/BaseButton.vue'
 import BaseInput from '../base/BaseInput.vue'
 import BaseSelect from '../base/BaseSelect.vue'
-import BaseToggle from '../base/BaseToggle.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import BaseModal from '../base/BaseModal.vue'
 import InlineError from '../InlineError.vue'
@@ -377,7 +365,6 @@ const props = defineProps({
   authStatus: { type: Object, default: null },
   subscriptions: { type: Array, default: null },
   subscriptionChanging: { type: Boolean, default: false },
-  readOnlyLoading: { type: Boolean, default: false },
   tags: { type: Array, default: () => [] },
   allTags: { type: Array, default: () => [] },
   resourceLimits: { type: Object, default: () => ({}) },
@@ -389,7 +376,7 @@ const props = defineProps({
 
 const emit = defineEmits([
   'set-label', 'rename', 'open-avatar-modal', 'cycle-emotion', 'update-tags', 'add-tag', 'remove-tag',
-  'change-subscription', 'toggle-read-only', 'save-resources', 'delete', 'navigate-tab', 'info-item-click',
+  'change-subscription', 'save-resources', 'delete', 'navigate-tab', 'info-item-click',
 ])
 
 const MEMORY_OPTIONS = ['1g', '2g', '4g', '8g', '16g', '32g', '64g']

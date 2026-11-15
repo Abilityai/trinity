@@ -323,6 +323,28 @@ class ChannelAdapter(ABC):
         """
         return None
 
+    def requester_identity(self, message: NormalizedMessage) -> dict:
+        """Who is asking, as this channel saw them (trinity-enterprise#737).
+
+        Recorded on an access request so the owner approves a person, not a
+        bare email. Keys are ``db.access_requests.REQUESTER_FIELDS``; a value
+        the channel does not expose is left out, never guessed. The default
+        reads the fields every adapter fills — the sender id, the
+        ``sender_username`` / ``sender_display_name`` metadata an adapter's
+        ``enrich_message`` sets (Slack), and the chat and thread when they are
+        not the user's own DM. Override where a channel carries more.
+        """
+        meta = message.metadata or {}
+        identity = {
+            "requester_channel_id": message.sender_id,
+            "requester_handle": meta.get("sender_username"),
+            "requester_name": meta.get("sender_display_name"),
+            "requester_thread_id": message.thread_id,
+        }
+        if message.channel_id and message.channel_id != message.sender_id:
+            identity["requester_chat_id"] = message.channel_id
+        return {k: v for k, v in identity.items() if v}
+
     # =========================================================================
     # Group Authentication (group_auth_mode support)
     # =========================================================================

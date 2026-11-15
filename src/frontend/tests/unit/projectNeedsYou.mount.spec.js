@@ -101,6 +101,31 @@ describe('a pending ask is a list row', () => {
     expect(href).toMatch(/item=ask(%3A|:)q1/)
   })
 
+  // #3994: jsdom has no layout, so the fit itself is measured in
+  // e2e/project-needs-you-overflow.spec.js. What can be pinned here is the
+  // structure that fit depends on: the first line holds only the agent, the
+  // kind and the time (the sync badge is wider than that line leaves in the
+  // side column, so it rides the wrapping action line), and the two spans that
+  // can truncate to nothing carry their full text on hover.
+  it('the first line is agent, kind and time; the sync badge rides the action line', async () => {
+    portal.asks = [ask({ agent_name: 'customer-onboarding-compliance-steward', aging: true })]
+    mountIt()
+    await flushPromises()
+    const head = byTestId('project-ask-head-q1')
+    expect(head.children.length).toBe(3)
+    const [name, kind, time] = head.children
+    expect(name.getAttribute('title')).toBe('customer-onboarding-compliance-steward')
+    expect(kind.getAttribute('title')).toBe(kind.textContent.trim())
+    expect(kind.textContent.trim()).not.toBe('')
+    expect(time.className).toContain('shrink-0')
+    const badge = byTestId('project-ask-badge-q1')
+    expect(badge).not.toBeNull()
+    expect(head.contains(badge)).toBe(false)
+    expect(badge.parentElement).toBe(byTestId('project-ask-answer-q1').parentElement)
+    expect(badge.textContent).toContain('Waiting')
+    expect(badge.getAttribute('title')).toBeTruthy()
+  })
+
   it('a short ask without a title shows its question as the title', async () => {
     portal.asks = [ask({ title: '', question: 'Ship it?', options: [] })]
     mountIt()

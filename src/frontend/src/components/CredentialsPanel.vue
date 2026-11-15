@@ -1,6 +1,6 @@
 <template>
-  <!-- `embedded` (trinity-enterprise#888): a section of Settings › Storage,
-       whose column already supplies the gutter. -->
+  <!-- `embedded` (trinity-enterprise#888, #951): the Settings › Credentials
+       pane, whose column already supplies the gutter. -->
   <div class="space-y-6" :class="{ 'p-6': !embedded }">
     <!-- Loading State -->
     <div v-if="loading" class="text-center py-8">
@@ -33,11 +33,46 @@
           </p>
         </div>
 
+        <!-- ent#951: the rows below are a READ of the running workspace. A
+             stopped agent or a failed read is not "Not present" — say which. -->
+        <p
+          v-if="agentStatus !== 'running'"
+          class="px-4 py-3 text-sm text-gray-600 dark:text-gray-400"
+          data-testid="credentials-stopped"
+        >
+          The agent is stopped. Start it to see and change its credential files — they live in its workspace.
+        </p>
+        <LoadFailed
+          v-else-if="statusFailed"
+          dense
+          title="Couldn't read the credential files"
+          message="The agent didn't answer. Its credentials are unchanged — try again."
+          :detail="statusError"
+          @retry="loadCredentialStatus"
+        />
+        <template v-else>
         <div class="divide-y divide-gray-200 dark:divide-gray-700">
+          <!-- ent#951: no .env yet — name the next action. Gated on .env, not on
+               "no credential file": every agent gets a platform-written
+               .mcp.json, so that test would never fire. -->
+          <div
+            v-if="credentialStatus && !hasEnvFile"
+            class="px-4 py-3 flex items-center justify-between gap-3"
+            data-testid="credentials-empty"
+          >
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+              <span class="font-medium">No .env yet</span> — the agent has no environment credentials.
+              Paste KEY=VALUE pairs into Quick Inject below, or add a .env file directly.
+            </p>
+            <BaseButton variant="secondary" size="sm" class="shrink-0 whitespace-nowrap" data-testid="credentials-empty-add-env" @click="editFile('.env')">
+              Add .env
+            </BaseButton>
+          </div>
           <div
             v-for="file in credentialFiles"
             :key="file.name"
             class="px-4 py-3 flex items-center justify-between"
+            data-testid="credential-file-row"
           >
             <div class="flex items-center space-x-3">
               <span
@@ -82,6 +117,7 @@
             </div>
           </div>
         </div>
+        </template>
 
         <!-- ent#819: a refused read (credential files are owner-tier) names why -->
         <div v-if="fileReadError" class="px-4 pb-3">
@@ -301,6 +337,8 @@ import { useAgentsStore } from '../stores/agents'
 import { useNotification } from '../composables'
 import CredentialSetupChecklist from './CredentialSetupChecklist.vue'
 import InlineError from './InlineError.vue'
+import LoadFailed from './LoadFailed.vue'
+import BaseButton from './base/BaseButton.vue'
 import { formatEnvLine, unquoteEnvValue } from '../utils/envFile'
 
 const props = defineProps({
@@ -324,6 +362,9 @@ const { showNotification } = useNotification()
 // State
 const loading = ref(false)
 const credentialStatus = ref(null)
+// ent#951: a read that failed with nothing on screen — never shown as "Not present".
+const statusFailed = ref(false)
+const statusError = ref('')
 // ent#127 — guided setup checklist
 const requirements = ref(null)
 const requirementsLoading = ref(false)
@@ -362,6 +403,8 @@ const hasCredentialFiles = computed(() => {
   return files['.env']?.exists || files['.mcp.json']?.exists
 })
 
+const hasEnvFile = computed(() => !!credentialStatus.value?.files?.['.env']?.exists)
+
 const hasEncryptedFile = computed(() => {
   const files = credentialStatus.value?.files || {}
   return files['.credentials.enc']?.exists
@@ -372,15 +415,22 @@ const loadCredentialStatus = async () => {
   if (!props.agentName) return
   if (props.agentStatus !== 'running') {
     credentialStatus.value = null
+    statusFailed.value = false
     return
   }
 
   loading.value = true
   try {
     credentialStatus.value = await agentsStore.getCredentialStatus(props.agentName)
+    statusFailed.value = false
   } catch (err) {
     console.error('Failed to load credential status:', err)
-    credentialStatus.value = null
+    // A failed refresh keeps what is on screen; only a first read fails visibly.
+    if (!credentialStatus.value) {
+      statusFailed.value = true
+      const detail = err.response?.data?.detail
+      statusError.value = typeof detail === 'string' ? detail : (err.message || '')
+    }
   } finally {
     loading.value = false
   }
@@ -472,6 +522,22 @@ const formatEnvContent = (credentials) => {
   return lines.join('\n') + '\n'
 }
 
+// trinity-enterprise#1073: the files route decodes with errors="replace", so a
+// file that is not UTF-8 text reads "successfully" as U+FFFD (and NULs, for
+// UTF-16). Every writer here replaces the WHOLE file, so such a read is never
+// a base to write from.
+const isNotText = (content) => typeof content === 'string' && /[\uFFFD\u0000]/.test(content)
+
+class EnvNotTextError extends Error {
+  constructor() {
+    super(
+      "This agent's credential file isn't plain UTF-8 text, so nothing was written " +
+      '(writing now would replace every credential already in it). ' +
+      'Ask whoever runs the agent to check its .env file.'
+    )
+  }
+}
+
 /**
  * The CURRENT `.env`, parsed. Throws unless the file is genuinely absent.
  *
@@ -483,8 +549,12 @@ const formatEnvContent = (credentials) => {
 const readExistingEnv = async () => {
   try {
     const content = await agentsStore.downloadAgentFile(props.agentName, '/home/developer/.env')
+    if (isNotText(content)) {
+      throw new EnvNotTextError()
+    }
     return parseEnvText(content)
   } catch (err) {
+    if (err instanceof EnvNotTextError) throw err
     if (err.response?.status === 404) return {}
     // ent#819: a refusal names its cause (e.g. owner-tier); say that, not "unreachable"
     if (err.response?.status === 403 && err.response?.data?.code) {
@@ -692,6 +762,11 @@ const editFile = async (filename) => {
     }
     content = ''
   }
+  if (isNotText(content)) {
+    fileReadError.value = `${filename} isn't plain UTF-8 text, so it can't be edited here ` +
+      '(saving would replace it with the garbled text). Ask whoever runs the agent to check it.'
+    return
+  }
   editingFile.value = filename
   editingContent.value = content
 }
@@ -772,6 +847,7 @@ watch(() => props.agentStatus, () => {
 })
 
 watch(() => props.agentName, () => {
+  credentialStatus.value = null
   loadCredentialStatus()
   loadRequirements()
 })

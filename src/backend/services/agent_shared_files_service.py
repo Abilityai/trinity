@@ -212,7 +212,15 @@ async def extract_from_agent(
             data = extracted.read()
             return data, os.path.basename(member.name)
     except tarfile.TarError as e:
-        raise HTTPException(status_code=500, detail=f"archive extraction failed: {e}")
+        # #4284: the class name in the body, the full exception in the log.
+        logger.error(
+            "archive extraction failed for agent %s path %s",
+            agent_name, container_path, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"archive extraction failed ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 # ---------------------------------------------------------------------------

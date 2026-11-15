@@ -278,7 +278,9 @@ RECEIPT_KEYS = {"status", "id", "request_id", "raised_by", "channel", "type", "t
                 "resolved", "ask_status", "disposition", "disposed_at", "expires_at",
                 "wakes_on_ending", "supersedes_expired",
                 "replaces", "replaced_by", "disposed_by",  # #3247
-                "agent_ending"}  # trinity-enterprise#901 — replaced | withdrawn | None
+                "agent_ending",  # trinity-enterprise#901 — replaced | withdrawn | None
+                "wake_state",  # abilityai/trinity-enterprise#1108 AC #4 — pending (agent not yet woken) | woken | None
+                "credential_destination"}  # trinity-enterprise#1109 — {agent_name, host} | None
 
 
 def _in(minutes):
@@ -332,6 +334,10 @@ def ask(real_db, monkeypatch):
     monkeypatch.setattr(svc, "_owner_email", lambda agent: state["owner"])
     monkeypatch.setattr(oqs, "_workspace_attachment", lambda agent, email, **_: (f"thread-{email}", False))
     monkeypatch.setattr(real_db, "get_operator_resume_enabled", lambda agent: state["opted_in"], raising=False)
+    # ent#1102: the gate is `wake_policy.resolve`, which reads the tri-state column first and
+    # fails closed for an agent with no ownership row — the fixture agent has none, so the
+    # owner's switch is stated there explicitly (True = on, False = off).
+    monkeypatch.setattr(real_db, "get_wake_on_ending", lambda agent: bool(state["opted_in"]), raising=False)
     monkeypatch.setattr(oqs.rate_limiter, "check",
                         lambda *a, **k: RateLimitResult(state["rate_ok"], 10, 0, 60))
     assignment_provider.clear_provider()
@@ -411,8 +417,14 @@ class TestRaiseAsk:
             _raise(ask, self.AGENT, _body(f"ra-{role}", to=role))
         assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, f"ra-{role}") is None
 
-    def test_a_provider_that_fills_the_role_addresses_the_person(self, ask):
+    def test_a_provider_that_fills_the_role_addresses_the_person(self, ask, monkeypatch):
+        import client_portal.service as portal_service
         from services import assignment_provider
+
+        # #4501: an approver is recorded only if they can open the agent; this
+        # one has no platform account, so the agent is shared with them.
+        monkeypatch.setattr(portal_service, "agent_on_roster",
+                            lambda agent_name, email, include_owned=True: True)
 
         class _P:
             def assignment_for(self, agent, trig):
@@ -427,10 +439,13 @@ class TestRaiseAsk:
         assert row["resolved_to"] == ["approver@example.com"]
         assert row["addressed_to_email"] == "approver@example.com" and r["resolved"] is True
 
-    def test_a_provider_that_says_nobody_fills_primary_sends_the_ask_to_the_operators(self, ask):
-        """ent#606: an ask to `primary` falls back to `operator` when no primary is
-        assigned; the owner stands in only when no provider answers at all. An
-        empty list IS an answer ("nobody fills it", resolve_role_people)."""
+    def test_a_provider_that_says_nobody_fills_primary_stands_the_owner_in(self, ask):
+        """abilityai/trinity-enterprise#1134 (ruling 1 of 2026-11-07): an ask to
+        `primary` reaches the agent's OWNER when no primary is assigned — never
+        silently the operator queue, where the person in the chat would not see
+        it. An empty list IS an answer ("nobody fills it", resolve_role_people);
+        under ent#606 it meant the operators, which left the field case with an
+        ask nobody in the chat could see."""
         from services import assignment_provider
 
         class _P:
@@ -442,6 +457,25 @@ class TestRaiseAsk:
 
         assignment_provider.register_provider(_P())
         r = _raise(ask, self.AGENT, _body("ra-nobody"))
+        row = ask.db.get_operator_queue_item(r["id"])
+        assert (r["to_role"], r["resolved"]) == ("primary", True)
+        assert row["addressed_to_email"] == OWNER and row["resolved_to"] == [OWNER]
+        assert (row["context"] or {}).get("workspace_session_id") == f"thread-{OWNER}"   # the owner's Main
+
+    def test_nobody_fills_primary_and_the_owner_has_no_email_is_the_operators(self, ask):
+        """The one remaining operator fallback after ent#1134: no owner address."""
+        from services import assignment_provider
+
+        class _P:
+            def assignment_for(self, agent, trig):
+                return None
+
+            def people_for(self, agent, role):
+                return {"emails": []}
+
+        assignment_provider.register_provider(_P())
+        ask.state["owner"] = None
+        r = _raise(ask, self.AGENT, _body("ra-nobody-noemail"))
         row = ask.db.get_operator_queue_item(r["id"])
         assert (r["to_role"], r["resolved"]) == ("primary", False)
         assert row["addressed_to_email"] is None and row["resolved_to"] is None
@@ -1195,11 +1229,11 @@ def _poller(monkeypatch, db, *entries):
     client = MagicMock()
     client.read_file = AsyncMock(return_value={"success": True, "content": content})
     client.write_file = AsyncMock(return_value={"success": True})
-    monkeypatch.setattr(oqs, "db", db)
-    monkeypatch.setattr(oqs, "AgentClient", lambda name: client)
+    monkeypatch.setattr(oqs.deps, "db", db)
+    monkeypatch.setattr(oqs.deps, "AgentClient", lambda name: client)
     monkeypatch.setattr(oqs.rate_limiter, "check", lambda *a, **k: RateLimitResult(True, 10, 0, 60))
     audit = AsyncMock()
-    monkeypatch.setattr(oqs, "_audit_sync", audit)
+    monkeypatch.setattr(oqs.deps, "_audit_sync", audit)
     ws = MagicMock()
     ws.broadcast = AsyncMock()
     monkeypatch.setattr(oqs, "_websocket_manager", ws)

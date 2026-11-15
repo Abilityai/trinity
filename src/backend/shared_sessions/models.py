@@ -11,7 +11,8 @@ class RoomCreate(BaseModel):
     agents: list[str] = Field(min_length=1, max_length=12)
     topic: Optional[str] = Field(default=None, max_length=2000)
     max_messages: Optional[int] = Field(default=None, ge=1, le=500)
-    max_cost_usd: Optional[float] = Field(default=None, gt=0)
+    # #3495: `service.MAX_COST_USD_CEILING` (pinned by test_3495_room_budget_roles).
+    max_cost_usd: Optional[float] = Field(default=None, gt=0, le=1000.0)
     ttl_hours: Optional[int] = Field(default=None, ge=0, le=168)
     scribe: Optional[str] = None
 
@@ -27,7 +28,7 @@ class RoomRename(BaseModel):
 class RoomMessageCreate(BaseModel):
     """``sender`` is deliberately absent — the acting principal comes from the
     auth context, never the body, so nobody can post as someone else."""
-    content: str = Field(min_length=1, max_length=8000)
+    content: str = Field(min_length=1, max_length=100_000)
     # trinity-enterprise#631 — the PEOPLE this message tags, by address, as
     # picked in the composer. Optional: every existing caller (the MCP
     # `post_to_room` tool included) is unaffected. Bounded loosely here; the
@@ -45,6 +46,13 @@ class RoomCloseRequest(BaseModel):
     reason: Optional[str] = Field(default="user_closed", max_length=50)
 
 
+class RoomContinueRequest(BaseModel):
+    """trinity#4302 — the `seq` of the `chain_paused` row the person is
+    continuing from (`paused_chain.seq` on the room payload). The service
+    refuses a seq that is not the room's live offer with a named 409."""
+    seq: int = Field(ge=1)
+
+
 # --- Operator room-budget defaults (ent#387) -------------------------------
 
 class RoomBudgetDefaults(BaseModel):
@@ -59,6 +67,7 @@ class RoomBudgetDefaults(BaseModel):
     sources: Dict[str, str] = {}
     max_messages_ceiling: int
     max_ttl_hours: int
+    max_cost_usd_ceiling: float               # #3495
 
 
 class RoomBudgetDefaultsUpdate(BaseModel):
@@ -69,6 +78,6 @@ class RoomBudgetDefaultsUpdate(BaseModel):
     API's own bounds.
     """
     max_messages: Optional[int] = Field(default=None, ge=1, le=500)
-    max_cost_usd: Optional[float] = Field(default=None, gt=0)
+    max_cost_usd: Optional[float] = Field(default=None, gt=0, le=1000.0)
     ttl_hours: Optional[int] = Field(default=None, ge=0, le=168)
     clear: List[str] = []

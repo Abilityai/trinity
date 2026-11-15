@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "date": "2026-11-05",
+  "mode": "diff",
+  "scope": "trinity-enterprise#459 operator invitation email",
+  "phases_run": [0, 1, 2, 9, 12, 13, 14],
+  "attack_surface": {"new_routes": 1, "changed_routes": 1, "new_outbound_paths": 1},
+  "findings": [
+    {
+      "id": 1,
+      "severity": "HIGH",
+      "confidence": 10,
+      "status": "FIXED",
+      "category": "Injection",
+      "title": "Free-text share field used as a mail recipient",
+      "file": "src/backend/services/agent_invite_service.py"
+    }
+  ],
+  "totals": {"critical": 0, "high": 1, "medium": 0, "low": 0, "open": 0}
+}

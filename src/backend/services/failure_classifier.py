@@ -5,6 +5,8 @@ copy is a byte-identical vendored mirror — edit the backend copy and regenerat
 byte-identity is enforced by tests/unit/test_904_sigkill_no_false_auth.py::TestBackendSchedulerParity.
 """
 
+import re
+
 # Substrings that indicate an auth-class subscription failure.
 AUTH_INDICATORS = [
     "credit balance",
@@ -89,15 +91,78 @@ def is_container_fault(error_message: str) -> bool:
     return any(marker in error_lower for marker in CONTAINER_FAULT_MARKERS)
 
 
+# #3984: the agent's turn-limit answer (422). Its text carries the CLI's turn
+# count, so at a cap of 401 or 403 the bare "401" / "403" AUTH_INDICATORS
+# matched and SUB-003 walked a turn that only hit the cap its owner or caller
+# chose. Keyed on the agent's own prefix (headless_executor.py, #361) and
+# anchored at the start, so an auth error that merely mentions the words is
+# still auth. Pinned against the producer by
+# tests/unit/test_3984_3849_not_a_credential_failure.py.
+TURN_LIMIT_MARKERS = [
+    "task exceeded turn limit:",
+]
+
+
+def is_turn_limit(error_message: str) -> bool:
+    """Return True if `error_message` is the agent's turn-limit answer (#3984)."""
+    if not error_message:
+        return False
+    error_lower = error_message.lstrip().lower()
+    return any(error_lower.startswith(marker) for marker in TURN_LIMIT_MARKERS)
+
+
+# #3849: the API refusing a prompt longer than the context window. Zero tokens
+# and exit 1, so the agent answers 503 — read as auth, and the same oversized
+# prompt went out once per subscription and once on the platform key. The
+# literal is the API's own sentence; Trinity does not author it.
+PROMPT_LENGTH_MARKERS = [
+    "prompt is too long",
+]
+
+# #4123: the agent's own auth answer (headless_executor.py, #285). It quotes the
+# stderr line that tripped it, so when that one line also said "prompt is too
+# long" the sentence stopped a genuine auth walk. Anchored at the start, after an
+# optional `[code] ` tag (a pull row stores `[auth] <text>`). Pinned against the
+# producer by tests/unit/test_4123_auth_prefix_wins.py.
+AGENT_AUTH_FAILURE_PREFIXES = [
+    "authentication failure:",
+]
+
+
+_CODE_TAG = re.compile(r"\[[a-z_]+\]\s*")
+
+
+def _is_agent_auth_answer(error_lower: str) -> bool:
+    text = error_lower.lstrip()
+    tag = _CODE_TAG.match(text)
+    if tag:
+        text = text[tag.end():]
+    return any(text.startswith(prefix) for prefix in AGENT_AUTH_FAILURE_PREFIXES)
+
+
+def is_prompt_too_long(error_message: str) -> bool:
+    """Return True if `error_message` is the API rejecting the prompt's length
+    — no credential can fix it, so SUB-003 must not switch on it (#3849). The
+    agent's own auth answer wins over the sentence (#4123)."""
+    if not error_message:
+        return False
+    error_lower = error_message.lower()
+    if _is_agent_auth_answer(error_lower):
+        return False
+    return any(marker in error_lower for marker in PROMPT_LENGTH_MARKERS)
+
+
 def is_auth_failure(error_message: str) -> bool:
     """Return True if `error_message` contains any AUTH_INDICATORS substring
-    AND does not also contain an unambiguous signal-kill / OOM / timeout
-    marker (#904) or a model-rejection marker (#3012)."""
+    AND is not a signal-kill / OOM / timeout (#904), a model rejection
+    (#3012), a turn-limit answer (#3984) or a prompt-length rejection (#3849)."""
     if not error_message:
         return False
     error_lower = error_message.lower()
     if any(marker in error_lower for marker in NON_AUTH_KILL_MARKERS):
         return False
     if is_model_rejection(error_message):
+        return False
+    if is_turn_limit(error_message) or is_prompt_too_long(error_message):
         return False
     return any(ind in error_lower for ind in AUTH_INDICATORS)

@@ -70,12 +70,13 @@
 
     <h3 class="font-medium text-gray-900 dark:text-white mb-2" :class="embedded ? 'text-sm' : 'text-lg'">Wake this agent when its asks end</h3>
     <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-      How one of this agent's parked requests ended always reaches it — but by
-      default it is only read on the agent's <em>next</em> turn. An agent with no
-      schedule has no next turn, so an approved action waits indefinitely. Turn
-      this on and the agent is woken when an ask it raised ends — answered,
-      cancelled or expired — so it acts on the answer, or stops waiting for one
-      that will not come (ent#329).
+      When a person ends an ask this agent raised — answers it or cancels it —
+      the agent is woken for one turn with the ending in its context, so it acts
+      on the answer, or stops waiting for one that will not come. On by default.
+      An expiry wakes nobody; the agent reads it on its next turn.
+      Switched off, the ending still reaches the agent, but only on its
+      <em>next</em> turn — and an agent with no schedule has no next turn, so an
+      approved action waits until someone writes to it (ent#329).
     </p>
 
     <div v-if="resumeLoading" class="text-sm text-gray-400">Loading…</div>
@@ -85,20 +86,21 @@
         <input
           type="checkbox"
           class="sr-only peer"
-          :checked="resumeEnabled"
-          :disabled="resumeSaving"
+          :checked="resumeEnabled === true"
+          :disabled="resumeSaving || resumeEnabled === null"
           @change="onResumeToggle($event.target.checked)"
         />
         <div class="w-11 h-6 bg-gray-200 dark:bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-action-primary-600"></div>
       </label>
       <div class="min-w-0">
-        <p class="text-sm text-gray-900 dark:text-gray-100">
-          Wake this agent when an ask it raised ends
+        <p class="text-sm text-gray-900 dark:text-gray-100" data-testid="resume-status">
+          Wakes when an ask ends: {{ resumeEnabled === null ? 'unknown' : resumeEnabled ? 'on' : 'off' }}
         </p>
         <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
           Each wake-up costs one agent turn, billed to you — one per answer, and one
-          per cancellation or expiry event (a sweep of several asks is one turn).
-          That is why it is off by default and set per agent, not per request.
+          per cancellation event (a sweep of several asks is one turn; an expiry
+          costs nothing, it wakes nobody).
+          That is why the switch is yours, per agent, not the agent's per request.
         </p>
         <p v-if="resumeMessage" class="mt-1 text-xs" :class="resumeMessageOk ? 'text-green-600 dark:text-green-400' : 'text-amber-700 dark:text-amber-400'">
           {{ resumeMessage }}
@@ -172,8 +174,11 @@ async function onToggle(next) {
   }
 }
 
-// ent#329 — respond → resume opt-in
-const resumeEnabled = ref(false)
+// ent#329 — respond → resume; on by default since abilityai/trinity-enterprise#1108.
+// null = not yet read / the GET failed: rendered "unknown", never "off" — a
+// false default would show the platform's default-on setting as off whenever
+// the read fails, and the switch stays disabled until the server has answered.
+const resumeEnabled = ref(null)
 const resumeLoading = ref(false)
 const resumeSaving = ref(false)
 const resumeMessage = ref('')
@@ -198,8 +203,8 @@ async function onResumeToggle(next) {
     const { data } = await api.put(`/api/agents/${props.agentName}/operator-resume`, { enabled: next })
     resumeEnabled.value = !!data?.enabled
     resumeMessage.value = next
-      ? 'On — answers will start a turn.'
-      : 'Off — answers are read on the next turn.'
+      ? 'On — an answer wakes the agent.'
+      : 'Off — answers are read on the agent\'s next turn.'
     resumeMessageOk.value = true
   } catch (e) {
     notifyUser('Failed to update the respond-to-resume setting.', 'error')

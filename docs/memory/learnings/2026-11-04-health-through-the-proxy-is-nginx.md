@@ -1,0 +1,3 @@
+## 2026-11-04 — pitfall — `/health` through the public proxy is a static nginx 200, and `/data` exists only inside the container
+**Context**: trinity-enterprise#1094. A snapshot boot check asked for "`/health` returns 200 and `/data/trinity.db` does not exist". `src/frontend/nginx-server.conf` answers `/health` itself, and `/data` is a mount in the backend container, so both pass on a droplet whose backend is down and whose SQLite file exists.
+**Lesson**: Check backend health at `localhost:8000/health` on the host and files with `docker exec trinity-backend`. When a probe's negative result comes from a call that can fail, treat the failed call as "unknown": `doctl ... list` with no network prints nothing, which reads as "destroyed" unless the exit status is checked.

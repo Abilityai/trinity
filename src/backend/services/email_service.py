@@ -11,7 +11,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import logging
-from typing import Optional
+from typing import Optional, Sequence, Tuple
 
 from config import (
     EMAIL_PROVIDER,
@@ -173,6 +173,34 @@ This code expires in 10 minutes.
 If you didn't request this code, you can safely ignore this email.
 """
 
+    # ------------------------------------------------------------------ #
+    # The one HTML shell every platform mail renders on (trinity-enterprise#1054)
+    # ------------------------------------------------------------------ #
+
+    _HTML_SHELL_HEAD = """<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; margin: 0; padding: 32px;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 480px; margin: 0 auto;">
+    <tr>
+      <td style="background: #ffffff; border-radius: 8px; padding: 40px; box-shadow: 0 1px 4px rgba(0,0,0,0.08);">
+        <p style="margin: 0 0 8px 0; font-size: 18px; font-weight: 600; color: #111;">Trinity</p>
+"""
+    _HTML_SHELL_TAIL = """
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+    @classmethod
+    def _html_shell(cls, *blocks: str) -> str:
+        """The card every platform mail sits in: the brand line, then ``blocks``
+        (already-rendered HTML lines, 8-space indented), then the closing tags.
+        The verification mail is rendered on it byte-for-byte as before — pinned
+        by ``tests/unit/test_ent1054_email_html_shell.py``."""
+        return cls._HTML_SHELL_HEAD + "\n".join(blocks) + cls._HTML_SHELL_TAIL
+
     def _get_verification_email_html(
         self,
         code: str,
@@ -187,25 +215,59 @@ If you didn't request this code, you can safely ignore this email.
         else:
             intro = 'You requested to sign in to <strong>Trinity</strong>.'
 
-        return f"""<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"></head>
-<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; margin: 0; padding: 32px;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 480px; margin: 0 auto;">
-    <tr>
-      <td style="background: #ffffff; border-radius: 8px; padding: 40px; box-shadow: 0 1px 4px rgba(0,0,0,0.08);">
-        <p style="margin: 0 0 8px 0; font-size: 18px; font-weight: 600; color: #111;">Trinity</p>
-        <p style="margin: 0 0 24px 0; font-size: 15px; color: #555;">{intro} Use the code below to verify your identity.</p>
-        <div style="background: #f0f0f0; border-radius: 6px; padding: 20px; text-align: center; margin-bottom: 24px;">
-          <span style="font-size: 36px; font-weight: 700; letter-spacing: 8px; color: #111; font-family: 'Courier New', monospace;">{code}</span>
-        </div>
-        <p style="margin: 0 0 16px 0; font-size: 13px; color: #888;">This code expires in 10 minutes.</p>
-        <p style="margin: 0; font-size: 13px; color: #aaa;">If you didn&rsquo;t request this code, you can safely ignore this email.</p>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>"""
+        return self._html_shell(
+            f'        <p style="margin: 0 0 24px 0; font-size: 15px; color: #555;">{intro} Use the code below to verify your identity.</p>',
+            '        <div style="background: #f0f0f0; border-radius: 6px; padding: 20px; text-align: center; margin-bottom: 24px;">',
+            f'          <span style="font-size: 36px; font-weight: 700; letter-spacing: 8px; color: #111; font-family: \'Courier New\', monospace;">{code}</span>',
+            '        </div>',
+            '        <p style="margin: 0 0 16px 0; font-size: 13px; color: #888;">This code expires in 10 minutes.</p>',
+            '        <p style="margin: 0; font-size: 13px; color: #aaa;">If you didn&rsquo;t request this code, you can safely ignore this email.</p>',
+        )
+
+    async def send_html(
+        self,
+        to_email: str,
+        subject: str,
+        *,
+        intro: str,
+        paragraphs: Optional[Sequence[Optional[str]]] = None,
+        cta: Optional[Tuple[str, str]] = None,
+    ) -> bool:
+        """Send a mail rendered on the shared shell, with a plain-text twin.
+
+        ``intro`` is the lead paragraph; ``paragraphs`` follow it (blank or
+        ``None`` entries are omitted — an empty operator-written setting leaves
+        no placeholder behind); ``cta`` is an optional ``(label, url)`` rendered
+        as a button-like link. Every string is TEXT and is HTML-escaped; the
+        plain-text body is the same content unescaped, with ``label: url`` for
+        the call to action. Delivery goes through ``send_email`` (provider
+        resolution, best-effort semantics) unchanged.
+        """
+        from html import escape
+
+        lines = [p.strip() for p in (paragraphs or []) if p and p.strip()]
+        blocks = [
+            f'        <p style="margin: 0 0 24px 0; font-size: 15px; color: #555;">{escape(intro)}</p>',
+        ]
+        for line in lines:
+            blocks.append(
+                f'        <p style="margin: 0 0 16px 0; font-size: 14px; color: #555;">{escape(line)}</p>'
+            )
+        if cta:
+            label, url = cta
+            blocks.append(
+                '        <p style="margin: 8px 0 0 0;">'
+                f'<a href="{escape(url, quote=True)}" style="display: inline-block; background: #111; '
+                'color: #ffffff; text-decoration: none; font-size: 14px; font-weight: 600; '
+                f'padding: 12px 20px; border-radius: 6px;">{escape(label)}</a></p>'
+            )
+        html_body = self._html_shell(*blocks)
+
+        text_parts = [intro.strip()] + lines
+        if cta:
+            text_parts.append(f"{cta[0]}: {cta[1]}")
+        body = "\n\n".join(text_parts) + "\n"
+        return await self.send_email(to_email, subject, body, html_body=html_body)
 
     def _send_console(self, to_email: str, subject: str, body: str) -> bool:
         """Print email to console (development mode)."""

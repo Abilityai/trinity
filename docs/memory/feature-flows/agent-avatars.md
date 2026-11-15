@@ -177,13 +177,13 @@ Prefix: `/api/agents`, Tags: `["avatars"]`
 - **Returns**: `FileResponse` — checks `.webp` first, falls back to `.png` for legacy avatars
 - **Content-Type**: `image/webp` (new avatars) or `image/png` (legacy fallback)
 - **Cache**: `Cache-Control: public, max-age=86400` (24 hours)
-- **Error**: 404 if neither `.webp` nor `.png` file exists
+- **Error**: 404 if neither `.webp` nor `.png` file exists. A name the avatar store's barrier refuses (`utils/avatar_paths.py`: it would leave the store, carries a NUL byte or a path separator, or has a path component over 255 bytes) gets the same 404, so it reads exactly like a missing file
 
 #### Endpoint: GET `/{agent_name}/avatar/reference` (line 45)
 - **Auth**: None (public asset)
 - **Returns**: `FileResponse` with PNG from `/data/avatars/{agent_name}_ref.png`
 - **Cache**: `Cache-Control: no-cache` (always fresh -- reference may change on re-generate)
-- **Error**: 404 if no reference image exists
+- **Error**: 404 if no reference image exists, or the name is one the barrier refuses (same rule as above)
 
 #### Endpoint: GET `/{agent_name}/avatar/identity`
 - **Auth**: Required (access control check via `can_user_access_agent`)
@@ -267,7 +267,7 @@ The avatar generation uses the shared image generation service (IMG-001).
 ### Image Optimization Pipeline
 
 **File**: `src/backend/utils/image_optimize.py`
-**Dependency**: `Pillow==11.1.0` (added to `docker/backend/Dockerfile`)
+**Dependency**: `Pillow==13.0.0` (added to `docker/backend/Dockerfile`)
 
 ```python
 optimize_avatar(image_bytes: bytes, max_size: int = 512) -> bytes
@@ -325,10 +325,11 @@ Two code paths construct the `avatar_url` field:
 - Deletes reference: `{agent_name}_ref.png`
 - Deletes all emotion variants (both `.webp` and `.png` for each emotion)
 
-**On Rename** (`src/backend/routers/agents.py`):
+**On Rename** (`src/backend/services/agent_service/rename.py::_move_avatars`):
 - Renames display avatar (both `.webp` and `.png` if they exist)
 - Renames reference: `{agent_name}_ref.png` → `{new_name}_ref.png`
 - Renames all emotion variants (both `.webp` and `.png` for each emotion)
+- Both paths of every move go through `utils/avatar_paths.avatar_path_or_none`; a pair either side of which the barrier refuses is skipped, so nothing is moved out of the store or onto another agent's files
 
 ### Configuration
 
@@ -337,7 +338,7 @@ Two code paths construct the `avatar_url` field:
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
 ```
 
-Avatar directory: `/data/avatars/` (created on first generate, bind-mounted from host)
+Avatar directory: `/data/avatars/` (`utils/avatar_paths.AVATAR_DIR`; created on first write by `ensure_avatar_store()`, at the normalised path the barrier checks against; bind-mounted from host)
 
 Files per agent:
 - `/data/avatars/{agent_name}.webp` — optimized display avatar (~30-50KB, served by `GET /avatar`)
@@ -627,6 +628,8 @@ avatar_prompt: A sharp-eyed explorer with binoculars and a weathered field journ
 On agent creation from a local template with `avatar_prompt`, the prompt is stored in the DB via `db.set_default_avatar()`. This means even if the agent is stopped when generate-defaults runs, the meaningful prompt is already available.
 
 **Bundled image (#2693).** A `local:` template may also ship `avatar.webp` (or `avatar.png`, ≤2 MB) beside `template.yaml`. When it declares an `avatar_prompt`, `crud._install_bundled_avatar` re-encodes that file through `optimize_avatar` into `/data/avatars/{name}.webp` before the prompt is seeded — so the agent has a face with no `GEMINI_API_KEY` and no outbound call. It is still recorded as a *default* avatar, so Generate Default Avatars overwrites it once a key exists. A missing or undecodable image degrades to the prompt-only seed. The first-run fleet (`scout`, `sage`, `scribe`) ships one each; `test_2693_first_run_fleet_ships_bundled_avatars` fails if a manifest agent loses either half.
+
+**GitHub templates (ent#1173, #4570).** A `github:` template may ship the same `avatar.webp`/`avatar.png` at its repo root. It is fetched at the create's ref (a pinned `@tag` gets the tag's file) during template resolution and installed by `crud._install_bundled_avatar_bytes` after the agent is registered. Unlike the `local:` path, the file does not need an `avatar_prompt`. After a successful install, `crud._stamp_bundled_avatar` records it as a *default* avatar, seeded with the template's own `avatar_prompt` (read from the same `template.yaml` the create already parses) or a generic prompt. Without that stamp `avatar_url` stays null and every surface shows initials, because `get_avatar_identity` ignores a row with no prompt. A failed install is never stamped, so the UI falls back to initials instead of a broken image. Pinned by `test_4570_*` in `test_1484_create_agent_characterization.py`.
 
 ### DB Tracking
 

@@ -297,7 +297,7 @@ Dashboard.vue
 
 | Error Case | HTTP Status | Handling |
 |------------|-------------|----------|
-| psutil error (`/host`) | 500 | `Error getting host stats: {message}` |
+| psutil error (`/host`) | 500 | `Error getting host stats ({ExceptionClass} — details in backend logs)` (the full exception is logged with its traceback) |
 | Docker unavailable (`docker_client` falsy) | 503 | `Docker not available` (`/containers`) |
 | Container stats error (per container) | - | Returns `{error: message}` for that container, continues |
 | Background refresh fails (`/containers`, #1096) | 200 | Logged at WARNING; previous (or empty) cached payload served — no 500 |

@@ -35,9 +35,15 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
+
+# Module level, never inside a test (2026-10-07: a run-time insert rebinds a
+# later bare `from conftest import …`).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _route_census  # noqa: E402
 
 from db.canvas import (
     AUDIENCE_OPERATOR,
@@ -429,35 +435,25 @@ def test_the_write_routes_are_self_gated():
     not stop an agent-scoped key writing as a SIBLING agent the same owner
     shares. That is a disclosure surface as well as a correctness one, because
     a `roster` canvas is client-visible (the #918 rule, restated)."""
-    source = (_BACKEND / "routers" / "canvas.py").read_text()
-    assert "_require_self" in source
-    guard = source[source.index("def _require_self"):source.index("@router.get")]
-    assert "current_user.agent_name" in guard and "403" in guard
-    # ent#536: the two content writes share `_gate_write` (self-gate + rate +
-    # size hint); the delete keeps the bare self-gate. Either spelling proves
-    # the gate is applied — what must never appear is a write with neither.
-    gate = source[source.index("def _gate_write"):source.index("@router.get")]
-    assert "_require_self(current_user, name)" in gate
-    for handler in ("def write_canvas", "def patch_canvas", "def clear_canvas"):
-        body = source[source.index(handler):]
-        body = body[:body.index("@router.") if "@router." in body[10:] else len(body)]
-        # ent#553: `clear_canvas` gates through `_gate_human_removal`, which
-        # calls `_require_self` for an agent principal and additionally
-        # requires ownership for a human. Still self-gated — via one more hop.
-        assert (
-            "_require_self(" in body
-            or "_gate_write(" in body
-            or "_gate_human_removal(" in body
-        ), f"{handler} is not self-gated"
+    # trinity-enterprise#840: each write and delete opens with the
+    # census-recognised `assert_own_agent`, so the route census decides this
+    # from the AST (and `test_ent840_agent_self_gate.py` calls each handler with
+    # a sibling's key) instead of a source-text match.
+    for handler in ("write_canvas", "patch_canvas", "clear_canvas", "bulk_delete_canvases"):
+        assert _canvas_census().routes[f"routers/canvas.py::{handler}"].self_gate, (
+            f"{handler} is not self-gated")
 
 
 def test_reads_are_not_self_gated():
     """An operator reading through the UI is a user-scoped principal with no
     `agent_name`, and the {self} ∪ permitted narrowing for agent keys lives at
     the MCP layer. Self-gating the READ would break the Agent Detail tab."""
-    source = (_BACKEND / "routers" / "canvas.py").read_text()
-    listing = source[source.index("async def list_canvases"):source.index("async def get_canvas")]
-    assert "_require_self(" not in listing
+    for handler in ("list_canvases", "get_canvas", "canvas_context"):
+        assert _canvas_census().routes[f"routers/canvas.py::{handler}"].self_gate is None, handler
+
+
+def _canvas_census():
+    return _route_census.walk(files=[_BACKEND / "routers" / "canvas.py"])
 
 
 # ---------------------------------------------------------------------------

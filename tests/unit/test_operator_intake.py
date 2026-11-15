@@ -150,6 +150,18 @@ def test_submits_on_consent_with_expected_payload(fake_db, monkeypatch, caplog):
     assert "me@acme.com" not in caplog.text
 
 
+def test_payload_trinity_version_is_release_version(fake_db, monkeypatch):
+    # #4381: was read from an unset GIT_COMMIT_SHORT, so always "unknown".
+    _enable(monkeypatch)
+    monkeypatch.setenv("VERSION", "0.9.5-rc2+g1a2b3c4")
+    monkeypatch.setattr(ois.httpx, "AsyncClient", RecordingClient)
+
+    asyncio.run(ois.submit_operator_intake(email="me@acme.com", company="Acme"))
+
+    _, payload = RecordingClient.posted[0]
+    assert payload["trinity_version"] == "0.9.5-rc2"
+
+
 def test_disabled_never_submits(fake_db, monkeypatch):
     _enable(monkeypatch, on=False)
     monkeypatch.setattr(ois.httpx, "AsyncClient", RecordingClient)

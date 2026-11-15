@@ -43,7 +43,7 @@ Related: [public-channel-model.md](public-channel-model.md) (#894, the middle ru
 
 ```
   explicit choice   →   the agent's public_channel_model (#894)   →   the platform default
-   (the dropdown)          (set by the owner, Sharing tab)            (#831, execute_task)
+   (the dropdown)          (set by the owner, Channels tab)            (#831, execute_task)
 ```
 
 `None` means **inherit**, all the way down — the shape the #894 plumbing already uses

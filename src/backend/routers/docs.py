@@ -10,9 +10,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pathlib import Path
 import json
+import logging
 
 from models import User
 from dependencies import get_current_user
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/docs", tags=["Documentation"])
 
@@ -48,7 +51,9 @@ async def get_docs_index(current_user: User = Depends(get_current_user)):
         with open(index_path, "r") as f:
             return json.load(f)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read index: {str(e)}")
+        # #4284: an OS/JSON error names the server-side path; log it, do not return it.
+        logger.exception("Failed to read documentation index")
+        raise HTTPException(status_code=500, detail=f"Failed to read index ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.get("/content/{slug:path}")
@@ -102,7 +107,8 @@ async def get_doc_content(
             return JSONResponse(content=json.loads(content))
         return JSONResponse(content={"content": content, "slug": slug})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read document: {str(e)}")
+        logger.exception("Failed to read document %s", slug)
+        raise HTTPException(status_code=500, detail=f"Failed to read document ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.get("/list")

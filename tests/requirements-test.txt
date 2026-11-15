@@ -28,7 +28,7 @@ httpx>=0.28.0
 websockets>=13.0
 python-dotenv>=1.0.1
 docker>=7.1.0
-apscheduler>=3.11.0
+apscheduler==3.11.3
 pydantic[email]>=2.10.0
 # Cap fastapi to prod's 0.115.x line. `docker/backend/Dockerfile` pins
 # `fastapi==0.115.6` EXACTLY, so an unbounded floor here resolved 0.140.13 —
@@ -104,7 +104,8 @@ idna>=3.10
 slack_sdk[socket-mode]>=3.41.0
 slackify-markdown>=0.2.0
 twilio>=9.10.0
-Pillow>=11.1.0
+# Floor matches docker/backend/Dockerfile's exact pin (trinity-enterprise#1124).
+Pillow>=13.0.0
 tenacity>=9.0.0
 passlib[bcrypt]>=1.7.4
 # Cap bcrypt <5: bcrypt 5.0.0 removed the `__about__` shim passlib 1.7.4 reads at
@@ -192,3 +193,12 @@ audioop-lts; python_version >= '3.13'
 # would prove nothing about cell mapping). Mirrors the backend image pins.
 openpyxl==3.1.5
 reportlab==4.2.5
+
+# trinity-enterprise#1022 retrieval memory — local ONNX embeddings and the
+# vector math. EXACT pins, equal to docker/backend/Dockerfile; pinned by
+# tests/unit/test_ent1022_retrieval_memory.py (the #1891 / ent#679 shape).
+fastembed==0.9.1
+onnxruntime==1.31.1
+numpy==2.5.4
+tokenizers==0.23.3
+huggingface-hub==1.33.0

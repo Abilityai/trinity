@@ -123,6 +123,16 @@ The `tools` array in templates is informational only.
 
 **Tests**: `tests/unit/test_2971_gemini_runtime.py` (22) — real `execute`/`execute_headless` over a captured `Popen`; the smoke harness against a fake `gemini` emulating 0.62.0's strict parser; Dockerfile pin and smoke placement.
 
+## 6. Traffic Routing Stays the Platform's (trinity-enterprise#1001)
+
+### Status: ✅ Implemented (2026-10-29)
+
+Read from the pinned 0.62.0: the CLI sends its traffic to `GOOGLE_GEMINI_BASE_URL` (or `GOOGLE_VERTEX_BASE_URL` under Vertex auth, `CODE_ASSIST_ENDPOINT` under Code Assist) and through `https_proxy`/`HTTPS_PROXY`/`http_proxy`/`HTTP_PROXY` (minus `NO_PROXY`). Its settings files carry no endpoint, proxy or env key, so they are no route. Its own `.env` loader is: at start it loads the first `.gemini/.env` or `.env` walking up from its cwd (`/home/developer`, i.e. the agent's own `.env`) and sets every name the process env does not already hold, an empty value included.
+
+So refusing a name in `build_execution_env` is not enough on Gemini: the loader would set it from the same file. On a Gemini container `build_execution_env` hands every spawn each pinnable routing name (`execution_env.routing_pins("gemini")`): the container's value, `""`, or for `CODE_ASSIST_ENDPOINT` (read with `??`, so `""` would become the host) its default `https://cloudcode-pa.googleapis.com`. `SSL_CERT_FILE` is refused but never pinned (OpenSSL opens an empty one). The `.env` rule itself is in [credential-injection.md](credential-injection.md).
+
+**Tests**: `tests/unit/test_ent1001_endpoint_env.py`, which also fails when the image's Gemini pin moves off 0.62.0 until these facts are re-read.
+
 ---
 
 ## Testing Checklist
@@ -159,6 +169,7 @@ The `tools` array in templates is informational only.
 
 | Date | Change |
 |------|--------|
+| 2026-10-29 | trinity-enterprise#1001: a Gemini spawn carries every routing name pinned (container value, `""`, or `CODE_ASSIST_ENDPOINT`'s default), because the CLI's own `.env` loader fills only unset names. See §6. |
 | 2026-10-01 | #2971: `@google/gemini-cli` pinned to 0.62.0 with a build-time argv smoke; argv built only in `gemini_cli_args.py` (no `--system-prompt`/`--max-turns`, `--skip-trust` always); system prompt prepended to the turn input; chat resumes only its own session id with the #2958 rules; echoed stdin rewritten to the caller's prompt in the execution log. See §5. |
 | 2026-05-18 | Pipe-drop reclassification (#474/#873): `BrokenPipeError`/`ConnectionResetError` in `execute_headless` now raise HTTP 502 instead of 500, preventing false circuit-breaker trips when the Gemini child process exits early. |
 
