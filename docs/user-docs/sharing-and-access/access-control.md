@@ -58,6 +58,8 @@ When someone requests access:
 2. Click **Approve** to grant access (adds them to the share list).
 3. Click **Deny** to reject.
 
+**Each request names who asked, as the channel saw them.** A request leads with the person's name or handle, then the channel and the person's id on it (for example *Telegram id 123456789*), their verified email, and when they asked. Telegram supplies the `@username` and first and last name; WhatsApp supplies the profile name; a field the channel does not expose stays empty. Up to three **seen before** badges show where the same channel identity has turned up on other agents you manage: **Approved**, **Denied**, **Asked** or **Verified** on *agent-name*, with a **+N more** badge for the rest. Two other badges mark a request with less to go on: **Email only — public link** (a public link carries a verified email and nothing else) and **Identity not captured** (a request made before Trinity recorded identities). When someone asks again, the request shows their current identity; your decision does not erase it.
+
 Approving auto-adds the email to your shared users list, which also puts the agent on that person's [Workspace](workspace.md) roster. It does not create a platform account or add the email to the login whitelist.
 
 **The requester is notified automatically.** When you approve a request that came in over Telegram, Slack, or WhatsApp, Trinity sends the requester a message on that same channel confirming they now have access — closing the loop on the "I'll let you know once the owner responds" reply they got when they first messaged. Web users see the change through the dashboard. Denials are silent (the agent's existence is not confirmed to the requester). A delivery failure (e.g. the user blocked the bot) never blocks or rolls back the approval; the outcome is recorded in the audit log.
@@ -87,7 +89,7 @@ For Telegram groups, you can require at least one verified member before the bot
 |----------|--------|-------------|
 | `/api/agents/{name}/access-policy` | GET | Get current policy |
 | `/api/agents/{name}/access-policy` | PUT | Update policy |
-| `/api/agents/{name}/access-requests` | GET | List pending requests |
+| `/api/agents/{name}/access-requests` | GET | List pending requests, each with the requester's channel identity (`requester_*` fields), `identity_captured` and `known_as` (the same identity on other agents you manage) |
 | `/api/agents/{name}/access-requests/{id}/decide` | POST | Approve or deny |
 
 **Policy body:**
@@ -109,6 +111,7 @@ For Telegram groups, you can require at least one verified member before the bot
 - Group chats with `group_auth_mode: "none"` bypass email verification entirely.
 - Slack requires `users:read.email` scope for email resolution.
 - A pending `/login` on Telegram or WhatsApp expires after 10 minutes; the user re-sends `/login` with their email to get a new code. If Redis is unavailable the pending code is not kept, and the user has to start again.
+- Sign-in code requests are capped over a 10-minute window: 5 per chat sender, 3 per email address and 20 per Telegram bot, WhatsApp number or Slack workspace. Over a cap the bot replies *Too many sign-in code requests. Try again in 10 minutes.* and sends no email. The per-address cap is shared with the web sign-in and MCP email sign-in, so codes requested for one address on any surface count together, and someone who keeps requesting codes for an address can hold back that address's codes for the window.
 
 ## See Also
 

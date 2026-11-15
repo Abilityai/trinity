@@ -72,6 +72,8 @@ The agent's container pulls its repository on its own. Without it, edits that pe
 
 The pull outcome appears in the agent's sync state: `last_pull_at`, `last_pull_status` (`success`, `failed` or `skipped`), `last_pull_error`, `behind_after_pull`, `last_successful_pull_at`, `consecutive_pull_failures` and `consecutive_pull_skips` (`GET /api/agents/{name}/git/sync-state`, `get_git_sync_state`). A failed pull does not count toward the push failures that trip the schedule pause.
 
+**An agent pinned to a tag never pulls.** An agent created from `github:owner/repo@<tag>` runs on that release. The automatic cycle records a named skip for it, and a manual **Pull** (the Git tab, `POST /api/agents/{name}/git/pull` or the `git_pull` MCP tool) is refused with `400` saying the agent is pinned to a tag or commit and nothing was changed, for every strategy including a force reset. To move a pinned agent to another ref, recreate it. An existing pinned agent gets this refusal after its next recreate on a current base image.
+
 > **Edits made outside agent turns are not protected.** The pull only protects work done inside the agent's own turns. A file uploaded through the Files tab, or edited in the web terminal or with `docker exec`, while a pull is integrating can be lost. A turn that starts during that window (up to about two minutes) can also see files change under it.
 
 ### Using sync in the UI
@@ -229,7 +231,7 @@ Trailing slashes are stripped automatically. Defaults target `github.com` and `h
 | `/api/agents/{name}/git/status` | GET | Git sync status including `ahead`, `behind`, `common_ancestor_sha`, `pull_branch`, plus `computed_at`, `lock_recovery`, and `index_lock_stuck` (see [Sync health polling](#sync-health-polling)). Each changed file's `path` is its real path on disk; for a rename it is the new path, with the old one in `orig_path` |
 | `/api/agents/{name}/git/sync` | POST | Trigger sync; the response carries `removed_paths`, `unignored_paths`, and `shadowed_negations` from the `.gitignore` sweep |
 | `/api/agents/{name}/git/log` | GET | Recent commits |
-| `/api/agents/{name}/git/pull` | POST | Pull from remote |
+| `/api/agents/{name}/git/pull` | POST | Pull from remote. Refused with `400` on an agent pinned to a tag |
 | `/api/agents/{name}/git/config` | GET | The agent's stored git configuration (repo, mode, branch) |
 | `/api/agents/{name}/git/initialize` | POST | Connect an agent created without a repository to GitHub; it takes a person — a browser session or your own user key; agent keys are refused |
 | `/api/agents/{name}/github-pat` | GET / PUT / DELETE | Per-agent PAT override: status only, set, or clear (back to the platform PAT). Setting and clearing it take a person — a browser session or your own user key; agent keys are refused |
@@ -257,7 +259,7 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 - The agent-vs-deployment choice applies at creation only. There is no endpoint yet to switch an existing agent from Source mode to Working Branch mode; create a new agent from your repository or use **Bind to your own repo**.
 - An agent created from a repository owned by an organization is pull-only by default, even when your token can push to it. Pass `source_mode: false` explicitly to ask for a working branch.
 - A **copy**-imported agent has no Git configuration at all. Use **Initialize GitHub Sync** rather than bind-to-own-repo.
-- Repository maintenance (repack/gc) runs on the agent's own home repository. Sub-repositories cloned into the workspace get no automatic maintenance.
+- Repository maintenance (repack/gc) runs on the agent's own home repository, on every auto-sync tick whether auto-sync is on or off and whether the last push worked, so an agent that pushes for itself is measured and kept packed too. Sub-repositories cloned into the workspace get no automatic maintenance.
 - A stuck `index.lock` is reported but never removed while the agent runs. Restart the agent to clear it.
 - The pull cycle protects edits made inside agent turns only. Uploads, web-terminal and `docker exec` edits made while a pull integrates can be lost.
 - A list template is always created pull-only, whatever you choose. Fork it to keep the agent's work in git.

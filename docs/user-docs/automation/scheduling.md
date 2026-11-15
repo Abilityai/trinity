@@ -18,6 +18,8 @@ For a single, agent-initiated, one-shot deferred follow-up rather than a recurri
 
 Schedules take any IANA zone name — including legacy aliases like `US/Eastern`, `Asia/Calcutta`, and `Europe/Kiev`. A timezone the platform cannot actually resolve is rejected when you create the schedule, with a message naming the problem, rather than being accepted and then silently never firing.
 
+At a daylight-saving fall-back, a schedule's next fire time never moves backwards. A minute-stepped schedule such as `*/30 * * * *` in a zone leaving summer time keeps firing on its cadence through the repeated hour.
+
 ### Schedules from a template
 
 A template can ship the recurring work its agent is designed to do in a `schedules:` block, and Trinity creates those schedules when the agent is created — through the UI, the API, and MCP alike. They appear here like any other schedule and are yours to edit, disable, or delete. See [Creating Agents](../agents/creating-agents.md).
@@ -31,7 +33,7 @@ A template can ship the recurring work its agent is designed to do in a `schedul
 1. Open the agent detail page and go to the scheduling section.
 2. Click **Create Schedule**.
 3. Configure: name, cron expression (e.g., `0 9 * * 1-5` for weekdays at 9 AM), message/task, timezone, and description. The presets **Daily 9 AM**, **Weekly Mon**, **Every 6h** and **Every 30m** fill the cron field for the common cadences.
-4. Optionally select a model override from the **Model** picker — Claude Opus 5.5, Fable 5.1, Sonnet 5, Haiku 4.5 and older models are listed, or type any model id. Left empty, the schedule uses the platform default model. Fable 5.1 is the most capable model, for the longest and hardest tasks; Sonnet 5 is fast with a 1M-token context window.
+4. Optionally select a model override from the **Model** picker — Claude Opus 5.5, Fable 5.1, Sonnet 5, Haiku 4.5 and older models are listed, or type any model id. Left empty, the schedule uses the agent's own model (the one set under **Settings › General › Model**, or declared by its template), else the platform default model (see [Model Selection](../agents/agent-configuration.md#model-selection)). Fable 5.1 is the most capable model, for the longest and hardest tasks; Sonnet 5 is fast with a 1M-token context window.
 5. Enable or disable individual schedules with the toggle.
 6. View execution history with status, duration, and cost.
 7. Click **Run now** to trigger a schedule immediately.
@@ -246,6 +248,10 @@ Retries are off by default: a schedule created in the UI (**Max Retries** → **
 3. Rate-limit errors (429) use 2x delay, capped at 300 seconds
 4. Retry creates a new execution record linked to the original
 5. Process repeats until success or max retries exhausted
+
+A run that stopped at its turn limit (`max_turns`) is never retried: the same task under the same cap stops at the same place, so a retry would only spend another full turn budget.
+
+A retry of a cron-fired run is held to the same gates as the fire itself. If the agent's autonomy was turned off in the meantime, the retry is dropped and no row is written; if a git-sync pause engaged, the retry is recorded as `skipped` with the reason. A retry of a run you started by hand or by webhook is not gated, just as that run was not. A retry also delivers its answer to a person's Workspace when the schedule is set to, so the person sees the retry's answer, not only the first attempt's failure.
 
 ### Execution Grouping
 

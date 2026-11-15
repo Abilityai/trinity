@@ -48,7 +48,7 @@ Each agent has an execution timeout cap (default 60 minutes, configurable from 1
 
 ## Do failed scheduled runs retry automatically?
 
-Only if you turn retries on. Each schedule has `max_retries` (range 0–5) and `retry_delay_seconds` (default 60, range 30–600). A schedule created in the UI or over the REST API starts with retries off (`max_retries: 0`); one created with the `create_agent_schedule` MCP tool starts with 1 retry. Rate-limit errors use double the delay, capped at 300 seconds. Each retry creates a new execution record linked to the original via `retry_of_execution_id`, and the execution list groups retries under their parent run. See [Scheduling](../automation/scheduling.md).
+Only if you turn retries on. Each schedule has `max_retries` (range 0–5) and `retry_delay_seconds` (default 60, range 30–600). A schedule created in the UI or over the REST API starts with retries off (`max_retries: 0`); one created with the `create_agent_schedule` MCP tool starts with 1 retry. Rate-limit errors use double the delay, capped at 300 seconds. Each retry creates a new execution record linked to the original via `retry_of_execution_id`, and the execution list groups retries under their parent run. A run that stopped at its turn limit is never retried, since it would stop at the same place. A retry of a cron run also respects autonomy and the git-sync pause: turn autonomy off and a pending retry is dropped. See [Scheduling](../automation/scheduling.md#automatic-retry).
 
 ## Can Trinity check that a scheduled run actually did its job?
 
@@ -84,7 +84,7 @@ When a reminder fires it runs as a normal execution, so it shows up in the agent
 
 ## How do I trigger a schedule from an external system like CI/CD?
 
-Enable a webhook on the schedule: open the schedule's **Webhook** panel and click **Enable webhook**, which mints a public URL containing a 256-bit token. Any external system can then `POST` to that URL — no Trinity account or JWT needed — and gets back `202 Accepted`. You can include an optional `{"context": "..."}` body (up to 4,000 characters) that is appended to the schedule's message, and every call is audit-logged. See [Webhook Triggers](../api-reference/webhook-triggers.md).
+Enable a webhook on the schedule: open the schedule's **Webhook** panel and click **Enable webhook**, which mints a public URL containing a 256-bit token. Any external system can then `POST` to that URL — no Trinity account or JWT needed — and gets back `202 Accepted`. You can include an optional `{"context": "..."}` body (up to 4,000 characters). It is added below the schedule's message, marked as external data rather than instructions, and the agent receives it with the run. Every call is audit-logged. See [Webhook Triggers](../api-reference/webhook-triggers.md).
 
 ## What should I do if my webhook URL leaks?
 

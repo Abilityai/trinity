@@ -150,6 +150,8 @@ trinity schedules list my-agent
 trinity schedules trigger my-agent schedule-id
 ```
 
+`trinity skills list` prints each skill's name, description, category and a **deprecated** column: `yes`, `→ <successor>` when the library names a replacement, or blank for a live skill. `--format json` returns the listing as the API sends it, with `deprecated` and `superseded_by` fields. Text from a library author is printed as-is, so a description containing brackets no longer breaks the table.
+
 ### Tags
 
 ```bash
