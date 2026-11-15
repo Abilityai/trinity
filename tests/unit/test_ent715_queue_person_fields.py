@@ -341,6 +341,12 @@ DOORS = {
         "POST", f"/api/agents/{a}/operator-queue/{r}/withdraw", {"reason": "moot"})),
 }
 EXEMPT = {
+    _Q + "readdress_queue_item": (
+        "trinity-enterprise#1096: `require_admin` + `require_person` refuse every machine principal "
+        "before the row is read (an agent key at the admin gate, the system key at the person rule — "
+        "two different refusals, so no one recipe fits), driven per principal by "
+        "test_1096_readdress_route.py::TestReaddressAuth; it returns ids, people and a seat to an "
+        "admin person only"),
     _Q + "clear_resolved_queue_items": (
         "a count, pinned exactly by TestTheClearResolvedTrigger::test_the_trigger_is_the_count_only. "
         "Not driven here: it writes cleared_at across the agent's resolved rows, and "
@@ -947,6 +953,18 @@ _ROW_READERS = {
     (_ROUTER_FILE, "get_my_ask"): ("door", "§6: the predicate's 404"),
     (_ROUTER_FILE, "get_queue_item"): ("door", "§6: `_for_principal`"),
     (_ROUTER_FILE, "respond_to_queue_item"): ("door", "§6: person only"),
+    (_ROUTER_FILE, "readdress_queue_item"): ("door", "§6: admin + person only (trinity-enterprise#1096)"),
+    (_ASKS, "admin_readdress"): (
+        "person", "an admin person's re-address (trinity-enterprise#1096): the row's address read to "
+                  "rewrite it; the id, the people it now waits on and the seat return to that admin, "
+                  "the audit carries ids, the reason code and `has_reason`"),
+    (_ASKS, "_address_unchanged"): (
+        "internal", "a fenced row's stored address, compared to the caller's read before an ending "
+                    "(trinity-enterprise#1096, R5); the raw columns feed the ending's compare-and-set, "
+                    "nothing leaves"),
+    (_ASKS, "_ending_expectation"): (
+        "person", "a fenced row re-read when a re-address moved it; the row returns only inside "
+                  "the `AskConflict` the person's own ending door already maps (trinity-enterprise#1096)"),
     (_ASKS, "_predecessor"): (
         "internal", "a re-ask's link: the agent's own expired ask, or one uniform refusal"),
     (_ASKS, "_refuse_unlinked_reask"): (

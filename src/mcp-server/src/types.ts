@@ -385,6 +385,9 @@ export interface ScheduleExecution {
   attempt_number?: number;
   retry_of_execution_id?: string;
   retry_scheduled_at?: string;
+  // ent#1105: the project an edition attributed this run to — present only
+  // when the reader may see that project; absent otherwise.
+  project_id?: string | null;
 }
 
 /** The aggregated result a completed `POST /fan-out` returns. */

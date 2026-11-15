@@ -51,6 +51,7 @@ from services.capacity_manager import (
 from services.dispatch_breaker import DispatchBreaker
 from services.execution_integrity import derive_turn_integrity
 from services import event_dispatch_service
+from services import execution_attribution  # ent#1105
 from services import channel_completion_report
 from services import peer_skill_policy, skill_gate_service
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
@@ -1866,6 +1867,9 @@ class TaskExecutionService:
                 ),
             )
             execution_id = execution.id if execution else None
+            # ent#1105: an edition may attribute this execution to a project
+            # from the row alone (e.g. a room turn). Inert in OSS; never raises.
+            execution_attribution.record_row(execution)
 
         # #678/#792 call-attempt bookkeeping, shared with the exception
         # handlers below (they read what the retries wrote). Created BEFORE the

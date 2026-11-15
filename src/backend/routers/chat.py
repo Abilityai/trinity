@@ -14,6 +14,8 @@ from datetime import datetime
 from typing import NoReturn, Optional
 
 from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ReportBackRequest, TaskExecutionStatus
+from dependencies import check_requested_project  # ent#1105
+from services import execution_attribution  # ent#1105
 from dependencies import (
     assert_not_share_viewer,
     capability_fence,
@@ -220,6 +222,9 @@ async def chat_with_agent(
     x_source_agent = resolve_source_agent(
         current_user, x_source_agent, endpoint=f"/api/agents/{name}/chat"
     )
+    # ent#1105: a named project_id is checked before admission, any claim,
+    # slot or row (422 project_attribution_unavailable when none attributes).
+    check_requested_project(request, current_user, name)
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -341,7 +346,7 @@ async def chat_with_agent(
     # ChatDispatchError, which this thin handler maps 1:1 to an HTTPException.
     # The finally in run_chat_turn releases the slot + idem claim.
     try:
-        return await chat_execution_service.run_chat_turn(
+        result = await chat_execution_service.run_chat_turn(
             name=name,
             request=request,
             current_user=current_user,
@@ -363,6 +368,9 @@ async def chat_with_agent(
         )
     except ChatDispatchError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
+    # ent#1105: a named project that passed the check but was not recorded is
+    # answered `project_attribution: "failed"`, never a silent success.
+    return execution_attribution.report(result, execution_attribution.explicit_status())
 
 
 def _resolve_deprecated_task_timeout(requested: Optional[int], agent_cap: int) -> tuple:
@@ -410,6 +418,9 @@ async def execute_parallel_task(
     x_source_agent = resolve_source_agent(
         current_user, x_source_agent, endpoint=f"/api/agents/{name}/task"
     )
+    # ent#1105: a named project_id is checked before admission, any claim,
+    # slot or row (422 project_attribution_unavailable when none attributes).
+    check_requested_project(request, current_user, name)
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -536,7 +547,9 @@ async def execute_parallel_task(
             or {"task_execution_id": result.execution_id, "async_mode": bool(request.async_mode)},
             headers={"X-Idempotent-Replay": "true"},
         )
-    return result
+    # ent#1105: a named project that passed the check but was not recorded is
+    # answered `project_attribution: "failed"`, never a silent success.
+    return execution_attribution.report(result, execution_attribution.explicit_status())
 
 
 @router.get("/{name}/chat/history")

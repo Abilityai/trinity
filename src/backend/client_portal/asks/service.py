@@ -766,12 +766,20 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
     except ask_service.AskNotAddressee as e:
         # trinity-enterprise#751: a gated-skill approval addressed to someone else;
         # #1042: an ask to a canon role the person is not seated in.
-        raise AskError(403, "not_addressee",
-                       e.role_message() or "This approval was addressed to someone else.")
+        # trinity-enterprise#1096: who it waits for, structured; never the
+        # admin verbs (R11 — this door has none).
+        detail = e.detail()
+        raise AskError(403, "not_addressee", detail.pop("message"),
+                       {k: v for k, v in detail.items() if k != "code"})
     except ask_service.AskConflict as conflict:
         # A lost race writes nothing and dispatches nothing — the sink only
         # reaches its observers on a compare-and-set it WON. Still pending means
         # the deadline refused it before the poller swept the row.
+        if conflict.code == "readdressed":
+            # trinity-enterprise#1096 (R5): moved off this person meanwhile.
+            # The person it moved to is not named on this door.
+            moved = ask_service.readdressed_detail(conflict.item or {}, name_people=False)
+            raise AskError(409, "readdressed", moved["message"])
         if conflict.code == "expired":
             raise AskError(409, "expired", "This ask expired before it was answered.")
         kind = ask_service.agent_ending_kind(conflict.item or {})
@@ -881,8 +889,9 @@ async def provide_credential(item_id: str, email: str, is_platform: bool, value:
                        "marked answered; the agent will ask again if it still needs it.",
                        {"credential_written": True})
     except ask_service.AskNotAddressee as e:
-        raise AskError(403, "not_addressee",
-                       e.role_message() or "This ask was addressed to someone else.")
+        detail = e.detail()
+        raise AskError(403, "not_addressee", detail.pop("message"),
+                       {k: v for k, v in detail.items() if k != "code"})
     updated = ending.rows[0]
     logger.info("[WorkspaceAsks] %s answered by %s through the secret field (client=%s)",
                 item_id, email, not is_platform)

@@ -346,7 +346,10 @@ def test_an_admin_may_cancel_but_not_approve(gate):
     admin = _ASK.Actor(email="admin@example.com", user=SimpleNamespace(role="admin"))
     with pytest.raises(_ASK.AskNotAddressee):
         asyncio.run(_answer_as(rid, admin))
-    ending = asyncio.run(_cancel_as(rid, admin))
+    # trinity-enterprise#1096: ending someone else's decision takes a reason
+    with pytest.raises(_ASK.AskReasonRequired):
+        asyncio.run(_cancel_as(rid, admin))
+    ending = asyncio.run(_cancel_as(rid, admin, reason="the requester left"))
     assert ending.rows[0]["status"] == "cancelled"
 
 
@@ -354,8 +357,8 @@ async def _answer_as(rid, actor):
     return _ASK.answer(_ask_row(rid), response=_GATE.APPROVE, response_text=None, actor=actor)
 
 
-async def _cancel_as(rid, actor):
-    return _ASK.cancel(_ask_row(rid)["id"], actor=actor)
+async def _cancel_as(rid, actor, reason=None):
+    return _ASK.cancel(_ask_row(rid)["id"], actor=actor, reason=reason)
 
 
 def test_a_non_admin_who_is_not_addressed_cannot_cancel(gate):

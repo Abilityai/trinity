@@ -373,17 +373,24 @@ async def admit_chat_request(
             current_user, source_agent=x_source_agent, execution_id=x_trinity_execution_id),
         triggered_by=gate_trigger,
         occurrence_key=idempotency_key,
-        dispatch=skill_gate_service.frozen_dispatch(
-            triggered_by=gate_trigger,
-            model=request.model,
-            source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
-            source_user_email=turn_tier_service.turn_origin_email(db, current_user, current_user.email or current_user.username),
-            source_agent_name=x_source_agent,
-            source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
-            source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
-            chain_depth=chain_depth,
-            continues_execution_id=turn_tier_service.turn_origin_execution_id(db, current_user),
-        ),
+        dispatch={
+            **skill_gate_service.frozen_dispatch(
+                triggered_by=gate_trigger,
+                model=request.model,
+                source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+                source_user_email=turn_tier_service.turn_origin_email(db, current_user, current_user.email or current_user.username),
+                source_agent_name=x_source_agent,
+                source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+                source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
+                chain_depth=chain_depth,
+                continues_execution_id=turn_tier_service.turn_origin_execution_id(db, current_user),
+            ),
+            # ent#1105: a held request keeps the project it would have run for.
+            **skill_gate_service.frozen_project(
+                agent_name=name, principal=current_user,
+                requested_project_id=getattr(request, "project_id", None),
+                triggered_by=gate_trigger),
+        },
     )
 
     # RELIABILITY-006 (#525): idempotency gate. Short-circuit duplicate

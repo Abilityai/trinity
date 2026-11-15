@@ -103,6 +103,20 @@ _TIMEOUT_REASON = case(
 _NOT_A_MENTION = not_a_tag_clause()
 
 
+def _address_conds(expect: Optional[Dict]) -> list:
+    """trinity-enterprise#1096: the extra compare-and-set clauses an ending
+    takes when it decided on the row's address — each stored column equal to
+    the raw text the caller read (NULL as NULL). Nothing when `expect` is None."""
+    if expect is None:
+        return []
+    conds = []
+    for key in ("addressed_to_email", "resolved_to", "context"):
+        if key in expect:
+            col, raw = getattr(operator_queue.c, key), expect[key]
+            conds.append(col.is_(None) if raw is None else col == raw)
+    return conds
+
+
 def _own_pending_conds(agent_name: str, exclude_request_id_prefixes=None) -> list:
     """The pending rows that spend an agent's OWN ask budget — the one predicate
     both depth caps read (the file seam's #1632 cap and the native `queue_full`,
@@ -1695,8 +1709,15 @@ class OperatorQueueOperations:
         responded_by_email: str,
         divergence_acknowledged: bool = False,
         terminal: bool = False,
+        expect_address: Optional[Dict] = None,
     ) -> Optional[Dict]:
         """Record a response to a queue item.
+
+        `expect_address` (trinity-enterprise#1096) — the stored address the
+        caller decided on (`addressed_to_email`, `resolved_to` and, when given,
+        `context`, all raw): the compare-and-set also requires them unchanged,
+        so an answer read before a re-address moved the row loses like any
+        other race (`_status_conflict` with the row still pending).
 
         `terminal` (#2372): the row has no agent audience (a platform-minted
         alert — the caller decides, this layer knows no prefixes), so the
@@ -1743,6 +1764,7 @@ class OperatorQueueOperations:
                             operator_queue.c.expires_at.is_(None),
                             operator_queue.c.expires_at > now,
                         ),
+                        *_address_conds(expect_address),
                     )
                 )
                 .values(
@@ -1789,8 +1811,11 @@ class OperatorQueueOperations:
         disposed_by_email: str,
         reason: Optional[str] = None,
         disposition: str = "cancelled",
+        expect_address: Optional[Dict] = None,
     ) -> Optional[Dict]:
         """Cancel a pending queue item, recording who ended it (trinity-enterprise#611).
+
+        `expect_address` (trinity-enterprise#1096): as `respond_to_item`'s.
 
         `disposition` (trinity-enterprise#748) is `cancelled` (an operator ended
         it) or `dismissed` (the person it was addressed to chose not to answer).
@@ -1813,6 +1838,7 @@ class OperatorQueueOperations:
                     and_(
                         operator_queue.c.id == item_id,
                         operator_queue.c.status == "pending",
+                        *_address_conds(expect_address),
                     )
                 )
                 .values(

@@ -378,6 +378,16 @@ export const QUEUE_RESPONSE_NOT_ADDRESSEE =
   'This approval was addressed to someone else; only they can decide it.'
 
 /**
+ * abilityai/trinity-enterprise#1096 — the refusal names who the card waits for
+ * (the seat and the person, worded by the server). Prefer the server's
+ * `detail.message`; keep the generic line when it sends none (an older backend).
+ */
+export function notAddresseeMessage(err) {
+  const message = err?.response?.data?.detail?.message
+  return typeof message === 'string' && message.trim() ? message : QUEUE_RESPONSE_NOT_ADDRESSEE
+}
+
+/**
  * trinity-enterprise#611 — how an item ENDED, as ONE rule every surface renders
  * (ResolvedCard, the `/m` "Recently ended" strip, PortalAsks). `null` while the
  * item is still pending.
