@@ -73,6 +73,7 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 ## Limitations
 
 - Voice replies cover the messaging channels (Telegram, Slack, WhatsApp) — not the Agent Detail chat or public links. The [Workspace](../sharing-and-access/workspace.md) has its own speaker toggle (**Speak replies aloud**) that reads replies with the same agent voice; it is a viewer-side choice, not something the agent opts into.
+- Credential values the agent has fetched are removed before anything is synthesized — in a voice note, a proactive voice note and the Workspace's read-aloud alike, so they are never sent to the speech provider or spoken; the Workspace says "redacted" in their place. The audit log's message preview carries the scrubbed text too.
 - Voice is per-reply — the agent decides each time; there is no way to force every reply to be spoken.
 - Proactive (addressed) voice notes reach Telegram and WhatsApp only; Slack is not supported yet. WhatsApp's 24-hour session window applies as it does to proactive text.
 - The voice is an ElevenLabs voice; it is unrelated to the Gemini voice used for [Voice Chat](voice-chat.md) and [VoIP calls](voip-telephony.md).

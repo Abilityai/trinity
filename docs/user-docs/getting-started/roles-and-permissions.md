@@ -52,6 +52,8 @@ Admins can change a user's role at any time via Settings. To give someone the op
 | Mint an **Ops (read-only)** MCP key | Admin, **interactive browser session only** — no key of any scope can mint one |
 | Mint an **Ops (operational writes)** MCP key | Admin, **interactive browser session only** — no key of any scope can mint one |
 | Create or list MCP keys | operator or above, **signed-in session only** — no key of any scope can create or list them |
+| Change your own password (**Settings → General → Password**) | An account that has a password — the admin — **signed-in session only** |
+| Edit the instance's terms of use | Admin, **signed-in session only** |
 | Change your own sign-in email or personal GitHub token | `operator` and above, **signed-in session only**; a new sign-in email also needs the 6-digit code mailed to it. A Workspace-only `user` asks an admin |
 
 ### Role is not the same as "human"
@@ -73,9 +75,9 @@ For monitoring integrations that must keep working under enforced two-factor, an
 
 An agent's **Settings › People** pane can also show a role select on each person's row; the role it sets applies on every agent. Every change there asks you to confirm it first; lowering someone to `user` reminds you they lose the operator UI on every agent. Where a person has no account yet, the row can offer **Give a platform account**, which creates their account right away (as `user`, unless an earlier allow-list entry set another role) so you can assign them to the agent; they then sign in at `/login`.
 
-The change takes effect on their next request. You cannot change your own role, and the role can only be changed from a signed-in session (an API key is refused); every change is recorded in the audit log. Lowering a role also lowers the person's email-whitelist entry to match, so a later sign-in with that address cannot bring the old role back. Raising a role leaves that entry as it was.
+The change takes effect on their next request, and the person's open live connections (the dashboard's event stream, an event-stream key they own, and any open terminal) close at once and reconnect at the new role; a terminal says *Your access changed. Open the terminal again to continue.* The same happens when an account is suspended, its sign-in email or password changes, or an MCP key is revoked or deleted (only that key's event streams close). You cannot change your own role, and the role can only be changed from a signed-in session (an API key is refused); every change is recorded in the audit log. Lowering a role also lowers the person's email-whitelist entry to match, so a later sign-in with that address cannot bring the old role back. Raising a role leaves that entry as it was.
 
-**Inviting a person.** Where invitations are available, **Settings → Access → User Management** has an **Invite a person** form (name, work email, role, which defaults to `user`, and an expiry, which defaults to 14 days) and a list of every invitation: its status (pending, accepted, expired or revoked), who sent it, when it was sent and accepted, and which terms version the person accepted. Pending invitations can be resent or revoked. Revoking an invitation, or letting it expire, stops that email signing in; an account that never accepted the terms is suspended. When the platform requires terms acceptance, an invited `user` sees the terms on their first sign-in and must accept them (or sign out) before the Workspace opens; publishing a new terms version asks everyone to accept again. While acceptance is required, inviting is refused until a terms version is published.
+**Inviting a person.** Where invitations are available, **Settings → Access → User Management** has an **Invite a person** form (name, work email, role, which defaults to `user`, and an expiry, which defaults to 14 days) and a list of every invitation: its status (pending, accepted, expired or revoked), who sent it, when it was sent and accepted, and which terms version the person accepted. Pending invitations can be resent or revoked. Revoking an invitation, or letting it expire, stops that email signing in; an account that never accepted the terms is suspended. Like every person, an invited `user` sees the instance's [terms of use](setup.md#terms-of-use) on their first sign-in and must accept them (or sign out) before the Workspace opens; publishing a new terms version asks everyone to accept again. While acceptance is required, inviting is refused until a terms version is published.
 
 ## For Agents
 
@@ -95,7 +97,7 @@ User roles are stored in the `users` table. The role is checked on each API requ
 
 ## Limitations
 
-- Role changes apply immediately but don't invalidate existing JWT tokens.
+- Role changes apply immediately but don't invalidate existing JWT tokens; open live connections are closed and reconnect at the new role. Every worker also re-checks its open connections about every 15 seconds, so a change made elsewhere reaches them within that time.
 - Public link users have no database entry and need no role.
 - An agent owned by a `user` account (possible only after a demotion) keeps its own heartbeat, reports, notifications and asks; everything else it did through the platform is refused until an admin raises the owner's role (agent ownership cannot be transferred).
 - Admins cannot demote themselves.

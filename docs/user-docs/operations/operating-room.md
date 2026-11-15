@@ -37,7 +37,7 @@ Each card carries a type pill — **Needs approval**, **Question**, or **Heads u
 
 An ask an agent addressed to a role that several people fill goes to every one of them: the first answer ends it, and the others' Workspace shows who answered.
 
-The page reads one capped page of 200 items; pending items come by priority and, within a priority, the longest-waiting first, so a queue past the cap drops the newest asks rather than the ones that have waited longest.
+The page reads every pending item you can see, ordered by priority. Counts are never taken from a partial list: the tab badge, the navigation badge, the fleet-grid chips and the agent Overview's *needs attention* count all read the full total. If the read cannot finish, the subtitle says so, for example *703 pending responses (500 shown)*. The **Resolved** tab shows the most recent window and states the total, for example *340 resolved · latest 200 shown*. **Clear All** over more than 500 items runs in batches, one per agent, so each agent hears about its cancelled asks once.
 
 If the item stopped being pending while you were answering — another operator's response or Clear All landed first, or it expired — your response is **not recorded** and the page says so.
 
@@ -71,6 +71,8 @@ Each agent may hold at most 25 pending items of its own (`OPERATOR_QUEUE_MAX_PEN
 ### Notifications Tab
 
 Consolidated view of agent notifications (replaces the former standalone Events page).
+
+On **Needs Response**, **Notifications**, **Executions** and **Resolved**, the list fills the window and scrolls inside its own region; the header, tabs, stats and filters stay in view, and **Load more** is the last thing in the list. Below a minimum height the page scrolls by the shortfall only. Bulk actions on Notifications sit in the list's header row.
 
 - Filter by agent, type, priority, or status; optionally show dismissed items.
 - Stats cards display **Pending** (every pending notification you can see, whatever the filters), **Acknowledged** and **Shown** (the rows loaded below), and **Agents**. The Pending figure, the tab badge and the navigation badge always count every pending notification; filtering the list never changes them.

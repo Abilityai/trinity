@@ -70,6 +70,10 @@ The periodic health-check loop is disabled by default. On the Health tab of the 
 
 Health aggregates three layers — Docker (container status, resource usage, OOM detection), network (HTTP reachability with latency), and business (runtime availability, context usage, stuck executions). An agent is **unhealthy** when it's unreachable, its health endpoint returns a server error, its runtime isn't available, or its workspace clone failed; it's **critical** when the container is missing, stopped, or was killed by the out-of-memory killer; it's **degraded** for softer problems like very high CPU, context usage above 95%, or stuck executions. The Health tab lists the specific issues per agent, and you can force a fresh check per agent or fleet-wide with **Check All**. See [Monitoring](../operations/monitoring.md).
 
+## Why does the Health tab show some agents as unknown?
+
+Either Trinity has no health reading for the agent, or its reading is too old to trust. A reading older than three check intervals (90 seconds by default) reads `unknown`, and its issues say how old it is and what it last said, plus *monitoring is off* when the health-check loop is stopped. The summary cards always add up to the total number of agents. Turn on monitoring, or run **Check All**, to get fresh readings. See [Monitoring](../operations/monitoring.md#health-tab-operations-page).
+
 ## Why is my new GitHub-template agent unhealthy even though its container is running?
 
 The likely cause is a failed template clone: the container started, but cloning the GitHub repository that gives the agent its identity (instructions, skills, files) failed — for example because of a bad repository URL or a personal access token that can't read the repo. The agent reports its clone status on its health endpoint, so monitoring marks it unhealthy with the issue "Agent identity clone failed" instead of reporting a running-but-empty agent as healthy. Check the agent's logs, then verify the template repository exists and your GitHub PAT has access to it. See [Monitoring](../operations/monitoring.md).

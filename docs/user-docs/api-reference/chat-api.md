@@ -18,7 +18,7 @@ API endpoints for agent chat, voice, streaming, and public chat access.
 | `/api/agents/{name}/chat/history` | GET | The agent's current `/chat` conversation |
 | `/api/agents/{name}/chat/history` | DELETE | Reset the `/chat` conversation so the next turn starts fresh (owner or admin) |
 | `/api/agents/{name}/chat/session` | GET | Current `/chat` session info, including context usage |
-| `/api/agents/{name}/model` | GET / PUT | Read or set the model the agent uses for subsequent messages. An agent's own refusal (for example `400` for an invalid model, naming the valid ones) reaches you with its status and detail; an unreachable agent or an agent error answers `503` |
+| `/api/agents/{name}/model` | GET / PUT | Read or set the model the agent uses for subsequent messages. On a Claude Code agent, PUT also saves the value as the agent's own model, which turns the platform starts run on; if the save fails after the agent accepted it, the answer is `500` `model_not_saved`. GET adds `default_model`, `backend_turn_model`, `default_model_source` and `default_model_refused` (see [Model Selection](../agents/agent-configuration.md#model-selection)). An agent's own refusal (for example `400` for an invalid model, naming the valid ones) reaches you with its status and detail; an unreachable agent or an agent error answers `503` |
 | `/api/agents/{name}/activity` | GET / DELETE | Session activity summary; clear it |
 | `/api/agents/{name}/activity/{tool_id}` | GET | Full detail of one tool call |
 
@@ -97,11 +97,15 @@ A sync `/task` that fails, times out, or is cancelled releases its `Idempotency-
 
 `POST /chat`, `POST /task`, and `POST /api/agents/{name}/sessions/{id}/message` (see [Agent Sessions](../agents/agent-session.md)) accept an optional `model`. The value is checked before anything is dispatched:
 
-- Empty, whitespace, or omitted means the agent's default model.
+- Empty, whitespace, or omitted means the agent's own model, else the platform default; the model the run used is recorded as `model_used`.
 - Otherwise it must start with a known model family, ignoring case: a short alias (`sonnet`, `opus`, `haiku`, `fable`) or a full id (`claude-…`, `gemini-…`, `gpt-…`, `codex…`). Suffixes such as `[1m]` are kept.
 - Anything else is refused with **422**, and the error names the value: `'<value>' is not a model id. Use a short alias (sonnet, opus, haiku, fable) or a full id such as '…'.`
 
 A refused request starts no execution. It does not use up its `Idempotency-Key`, and a refused session turn leaves no unanswered message in the session. The check is on the shape only: an id with a valid prefix that the provider does not serve still fails when the run starts.
+
+#### Per-task `max_turns`
+
+`POST /task` accepts an optional `max_turns` (1–500). It can only tighten the agent's `max_turns_task` guardrail, never raise it: the agent runs on the lower of the two, and a missing value leaves the guardrail in force. It applies to sync and async tasks, a queued task, and a task released by a skill approval. A task that stops at the cap fails with `422` and `X-Trinity-Error-Code: max_turns` (see [Agent Guardrails](../agents/agent-guardrails.md)). That failure is final for its `Idempotency-Key`: the same key replays the same `422` with `X-Idempotent-Replay: true` instead of running the task again. Claude Code agents only; Gemini and Codex log the value and rely on the timeout.
 
 #### Deprecated: per-task `timeout_seconds`
 
