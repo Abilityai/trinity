@@ -9,7 +9,8 @@ This guide covers the Claude Code path. The **abilities** plugins are Claude Cod
 ## Prerequisites
 
 - **Claude Code** installed — `npm install -g @anthropic-ai/claude-code`
-- **Trinity instance** running — Trinity is [self-hosted](deploying-trinity.md). No instance yet? `/trinity:deploy-new-instance` stands one up: the DigitalOcean installer, any server you reach over SSH, or local Docker
+- **Trinity instance** running — Trinity is [self-hosted](deploying-trinity.md). No instance yet? `/trinity:deploy-new-instance` stands one up: the DigitalOcean installer, a Marketplace image (DigitalOcean 1-Click, AWS or Vultr), any server you reach over SSH, or local Docker
+- **An `operator` account or above** on that instance — a `user` account works in the Workspace only and cannot use MCP, so ask an admin to whitelist you as `operator`
 
 ## One-Time Setup
 
@@ -49,7 +50,7 @@ The `custom` wizard asks about your domain and scaffolds a complete agent. It co
 /trinity:connect
 ```
 
-Authenticates and saves your MCP connection config. Only needed once per machine.
+Authenticates and saves your MCP connection config. Only needed once per machine. If it stops with `403 workspace_only`, your account has the `user` role; an admin raises it to `operator` under **Settings → Access → User Management**.
 
 ### Step 3: Add your GitHub token (one-time)
 

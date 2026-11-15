@@ -85,6 +85,8 @@ Setting a task done while its agent never claimed it (it isn't in **Awaiting ver
 
 Every row and every open task names **who created it** (a person, or an agent marked *(agent)*) and **who it is for**: the person who owns it and the agent doing it.
 
+**Editing a task.** A member who can change tasks edits its **Title**, **Objective**, **Definition of done** and **Owner** in the open task, alongside its status and note, and one **Save** sends only what changed. Clearing the objective, the definition of done or the owner removes it. The limits are the ones at creation — a title of up to 200 characters, an objective or definition of done of up to 4,000 — checked before you save, and a refusal is shown under the field it names, keeping what you typed. The task's agent is not changed here. A done task shows these fields disabled with *Reopen the task to change its …*; reopen it first. Edits and owner changes appear in the task's log as **Edited** and **Owner**.
+
 #### GitHub issues and PRs
 
 A task can link up to 10 GitHub issues or pull requests where its work happens. Open the task and type `owner/repo#123` or paste the issue or PR link under **GitHub issues and PRs**; members who can change the task add and remove links, and agents do the same through their tools. Trinity reads each item's title and state only and never writes to GitHub. The task list shows how many links a task has.
@@ -178,13 +180,16 @@ A brief often needs more room than a task's fields: a call transcript, your view
 
 ### Members, agents and visibility
 
-**Members & access** is where the creator adds people by their work email, adds agents, and invites guests.
+**Members & access** is where the creator adds people, adds agents, and invites guests.
+
+**Picking a person.** Every field that names a person — a member, a guest, the steward in **New project** and **Edit project**, a task's owner — is a people picker: start typing a name or email and pick from the suggestions, using ↑ ↓ and Enter or a click. Who appears is decided by the server: the people you may add there, never the whole instance. The member, steward and task-owner fields need a person picked from the list, and text that matches no one says so by name. The guest field also takes an outside email typed in full, since a guest may have no account yet.
 
 - **Visibility** is **Members only** (the default) or **Company** — every platform user at your company can open a Company project and work on it with its agents, but only members write its tasks and log; only members can open a Members-only one.
 - **Adding an agent** you own takes effect at once. Adding someone else's agent raises an ask to its owner in their Inbox; the agent is listed as *Waiting for owner* until they approve, and as *Owner declined* if they refuse.
 - **Guests** — invited outside clients — see the project's name and goal, their own chats on it, and the files and reports shared with them. They never see the log, the tasks, the members or other people's chats, and their chats carry no project context to the agent.
 - **Where you stand.** Under the goal, the project page says your role and what it lets you do: the creator can change everything; a member can add and change tasks, write in the log and add files; a company viewer can open the project and chat with its agents, but only members change its tasks, log and files. If you aren't a member, one line in place of **New task**, the log entry form and **Add from…** says who can add you. On an archived project the line says nothing changes until the creator restores it. The **Awaiting verification** group says who confirms a finished task: a member, or the steward agent by name when it is active on the project.
 - **Ask to join.** Someone who can open a company project but isn't on it gets **Ask to join** under the role line. The project's creator gets one decision in their **Inbox**. **Approve** adds them as a member, and **Decline** sends back the reason the creator gives. While a request waits, the page says who it waits on, and asking again doesn't send a second one. Guests are invited and never see this.
+- **A linked room's agents.** Linking a room never adds its agents to the project. When some of them aren't on it, the room's header shows a chip beside the project badge — *2 not on it*, or *1 waiting on owner* — that opens **Agents in this room** with each agent's state. The creator gets **Add** for an agent they can add (someone else's agent still asks its owner first) and sees *Not on your list* for one they can't; a member sees the states and who can add. After the creator links a room that has such agents, the list opens on its own.
 - **Ask to add a room's agent.** In a room linked to the project, a member who can't add an agent gets **Ask to add** in the room's agents list. The creator decides in their Inbox. If they approve and the agent is someone else's, its owner is asked next, as always.
 - **Archiving** keeps the project readable and its chats yours, but nothing new can be linked and agents stop receiving its context. **Restore** undoes it.
 

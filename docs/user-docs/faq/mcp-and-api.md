@@ -137,6 +137,10 @@ The health check is `GET /health` — at the root, not under `/api` — and it a
 
 MCP clients must be reconnected manually after the backend restarts — the session doesn't recover on its own. In Claude Code, run `/mcp` and reconnect the Trinity server, or restart the client. Your API key is still valid; only the connection needs re-establishing. See [MCP Server](../integrations/mcp-server.md).
 
+## Do I have to reconnect my MCP client when Trinity's MCP server restarts or is redeployed?
+
+Not if you connected with an API key. The MCP server signs each keyed session, so after a restart or redeploy your client's next call resumes the same session, as long as the key is still active and the session is less than 30 days old; each revival is recorded in the audit log. A keyless session started with an email code is not revived, so log in again, and a call that was running at the moment of the restart is lost. Changing `INTERNAL_API_SECRET` invalidates every signed session, so each connected client reconnects once. See [MCP Server](../integrations/mcp-server.md#limitations).
+
 ## Can I connect an MCP client to Trinity without creating an API key first?
 
 If your admin has enabled inline authentication, yes: connect with a keyless connector config, call `request_login(email)` to get a 6-digit code by email, then `verify_login(code)`. You can then use the exposed skills of every agent shared with that email. The login binds a **session**, not a key — nothing is written to disk, and because MCP sessions are per-connection, restarting your client means logging in again. Inline auth is off by default (`MCP_INLINE_AUTH_ENABLED`). See [MCP Server](../integrations/mcp-server.md).

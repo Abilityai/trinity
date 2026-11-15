@@ -6,9 +6,13 @@
 
 Open the agent detail page, click the **Settings** tab and pick **People** in the rail (visible to the owner; it is the former Access tab), enter your teammate's email, and click **Add person**. They can then sign in to the Workspace with a code emailed to them and use the agent there. Sharing does not create a platform account or add the email to the login whitelist — whether they also get the operator UI is their platform role, which an admin sets on their row or in **Settings → Access**. Their row shows **Active** if they already have a Trinity account, or **Pending** ("No platform account — uses the Workspace"); each row also carries an off-by-default toggle that lets the agent message that person proactively. Click **Remove** on a row to revoke access at any time. See [Agent Sharing](../sharing-and-access/agent-sharing.md).
 
+## Why did the invitation email for someone I shared an agent with have no link?
+
+Because `FRONTEND_URL` is not set in `.env`. The invitation takes its sign-in link from `FRONTEND_URL` only; when it is empty, the email still goes out but carries no link, and tells the person to use your Trinity sign-in page. The Public URL is deliberately not used, because the public chat address serves chat only and would turn the Workspace away. Set `FRONTEND_URL` to the address people use for Trinity whenever you set a Public URL, and use **Resend invite** on their row. See [Agent Sharing](../sharing-and-access/agent-sharing.md).
+
 ## What can my teammate do with an agent I've shared with them?
 
-Shared operators get interact-level access: they can chat with the agent, run tasks, and view its files and logs. They cannot modify the agent's configuration, credentials, schedules, or permissions, and they cannot delete or re-share it — those actions stay with the owner (and admins, who have full access to all agents). Every API endpoint checks ownership or sharing status before granting access. See [Agent Sharing](../sharing-and-access/agent-sharing.md).
+Shared operators get interact-level access: they can chat with the agent, run tasks, start and stop it, and open its files except credential files. They see only the executions they started, never the owner's or anyone else's, and they cannot modify the agent's configuration, credentials, schedules, or permissions, or delete or re-share it — those stay with the owner (and admins). While they chat, the agent itself is held to their limits too: no shell, file tools limited to the paths they could open, no schedules or reminders set for them, and on a Gemini CLI or Codex agent their message is refused. See [Agent Sharing](../sharing-and-access/agent-sharing.md#what-the-agent-does-for-someone-you-share-it-with).
 
 ## Why can't my teammate see my past conversations with a shared agent?
 
@@ -34,13 +38,17 @@ Each role has a limit on how many agents it can own: by default creators get 10,
 
 The role comes from their email whitelist entry: each whitelisted email carries a default role that is assigned on first login, and it falls back to the basic **user** role if none was set. Adding someone through an agent's Settings › People or approving their access request creates no account and no whitelist entry — they use the Workspace with an emailed code. A **user** account works in the Workspace only; an admin raises someone to `operator` or above via **Settings** → **Access** → **User Management** (or the role select on their row there) to give them the operator UI. See [Roles and Permissions](../getting-started/roles-and-permissions.md).
 
+## Why does everyone, me included, have to accept terms of use on first sign-in, and can I change them?
+
+Every Trinity instance ships default terms of use, and each person signing in to the app or the Workspace accepts the current version once before they can continue — admins included. An admin edits the title and Markdown text under **Settings → Access → Terms of use** and clicks **Save as a new version**, which asks everyone to accept again on their next visit; **Restore the default** puts the shipped text back, and a switch turns the requirement off. The same panel lists who accepted which version and when. Scripts, the CLI and operator or agent API keys are never asked. See [Setup → Terms of use](../getting-started/setup.md#terms-of-use).
+
 ## Can people sign up for my Trinity instance on their own?
 
 Not unless you explicitly allow it — public self-signup is off by default, and the email whitelist stays the real access gate. The unauthenticated access-request endpoint returns 403 and tells the person to ask an administrator to whitelist their email. An admin can opt in via the `PUBLIC_ACCESS_REQUESTS_ENABLED` environment variable or the matching system setting; when enabled, self-signups are auto-whitelisted with the basic **user** role. See [Roles and Permissions](../getting-started/roles-and-permissions.md).
 
 ## How does someone request access to my agent, and what happens when I approve it?
 
-When an agent is in **Restricted** mode and an unknown user with a verified email messages it — from any channel — they see "Your access request is pending approval" and a request appears under the Restricted/Open switch in the agent's **Channels** tab. Click **Approve** to add their email to the share list, which admits them on every channel at once; click **Deny** to reject silently (the agent's existence is not confirmed). If the request came in over Telegram, Slack, or WhatsApp, Trinity automatically messages the requester on that same channel to confirm access; a delivery failure never rolls back the approval. See [Access Control](../sharing-and-access/access-control.md).
+When an agent is in **Restricted** mode and an unknown user with a verified email messages it — from any channel — they see "Your access request is pending approval" and a request appears under the Restricted/Open switch in the agent's **Channels** tab. Click **Approve** to add their email to the share list, which admits them on every channel at once; click **Deny** to reject silently (the agent's existence is not confirmed). Each request names who asked as the channel saw them — name, `@handle`, the channel and their id on it, and their email — with up to three "seen before" badges showing where that same identity has asked, been approved or denied, or verified on your other agents. If the request came in over Telegram, Slack, or WhatsApp, Trinity automatically messages the requester on that same channel to confirm access; a delivery failure never rolls back the approval. See [Access Control](../sharing-and-access/access-control.md).
 
 ## What's the difference between Restricted and Open access on an agent?
 
@@ -94,6 +102,14 @@ Three ways to give someone access, for three audiences. A **public link** is a s
 
 A client session slides: it renews while the person uses the Workspace, ends after an idle window, and never outlives a hard cap — by default 7 idle days and 30 days in total. When it times out the sign-in form says *Your session timed out*, and signing in again returns them to where they were. Admins see the policy under **Settings → Retention → Workspace sessions**; changing the numbers requires an entitlement. Platform users have no separate Workspace session — their platform login is the Workspace login. See [Workspace](../sharing-and-access/workspace.md#signing-in-and-out).
 
+## Why does the Workspace ask me to accept terms of use before I can see my agents?
+
+The instance shows its terms of use once to every person who signs in, on any door — a client in the Workspace and a platform user alike — and again when the terms change. Tick the box and press **Accept and continue**, and the Workspace loads your agents, chats and asks. **Decline and sign out** signs you out and changes nothing else; sign in again when you are ready. An admin edits the text, or restores the shipped default, under **Settings → Access**. See [Workspace](../sharing-and-access/workspace.md#accepting-the-terms-of-use).
+
+## Why does the Workspace say "Add an email to use the Workspace"?
+
+The Workspace finds your agents — the ones you own and the ones shared with you — by email, and your Trinity account has none. This is usual for the built-in admin on a fresh install. Press **Open Settings**, add an address under **Settings → General → Admin sign-in email**, then **Reload**. Separately, if you type an email that belongs to a Trinity account into the Workspace's own sign-in form, you are sent to the Trinity sign-in page with it filled in, so you get your own agents rather than a client's view. See [Workspace](../sharing-and-access/workspace.md#signing-in-and-out).
+
 ## What's the difference between "Sign out" and "Sign out of Trinity" in the Workspace?
 
 The button at the bottom of the Workspace sidebar signs you out. For a platform user it reads **Sign out of Trinity**, because the Workspace session *is* the platform session — ending one ends the other. For an external client it is a plain **Sign out**. Identity never switches on its own: when a client's session expires on a browser that also holds an operator login, the sign-in form offers **Continue as user@example.com** as an explicit click rather than quietly carrying on as the operator. See [Workspace](../sharing-and-access/workspace.md#signing-in-and-out).
@@ -110,6 +126,10 @@ Yes. The agent names the role the report is for with `to` — usually `primary`,
 
 A record of what you and the agent approved, deferred or killed, and why. Each entry records the outcome, what was decided, the alternatives, the criterion that decided it, what would reverse it, and a review date. You record one with **Record a decision**, and the agent can record one with its `record_decision` tool. An active decision can be reconfirmed, corrected, reversed (with a reason) or closed; nothing is deleted, and a decision past its review date shows as expired. The active ones are read into every turn with that agent, so it reuses the criterion next time. See [Workspace](../sharing-and-access/workspace.md#decisions).
 
+## What does "What it may do unprompted" mean on an agent's Info tab?
+
+It lists each kind of ask (the **Ask class** on your decisions) and whether the agent may act on it without asking you first. Every class starts **on-request**; it becomes **unprompted** only when at least three decisions from separate conversations apply one criterion with no reversals and you haven't rated the agent down in 30 days — there is no promote button. Even then, the instance's autonomy level must be at **L2** or above and the agent's autonomy switch on; each blocking reason is listed in plain words. You can **Hold on-request** any class on your own seat, and only the agent's owner can release a hold. See [Workspace](../sharing-and-access/workspace.md#what-it-may-do-unprompted).
+
 ## Why does the role card say the agent "owns no objective yet"?
 
 The objectives an agent owns come from its seat on record — the seat it holds itself, or the seat of the person it serves — not from the role named in its template. An agent with no seat on record owns nothing, so the card says so and still lists the objectives that name it as a supporting agent. The seat shown is the one the agent serves for you, with a line saying where it comes from. See [Workspace](../sharing-and-access/workspace.md#the-role-card) and [Dynamic Dashboards](../advanced/dynamic-dashboards.md#objectives-target-vs-actual).
@@ -120,7 +140,7 @@ Yes. An agent addresses an approval or question to one person it is shared with 
 
 ## What is the Workspace Inbox?
 
-The Workspace's landing page — signing in, or opening bare `/workspace`, takes you there. **Action** lists the asks waiting on you, most urgent first (soonest expiry, then priority, then oldest), and can be narrowed to one agent; **Unread** lists chats where something came back since you last read them; **All** lists every chat plus asks that ended in the last 7 days. Clicking a row opens it in a reading pane: an ask is answered in place, with where it came from shown below it, and a chat shows what arrived and is marked read. A pinned **Inbox** row at the top of the sidebar carries the two counts. When a colleague tags you in a conversation, that lands under **Unread** too. Rooms are not in the Inbox yet. See [Workspace](../sharing-and-access/workspace.md#the-inbox).
+The Workspace's landing page — signing in, or opening bare `/workspace`, takes you there. **Action** lists the asks waiting on you, most urgent first (soonest expiry, then priority, then oldest), and can be narrowed to one agent; **Unread** lists chats where something came back since you last read them; **All** lists every chat plus asks that ended in the last 7 days. Clicking a row opens it in a reading pane: an ask is answered in place, with where it came from shown below it, and a chat shows what arrived and is marked read. A pinned **Inbox** row at the top of the sidebar carries the two counts. When a colleague tags you in a conversation, that lands under **Unread** too, and so does a room you are in when an agent posts there — one row per room, which opens its new messages in the pane. See [Workspace](../sharing-and-access/workspace.md#the-inbox).
 
 ## How do I tag a colleague in a Workspace conversation?
 

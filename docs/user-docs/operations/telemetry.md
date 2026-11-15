@@ -71,6 +71,21 @@ With sharing on, exactly one other request leaves the box under the same two gat
 
 The same tab prints the install id in its footer only once one exists; opening the tab never mints one.
 
+### Turning off every vendor request (`DO_NOT_TRACK`)
+
+Tier 2 is one of several channels that reach a host Ability.ai operates. Set `DO_NOT_TRACK=1` in `.env` (any value other than `0`, empty or `false`) and the instance makes no request to a vendor-operated host. It switches off, at run time and on the published images too:
+
+| Channel | Its own switch |
+|---------|----------------|
+| The security & product updates contact form | `OPERATOR_INTAKE_ENABLED` |
+| Tier 2 fleet sharing (and the benchmark card) | `TELEMETRY_SHARING_ENABLED` |
+| The help widget's **Bug / Feature / Feedback** reports | `BUG_REPORTING_ENABLED` |
+| The help widget's **Ask** tab and the `ask_trinity` MCP tool, which send the question to the hosted docs service | `ASK_TRINITY_ENABLED` |
+
+It also removes both vendor hosts from the browser's Content-Security-Policy. With both help channels off, the help widget is not shown at all, and with `ASK_TRINITY_ENABLED` off the `ask_trinity` tool is not registered. Recreate the backend, frontend and MCP server containers after changing it.
+
+`DO_NOT_TRACK` does not cover what you configure yourself, because none of it goes to a vendor host: your model provider, GitHub, email and channel settings, and the template registry (a read from GitHub that sends nothing).
+
 ## What Is / Isn't Shared
 
 **Shared (coarse, anonymized aggregates only):**
@@ -114,6 +129,7 @@ The generic `PUT /api/settings/{key}` refuses every `telemetry_sharing_*` key â€
 | `TELEMETRY_SHARING_URL` | Hosted benchmark intake endpoint |
 | `TELEMETRY_SHARING_INTERVAL_HOURS` | How often aggregates are shared once opted in (default 24) |
 | `TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS` | Default backfill window when consent is granted (default 30) |
+| `DO_NOT_TRACK` | Any value other than `0`/empty/`false` turns off every request to a vendor-operated host, Tier 2 included (see above) |
 
 Full API reference: http://localhost:8000/docs
 

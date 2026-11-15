@@ -62,14 +62,14 @@ login page, which drops the `?onboarding=1` parameter).
 
 - A Docker container is built from the `trinity-agent-base` image.
 - Template files are copied into the agent's workspace at `/home/developer/`.
-- Credentials the template declares show as missing under **Settings › Storage › Credentials** until you add them.
+- Credentials the template declares show as missing under **Settings › Credentials** until you add them.
 - The agent starts automatically and appears on the Dashboard.
 
 Details: [Creating Agents](../agents/creating-agents.md).
 
 ### Interacting With Your Agent
 
-The agent detail page has tabs for **Overview**, **Tasks**, **Chat**, **Reports**, **Canvas**, **Schedules**, **Loops**, **Skills**, **Payments** and **Files**. Owners and admins also see **Channels / Permissions** and, pinned at the end of the strip, **Settings** — one home with a rail of panes (**General**, **Guardrails**, **People**, **Channels**, **Integrations**, **Storage**) for the agent's identity, limits, people, credentials, repository and folders. **Git** appears when the agent has a repository binding, and **Dashboard**, **Brain** and **A2A** when the agent or your install enables them.
+The agent detail page has tabs for **Overview**, **Tasks**, **Chat**, **Reports**, **Canvas**, **Schedules**, **Loops**, **Skills**, **Payments** and **Files**. Owners and admins also see **Channels / Permissions** and, pinned at the end of the strip, **Settings** — one home with a rail of panes (**General**, **Credentials**, **Guardrails**, **People**, **Channels**, **Integrations**, **Storage**) for the agent's identity, credentials, limits, people, repository and folders. **Git** appears when the agent has a repository binding, and **Dashboard**, **Brain** and **A2A** when the agent or your install enables them.
 
 - **Chat tab** -- Each message runs as a new agent session; the last 20 messages are included for context. **Continue in Workspace →** (top of the tab) opens the continuous conversation, where memory, tool results and reasoning carry across turns. Opening an agent there starts a new chat — on a desktop, with the cursor already in the message field — or returns you to a chat holding an unsent draft; earlier chats stay in the chat list. The composer's call button starts a voice call there.
 - **Tasks tab** -- Send one-off tasks and view execution history.
@@ -79,7 +79,7 @@ The agent detail page has tabs for **Overview**, **Tasks**, **Chat**, **Reports*
 
 ### Next Steps
 
-- Add credentials under the agent's **Settings › Storage › Credentials**.
+- Add credentials under the agent's **Settings › Credentials**.
 - Send a task via the **Tasks** tab or chat via the **Chat** tab.
 - Set up schedules for autonomous operation.
 - Configure permissions if building multi-agent systems.

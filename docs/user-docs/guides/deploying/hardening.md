@@ -41,7 +41,7 @@ dig +short your-domain.com
 # Expected: the droplet's IP address
 ```
 
-Then, in Trinity: **Settings → General → Public URL**, enter the full address including `https://`, and save. No terminal step, no certificate to install.
+Then, in Trinity: **Settings → General → Public URL**, enter the full address including `https://`, and save. A trailing dot after the host name (`your-domain.com.`) is dropped on save, because the certificate is issued for the name without it. No terminal step, no certificate to install.
 
 What saving it does:
 
@@ -225,3 +225,4 @@ The full six-probe check is in [Monitoring](monitoring.md) — run it if anythin
 - [Single-Server Deployment](single-server.md) — base server setup
 - [Backup and Restore](backup-and-restore.md) — have this in place before the instance matters
 - [Monitoring](monitoring.md) — the six health probes and resource thresholds
+- [Security and Compliance for Evaluators](https://docs.ability.ai/getting-started/security-and-compliance) — on the docs site: each security claim marked documented, tested or unsupported, for teams evaluating Trinity
