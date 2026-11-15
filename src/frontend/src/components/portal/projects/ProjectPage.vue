@@ -62,7 +62,11 @@
         <span aria-hidden="true"> / </span><span>{{ p.name }}</span>
       </nav>
 
-      <header class="flex flex-col gap-4 sm:flex-row sm:items-start">
+      <!-- #4597: the header stacks at every width. Side by side, the action
+           group sized to its one-line max-content width and squeezed the
+           title and goal into a narrow column; on desktop it is its own
+           right-aligned row above the title instead (mobile keeps it last). -->
+      <header class="flex flex-col gap-4">
         <div class="min-w-0 flex-1 space-y-2">
           <div class="flex flex-wrap items-center gap-2">
             <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100 break-words">{{ p.name }}</h1>
@@ -106,7 +110,7 @@
             <span :title="absolute(p.updated_at)">Updated {{ relative(p.updated_at) }}</span>
           </p>
         </div>
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2 sm:order-first sm:justify-end" data-testid="project-actions">
           <BaseButton
             v-if="lifecycle.primary"
             :variant="lifecycle.primary.verb === 'stop' ? 'secondary' : 'primary'"
