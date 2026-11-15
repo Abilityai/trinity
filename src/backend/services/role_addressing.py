@@ -99,7 +99,8 @@ class RoleRefused(Exception):
     ask to a canon role id (:func:`resolve_role_id_for_ask`) also names
     ``role_unavailable`` (no provider can answer) and ``role_cannot_open_agent``
     (nobody seated can open the agent); an ask to the ``approver`` kind
-    (:func:`resolve_approver_for_ask`) names ``role_cannot_open_agent`` too.
+    (:func:`resolve_approver_for_ask`) names ``role_cannot_open_agent`` too,
+    and so does a ``credential`` ask (:func:`resolve_credential_reader`).
     ``message`` names the role's label, never a person."""
 
     def __init__(self, code: str, role: str, message: str):
@@ -199,7 +200,9 @@ def resolve_addressee(
     """:func:`resolve` for an ADDRESSING surface — an ask, a message, a voice
     note, a proposal's approver (abilityai/trinity-enterprise#1134, ruling 1):
     the one rule those surfaces share, so an ask and a message addressed
-    ``to: primary`` cannot reach different people.
+    ``to: primary`` cannot reach different people (one exception: a
+    ``credential`` ask, whose reader must be able to open its one door —
+    :func:`resolve_credential_reader`, #4579).
 
     Identical to :func:`resolve` on every arm but one: a provider that answers
     "nobody fills primary" stands the agent's OWNER in (``stood_in`` True)
@@ -342,6 +345,76 @@ def reachable_people(agent_name: str, people: List[str]) -> List[str]:
     (:func:`can_open_agent`), in order: the audience an ask whose answer is
     fenced to its addressees may record."""
     return [p for p in people if can_open_agent(agent_name, p)]
+
+
+def on_workspace_roster(agent_name: str, email: str) -> bool:
+    """Can this person reach the Workspace secret field of a ``credential``
+    ask raised on ``agent_name``? (#4579)
+
+    That field is the ONE door that can end a credential ask
+    (``ask_service.answer`` refuses every other answer), and it opens for the
+    ask's reader only when the agent is on their Workspace roster: shared with
+    them, or owned by them (``client_portal.asks.service._owned_ask``).
+    Narrower than :func:`can_open_agent` on purpose: that rule also counts an
+    admin's access to any agent, because an approval can be decided in
+    Operations. A credential cannot.
+
+    ``include_owned=True`` for everyone: the owned read joins the account by
+    email, so an address with no account owns nothing. A deactivated account
+    signs in at no door (trinity-enterprise#1258), so it is not a reader
+    whatever is shared with it. Fails closed: an unreadable lookup is "not on
+    the roster", which hands the ask on or refuses it by name, never files it
+    for a reader nobody checked.
+    """
+    try:
+        from client_portal.service import agent_on_roster, email_account_suspended
+        if email_account_suspended(email):
+            return False
+        return bool(agent_on_roster(agent_name, email, include_owned=True))
+    except Exception:  # noqa: BLE001
+        logger.warning("[role_addressing] could not tell whether a person has %s on their "
+                       "Workspace roster", agent_name, exc_info=True)
+        return False
+
+
+def resolve_credential_reader(
+    agent_name: str,
+    *,
+    owner_lookup: Optional[Callable[[str], Optional[str]]] = None,
+) -> Resolution:
+    """Resolve the ONE reader of a ``credential`` ask raised by ``agent_name``
+    (#4579) — a chain, with the reach of the secret field checked at each step
+    (:func:`on_workspace_roster`):
+
+    1. the agent's primary person (:func:`resolve_addressee`: the seated
+       primary, else the owner standing in), when they can reach the field;
+    2. else the agent's owner, when the owner can;
+    3. else ``RoleRefused("role_cannot_open_agent")`` — nothing is filed.
+
+    Nobody resolved, or several people, is returned as it is: the ask sink
+    refuses that ``no_person``, as before. This is the one place an ask
+    ``to: primary`` may reach someone other than a message ``to: primary``
+    does: a credential ask has a single door, so a seated primary who cannot
+    open it is passed over rather than recorded as a reader who never sees
+    the ask while nobody else may fill it. The raise and a re-address
+    (``ask_service.readdress_role``) both read this rule, so they cannot
+    drift. The message names roles, never a person.
+    """
+    lookup = owner_lookup or owner_email
+    r = resolve_addressee(agent_name, "primary", owner_lookup=lookup)
+    if not r.single or on_workspace_roster(agent_name, r.single):
+        return r
+    owner = lookup(agent_name)
+    if owner and owner != r.single and on_workspace_roster(agent_name, owner):
+        logger.info("[role_addressing] the primary person for %s cannot open it in their "
+                    "Workspace; a credential ask goes to the agent's owner", agent_name)
+        return Resolution("primary", [owner], owner, True, stood_in=True)
+    raise RoleRefused(
+        "role_cannot_open_agent", "primary",
+        f"Neither the primary person for {agent_name} nor its owner can open {agent_name} "
+        "in their Workspace, so nobody would see this ask. Ask an admin to share "
+        f"{agent_name} with its primary person.",
+    )
 
 
 def resolve_approver_for_ask(agent_name: str) -> Resolution:

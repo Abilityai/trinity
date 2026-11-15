@@ -81,6 +81,7 @@ Someone who works with an agent only in the Workspace has no Credentials section
 - Type or paste the value and press **Send**. The field empties at once; the value is stored in the agent's `.env` under that name and the agent's next turn reads it from its environment. No restart is needed.
 - The conversation then shows **NAME provided**. The value does not appear in the chat, in the ask's answer, in the agent's wake or in the audit log, which records only the name.
 - If the agent is stopped, nothing is stored: start it, then send again. Other refusals say what happened in the card.
+- The field opens for one person: the agent's primary contact when the agent is in their Workspace (shared with them, or their own), otherwise the agent's owner. If neither can open the agent, the agent's request is refused and nothing waits unseen; an admin shares the agent with its primary contact and the agent asks again.
 - A credential ask can only be answered through this field. The Operations page shows it without a reply box, and **Dismiss** still ends it without giving the value.
 - **Do not paste a secret into the chat as a message.** The Workspace refuses a message that looks like a key or token (*That looks like a secret. Nothing was stored.*), keeps no copy of it — not in the conversation, not as a draft — and points you to the secret field. Ask the agent to request the credential so the field opens.
 
