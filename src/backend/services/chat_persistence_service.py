@@ -179,6 +179,19 @@ async def persist_chat_session(
             ),
         )
         logger.debug(f"[Task] Saved to chat session {session.id} for agent '{agent_name}'")
+        # #4537: name the thread on the row, as /chat does (#3380), so a wake
+        # of a run this turn delegated can put its reply in the same thread.
+        # After the write and fail-open: a missing link only keeps that reply
+        # on the execution row, as before.
+        execution_id = getattr(result, "execution_id", None)
+        if execution_id:
+            try:
+                db.set_execution_chat_session(execution_id, session.id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "[Task] Could not link execution %s to its chat session (exc=%s)",
+                    execution_id, type(e).__name__,
+                )
         return session.id
     except Exception as e:
         # Fail-loud (#1444): a swallowed error here silently loses the user's
@@ -199,6 +212,49 @@ async def persist_chat_session(
             exc_info=True,
         )
         return None
+
+
+async def _announce_reply(agent_name: str, execution_id: Optional[str], chat_session_id: str) -> None:
+    """The thin `chat_response_ready` trigger: identifiers only (#918)."""
+    if not _websocket_manager:
+        return
+    try:
+        await _websocket_manager.broadcast(json.dumps({
+            "type": "chat_response_ready",
+            "execution_id": execution_id,
+            "agent_name": agent_name,
+            "chat_session_id": chat_session_id,
+            "timestamp": utc_now_iso(),
+        }))
+    except Exception as e:
+        logger.warning(f"[Task Async] chat_response_ready broadcast failed: {e}")
+
+
+async def post_platform_turn_reply(*, agent_name: str, session, row) -> bool:
+    """Write a platform-started turn's reply into a chat thread as the agent's
+    next message, and announce it (#4537). The caller has already decided the
+    thread is the right one; this writes from the PERSISTED row — its sanitized
+    response, cost and context — and nothing a person typed. Returns whether a
+    message was written. Raises on a DB error: the caller owns the retry claim."""
+    content = (getattr(row, "response", None) or "").strip()
+    if not content or getattr(session, "agent_name", None) != agent_name:
+        return False
+    db.add_chat_message(
+        session_id=session.id,
+        agent_name=agent_name,
+        user_id=session.user_id,
+        user_email=session.user_email,
+        role="assistant",
+        content=content,
+        fields=ChatMessageFields(
+            cost=getattr(row, "cost", None),
+            context_used=getattr(row, "context_used", None),
+            context_max=getattr(row, "context_max", None),
+            execution_time_ms=getattr(row, "duration_ms", None),
+        ),
+    )
+    await _announce_reply(agent_name, getattr(row, "id", None), session.id)
+    return True
 
 
 async def persist_and_broadcast_chat_session(
@@ -225,15 +281,6 @@ async def persist_and_broadcast_chat_session(
         subscription_id=subscription_id,
         execution_time_ms=execution_time_ms,
     )
-    if chat_session_id and _websocket_manager:
-        try:
-            await _websocket_manager.broadcast(json.dumps({
-                "type": "chat_response_ready",
-                "execution_id": execution_id,
-                "agent_name": agent_name,
-                "chat_session_id": chat_session_id,
-                "timestamp": utc_now_iso(),
-            }))
-        except Exception as e:
-            logger.warning(f"[Task Async] chat_response_ready broadcast failed: {e}")
+    if chat_session_id:
+        await _announce_reply(agent_name, execution_id, chat_session_id)
     return chat_session_id

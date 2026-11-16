@@ -167,6 +167,7 @@ import { ref, computed, nextTick, onMounted, onUnmounted, onActivated, onDeactiv
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useSkillsStore } from '../stores/skills'
+import { useAgentsStore } from '../stores/agents'
 import { ChatMessages, ChatInput, ChatEmptyState } from './chat'
 import { shouldCancelOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../utils/turnCancel'
 import ModelSelector from './ModelSelector.vue'
@@ -196,6 +197,7 @@ const props = defineProps({
 
 const authStore = useAuthStore()
 const skillsStore = useSkillsStore()   // #2703: per-agent "skills changed" ticks
+const agentsStore = useAgentsStore()   // #4537: per-agent "a reply landed" ticks
 
 // Voice lives in the Workspace (#2559). This panel used to mount the orb and
 // run a parallel call: its own start route, its own transcript home
@@ -844,6 +846,33 @@ onMounted(() => {
 // already reloads on start.
 watch(() => skillsStore.changedAt[props.agentName], (tick, prev) => {
   if (tick && tick !== prev && props.agentStatus === 'running') loadPlaybooks()
+})
+
+// #4537 — a reply was written into this agent's chat outside a turn this panel
+// is waiting on (a wake reporting back on a delegation). Refetch the session
+// on screen, in place: no loading state, and only when it grew, so nothing a
+// person is reading moves. A turn in flight reloads on its own when it ends.
+const refreshOpenSession = async (sessionId) => {
+  if (!sessionId || sessionId !== currentSessionId.value || loading.value) return
+  try {
+    const response = await axios.get(`/api/agents/${props.agentName}/chat/sessions/${sessionId}`, {
+      headers: authStore.authHeader
+    })
+    const fresh = (response.data.messages || []).map(storedChatMessage).map(msg => ({
+      role: msg.role,
+      content: msg.content,
+      timestamp: msg.timestamp,
+      source: msg.source || 'text',
+      held: msg.held,
+    }))
+    if (sessionId !== currentSessionId.value || loading.value) return
+    if (fresh.length > messages.value.length) messages.value = fresh
+  } catch (err) {
+    console.error('Failed to refresh session:', err)
+  }
+}
+watch(() => agentsStore.chatReplyAt[props.agentName], (tick, prev) => {
+  if (tick && tick.at !== prev?.at) refreshOpenSession(tick.sessionId)
 })
 
 onUnmounted(() => {
