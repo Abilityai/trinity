@@ -227,7 +227,16 @@ def _agent_unreachable(what: str) -> CredentialSinkError:
         {"step": what})
 
 
-def _env_unreadable(reason: str) -> CredentialSinkError:
+def _env_unreadable(reason: str, *, old_image: bool = False) -> CredentialSinkError:
+    if old_image:
+        # #4483: the agent kept an image from before the upgrade, which cannot
+        # say whether it has a credential file. The remedy is a restart.
+        return CredentialSinkError(
+            409, "env_unreadable",
+            "This agent is running an older agent image that cannot confirm what is in its "
+            "credential file, so nothing was stored. Ask the agent's owner or an admin to "
+            "stop and start it in Trinity, then send the value again.",
+            {"reason": reason})
     return CredentialSinkError(
         409, "env_unreadable",
         "The agent's credential file could not be read as text, so it was left exactly as "
@@ -251,12 +260,15 @@ async def _read_env(client: httpx.AsyncClient, agent_name: str) -> str:
     if response.status_code != 200:
         raise _agent_unreachable("read")
     try:
-        state, content = agent_env_read.classify_env_read(response.json())
+        body = response.json()
+        state, content = agent_env_read.classify_env_read(body)
     except ValueError:
         raise _agent_unreachable("read") from None
     if state in (agent_env_read.TEXT, agent_env_read.ABSENT):
         return content
-    raise _env_unreadable(state)  # "not_utf8" / "unconfirmed", as before
+    # "not_utf8" / "unconfirmed", as before
+    raise _env_unreadable(state, old_image=(
+        state == agent_env_read.UNCONFIRMED and agent_env_read.image_predates_missing(body)))
 
 
 async def _inject_env(client: httpx.AsyncClient, agent_name: str, env_text: str) -> None:

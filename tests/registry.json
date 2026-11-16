@@ -9251,6 +9251,19 @@
         "security"
       ],
       "description": "#4579: a credential ask is recorded only for a reader who can open its Workspace secret field: the agent's primary person when the agent is on their roster, else its owner, else the raise is refused 422 role_cannot_open_agent and nothing is filed. Real sink, real door (_owned_ask) and real route on a real DB: a primary off the roster hands the ask to the owner, an admin or a deactivated account off the roster is not a reader, the owner is reached through the owned roster on real account, ownership and share rows, an unreadable roster fails closed and the log names nobody, a question ask and a replay are unchanged, and a seat change re-addresses a pending credential row by the same chain."
+    },
+    {
+      "file": "unit/test_4483_fleet_base_image_check.py",
+      "feature": "#4483",
+      "added": "2026-11-15",
+      "categories": [
+        "unit",
+        "backend",
+        "agent-lifecycle",
+        "reliability",
+        "operator-queue"
+      ],
+      "description": "#4483: the fleet base-image check names every running, non-ephemeral agent still on an older agent image in ONE platform alert (fleet_base_image_stale:fleet), updates it as the set changes and ends it when none are left; a base image whose version label is older than the backend is reported even with no drifted agent, with the source and hosted commands; Docker unreadable, an agent whose comparison failed and a base image with no parseable label are 'could not check' (no alert, no clear); no container is touched; only the lease holder runs a cycle (fail-open without Redis) and main.py starts the loop. Also: 409 env_unreadable names the older agent image and the restart when the agent's read answer carries no `missing` list (credential sink and Nevermined delegation)."
     }
   ]
 }
