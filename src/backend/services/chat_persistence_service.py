@@ -245,7 +245,9 @@ async def post_platform_turn_reply(*, agent_name: str, session, row) -> bool:
         user_id=session.user_id,
         user_email=session.user_email,
         role="assistant",
-        content=content,
+        # The row was scrubbed when it won the terminal CAS; scrub again here so
+        # this writer does not depend on that for a staged secret (ent#279).
+        content=scrub_text(get_staged_values(), content),
         fields=ChatMessageFields(
             cost=getattr(row, "cost", None),
             context_used=getattr(row, "context_used", None),
