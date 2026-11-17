@@ -159,3 +159,26 @@ Still open from that report and unchanged here: reach is checked at the raise on
 - **Remediation questions**: none to ask; there is no finding.
 - **Posting, committing, opening issues**: not done. A follow-up issue would say: "decide whether a failed read of the primary seat should refuse a credential ask with 'could not check' instead of falling back to the owner, on both channels".
 - **Skill self-improvement**: not applied. The note it would record: when a guard's exemption is keyed by function name, a refactor that moves the guarded call must move the entry with it, and the audit should re-read every caller of the new holder.
+
+## Addendum (2026-11-17): what changed after this report was written
+
+This report audited an uncommitted tree. The change was then reviewed, reworded in places and merged with `dev` before it was pushed. This section lists what differs from the audited tree. It is the change author's note on the final diff. The audit was **not re-run**, so the verdict above covers the audited tree only, and the line numbers it cites into `role_addressing.py`, `ask_service.py`, `filechannel.py` and `ingest.py` are from that tree.
+
+**Code changes after the audit**
+
+- **One read per person.** `role_addressing.reach_of` replaces `reachable_people` and `reach_unchecked`: a resolver takes its audience and its refusal's cause from a single `agent_reach` read per person, and `skill_gate_service._approvers` does the same through `_can_open`. Before, the cause was read a second time, so a lookup that failed and then recovered answered "cannot open" (a standing refusal on the gate) for a person who can. The failure direction is unchanged: "could not check" is still not reachable, and nobody is recorded on it.
+- **The queue-file marker during an outage.** A sync cycle that held a credential entry because it could not check now leaves the file's `platform.ingestion` block as it is, instead of clearing a hold the outage merely hid. The block is in the agent's own file and carries entry ids and hold names only.
+- **The destination-check bound.** An entry past the ten checks per cycle is skipped unjudged and is no longer counted toward the flood alert. The bound itself is unchanged.
+- **Small items.** `filechannel` compares the refusal's cause with `role_addressing.CAUSE_UNCHECKED` instead of a literal; the agent prompt tells the agent to remove a held entry before raising it with `ask_for_credential`.
+
+**Wording changes after the audit**
+
+- The remedy of a "cannot open" refusal no longer says "share the agent". It says to make sure the agent is shared with the person and that they can sign in. Six sentences: the approver ask, the canon-role ask, the skill gate's `approver_cannot_open_agent`, the credential ask whose seated primary and owner both cannot open the agent, and the two sentences an admin reads when a re-address by rule is refused. The MCP tool text and the docs follow.
+- Bearing on item 5 above ("None says which account state stops a person"): still true. The new sentence names two things to check and never which one fails. It does tell its reader that sign-in is one of the two possible causes, which the old sentence did not mention.
+
+**Tests and merge**
+
+- Added tests: the single read (ask and gate), an owner who could not be checked, the marker during an outage, the destination-check bound, a destination stored through the poller, the admin sentences for a system agent and for an owner who is the primary, the new remedy in each of the six places, and a pin of a stated limit (a card from the queue file carries no role, so an admin's re-address answers `422 unknown_family`).
+- Merged `dev` at `7767f4f2b`. It changes none of the audited source files. One conflict, in `tests/registry.json`, where both sides appended an entry. A prompt guard that arrived with that merge needed the three hold names classified as status names.
+
+**Not covered by anyone after the audit**: an independent security read of the items above. None adds a route, a tool, a table, a broadcast or a stored field.
