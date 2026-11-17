@@ -42,13 +42,16 @@ from services.chat_title import (
     is_greeting,
     normalize_chat_title,
 )
+import config
 # #2157: the surface stamp written onto every portal execution — see
 # `config.PORTAL_SOURCE_CHANNEL` for why it exists and why it is not a channel.
 from config import PORTAL_SOURCE_CHANNEL
 from services import login_policy_gate, skill_gate_map_service, turn_context
+from services import execution_attribution  # ent#1105
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.channel_completion_report import (
     COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED, COMPLETION_SOURCE_NOTICE,
+    PROACTIVE_SOURCE,
 )
 
 from . import db
@@ -178,6 +181,11 @@ PORTAL_FAILURE_CATEGORIES = (
     # failure. Not `invalid_model`: the client did not choose this model, so
     # there is no stored preference to clear. Only an operator can fix it.
     "model_unsupported",
+    # trinity-enterprise#926 — the agent's runtime (Gemini CLI, Codex) cannot hold
+    # a turn to what this person may do, so it refused it before starting. The
+    # agent's own sentence names the runtime and what the owner can change. Not
+    # retryable: resending meets the same refusal.
+    "turn_refused",
     # trinity-enterprise#751 — the message invokes a skill that needs a person's
     # approval and could not be put up for one (refused by name; nothing ran).
     # Not retryable: resending meets the same refusal. A request that WAS put up
@@ -198,10 +206,12 @@ INTERNAL_FAILURE_DETAIL = (
 def _public_chat_url() -> str:
     """Local mirror of OSS ``settings_service.get_public_chat_url()`` — the
     fallback base when no explicit portal base URL is set."""
+    from services.settings_service import normalize_public_url  # #3881
+
     url = db.get_setting("public_chat_url", "")
     if url:
-        return url.rstrip("/")
-    return os.getenv("PUBLIC_CHAT_URL", "").rstrip("/")
+        return normalize_public_url(url)
+    return normalize_public_url(os.getenv("PUBLIC_CHAT_URL", ""))
 
 
 def get_portal_base_url() -> str:
@@ -285,19 +295,137 @@ def email_has_access(email: str | None) -> bool:
     if len(db.get_shared_roster(email)) == 0:
         return False
     try:
-        return not db.is_client_blocked(email)
+        if db.is_client_blocked(email):
+            return False
     except Exception as exc:  # noqa: BLE001 — a block must not evaporate on error
         logger.error("[#281] block lookup failed during portal sign-in; denying: %s", exc)
         return False
+    # trinity-enterprise#1258: a share does not re-open a deactivated account.
+    return not email_account_suspended(email)
+
+
+def email_account_suspended(email: str | None) -> bool:
+    """trinity-enterprise#1258 — True when this address belongs to a platform
+    account that is deactivated (`users.suspended_at`, the #995 primitive).
+
+    The Workspace door decided on two questions only — is an agent shared with
+    the address, and would `/login` admit it — and neither reads the column. So
+    a suspended account with a share fell through to the outside-client path:
+    a code, a session, and turns on the shared agent, while `/login` refused
+    the same person. Suspension wins on every door (ruling on the issue): a
+    share made before or after it does not re-open the account, and the remedy
+    is an admin reactivating it.
+
+    An address with no account is not suspended: an outside client has no
+    `users` row and is governed by the share and the block (ent#281) alone.
+
+    Fail-closed, like the block: a lookup that cannot answer denies. Every
+    caller reads the same database for the share or the session one line away,
+    so a database that cannot answer this could not have served the request.
+    """
+    addr = (email or "").strip().lower()
+    if not addr:
+        return False
+    from database import db as core_db
+    try:
+        user = core_db.get_user_by_email(addr)
+    except Exception as exc:  # noqa: BLE001 — a deactivation must not evaporate on error
+        logger.error("[ent#1258] account lookup failed at the Workspace door; denying: %s",
+                     type(exc).__name__)
+        return True
+    return bool(user and user.get("suspended_at"))
+
+
+# #3922 — what `portal_signin_verify` returns instead of a token for a platform
+# account: it signs in at `/login`, never as an outside client.
+PLATFORM_LOGIN_REQUIRED = object()
+
+
+def platform_login_admits(email: str | None) -> bool:
+    """#3922 — True when this address has a platform account that `/login`
+    can sign in: a `users` row exists for it, AND either
+
+    * it has a password (`POST /api/token` takes the email for an account with
+      a password hash — the admin, `authenticate_user`), or
+    * the platform email login (`POST /api/auth/email/verify`) would admit it:
+      email login on, the login policy allows codes (the pair
+      `GET /api/auth/mode` reports as `email_code_login_enabled`), and the
+      address is allow-listed (the #2381 re-check that route applies).
+
+    Such an address is a platform account, so the Workspace door sends it to
+    `/login` rather than minting a client session that resolves as
+    `is_platform=False`. The user row is required: an allow-list row is not
+    an account (sharing and access-request approval wrote allow-list rows for
+    outside clients before trinity-enterprise#837, and those remain), and
+    sending such a client to `/login` would create a user for them there.
+    Anything else, including a lookup error, keeps the client door: a `/login`
+    that cannot admit the person is a dead end."""
+    addr = (email or "").strip().lower()
+    if not addr:
+        return False
+    from database import db as core_db
+    try:
+        user = core_db.get_user_by_email(addr)
+        if not user:
+            return False
+        if user.get("password"):
+            return True
+        return _platform_email_login_open(core_db, addr)
+    except Exception as exc:  # noqa: BLE001 — fall back to the unchanged client door
+        logger.warning("[#3922] platform-account lookup failed; using the client door: %s", exc)
+        return False
+
+
+def _platform_email_login_open(core_db, addr: str) -> bool:
+    """The platform email login would take this address: email login on, the
+    login policy allows codes, and the address is allow-listed (#2381)."""
+    from config import EMAIL_AUTH_ENABLED
+    setting = core_db.get_setting_value("email_auth_enabled", str(EMAIL_AUTH_ENABLED).lower())
+    if str(setting).lower() != "true" or not login_policy_gate.email_code_allowed():
+        return False
+    return bool(core_db.is_email_whitelisted(addr))
+
+
+def platform_login_handoff(email: str | None) -> str | None:
+    """#4157 — after a CORRECT code for a platform account, a one-time token
+    `/login` redeems at `POST /api/auth/email/handoff`, so the person does not
+    need a second emailed code.
+
+    Minted only when the platform email login would take the address. A
+    password-only account the email door refuses gets None and signs in with
+    its password, as before. Never call this before the code has verified:
+    the token is what tells the inbox owner the address has an account (#186).
+    """
+    addr = (email or "").strip().lower()
+    if not addr:
+        return None
+    from database import db as core_db
+    try:
+        if not _platform_email_login_open(core_db, addr):
+            return None
+    except Exception as exc:  # noqa: BLE001 — no token; `/login` asks for a code
+        logger.warning("[#4157] hand-off admission check failed: %s", type(exc).__name__)
+        return None
+    from services import login_handoff_service
+    return login_handoff_service.mint(addr)
 
 
 def portal_signin_request(email: str | None) -> str | None:
     """Step 1: if the email has portal access, mint a 6-digit login code and
     return it (the caller dispatches the email). Returns None otherwise — the
     router ALWAYS returns the same generic body, so this never reveals whether
-    an email has access (#186 enumeration discipline)."""
+    an email has access (#186 enumeration discipline).
+
+    #3922: a platform account gets a code too, even with nothing shared to it,
+    so the verify step can send it on to `/login` instead of leaving it waiting
+    for a code that never comes."""
     email = (email or "").strip().lower()
-    if not email or not email_has_access(email):
+    if not email or not (email_has_access(email) or platform_login_admits(email)):
+        return None
+    # trinity-enterprise#1258: no code for a deactivated account, whichever of
+    # the two reasons above would have issued one. The router's body is the
+    # same either way, so this tells a caller nothing (#186).
+    if email_account_suspended(email):
         return None
     # ent#849: members of an SSO-only org sign in with SSO; outsiders keep codes.
     if not login_policy_gate.email_code_allowed_for(email):
@@ -306,20 +434,34 @@ def portal_signin_request(email: str | None) -> str | None:
     return core_db.create_login_code(email, expiry_minutes=10)["code"]
 
 
-def portal_signin_verify(email: str | None, code: str | None) -> str | None:
+def portal_signin_verify(email: str | None, code: str | None, *, interactive: bool = False):
     """Step 2: verify the code AND re-check access, then mint a portal session
-    token (a verified email, no platform account). Returns None on any failure."""
+    token (a verified email, no platform account). Returns None on any failure.
+
+    #3922: a platform account returns `PLATFORM_LOGIN_REQUIRED` and gets no
+    token. It is decided only after the code verifies, so only the owner of the
+    inbox learns that the address has an account."""
     email = (email or "").strip().lower()
     # ent#849: before redeeming, so a refused member's code is not consumed.
     if not login_policy_gate.email_code_allowed_for(email):
         return None
+    # trinity-enterprise#1258: a deactivated account gets no session and no
+    # hand-off to `/login`. Before redeeming, like the policy check above, so
+    # the answer is the same 401 as a wrong code (#186). No code is issued to
+    # such an account, but one issued just before the suspension is still live.
+    if email_account_suspended(email):
+        return None
     from database import db as core_db
     if not core_db.verify_login_code(email, code or ""):
         return None
+    if platform_login_admits(email):
+        return PLATFORM_LOGIN_REQUIRED
     if not email_has_access(email):
         return None
     from dependencies import PORTAL_MINT_OTP, create_portal_session_token
-    return create_portal_session_token(email, minted_by=PORTAL_MINT_OTP)
+    # `interactive`: the Workspace SPA's own declaration (ent#1107 ruling A) —
+    # the session the terms gate asks.
+    return create_portal_session_token(email, minted_by=PORTAL_MINT_OTP, interactive=interactive)
 
 
 def portal_exchange(email: str | None) -> str | None:
@@ -687,6 +829,15 @@ def _card_model_default(row: dict, ctx: ModelContext, runtime: str) -> Optional[
             return PortalModelDefault(
                 model=stored, label=catalog_label(stored), source="agent"
             )
+        # ent#1202: the agent's own model, through the same pure precedence the
+        # turn resolves with, so the label and the turn agree.
+        from services.agent_model_service import SOURCE_AGENT, choose
+
+        own = choose(row.get("default_model"), (runtime or _DEFAULT_RUNTIME).lower(), ctx.platform_default)
+        if own.source == SOURCE_AGENT:
+            return PortalModelDefault(
+                model=own.model, label=catalog_label(own.model), source="own"
+            )
         return PortalModelDefault(
             model=ctx.platform_default, label=ctx.platform_label, source="platform"
         )
@@ -739,11 +890,26 @@ async def _agent_runtime(agent_name: str) -> str:
         return _DEFAULT_RUNTIME
 
 
+def _member_agent_names() -> frozenset:
+    """Names of non-deleted member agents, fail-open (ent#1172).
+
+    OSS installs without the enterprise submodule get an empty frozenset — the
+    roster must never 500 over a missing capability (the same contract as
+    `_projects_available` and `_default_voice_id`).
+    """
+    try:
+        from enterprise.backend.member_agents.db import live_member_agent_names
+        return live_member_agent_names()
+    except Exception:  # noqa: BLE001 — fail open: OSS installs have no enterprise
+        return frozenset()
+
+
 def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
                  availability: str = "unknown", *,
                  is_platform: bool, runtime: str,
                  model_context: ModelContext,
                  stt_ready: bool | None,
+                 member_agent_names: frozenset = frozenset(),
                  can_manage_canvases: bool = False) -> PortalAgentCard:
     """One roster row → one card. Shared by the roster and the single-agent
     lookup (#2160) so the two cannot disagree about how a card is built.
@@ -772,6 +938,10 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
     from services import tts_service
     from services.pull_pilot import pull_owns_dispatch
     name = r["agent_name"]
+    # ent#1172: suppress the model picker for share-tier viewers of member agents.
+    # An owner viewing their own member agent keeps the control (AC 5 boundary).
+    is_member_agent = name in member_agent_names
+    _is_share_tier_member = is_member_agent and not bool(r.get("owned"))
     updated = r.get("avatar_updated_at")
     # Only agents with a generated (non-default) avatar get an image URL;
     # the UI renders an initials tile otherwise.
@@ -825,13 +995,16 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
         # #3114: an env-var read, so cheap per card.
         pulls_turns=pull_owns_dispatch(name, "public"),
         # ent#403: `None` — no control at all — for every non-platform principal.
-        # The roster payload is the ONLY capability channel an external client
-        # has (#2128): a UI gate written against `GET /api/settings/feature-flags`
-        # is `get_current_user`-gated and returns empty for exactly that
-        # audience, so the gate has to be here.
+        # ent#1172: also `None` for share-tier viewers of member agents (taste
+        # decision 7: model_default=None server-side for that audience).
         model_default=(
-            _card_model_default(r, model_context, runtime) if is_platform else None
+            _card_model_default(r, model_context, runtime)
+            if is_platform and not _is_share_tier_member
+            else None
         ),
+        # ent#1172: carried to the frontend so it can suppress the briefing body
+        # (description, skill hints, suggestions, error line) for share-tier viewers.
+        is_member_agent=is_member_agent,
     )
 
 
@@ -928,6 +1101,9 @@ async def get_agent_card(email: str | None, agent_name: str,
                         is_platform=include_owned,
                         runtime=runtime,
                         model_context=_model_context(),
+                        # ent#1172: same set the roster resolves once — the page
+                        # and sidebar cannot disagree about is_member_agent either.
+                        member_agent_names=_member_agent_names(),
                         # ent#553 (review): the roster resolves this per row and
                         # this path did not, so the SAME owner saw
                         # `can_manage_canvases: true` in the sidebar and `false`
@@ -1031,6 +1207,8 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     # its label), resolved HERE beside `tts_ready` and `default_voice` and
     # threaded into every card — never re-read per card.
     model_context = _model_context()
+    # ent#1172: once per roster load, like `tts_ready` and `model_context`.
+    member_names = _member_agent_names()
     cards = [
         _row_to_card(r, tts_ready, default_voice,
                      availability=availability.get(r["agent_name"], "unknown"),
@@ -1038,6 +1216,7 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
                      runtime=runtimes.get(r["agent_name"], _DEFAULT_RUNTIME),
                      model_context=model_context,
                      stt_ready=stt_ready,
+                     member_agent_names=member_names,
                      # ent#553 — resolved through `may_manage_canvases`, the SAME
                      # predicate the write routes enforce with, rather than a
                      # faster per-row comparison against `r["owner"]`. That
@@ -1061,13 +1240,17 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     # ent#534: the Workspace's real-time voice capability — instance-level and
     # principal-kind-level, resolved once here like `multi_agent_chat`. The
     # roster is THE capability channel for this surface (#2128).
-    from .voice import realtime_voice_capability
+    from services import portal_capabilities
+
+    from .voice import direct_voice_capability, realtime_voice_capability
     return PortalRoster(
         client_email=(email or None),
         agents=cards,
         multi_agent_chat_available=multi_agent_chat,
         projects_available=_projects_available(include_owned, email),
+        agent_setup_pending=portal_capabilities.has("agent_setup_pending", (email or "").strip().lower()),
         realtime_voice=realtime_voice_capability(include_owned),
+        direct_voice=direct_voice_capability(include_owned),
         # ent#403: instance-level, so it rides the roster rather than every card.
         # Empty for a non-platform principal — belt to the per-card braces: the
         # ROUTER is the control (a client that fabricated a `model` is refused
@@ -1303,7 +1486,7 @@ def _use_case_hints(use_cases) -> list[PortalPlaybook]:
         text = uc.strip()[:_MAX_USE_CASE_CHARS]
         if not text:
             continue
-        hints.append(PortalPlaybook(title=text, description=None, starter_prompt=text))
+        hints.append(PortalPlaybook(title=text, description=None, starter_prompt=text, kind="use_case"))
         if len(hints) >= _MAX_USE_CASE_HINTS:
             break
     return hints
@@ -1472,6 +1655,7 @@ async def _agent_briefing(agent_name: str, availability: str = "ready"):
             PortalPlaybook(
                 title=(p.title or "")[:_MAX_HINT_TITLE_CHARS],
                 starter_prompt=(p.starter_prompt or "")[:_MAX_HINT_STARTER_CHARS],
+                kind=p.kind,   # ent#584: a use case stays one on the wire
             )
             for p in playbooks[:_MAX_SEARCHABLE_PLAYBOOKS]
         ]
@@ -1560,15 +1744,15 @@ async def synthesize_portal_tts(agent_name: str, email: str, text: str,
                                 include_owned: bool = False) -> bytes:
     """Text-to-speech for a portal reply (voice mode, #78). Roster-scoped (miss →
     404). Reuses the shared ElevenLabs `tts_service` with the agent's configured
-    voice. Raises ClientPortalError when voice isn't available (no key / no voice)
+    voice. Staged credential values are scrubbed from the text before synthesis
+    (#4359). Raises ClientPortalError when voice isn't available (no key / no voice)
     or synthesis fails / the text exceeds the shared cost cap — the client then
     just keeps the text reply. Returns MP3 bytes (played directly in the browser)."""
     from services import tts_service
 
     if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
-    body = (text or "").strip()
-    if not body:
+    if not (text or "").strip():
         raise ClientPortalError(400, "Nothing to speak")
     if not tts_service.is_available():
         raise ClientPortalError(404, "Voice is not available")
@@ -1579,6 +1763,21 @@ async def synthesize_portal_tts(agent_name: str, email: str, text: str,
     voice_id = tts_service.resolve_voice_id(agent_name)
     if not voice_id:
         raise ClientPortalError(404, "This agent has no voice configured")
+    # The cost cap judges the text as the client sent it. The client chooses this
+    # text and the staged store is shared by every agent, so an answer that changed
+    # with what is staged would let a client test a guessed value against it. The
+    # spoken placeholder below is never longer than a value it replaces, so text
+    # that fits here still fits the cap inside synthesize_mp3.
+    if len(text.strip()) > config.TTS_MAX_CHARS:
+        raise ClientPortalError(422, "Could not synthesize audio for this reply")
+    # #4359 (the ent#279 seam): remove staged credential values before the text
+    # reaches the TTS provider, after the refusals above so they never read the
+    # store. Scrub BEFORE the strip: a staged value can carry edge whitespace, and
+    # stripping first breaks the exact match at the text's edge. Fail-open: with
+    # the store down the text is spoken as given.
+    from services.runtime_secret_scrub import SPOKEN_PLACEHOLDER, scrub_staged
+
+    body = scrub_staged(text, marker=SPOKEN_PLACEHOLDER).strip()
 
     audio = await tts_service.synthesize_mp3(body, voice_id)
     if not audio:
@@ -1891,7 +2090,7 @@ _TITLE_MAX_TOKENS = 32
 # The OAuth beta header that lets a subscription token authenticate the Messages
 # API (the header Claude Code itself sends). Lets a subscription-only deployment —
 # which holds no ANTHROPIC_API_KEY — still generate titles (ent#186 follow-up).
-_OAUTH_BETA = "oauth-2025-04-20"
+from services.model_gateway import OAUTH_BETA as _OAUTH_BETA  # the gateway owns the header (ent#1027)
 
 # The two-block prompt: the client's message AND the agent's visible reply.
 #
@@ -2153,74 +2352,20 @@ def _scrub_title_detail(text: str) -> str:
     return re.sub(r"(sk-[A-Za-z0-9_\-]{8,}|sk-ant-[A-Za-z0-9_\-]{8,})", "[redacted]", text)
 
 
-def _resolve_title_auth(agent_name: str) -> dict | None:
-    """Pick the credential the title call authenticates with — **the one the
-    agent's own chat runs on** (#2766).
-
-    The credential FOLLOWS THE AGENT. `derive_auth_mode` is the platform's one
-    auth-mode derivation (#471), so this path speaks the same vocabulary as
-    `AgentAuthStatus` and the subscription-pressure batch rather than inventing
-    a second answer to "what is this agent authenticated as":
-
-    * ``subscription`` — the agent's OWN subscription OAuth token, via the
-      Messages-API OAuth beta header. Same credential, same bill as its chat.
-    * ``api_key`` — only then the instance key.
-    * ``not_configured`` — no credential; the caller keeps the derived title.
-
-    This precedence is INVERTED from the original, and the inversion is the
-    fix. The instance key used to win outright, so on a fleet where every agent
-    runs on a subscription, thread titles were billed to — and gated on — a
-    console account no agent was assigned. An unfunded or revoked instance key
-    then broke titles for agents that were otherwise completely healthy, which
-    is #2114's "a stale key shadows subscription auth" one layer up, on the
-    backend side.
-
-    A ``subscription``-mode agent whose token cannot be read returns **None**
-    rather than falling through to the instance key. Falling through is exactly
-    the shadowing this fixes: an instance key the agent was never assigned is
-    not a credential it holds, so a missing token is "no credential for this
-    agent", not "use someone else's".
-    """
-    from services.settings_service import get_anthropic_api_key
-    from services.subscription_service import derive_auth_mode
-    import database
-
-    base = {"anthropic-version": "2023-06-01", "content-type": "application/json"}
-
-    try:
-        db = database.db if hasattr(database, "db") else database.get_db()
-        sub_id = db.get_agent_subscription_id(agent_name)
-    except Exception as e:  # noqa: BLE001 — fail-soft, keep the derived title
-        logger.warning("portal title: subscription lookup failed for %s: %s", agent_name, e)
+def _resolve_title_auth(agent_name: str) -> "model_gateway.Credential | None":
+    """The credential the title call runs on — **the one the agent's own chat
+    runs on** (#2766), resolved by the platform's one model door
+    (`services/model_gateway.resolve`, trinity-enterprise#1027): the agent's
+    subscription, else the instance key for an api-key-mode agent, and None for
+    a subscription-mode agent whose token cannot be read — falling through to an
+    instance key the agent was never assigned is exactly the shadowing #2766
+    fixed. The gateway speaks `derive_auth_mode`'s vocabulary (#471)."""
+    from services import model_gateway
+    credential = model_gateway.resolve(agent_name)
+    if not credential.usable:
+        logger.debug("portal title: no credential for %s (%s) — keeping derived title", agent_name, credential.reason)
         return None
-
-    api_key = get_anthropic_api_key()
-    mode = derive_auth_mode(bool(sub_id), bool(api_key))
-
-    if mode == "subscription":
-        try:
-            token = db.get_subscription_token(sub_id)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("portal title: subscription token unreadable for %s: %s", agent_name, e)
-            return None
-        if token:
-            return {**base, "authorization": f"Bearer {token}", "anthropic-beta": _OAUTH_BETA}
-        # Deliberately NOT the instance key — see the docstring.
-        logger.debug(
-            "portal title: %s is subscription-mode but its token is unreadable — "
-            "keeping derived title rather than billing an unassigned instance key",
-            agent_name,
-        )
-        return None
-
-    if mode == "api_key":
-        return {**base, "x-api-key": api_key}
-
-    logger.debug(
-        "portal title: no subscription and no ANTHROPIC_API_KEY for %s — keeping derived title",
-        agent_name,
-    )
-    return None
+    return credential
 
 
 async def _generate_thread_title(agent_name: str, client_message: str, reply: str) -> str | None:
@@ -2231,12 +2376,15 @@ async def _generate_thread_title(agent_name: str, client_message: str, reply: st
     first attempt is spawned before the turn runs — so it picks the
     opener-only prompt rather than formatting an empty block into the two-block
     one."""
-    import httpx
 
-    headers = _resolve_title_auth(agent_name)
-    if not headers:
-        _record_title_outcome("no_credential",
-                              f"no ANTHROPIC_API_KEY and no subscription token for {agent_name}")
+    from services import model_gateway
+
+    credential = _resolve_title_auth(agent_name)
+    if not credential:
+        # The gateway's reason, not a fixed sentence: "token unreadable" and
+        # "no key" call for different remedies, and the notice quotes this.
+        reason = model_gateway.plan(agent_name).get("reason") or "no credential"
+        _record_title_outcome("no_credential", f"no credential for {agent_name}: {reason}")
         return None
 
     if reply:
@@ -2250,20 +2398,17 @@ async def _generate_thread_title(agent_name: str, client_message: str, reply: st
             max_chars=_TITLE_MAX_CHARS,
             message=(client_message or "")[:_TITLE_INPUT_CHARS],
         )
-    try:
-        async with httpx.AsyncClient(timeout=_TITLE_TIMEOUT) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers=headers,
-                json={
-                    "model": _TITLE_MODEL,
-                    "max_tokens": _TITLE_MAX_TOKENS,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
-    except Exception as e:  # noqa: BLE001 — fail-soft, fallback title stands
-        logger.warning("portal title generation request failed: %s", e)
-        _record_title_outcome("failed", f"request failed: {type(e).__name__}")
+    # The platform's one model door (trinity-enterprise#1027); `send` rather
+    # than `complete` so the health record keeps the upstream status and reason —
+    # and the usage line is logged here, like every other caller's.
+    started = time.monotonic()
+    resp = await model_gateway.send(
+        credential,
+        credential.body(prompt=prompt, max_tokens=_TITLE_MAX_TOKENS, model=_TITLE_MODEL),
+        timeout=_TITLE_TIMEOUT,
+    )
+    if resp is None:
+        _record_title_outcome("failed", "request failed")
         return None
 
     if resp.status_code != 200:
@@ -2274,7 +2419,9 @@ async def _generate_thread_title(agent_name: str, client_message: str, reply: st
         _record_title_outcome("failed", _title_failure_detail(resp.status_code, resp.text))
         return None
     try:
-        text_out = (resp.json().get("content") or [{}])[0].get("text", "")
+        data = resp.json()
+        model_gateway.log_usage("workspace.title", credential, data, started)
+        text_out = model_gateway.first_text(data) or ""
     except Exception as e:  # noqa: BLE001
         logger.warning("portal title generation: unreadable response: %s", e)
         _record_title_outcome("failed", "unreadable response")
@@ -2384,8 +2531,12 @@ def _refuse_turn_during_voice_call(session_id: str, *, voice_call_id: str | None
     this chat"), so the call could not run a single task. Its rows carry the
     call id, and `get_platform_rows_since_last_reply` skips them as a cursor,
     so the delta the guard protects stays whole.
+
+    trinity-enterprise#1046: a Direct call's `vd_` id DOES arrive on a request, so it
+    never passes here. The route checked it is the caller's own Direct call, and that
+    proves nothing about a Live call on the thread: only a dispatcher id is a bypass.
     """
-    if voice_call_id:
+    if voice_call_id and not voice_call_id.startswith("vd_"):
         return
     from .voice import voice_call_active
     if voice_call_active(session_id):
@@ -2477,6 +2628,10 @@ def chat_for_execution(agent_name: str, email: str, execution_id: str) -> str | 
     person's conversation. Raises like any other portal call; the caller owns
     the fail-soft.
 
+    ent#1171 is a named exception: a reminder (a turn whose `triggered_by` is `reminder`) the
+    person's own agent set for that person's work tiles in their conversation —
+    handled upstream in `_workspace_attachment` via `wake_for_execution`.
+
     The turn must still be RUNNING (cso r1). The id arrives as a header the
     platform sets, but the agent process holds its own key and can send any of
     its executions' ids; only a live turn can be raising an ask. What remains
@@ -2485,6 +2640,22 @@ def chat_for_execution(agent_name: str, email: str, execution_id: str) -> str | 
     ARCHIVED chat is deliberately not excluded: a reset Main stays listed,
     readable and resumable (`reset_main_session`), Reset is refused mid-turn,
     so a running turn there is a person talking in a chat they can see.
+    """
+    hit = chat_of_turn(agent_name, execution_id)
+    if hit is None or hit[1] != (email or "").lower():
+        return None
+    return hit[0]
+
+
+def chat_of_turn(agent_name: str, execution_id: str) -> tuple[str, str] | None:
+    """`(chat_id, client)` for a RUNNING Workspace chat turn of `agent_name`,
+    whoever its client is — else None (trinity-enterprise#1134).
+
+    The rule `chat_for_execution` documents, without the addressee match: an
+    ask that fell to the operators has no addressee to match, and its chat
+    notice is read only by that chat's owner (`get_portal_session` again at
+    read time). The session must belong to the turn's own client, so a row can
+    never name another person's conversation.
     """
     from database import db as core_db
     from models import TaskExecutionStatus
@@ -2497,9 +2668,35 @@ def chat_for_execution(agent_name: str, email: str, execution_id: str) -> str | 
         return None
     chat_id = getattr(execution, "source_channel_chat_id", None)
     client = (getattr(execution, "source_channel_client", None) or "").lower()
-    if not chat_id or not client or client != (email or "").lower():
+    if not chat_id or not client:
         return None
-    return chat_id if db.get_portal_session(chat_id, agent_name, client) else None
+    return (chat_id, client) if db.get_portal_session(chat_id, agent_name, client) else None
+
+
+def wake_for_execution(agent_name: str, email: str, execution_id: str) -> str | None:
+    """The Workspace Main chat for an ask raised during a reminder (wake) of
+    this agent for this person — the ent#1171 exception to ent#610's rule.
+
+    A reminder carries the original work's author as `source_user_email`; the
+    guard `source_user_email == email` ensures cross-member delegation (a wake
+    addressing a different person) stays Inbox-only. The ask attaches to Main
+    rather than a specific chat because a wake has no live portal session of its
+    own. Raises like any other portal call; the caller owns the fail-soft.
+    """
+    from database import db as core_db
+    from models import TaskExecutionStatus
+    execution = core_db.get_execution(execution_id)
+    status = getattr(execution, "status", None)
+    if (execution is None
+            or execution.agent_name != agent_name
+            or getattr(status, "value", status) != TaskExecutionStatus.RUNNING.value
+            or execution.triggered_by != "reminder"):
+        return None
+    # Cross-member delegation stays Inbox-only (ent#1171).
+    source = (getattr(execution, "source_user_email", None) or "").lower()
+    if not source or source != (email or "").lower():
+        return None
+    return ensure_thread_for_ask(agent_name, email)
 
 
 def _one_line(content) -> str:
@@ -2548,6 +2745,8 @@ def _context_lines(rows: list[dict], spoken_budget: int) -> list[str]:
       hiding from the agent that a call ended or that Main was reset;
     * a background task's completion report (ent#610 marker) →
       ``[Background task report: …]``, for the same reason;
+    * a message the agent sent between turns (ent#1221 marker) →
+      ``[You messaged them between turns: …]``, so it is not read as a reply;
     * spoken rows beyond the budget are dropped oldest-first, and every cut is
       named where the call's kept rows begin — a count only, no pointer to a
       place the agent cannot read.
@@ -2565,6 +2764,9 @@ def _context_lines(rows: list[dict], spoken_budget: int) -> list[str]:
             continue
         if m.get("source") in _COMPLETION_SOURCES:
             lines.append(f"[Background task report: {content}]")
+            continue
+        if m.get("source") == PROACTIVE_SOURCE:  # ent#1221
+            lines.append(f"[You messaged them between turns: {content}]")
             continue
         spoken = m.get("source") == "voice"
         if spoken:
@@ -2609,7 +2811,16 @@ def _format_voice_delta(rows: list[dict], *, budget: int = _SPOKEN_CONTEXT_MAX_C
     return VOICE_DELTA_HEADER + "\n" + "\n".join(lines)
 
 
-def _build_portal_system_prompt(agent_name: str, email: str) -> str | None:
+DIRECT_CALL_ETIQUETTE = (
+    "The person is on a voice call. Their words were transcribed, so names and numbers may be "
+    "misheard: confirm them before acting on them. Your reply is read aloud. Usually use one to "
+    "three short sentences, unless asked for more. Avoid markdown, URLs and ids in what you say. "
+    "Put anything that must be seen in <screen>...</screen>, which is shown and not read. Say what "
+    "you are about to do before long work."
+)
+
+
+def _build_portal_system_prompt(agent_name: str, email: str, *, retrieved=()) -> str | None:
     """Compose the caller system-prompt fragment for a portal turn (ent#212):
     the client's MEM-001 per-user memory block + the #1205 public-channel
     instructions, via the SAME helper the channel router uses, plus the #2157
@@ -2636,7 +2847,7 @@ def _build_portal_system_prompt(agent_name: str, email: str) -> str | None:
     memory_block = None
     try:
         record = core_db.get_or_create_public_user_memory(agent_name, email)
-        memory_block = format_user_memory_block(record)
+        memory_block = format_user_memory_block(record, retrieved=retrieved)
     except Exception as e:  # noqa: BLE001 — never block a portal turn on memory
         logger.warning("portal memory fetch failed for %s/%s: %s", agent_name, email, e)
     try:
@@ -2654,7 +2865,8 @@ def resolve_turn_model(agent_name: str, requested: str | None) -> str | None:
     """The ONE model ladder for a portal turn (ent#403).
 
     ``requested`` (the user's explicit pick, already validated at the router)
-    → the agent's #894 ``public_channel_model`` → the PLATFORM DEFAULT. The
+    → the agent's #894 ``public_channel_model`` → the agent's own
+    ``default_model`` (ent#1202) → the PLATFORM DEFAULT. The
     ladder resolves to a concrete id and only degrades to ``None`` when the
     platform default itself is unreadable.
 
@@ -2708,9 +2920,12 @@ def resolve_turn_model(agent_name: str, requested: str | None) -> str | None:
         override = None
     if override:
         return override
+    # ent#1202: the agent's own model, then the platform default — the same
+    # resolver `execute_task` uses, so the row and the turn agree. A Codex or
+    # Gemini agent resolves to None and runs on its own model.
     try:
-        from services import settings_service
-        return settings_service.get_platform_default_model() or None
+        from services.agent_model_service import resolve_default_model
+        return resolve_default_model(agent_name).model
     except Exception as e:  # noqa: BLE001 — never fail a turn over the stamp
         # Degrading to None is the pre-ent#403 behaviour: the row goes back to
         # NULL and `execute_task` resolves the default itself. Worse than a
@@ -2764,7 +2979,7 @@ def validate_requested_model(raw: str | None, *, is_platform: bool) -> str | Non
         # echoed. `PortalChatRequest.model` is deliberately unvalidated at the
         # payload layer (a length rule there would refuse before the 403 that
         # this principal has no control at all), and every sibling field on that
-        # model IS bounded — `message` is `max_length=8000`. Without this an
+        # model IS bounded — `message` is `max_length=100_000`. Without this an
         # authenticated caller can post a megabyte-long `model` and have it
         # echoed verbatim into the error body. Truncated rather than dropped:
         # naming what was refused is the whole point of the message.
@@ -2866,6 +3081,8 @@ def _precreate_sync_execution(
                 open_canvas_id=open_canvas_id,
             ),
         )
+        # ent#1105: an edition may attribute this turn to its chat's project.
+        execution_attribution.record_row(execution)
         return execution.id if execution else None
     except Exception:  # noqa: BLE001
         logger.warning("portal: could not pre-create the sync turn's execution row")
@@ -2889,7 +3106,8 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       resolved_model: str | None = None,
                       # ent#551 — a turn dispatched from a voice call carries the
                       # call's id on both its rows (typed rows, `source` NULL):
-                      # the attribution, and nothing else. Never from a request.
+                      # the attribution, and nothing else. From a request only for a
+                      # Direct call, validated at the router (ent#1046).
                       voice_call_id: str | None = None,
                       # ent#555 — the canvas on screen, validated at the router.
                       # Stamped on the execution so the agent's tools default to it.
@@ -3057,7 +3275,10 @@ async def portal_chat(agent_name: str, message: str, email: str,
     history = []
     try:
         # #2694: a window of TYPED turns plus the calls among them — a 180-row
-        # call no longer fills the window on its own.
+        # call no longer fills the window on its own. trinity#3402: a turn the
+        # skill gate held or refused, and its notice, are not in it (the read's
+        # default) — the gate reads only what is typed this turn, so the agent
+        # must never be handed that request as conversation instead.
         history = db.get_portal_thread_window(
             agent_name, email, session_id, typed_limit=_HISTORY_CONTEXT_MESSAGES
         ).rows
@@ -3203,7 +3424,22 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # skipping both the memory block and the #1205 prompt, so one call closes
     # both. Portal identity is always a verified email, so the router's
     # `verified_email and not is_group` gate is trivially satisfied here.
-    system_prompt = _build_portal_system_prompt(agent_name, email)
+    # trinity-enterprise#1022: the facts most relevant to this message, awaited
+    # off the event loop; [] when memory is off or anything fails.
+    try:
+        from services import memory_service
+        retrieved = await memory_service.recall(agent_name, email, message)
+    except Exception as e:  # noqa: BLE001 — never block a portal turn on memory
+        logger.debug("portal memory recall skipped for %s: %s", agent_name, e)
+        retrieved = ()
+    # The keyword rides only when there is something to carry, so the call is
+    # byte-identical to the pre-#1022 one while memory is off (the default).
+    system_prompt = (_build_portal_system_prompt(agent_name, email, retrieved=retrieved)
+                     if retrieved else _build_portal_system_prompt(agent_name, email))
+    # trinity-enterprise#1046: this reply will be read aloud. A prompt suffix, not a
+    # rewrite of what is said.
+    if voice_call_id and voice_call_id.startswith("vd_"):
+        system_prompt = f"{system_prompt}\n\n{DIRECT_CALL_ETIQUETTE}" if system_prompt else DIRECT_CALL_ETIQUETTE
 
     # ent#358: the shared resume engine — cached uuid → per-(agent, uuid) lock →
     # `persist_session=True` → one cold retry if the JSONL is gone. Identical to
@@ -3304,9 +3540,14 @@ async def portal_chat(agent_name: str, message: str, email: str,
         # trinity-enterprise#751: the message names a gated skill — nothing ran,
         # an approval was raised. Waiting is not failing: the thread renders a
         # non-retryable error as a Failed turn, so the notice is the reply.
-        return _persist_reply(agent_name, email, session_id, e.message, None, voice_call_id,
-                              execution_id, viewer_is_person=gate_is_person)
+        answer = _persist_reply(agent_name, email, session_id, e.message, None, voice_call_id,
+                                execution_id, viewer_is_person=gate_is_person)
+        # trinity#3402: neither the request nor its notice is ever replayed to
+        # the agent, whatever is decided — an approved run is its own execution.
+        _mark_gate_hold((user_row_id, answer.get("message_id")), e)
+        return answer
     except SkillGateError as e:
+        _mark_gate_hold((user_row_id,), e)   # trinity#3402: nor is a refused one
         raise ClientPortalError(e.status_code, str(e), category="gated", retryable=False)
     except ResumeLockBusy:
         # A concurrent turn holds this thread's lock. Same shape as the "agent
@@ -3371,6 +3612,13 @@ async def portal_chat(agent_name: str, message: str, email: str,
                 "pick another model.",
                 category="model_unsupported", retryable=False,
             )
+        if code == "TURN_REFUSED":
+            raise ClientPortalError(
+                403,
+                result.error or "This agent can't take this conversation on its current runtime. "
+                "Its owner can change that.",
+                category="turn_refused", retryable=False,
+            )
         if code in ("AUTH", "BILLING"):
             # #2638: "re-sending re-fails" is only true while nothing changed
             # underneath. SUB-003 may have MOVED the agent onto a different
@@ -3397,9 +3645,9 @@ async def portal_chat(agent_name: str, message: str, email: str,
                 isinstance(switch, dict) and switch.get("switched")
                 and not switch.get("retried") and not switch.get("exhausted")
             ):
-                where = switch.get("new_subscription")
+                # #4482: a subscription's name is operator data — never shown.
                 moved = (
-                    f"moved onto '{where}'" if where
+                    "moved onto another subscription" if switch.get("new_subscription")
                     else "moved onto the platform API key"
                 )
                 raise ClientPortalError(
@@ -3550,6 +3798,31 @@ def _gate_requester(email: str, is_person: bool, credential: str | None = None):
                                         credential=credential)
 
 
+def _mark_gate_hold(message_ids, exc) -> None:
+    """trinity#3402: keep a turn the skill gate stopped — the client's message
+    and the notice answering it — out of every later prompt. Never changes the
+    answer: the approval is already raised, or the refusal already given. A
+    failure is an ERROR: until fixed, the row would be replayed."""
+    from services.skill_gate_errors import hold_marker
+
+    ids = [i for i in message_ids if i]
+    try:
+        db.mark_portal_messages_held(ids, hold_marker(exc))
+    except Exception:  # noqa: BLE001
+        logger.error("portal: could not mark the gated turn's messages %s", ids, exc_info=True)
+
+
+def _clear_gate_hold(row_id: str | None) -> None:
+    """trinity#3402: a retry reuses the refused turn's row — drop that verdict.
+    Best-effort: a stale mark only keeps a message that then ran out of history."""
+    if not row_id:
+        return
+    try:
+        db.mark_portal_messages_held([row_id], None)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal: could not clear the gate mark of reused row %s: %s", row_id, e)
+
+
 def _voice_attribution(voice_call_id: str | None) -> dict:
     """ent#551: the `add_portal_message` kwargs that attribute a row to the
     voice call whose `run_task` produced it — and NOTHING for a typed turn, so
@@ -3640,13 +3913,18 @@ def _persist_user_turn(agent_name: str, email: str, session_id: str, content: st
     row is moved to the retrying turn, so its reply sits under it after a reload.
     """
     try:
-        recent = db.get_portal_messages(agent_name, email, limit=1, session_id=session_id)
+        # trinity#3402: with held rows — a refused turn is exactly what is retried.
+        recent = db.get_portal_messages(agent_name, email, limit=1, session_id=session_id,
+                                        include_held=True)
         # ent#534: a SPOKEN last line is not a failed typed turn — typing the
         # same words after saying them is a new message, not a retry.
         if (recent and recent[-1].get("role") == "user" and recent[-1].get("content") == content
                 and recent[-1].get("source") is None):
             logger.info("portal: skipping duplicate user row on retry for session %s", session_id)
             _stamp_user_turn(recent[-1].get("id"), execution_id)
+            # trinity#3402: the row stands for THIS turn now; an earlier turn's
+            # gate verdict no longer applies (this one gets its own).
+            _clear_gate_hold(recent[-1].get("id"))
             return recent[-1].get("id")
     except Exception as e:  # noqa: BLE001 — a read failure must not block the turn
         logger.warning("portal duplicate-check failed for %s: %s", session_id, e)
@@ -4202,7 +4480,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             # #3265 — see `portal_chat`.
                             attachments: str | None = None,
                             # trinity-enterprise#631 — see `portal_chat`.
-                            person_tags: tuple | None = None) -> dict:
+                            person_tags: tuple | None = None,
+                            # trinity-enterprise#1046 — already validated at the router.
+                            voice_call_id: str | None = None) -> dict:
     """Begin a turn and return as soon as it is dispatchable.
 
     Returns ``{execution_id, session_id}``. The caller subscribes to the
@@ -4275,6 +4555,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
             open_canvas_id=open_canvas_id,
         ),
     )
+    # ent#1105: an edition may attribute this turn to its chat's project.
+    execution_attribution.record_row(execution)
     execution_id = execution.id if execution else None
     if not execution_id:
         # No id means no stream to subscribe to. Fail loudly rather than hand
@@ -4314,7 +4596,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                               reply_context=reply_context,
                               gate_is_person=gate_is_person,
                               gate_credential=gate_credential,
-                              person_tags=person_tags)
+                              person_tags=person_tags,
+                              voice_call_id=voice_call_id)
         except ClientPortalError as e:
             # There is no request left to raise into — the 202 went out long ago
             # — so the ONLY way this reaches the client is the record written
@@ -4796,11 +5079,14 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
         session_id = db.get_latest_portal_session_id(agent_name, email)
     messages: list = []
     truncated = False
+    # trinity#3402: the client's own thread shows a held turn and its notice —
+    # and the reply poll must find that notice as the turn's answer.
     if session_id and limit is not None:
-        messages = db.get_portal_messages(agent_name, email, limit=limit, session_id=session_id)
+        messages = db.get_portal_messages(agent_name, email, limit=limit, session_id=session_id,
+                                          include_held=True)
     elif session_id:
         window = db.get_portal_thread_window(agent_name, email, session_id,
-                                             typed_limit=_HISTORY_TYPED_TURNS)
+                                             typed_limit=_HISTORY_TYPED_TURNS, include_held=True)
         messages, truncated = window.rows, window.truncated
     # ent#366: attach the caller's OWN rating to each message, so a reload shows
     # the thumb they already gave. One query for the thread rather than one per
@@ -5131,6 +5417,29 @@ def _human_size(n: int) -> str:
     return f"{n / 1024 / 1024:.1f} MB"
 
 
+def _age_phrase(iso, *, now: datetime | None = None) -> str:
+    """"just now" / "N minutes|hours|days ago" for an ISO timestamp, or ""
+    when it is missing or unreadable (#4072 — lets the agent tell a file shared
+    just now from one shared weeks ago). Naive input is UTC; a time slightly
+    ahead of `now` reads "just now". `now` defaults to the current UTC time."""
+    if not iso or not isinstance(iso, str):
+        return ""
+    try:
+        ts = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    secs = ((now or datetime.now(timezone.utc)) - ts).total_seconds()
+    if secs < 60:
+        return "just now"
+    for unit, size in (("day", 86400), ("hour", 3600), ("minute", 60)):
+        if secs >= size:
+            n = int(secs // size)
+            return f"{n} {unit}{'' if n == 1 else 's'} ago"
+    return "just now"
+
+
 def _legacy_migration_is_safe(agent_name: str, email: str) -> bool:
     """True iff exactly one of this agent's shared emails claims the legacy dir.
 
@@ -5163,39 +5472,54 @@ def _legacy_migration_is_safe(agent_name: str, email: str) -> bool:
     return True
 
 
-def _alert_collided_inbox(agent_name: str, legacy_dir: str, claimants: list[str]) -> None:
-    """Raise ONE operator-queue item per collided legacy inbox (ent#308).
+# ent#308, #3254: the collision is recomputed on every inbox read and keeps
+# reading true while the two shares exist, so this process reports it at most
+# once per 6 hours per (agent, folder, claimant set). A new claimant is a new
+# key and is reported at once.
+_COLLISION_REOBSERVE_SECONDS = 6 * 60 * 60
+_collision_observed_at: dict[tuple[str, str, str], float] = {}
 
-    Best-effort and idempotent: the id is derived from the legacy directory and
-    `create_item` is an INSERT ... ON CONFLICT DO NOTHING (keyed per agent), so a
-    repeat access does not re-alert. Never raises — an alert failure must not
-    break a client's inbox read.
+
+def _alert_collided_inbox(agent_name: str, legacy_dir: str, claimants: list[str]) -> None:
+    """Report a collided legacy inbox to the operator queue (ent#308). Never raises.
+
+    Through the platform alert seam (#3246, #3254): one pending row per legacy
+    folder (subject `portal_inbox_collision:<dir>`). A must-act kind: it never
+    expires and only a person ends it. A person's ending is final. The
+    collision keeps reading true after someone split the folder, because the
+    platform cannot tell, so a repeat access never re-alerts the same
+    claimants. A NEW claimant changes `claimants_digest`, the kind's material
+    key (sha256 of the sorted set; no address in the context), and re-alerts.
 
     The id's prefix is reserved (`_RESERVED_ID_PREFIXES`, #715): the text lists
     client addresses, so the item is a platform alarm the agent's own file and
     resume turn never receive, the queue's reads never return it to a machine
-    key, and an agent cannot pre-create the id to swallow the alert through that
-    same ON CONFLICT. The ERROR log in the caller still fires on every access.
+    key, and an agent cannot pre-create one. The ERROR log in the caller still
+    fires on every access.
     """
-    try:
-        from database import db as core_db
-        core_db.create_operator_queue_item(agent_name, {
-            "id": f"portal-inbox-collision-{legacy_dir}",
-            "type": "alert",
-            "priority": "high",
-            "title": "Two portal clients shared one inbox folder",
-            "question": (
-                f"The folder `{_PORTAL_INBOX_ROOT}/{legacy_dir}/` on {agent_name} was written to by "
-                f"{len(claimants)} different client addresses before ent#308 made inbox names unique: "
-                + ", ".join(claimants)
-                + ". Their files are mixed together and nothing records which file belongs to whom, "
-                "so Trinity will not split it automatically. New uploads are already isolated in "
-                "per-client folders. Please review the old folder and move or delete its contents."
-            ),
-            "created_at": utc_now_iso(),
-        })
-    except Exception as exc:  # noqa: BLE001 — alerting must never break a read
-        logger.warning("[#308] could not raise collided-inbox alert for %s: %s", agent_name, exc)
+    digest = hashlib.sha256("\0".join(sorted(claimants)).encode("utf-8")).hexdigest()
+    memo_key = (agent_name, legacy_dir, digest)
+    now = time.monotonic()
+    seen = _collision_observed_at.get(memo_key)
+    if seen is not None and now - seen < _COLLISION_REOBSERVE_SECONDS:
+        return
+    from services import platform_alerts
+    outcome = platform_alerts.observe(
+        agent_name, "portal_inbox_collision", legacy_dir,
+        priority="high",
+        title="Two portal clients shared one inbox folder",
+        question=(
+            f"The folder `{_PORTAL_INBOX_ROOT}/{legacy_dir}/` on {agent_name} was written to by "
+            f"{len(claimants)} different client addresses before ent#308 made inbox names unique: "
+            + ", ".join(claimants)
+            + ". Their files are mixed together and nothing records which file belongs to whom, "
+            "so Trinity will not split it automatically. New uploads are already isolated in "
+            "per-client folders. Please review the old folder and move or delete its contents."
+        ),
+        context={"claimants_digest": digest},
+    )
+    if outcome != platform_alerts.OBSERVED_FAILED:
+        _collision_observed_at[memo_key] = now
 
 
 def _inbox_list_cmd(inbox: str, legacy: str | None = None) -> str:
@@ -5341,8 +5665,10 @@ async def _read_file_b64(container, path: str) -> str | None:
 async def _collect_inbox_for_turn(agent_name: str, email: str, message: str):
     """Build (images, image_names, doc_files) for a chat turn. Images are attached
     as vision blocks ONLY when the message references them (size/count-capped);
-    otherwise they're listed by name so the client can ask. Documents are always
-    listed so the agent can read them on demand. Best-effort; never raises."""
+    otherwise they're listed by name so this person can ask. Documents are always
+    listed — as files this person has shared over time, not as this turn's
+    attachment (#4072) — so the agent can open one on demand. Best-effort; never
+    raises."""
     try:
         uploads = await _read_inbox(agent_name, email)
     except Exception as e:  # noqa: BLE001
@@ -5373,7 +5699,7 @@ async def _collect_inbox_for_turn(agent_name: str, email: str, message: str):
 
 
 async def collect_inbox_context(agent_name: str, email: str, message: str) -> tuple[str, list[dict]]:
-    """How ONE agent is told about ONE client's files for ONE turn.
+    """How ONE agent is told about ONE person's files for ONE turn.
 
     Returns ``(manifest_prefix, images)``:
 
@@ -5386,6 +5712,18 @@ async def collect_inbox_context(agent_name: str, email: str, message: str) -> tu
     * ``images`` — vision blocks for ``execute_task(images=…)``, attached only
       when this turn actually references them ("only when told", #78).
 
+    **The inbox is per person per agent, not per chat (#4072).** Every file this
+    person ever shared with the agent is listed on every turn, in the 1:1 chat
+    and in every room, so the sentence must never say the person "has uploaded"
+    them: an agent reads that literally and opens a file from three
+    conversations ago to answer an unrelated question. Every branch therefore
+    hedges provenance ("not necessarily with this message") and makes use
+    conditional on the latest request, and each document carries its age
+    (`_age_phrase`) so "summarise this" can still resolve to the file shared
+    just now. The per-turn attachment set that would make an unhedged "attached
+    to this message" true exists only for 1:1 chat (#3265); splitting attached
+    from standing files on it is a follow-up.
+
     **This is the one place that composition lives (#2794).** It was inline in
     `portal_chat`, which meant the 1:1 conversation was the only surface that
     ever told an agent a file existed: a multi-agent ROOM built its turn prompt
@@ -5397,25 +5735,33 @@ async def collect_inbox_context(agent_name: str, email: str, message: str) -> tu
 
     Best-effort in both halves — a listing or read failure yields ``("", [])``
     rather than raising, because a file the agent cannot be told about must
-    still not cost the client their turn.
+    still not cost the person their turn.
     """
     images, image_names, doc_files = await _collect_inbox_for_turn(agent_name, email, message)
     parts: list[str] = []
     if images:
         parts.append(
-            "The client's image(s) are shown to you directly below as images — "
+            "This person's image(s) from your inbox are shown to you directly below as images — "
+            "use them only if the latest request is about them; "
             "do NOT open/cat/read image files as text: " + ", ".join(image_names)
         )
     elif image_names:
         parts.append(
-            "The client has image(s) in your inbox (ask to see one and it'll be shown to you; "
-            "do NOT read image files as text): " + ", ".join(image_names)
+            "This person also has image(s) in your inbox that are not attached to this message "
+            "(possibly from other conversations) — do NOT read image files as text; "
+            "if they ask about one, have them name it and it will be shown to you: "
+            + ", ".join(image_names)
         )
     if doc_files:
-        listing = ", ".join(f"{d['filename']} ({_human_size(d['size_bytes'])})" for d in doc_files)
+        def _item(d):
+            age = _age_phrase(d.get("uploaded_at"))
+            return f"{d['filename']} ({_human_size(d['size_bytes'])}{', shared ' + age if age else ''})"
+        listing = ", ".join(_item(d) for d in doc_files)
         parts.append(
-            f"The client has uploaded these files to your inbox at `{_client_inbox(email)}/` — "
-            f"read any that are relevant: {listing}"
+            f"Files this person has shared with you over time, in `{_client_inbox(email)}/` — "
+            "not necessarily with this message, and possibly from other conversations. "
+            "Open one only when the latest request refers to it (by name, or as \"this\"/\"the file\" "
+            f"about one shared just now): {listing}"
         )
     if not parts:
         return "", images
@@ -5775,30 +6121,80 @@ def _chat_state_room_left(email: str) -> bool:
         return True
 
 
-def get_chat_state(email: str, unread: dict[str, int] | None = None) -> dict:
+def get_chat_state(email: str, unread: dict[str, int] | None = None,
+                   room_reader: tuple[str, str] | None = None,
+                   room_unread: dict[str, int] | None = None,
+                   sees_all_rooms: bool = False,
+                   as_of: str | None = None) -> dict:
     """Star + unread state for every chat the caller has state for.
 
-    Unread is computed for threads only; a room carries its own seq cursor and
-    is reported as starred-or-not with `unread = 0`. `unread` lets a caller pass
-    counts it already read in the same statement as something else
-    (ent#610 `chat_previews`), so the two cannot come from different instants.
+    `unread` lets a caller pass counts it already read in the same statement as
+    something else (ent#610 `chat_previews`), so the two cannot come from
+    different instants; `room_unread` is the same for rooms.
+
+    trinity-enterprise#959: a room's unread is counted only when the caller
+    names the room participant it reads as (`room_reader`, from
+    `room_reader_of(principal)`), and only for rooms that participant is in
+    (`db.unread_room_arrivals` joins through the membership row).
+
+    Fix round 1 (security review #1): the stored room ROWS are filtered the same
+    way. A cursor/star row is keyed by EMAIL, which a Workspace identity and a
+    platform account can share, so without the filter a credential was handed
+    the ids of rooms only the OTHER identity is in. A room row is returned only
+    for a room the reader is actively in — one batched read, `db.active_room_ids`
+    — and with no reader, for none. `sees_all_rooms` (`room_sees_all`: a
+    platform admin, who lists every room through `GET /api/rooms` anyway) keeps
+    the admin's OWN starred rows for rooms they are not in; those still count 0.
     """
+    # trinity-enterprise#1010: the instant this state is read AS OF, returned so
+    # the client can send it back as the read write's `through` — "I held
+    # everything up to here". Stamped BEFORE any count is read (a caller that
+    # read its counts first passes the instant it stamped before them): stamped
+    # after, an arrival committed between the two would sit inside `as_of` yet
+    # be missing from what the client was shown, and its read would swallow it.
+    as_of = as_of or utc_now_iso()
     rows = db.get_chat_state(email)
     unread = db.count_unread_by_session(email) if unread is None else unread
+    if room_unread is None:
+        room_unread = ({rid: a["n"] for rid, a in db.unread_room_arrivals(email, *room_reader).items()}
+                       if room_reader else {})
+    my_rooms: set[str] | None = None if sees_all_rooms else (
+        db.active_room_ids(*room_reader) if room_reader else set())
     chats = []
     seen_threads: set[str] = set()
+    seen_rooms: set[str] = set()
+    # trinity-enterprise#1011: a room's cursor lives in a row per identity space
+    # (`db.room_cursor_kind`), its star on the plain `room` row. A room is ONE
+    # entry, present when either row exists: the star from the `room` row, the
+    # presence of a read from THIS reader's space row. Another space's row is
+    # never read here — it is the other identity's state, and listing a room off
+    # it would hand this credential the id of a room it may not be in.
+    own_space = db.room_cursor_kind(room_reader[0]) if room_reader else None
+    room_rows: dict[str, dict] = {}
     for r in rows:
         kind, cid = r.get("chat_kind"), r.get("chat_id")
         if not kind or not cid:
             continue
-        if kind == "thread":
-            seen_threads.add(cid)
+        if kind == "room" or (own_space and kind == own_space):
+            if my_rooms is not None and cid not in my_rooms:
+                continue
+            entry = room_rows.setdefault(cid, {"starred": False})
+            if kind == "room":
+                entry["starred"] = bool(r.get("starred_at"))
+            continue
+        if kind != "thread":
+            continue
+        seen_threads.add(cid)
         chats.append({
             "kind": kind,
             "id": cid,
             "starred": bool(r.get("starred_at")),
-            "unread": unread.get(cid, 0) if kind == "thread" else 0,
+            "unread": unread.get(cid, 0),
         })
+    for cid, entry in room_rows.items():
+        seen_rooms.add(cid)
+        chats.append({"kind": "room", "id": cid, "starred": entry["starred"],
+                      "unread": room_unread.get(cid, 0)})
     # A CURSORLESS thread has unread and no state row, so the loop above never
     # reaches it — and that is the whole ent#557 case: an agent replies into a
     # freshly minted Main the viewer has never opened, so no row was ever
@@ -5813,8 +6209,15 @@ def get_chat_state(email: str, unread: dict[str, int] | None = None) -> dict:
     # that is not already theirs. `starred` is False by construction — a chat
     # with no row has never been starred.
     cursorless = [
-        (cid, n) for cid, n in unread.items()
+        ("thread", cid, n) for cid, n in unread.items()
         if cid and cid not in seen_threads and n > 0
+    ]
+    # ent#959: a room the viewer is in and has never opened enters the same way,
+    # under the same cap rule. Bounded by the membership join that produced
+    # `room_unread`, so this cannot append a room the viewer is not in.
+    cursorless += [
+        ("room", cid, n) for cid, n in room_unread.items()
+        if cid and cid not in seen_rooms and n > 0
     ]
     # ...but ONLY while the viewer can still clear it, and that is not a
     # nicety. `mark_chat_read` silently no-ops when the row would be a NEW one
@@ -5833,9 +6236,43 @@ def get_chat_state(email: str, unread: dict[str, int] | None = None) -> dict:
     # list is empty and the cap cannot be the reason.
     if cursorless and not _chat_state_room_left(email):
         cursorless = []
-    for cid, n in cursorless:
-        chats.append({"kind": "thread", "id": cid, "starred": False, "unread": n})
-    return {"chats": chats}
+    for kind, cid, n in cursorless:
+        chats.append({"kind": kind, "id": cid, "starred": False, "unread": n})
+    return {"chats": chats, "as_of": as_of}
+
+
+def room_reader_of(principal) -> tuple[str, str] | None:
+    """The room participant this Workspace credential reads as (ent#959).
+
+    Rooms seat a person in one of two identity spaces (ent#362), and the rooms
+    API picks between them by credential (`shared_sessions.service._caller`): a
+    platform session is `user` + its USERNAME, a Workspace session is
+    `workspace_user` + its verified email. The chat-state routes see the
+    `PortalPrincipal`, whose email alone cannot say which — so the decision is
+    made here, from the same two facts, and fails CLOSED: a platform principal
+    with no username reads no room rather than an email-keyed guess that could
+    be another person's Workspace identity.
+    """
+    from shared_sessions.service import WORKSPACE_KIND
+
+    if getattr(principal, "is_platform", False):
+        username = (getattr(principal, "username", None) or "").strip()
+        return ("user", username) if username else None
+    email = (getattr(principal, "email", None) or "").strip().lower()
+    return (WORKSPACE_KIND, email) if email else None
+
+
+def room_sees_all(principal) -> bool:
+    """Does this Workspace credential list EVERY room (ent#959 fix round 1)?
+
+    Only a platform admin: the rooms API lists every room to an admin platform
+    account (`shared_sessions.service.list_rooms`), so the admin's own starred
+    rows for rooms they are not in disclose nothing they cannot already list.
+    `is_admin` is the portal's stricter reading (`_is_admin_principal`: role AND
+    an admin-gate scope) and is always False for a Workspace session token.
+    """
+    return bool(getattr(principal, "is_platform", False)
+                and getattr(principal, "is_admin", False))
 
 
 def set_chat_star(email: str, chat_kind: str, chat_id: str, starred: bool) -> None:
@@ -5854,21 +6291,83 @@ def set_chat_star(email: str, chat_kind: str, chat_id: str, starred: bool) -> No
         # accumulate from ordinary use and unstar cannot remove them.
         if db.count_starred_rows(email) >= db.MAX_STARRED_CHATS:
             raise ClientPortalError(409, "Too many saved chats — unstar some first")
-        if _would_create_row_past_cap(email, kind, cid):
+        if _would_create_row_past_cap(email, kind, cid) and not (
+                kind == "room" and any(db.chat_state_row_exists(email, db.room_cursor_kind(space), cid)
+                                       for space in ("user", "workspace_user"))):
+            # The mirror of `mark_chat_read`'s exemption (#1011 review): a
+            # viewer who has READ a room since the split holds only its
+            # identity-space cursor row, so starring it needs the plain `room`
+            # row — refused at the cap, a 409 for a room already on their list.
+            # Bounded the same way: one `room` row beside a row they own.
             raise ClientPortalError(409, "Too much saved chat state — open fewer new chats")
     db.set_chat_star(email, kind, cid, starred, utc_now_iso())
 
 
-def mark_chat_read(email: str, chat_kind: str, chat_id: str) -> None:
+# The spelling every stored instant uses: `utc_now_iso` ("…:SS.ffffffZ") and the
+# coarser "…:SSZ" some writers and fixtures store. Strict, because the cursor is
+# compared to stored values AS A STRING: a `through` is stored verbatim (see
+# `db._later`), so an offset form or a bare date would sort wrongly against them.
+_READ_THROUGH = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z")
+
+
+def _read_through(through: str | None, now: str) -> str | None:
+    """The instant a read covers (trinity-enterprise#1010): the client's
+    ``through``, clamped to ``now`` so a client cannot pre-read arrivals that do
+    not exist yet. ``None`` stays ``None`` (the write then covers up to now).
+    Anything that is not one instant in the stored spelling is a 422."""
+    if through is None:
+        return None
+    if not isinstance(through, str) or not _READ_THROUGH.fullmatch(through):
+        raise ClientPortalError(422, "through must be a UTC instant like 2026-01-15T10:30:00Z")
+    try:
+        held = parse_iso_timestamp(through)
+    except ValueError:
+        raise ClientPortalError(422, "through must be a UTC instant like 2026-01-15T10:30:00Z")
+    return now if held > parse_iso_timestamp(now) else through
+
+
+def mark_chat_read(email: str, chat_kind: str, chat_id: str,
+                   room_reader: tuple[str, str] | None = None,
+                   through: str | None = None) -> None:
     """Advance the caller's read cursor on one chat. Same non-validation and
-    same cap as `set_chat_star`."""
+    same cap as `set_chat_star` — for a thread.
+
+    trinity-enterprise#1010: the cursor moves to ``through``, the newest instant
+    the client held (its last `as_of`, or the newest message it rendered), not
+    to the server's now — so an arrival after the client's last fetch still
+    counts as unread. Clamped to now; never moves the cursor back; ``None`` is
+    the old meaning (now).
+
+    A ROOM's cursor moves only for a reader actively in that room
+    (trinity-enterprise#959 fix round 1, security review #3): the cursor row is
+    keyed by email, so an unchecked write let a non-member create one and let a
+    platform account clear the same email's Workspace-identity room. An unknown
+    room, a room the reader is not in or left, and a call with no reader all
+    return exactly as a successful write does, writing nothing — the write
+    stays no existence oracle (invariant #8). And it moves only the reader's
+    OWN identity space's cursor (#1011), seeded from the shared pre-split row.
+    """
     kind, cid = _validate_chat_ref(chat_kind, chat_id)
-    if _would_create_row_past_cap(email, kind, cid):
+    now = utc_now_iso()
+    held = _read_through(through, now)
+    cursor_kind, floor_kind = kind, None
+    if kind == "room":
+        if not (room_reader and db.is_active_room_participant(cid, *room_reader)):
+            return
+        cursor_kind, floor_kind = db.room_cursor_kind(room_reader[0]), "room"
+    if _would_create_row_past_cap(email, cursor_kind, cid) and not (
+            floor_kind and db.chat_state_row_exists(email, floor_kind, cid)):
         # Silently no-op rather than erroring: a read marker is incidental to
         # what the user asked for (opening a chat), and failing the open because
         # a bookkeeping table is full would be absurd.
+        #
+        # A room whose shared `room` row already exists is exempt (#1011
+        # review): that row lists the room and counts its unread from the
+        # pre-split floor, so refusing the space row would leave a badge no
+        # read can clear. The exemption is bounded — at most one space row per
+        # identity space beside a row the viewer already owns.
         return
-    db.mark_chat_read(email, kind, cid, utc_now_iso())
+    db.mark_chat_read(email, cursor_kind, cid, now, through=held, floor_kind=floor_kind)
 
 # ---------------------------------------------------------------------------
 # ent#366 — one-click ratings
@@ -5957,6 +6456,19 @@ def submit_rating(agent_name: str, email: str, *, target_kind: str, target_id: s
     except Exception as e:  # noqa: BLE001
         logger.warning("portal: rating write failed for %s/%s: %s", agent_name, target_kind, e)
         raise ClientPortalError(503, "Could not record that rating — try again.")
+
+    # ent#641: a thumbs-down by the seat is one of the two events that can
+    # DEMOTE an ask class, and the only one that does not pass through the
+    # decision record. Re-evaluate here rather than on the panel read — a read
+    # that writes makes an owner opening the page a writer for every seat.
+    # Fail-open: the reader re-ANDs the live conjuncts anyway, so a missed
+    # re-evaluation can only leave a verdict stale, never wider than earned.
+    try:
+        from services import autonomy_dial_service
+
+        autonomy_dial_service.evaluate_seat(platform_db, agent_name, email, persist=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal: autonomy re-evaluation after a rating failed for %s: %s", agent_name, e)
 
     return {
         "target_kind": target_kind,
@@ -6185,23 +6697,31 @@ async def raise_problem_report(agent_name: str, email: str, *, target_kind: str,
     redaction (`comment_withheld`) is untouched. The operator sees the comment;
     the agent still does not.
 
-    **Routed through the #1677 budget, never a direct create.** The volume is
-    driven by a client clicking, so by the classification rule this is an
-    agent-influenceable emitter: a direct `create_operator_queue_item` would fail
-    the CI emitter guard, and reusing the generic `alert` type would have let five
-    unrelated alerts on that agent silence every problem report (the budget counts
-    pending rows OF THAT TYPE, including ones other emitters wrote).
+    **Reported through the platform-alert seam (#3254), budgeted there (#1677).**
+    The volume is driven by a client clicking, so by the classification rule this
+    is an agent-influenceable emitter, and it carries its own type,
+    `workspace_problem_report`: reusing the generic `alert` type would have let
+    five unrelated alerts on that agent silence every problem report (the budget
+    counts pending rows OF THAT TYPE, including ones other emitters wrote).
 
-    Never raises, and returns whether an item was raised. The client's rating is
-    already recorded by the time this runs: their action must never fail because
-    the operator's copy could not be written.
+    One row per person per target per UTC day: the subject is the digest
+    `_problem_report_id` computes. A person must act on it, so it never expires
+    and the platform never ends it. The click and the comment arrive as two
+    requests that meet on that row inside the seam's lock: a reading with words
+    writes them, and a bare one only counts (`keep_text`), so a re-rate can never
+    erase a comment, whichever lands first (trinity#3521). An item a person
+    already ended is not rewritten or reopened: a later reading that day is
+    snoozed. The `workspace-problem-` id prefix keeps it owner-only
+    (trinity-enterprise#866).
+
+    Never raises, and returns whether the operator's item was written (created,
+    or updated in place). The client's rating is already recorded by the time
+    this runs: their action must never fail because the operator's copy could not
+    be written.
     """
     try:
-        from database import db as core_db
-        from services.operator_queue_service import (
-            _truncate_with_marker,
-            create_bounded_alert,
-        )
+        from services import platform_alerts
+        from services.operator_queue_service import _truncate_with_marker
 
         evaluator = workspace_evaluator(email, is_platform=is_platform)
         text = (comment or "").strip()
@@ -6225,33 +6745,17 @@ async def raise_problem_report(agent_name: str, email: str, *, target_kind: str,
             "target_id": target_id,
             "has_comment": bool(text),
         }
-        request_id = _problem_report_id(evaluator, target_kind, target_id)
-
-        def _attach_comment() -> bool:
-            # trinity#3521: the comment usually arrives as a SECOND request, after
-            # the click already raised the item. Only words ever write text, so a
-            # bare re-rate can never erase a comment. No new row, so no budget.
-            return bool(text) and core_db.update_pending_problem_report(
-                agent_name, request_id, question=question, context=context)
-
-        if _attach_comment():
-            return True
-        item = {
-            "id": request_id,
-            "agent_name": agent_name,
-            "type": "workspace_problem_report",
-            "status": "pending",
-            "priority": "medium",
-            "title": "A Workspace client rated a response as not useful",
-            "question": question,
-            "context": context,
-            "created_at": utc_now_iso(),
-        }
-        created = await create_bounded_alert(agent_name, item)
-        # Both requests run as background tasks. If the bare click's create
-        # landed between the miss above and this create, ours was the ON
-        # CONFLICT no-op, so attach once more. Idempotent.
-        return _attach_comment() or created
+        kind = platform_alerts.KINDS["workspace_problem_report"]
+        key = _problem_report_id(evaluator, target_kind, target_id)[len(kind.prefix):]
+        outcome = platform_alerts.observe(
+            agent_name, kind.name, key,
+            title="A Workspace client rated a response as not useful",
+            question=question,
+            priority="medium",
+            context=context,
+            keep_text=not text,
+        )
+        return outcome in (platform_alerts.OBSERVED_CREATED, platform_alerts.OBSERVED_UPDATED)
     except Exception as e:  # noqa: BLE001 — the rating is already recorded
         logger.warning("[ent#499] problem report failed for %s/%s: %s",
                        agent_name, target_kind, e)

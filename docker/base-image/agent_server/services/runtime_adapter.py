@@ -51,6 +51,11 @@ class AgentRuntime(ABC):
     # `.env` and must never receive a Claude credential (#1187 decision 7).
     supports_auth_override: bool = False
 
+    # #4156: whether `execute`/`execute_headless` accept `disable_auto_memory`
+    # (spawn with Claude Code's shared auto-memory off). Only the Claude
+    # runtime has that memory; the others never receive the keyword.
+    supports_auto_memory_switch: bool = False
+
     @abstractmethod
     async def execute(
         self,
@@ -165,7 +170,9 @@ class AgentRuntime(ABC):
             allowed_tools: List of allowed tool names (None = all tools)
             system_prompt: Custom system prompt
             timeout_seconds: Execution timeout
-            max_turns: Maximum agentic turns for runaway prevention (None = unlimited)
+            max_turns: Per-task turn cap for runaway prevention; may only tighten the
+                agent's guardrail (#2328). None = the guardrail (runtimes without a
+                turn-cap flag log it and rely on the timeout)
             execution_id: Optional execution ID for process registry (enables termination tracking)
             resume_session_id: Optional Claude Code session ID to resume (EXEC-023)
             persist_session: If True, omit ``--no-session-persistence`` so the
@@ -196,6 +203,8 @@ _CLAUDE_RUNTIMES = frozenset({"claude-code", "claude"})
 _GEMINI_RUNTIMES = frozenset({"gemini-cli", "gemini"})
 _CODEX_RUNTIMES = frozenset({"codex"})
 KNOWN_RUNTIMES = _CLAUDE_RUNTIMES | _GEMINI_RUNTIMES | _CODEX_RUNTIMES
+# Every AGENT_RUNTIME spelling that selects Gemini (the backend writes either).
+GEMINI_RUNTIMES = _GEMINI_RUNTIMES
 
 
 def get_runtime() -> AgentRuntime:

@@ -280,4 +280,22 @@ describe("deprecated skills (ent#672)", () => {
     assert.ok(tools.assignSkillToAgent.description.includes("deprecated:<successor>"));
     assert.ok(tools.getAgentSkills.description.includes("list_skills"));
   });
+
+  it("#3136: assign says the delivery report carries the injection's dependency codes too", () => {
+    const tools = makeTools([], {});
+    const d = tools.assignSkillToAgent.description;
+    // The old sentence promised the opposite ("lifecycle codes only; dependency
+    // warnings are on sync_agent_skills"), and an agent reading it would stop
+    // looking at `warnings` once it saw no deprecation.
+    assert.ok(!d.includes("lifecycle codes only"), "the stale promise is gone");
+    for (const code of ["missing_binary:<name>", "missing_env:<KEY>", "packages_not_checked"]) {
+      assert.ok(d.includes(code), `names ${code}`);
+    }
+    assert.ok(d.includes("pending_start") && d.includes("in_progress"), "says which outcomes carry none");
+  });
+
+  it("ent#736: list_skill_sets says each member carries `deprecated`", () => {
+    const tools = makeTools([], {});
+    assert.ok(tools.listSkillSets.description.includes("`deprecated`"));
+  });
 });

@@ -250,13 +250,15 @@ class ActivityService:
         try:
             activity_state = activity_state_for_terminal(terminal_status)
             if execution_id:
+                # #3651: companions are closed HERE, for every terminal writer,
+                # and from the persisted row — not from `backlog_metadata`,
+                # which a direct-dispatch `/task` hop never has. Opting in per
+                # writer is how #3588 fixed one recovery path and left five.
                 try:
-                    await self._close_queued_activities(
-                        execution_id, activity_state, error
-                    )
+                    await self.close_companion_activities(execution_id)
                 except Exception as e:  # noqa: BLE001 — never block the dispatch close
                     logger.warning(
-                        "[#2329] queued-activity close failed for execution %s: %s",
+                        "[#3651] companion close failed for execution %s: %s",
                         execution_id,
                         e,
                     )
@@ -297,32 +299,6 @@ class ActivityService:
             details["inject_result"] = meta.get("inject_result")
         return details
 
-    async def _close_queued_activities(self, execution_id, activity_state, error) -> None:
-        """#2329: close the collaboration / self-task activity a queued row
-        names, so a terminal written outside ``run_async_task`` (pull sink,
-        lease-reaper park, watchdog) does not leave it ``started``. Backlog
-        expiry calls no closer; the 120-minute sweep covers it."""
-        execution = db.get_execution(execution_id)
-        # Only a row that is terminal NOW. The lease reaper closes the dead
-        # attempt's dispatch activity as CANCELLED and re-queues the row with the
-        # same metadata: its collaboration / self-task activity belongs to the
-        # re-delivered attempt, and a CANCELLED close can never be upgraded.
-        if execution is None or execution.status not in TERMINAL_TASK_STATUSES:
-            return
-        raw = getattr(execution, "backlog_metadata", None)
-        ids = queued_activity_ids(raw)
-        if not ids:
-            return
-        details = self._companion_close_details(execution, json.loads(raw))
-        for aid in ids:
-            await self.complete_activity(
-                activity_id=aid,
-                status=activity_state,
-                details=details,
-                # Push closers record an error on FAILED only (#1332).
-                error=error if activity_state == ActivityState.FAILED else None,
-            )
-
     async def close_companion_activities(
         self, execution_id: str, *, details_extra: Optional[Dict] = None
     ) -> int:
@@ -330,11 +306,23 @@ class ActivityService:
         of a TERMINAL execution, deriving state AND instant from the persisted
         row. Returns the number of companions closed.
 
-        Built for the watchdog claim, whose dispatch close runs inside
-        ``apply_result`` and never reaches ``_close_queued_activities`` — and
-        whose companions may have NO ``backlog_metadata`` at all (a
-        direct-dispatch ``/task`` hop, the issue's own repro). The lookup is
-        type-scoped on ``related_execution_id`` with the metadata ids as a belt.
+        Called by ``close_execution_activity`` for every terminal writer
+        (#3651), and directly by the watchdog claim to stamp ``recovered_by``.
+        Companions may have NO ``backlog_metadata`` at all (a direct-dispatch
+        ``/task`` hop), so the lookup is type-scoped on ``related_execution_id``
+        with the metadata ids as a belt.
+
+        Re-queue safety: a row that is not terminal NOW is left alone. The lease
+        reaper closes the dead attempt's dispatch activity as CANCELLED and
+        re-queues the row; its companions belong to the re-delivered attempt,
+        and a CANCELLED close can never be upgraded.
+
+        Push path: the owner runs before ``run_post_turn_delivery``, so it wins
+        the companion CAS and the push closers' writes are no-ops. Result
+        injection (``finalize_self_task``) runs regardless of that CAS. On a
+        recovery-closed self-task the injection never runs (the coroutine that
+        held the request died) — accepted loss; recovery writes FAILED and
+        injection is SUCCESS-only, so it is the claim-to-SUCCESS case alone.
 
         **Everything is derived from the ROW, never from the caller's envelope**:
         ``apply_result``'s failure branch returns the same result whether its
@@ -349,13 +337,13 @@ class ActivityService:
 
         Fail-open: returns 0 and swallows on any error — it runs after a
         committed terminal and must never affect it. Per-row ``complete_activity``
-        (WS broadcast per close) is deliberate: a claim is 1–2 companions on a
-        path that already broadcasts per claim; the bulk sweeps keep their
-        broadcast-free ``close_open_activities_for_executions``.
+        (WS broadcast per close) is deliberate: an execution has 0–2 companions
+        and every caller already broadcasts its dispatch close; the bulk sweeps
+        keep their broadcast-free ``close_open_activities_for_executions``.
         """
         try:
             execution = db.get_execution(execution_id)
-            # Terminal NOW — the same re-queue guard as _close_queued_activities.
+            # Terminal NOW — the re-queue guard above.
             if execution is None or execution.status not in TERMINAL_TASK_STATUSES:
                 return 0
             activity_state = activity_state_for_terminal(execution.status)

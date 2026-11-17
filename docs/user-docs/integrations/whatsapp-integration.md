@@ -75,7 +75,7 @@ You need three values from Twilio: **Account SID**, **Auth Token**, and a **What
 ### Connect WhatsApp to an Agent
 
 1. Open the agent detail page
-2. Select the **Sharing** tab and find the **WhatsApp** row under **Channels**
+2. Select the **Channels** tab and find the **WhatsApp** row under **Channels**
 3. Click **Configure** — the WhatsApp (Twilio) configuration opens in a dialog
 4. Enter:
    - **Twilio Account SID** — starts with `AC`, 34 characters long
@@ -126,7 +126,7 @@ Agents can deliver files and images in their WhatsApp replies, not just text. Ea
 
 Rules:
 
-- Outbound media requires the agent's **file-sharing** toggle to be on (Sharing tab → Distribution → File sharing) and a configured **Public URL** under Settings → General (media links must be HTTPS).
+- Outbound media requires the agent's **file-sharing** toggle to be on (Channels tab → Distribution → File sharing) and a configured **Public URL** under Settings → General (media links must be HTTPS).
 - A file that is oversized, of an unsupported type, or otherwise undeliverable degrades to a `📎 name: url` download link appended to the text reply — it never blocks the reply or other files.
 
 ### Voice Replies (Outbound)
@@ -139,7 +139,7 @@ WhatsApp users can send these commands to the agent number:
 
 | Command | Action |
 |---------|--------|
-| `/login user@example.com` | Sends a 6-digit verification code to the email address |
+| `/login user@example.com` | Sends a 6-digit verification code to the email address. Code requests are capped (5 per number, 3 per address and 20 per WhatsApp binding in 10 minutes); over a cap the agent replies *Too many sign-in code requests. Try again in 10 minutes.* and sends no email |
 | `/login 123456` | Submits the code and verifies the email |
 | `/logout` | Unlinks the verified email from this WhatsApp number |
 | `/whoami` | Shows the currently verified email address |
@@ -148,7 +148,7 @@ After successful `/login`, if the agent has a restricted access policy (`require
 
 ## Access Control
 
-WhatsApp respects the same cross-channel access policy as Telegram and Slack. Configure it in **Agent Detail → Sharing → Channel Access Policy**:
+WhatsApp respects the same cross-channel access policy as Telegram and Slack. Configure it in **Agent Detail → Channels → Channel Access Policy**:
 
 | Policy | Effect |
 |--------|--------|
@@ -156,7 +156,7 @@ WhatsApp respects the same cross-channel access policy as Telegram and Slack. Co
 | **Require email** | Users must complete `/login` before chatting; unverified users are prompted |
 | **Require sharing** | Users must be explicitly shared on the agent (owner/admin must approve) |
 
-Approving an access request (from **Sharing → Access Requests**) automatically adds the email to the shared-access list.
+Approving an access request (from **Channels → Access Requests**) automatically adds the email to the shared-access list.
 
 ## For Agents
 
@@ -270,7 +270,7 @@ This is different from "download failed" — the file **was** fetched successful
 - [Telegram Integration](telegram-integration.md) · [Slack Integration](slack-integration.md)
 - [Voice Replies](../advanced/voice-replies.md) — spoken replies across channels
 - [Access Control](../sharing-and-access/access-control.md) — the channel access policy `/login` enforces
-- [Agent Sharing & Access](../sharing-and-access/agent-sharing.md) — the Sharing tab that hosts the WhatsApp dialog
+- [Agent Sharing & Access](../sharing-and-access/agent-sharing.md) — the Channels tab that hosts the WhatsApp dialog
 
 **External references:**
 

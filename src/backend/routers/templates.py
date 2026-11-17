@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from models import User
 from dependencies import get_current_user
+from services import template_source_policy
 from services.template_service import (
     get_all_templates,
     get_github_template,
@@ -23,10 +24,14 @@ async def list_templates(current_user: User = Depends(get_current_user)):
     `id` prefix `local:`) and GitHub-configured templates (`id` prefix
     `github:`). Local templates always available without network; GitHub
     metadata is cached 10 min per repo. (#843)
+
+    trinity-enterprise#591: for an agent key while the instance's template-source
+    allowlist is set, each entry carries `allowed_for_agents` — whether this
+    caller may create an agent from it. Absent otherwise (byte-identical).
     """
     templates = get_all_templates()
     templates.sort(key=lambda t: (t.get("priority", 100), t.get("display_name", "")))
-    return templates
+    return template_source_policy.annotate_templates(current_user, templates)
 
 
 @router.get("/{template_id:path}")

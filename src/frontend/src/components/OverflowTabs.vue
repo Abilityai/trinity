@@ -32,14 +32,27 @@ export const FIXED_TAB_WIDTH = 'w-48'
  *
  * The width class lands in BOTH rows for the reason the pinned glyph does: a
  * visible row that renders wider than the mirror measures is a strip that
- * overflows one tab too late. The visible button additionally needs `shrink-0`
- * and the visible nav `overflow-hidden`, which the mirror needs neither of —
- * `inlineCount` starts at +Infinity, so on first paint every tab is inline; a
- * truncating label drops the button's min-content to padding, and flex's
- * default `flex-shrink: 1` would squeeze the whole row to ~50px per tab for a
- * frame while the `width: max-content` mirror still reports the real 160.
+ * overflows one tab too late. The visible button additionally needs `shrink-0`,
+ * which the mirror does not — `inlineCount` starts at +Infinity, so on first
+ * paint every tab is inline; a truncating label drops the button's min-content
+ * to padding, and flex's default `flex-shrink: 1` would squeeze the whole row
+ * to ~50px per tab for a frame while the `width: max-content` mirror still
+ * reports the real 160.
+ *
+ * The fit is VERIFIED against the real row, not only computed (#4241). The
+ * mirror can under-measure — a kept-alive page re-activated at another width,
+ * an engine whose `<button>` flex items will not shrink below their text
+ * (WebKit), a glyph that lands late — and then the arithmetic says "everything
+ * fits" while the drawn row is wider than its box, so the last tabs paint
+ * straight over whatever sits to the strip's right (the agent page's pinned
+ * Settings tab read "FilesSettings"). Two layers: the visible nav always
+ * clips (`overflow-hidden`), so a mis-fit can never paint over a neighbour;
+ * and after every fit decision `verifyFit` reads the rendered row's
+ * `scrollWidth` against its `clientWidth` (and, on a strip whose labels may
+ * truncate, each label's), re-measures once, and then drops one tab into
+ * More per frame until the row genuinely fits. A row that fits is left alone.
  */
-import { ref, computed, onMounted, onUnmounted, watch, nextTick, h } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, watch, nextTick, h } from 'vue'
 import DraftMark from './base/DraftMark.vue'
 // #1925 — the fit arithmetic moved to a pure module so NavBar's priority+ link
 // row packs by the SAME rule instead of a second copy, and so the rule is
@@ -114,6 +127,7 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue', 'close'])
 
 const rootEl = ref(null)        // width-driven container (RO target)
+const visibleNav = ref(null)    // the rendered row, verified after each fit
 const measureNav = ref(null)    // hidden mirror row
 const measureMoreEl = ref(null) // hidden worst-case More button
 const moreBtnEl = ref(null)     // visible More trigger (focus return)
@@ -130,6 +144,11 @@ const open = ref(false)
 let ro = null
 let rafId = null
 let lastWidth = -1
+let verifyRafId = null
+// One re-measure per overflow episode: the first verified overflow refreshes
+// the mirror widths; if the arithmetic still lands on the same count, the
+// mirror is simply wrong for this row and tabs are dropped until it fits.
+let remeasuredForOverflow = false
 
 
 // Full literal class strings so Tailwind's content scan sees every one. The
@@ -267,6 +286,50 @@ function recompute() {
     gap: 0,
     epsilon: FIT_EPSILON,
   })
+  scheduleVerify()
+}
+
+// Does the RENDERED row overflow its box? `scrollWidth` catches a row whose
+// buttons kept their width and ran past the edge (WebKit); a label squeezed
+// into an ellipsis is the same mis-fit in Chromium's costume, so on a strip
+// whose labels are not meant to truncate, a truncated label counts too.
+function rowOverflows() {
+  const nav = visibleNav.value
+  if (!nav) return false
+  if (nav.scrollWidth - nav.clientWidth > FIT_EPSILON) return true
+  if (props.fixedWidth) return false
+  for (const label of nav.querySelectorAll('.truncate')) {
+    if (label.scrollWidth - label.clientWidth > FIT_EPSILON) return true
+  }
+  return false
+}
+
+function scheduleVerify() {
+  if (verifyRafId != null) return
+  // Vue flushes the render in a microtask, so by the next frame the row
+  // reflects the count just decided.
+  verifyRafId = requestAnimationFrame(() => {
+    verifyRafId = null
+    verifyFit()
+  })
+}
+
+function verifyFit() {
+  if (!Number.isFinite(inlineCount.value)) return // not measured yet
+  if (!rowOverflows()) {
+    remeasuredForOverflow = false
+    return
+  }
+  if (!remeasuredForOverflow) {
+    remeasuredForOverflow = true
+    const before = inlineCount.value
+    syncWidth()
+    measure() // → recompute → scheduleVerify
+    if (inlineCount.value !== before) return
+  }
+  if (inlineCount.value <= 1) return
+  inlineCount.value -= 1
+  scheduleVerify()
 }
 
 function onResize() {
@@ -277,7 +340,10 @@ function onResize() {
     if (w === lastWidth) return // width-diff guard: ignore height-only jitter
     lastWidth = w
     containerWidth.value = w
-    recompute()
+    // Re-measure, not just recompute: widths taken while the strip was
+    // detached (a kept-alive page) or before a late glyph are stale, and a
+    // handful of rects per frame is nothing.
+    measure()
   })
 }
 
@@ -330,9 +396,18 @@ onMounted(() => {
   })
 })
 
+// A kept-alive page (AgentDetail) comes back with whatever geometry it left
+// with; the ResizeObserver only reports the re-attach, so take fresh widths.
+onActivated(() => {
+  if (!rootEl.value) return
+  syncWidth()
+  measure()
+})
+
 onUnmounted(() => {
   if (ro) ro.disconnect()
   if (rafId != null) cancelAnimationFrame(rafId)
+  if (verifyRafId != null) cancelAnimationFrame(verifyRafId)
   document.removeEventListener('pointerdown', onPointerDown)
 })
 </script>
@@ -340,7 +415,7 @@ onUnmounted(() => {
 <template>
   <div ref="rootEl" class="relative border-b border-gray-200 dark:border-gray-700">
     <!-- Visible row: inline tabs + right-pushed More trigger -->
-    <nav class="-mb-px flex" :class="fixedWidth ? 'overflow-hidden' : ''">
+    <nav ref="visibleNav" class="-mb-px flex overflow-hidden">
       <TablistWrap :label="tablistLabel" :clip="fixedWidth">
       <CloseWrap v-for="(tab, i) in inlineTabs" :key="tab.id" :tab="tab" shrink @close="(id) => emit('close', id)">
       <button

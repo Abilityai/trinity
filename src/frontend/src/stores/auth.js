@@ -4,6 +4,10 @@ import {
   clearStoredSession, readStoredToken, readStoredUser, TOKEN_KEY,
 } from '@/utils/platformSession'
 
+// What the SPA tells a sign-in route it is (trinity-enterprise#1107, ruling A):
+// the minted session carries `interactive: true`, the claim the terms gate reads.
+export const SPA_CLIENT = 'web'
+
 export const useAuthStore = defineStore('auth', {
   state: () => ({
     token: null,
@@ -30,6 +34,11 @@ export const useAuthStore = defineStore('auth', {
     // of a token. { token, enrolled, enrollmentRequired }. The Login view
     // switches to the second-factor step while this is non-null.
     mfaChallenge: null,
+    // #4157: the one-time hand-off the Workspace's code page got for a
+    // platform account ({ email, token }). Memory only: never the URL, never
+    // storage. `/login` redeems it once instead of asking for a second code;
+    // a reload drops it and the second-code form is the fallback.
+    workspaceHandoff: null,
     // Promise that resolves when initializeAuth() completes (PERF-269)
     _initResolve: null,
     _initPromise: null
@@ -297,6 +306,24 @@ export const useAuthStore = defineStore('auth', {
       }
     },
 
+    // #3825: change the signed-in account's own password. The server signs every
+    // OTHER session of the account out and returns a fresh token for this one,
+    // which replaces ours — the old token is now refused. Errors propagate: the
+    // panel names them next to the form.
+    // `revokeApiKeys` also revokes the MCP API keys this person created (never
+    // their agents' keys); the session cutoff does not reach keys otherwise.
+    async changePassword(currentPassword, newPassword, revokeApiKeys = false) {
+      const { data } = await axios.put('/api/users/me/password', {
+        current_password: currentPassword,
+        new_password: newPassword,
+        revoke_api_keys: revokeApiKeys,
+      })
+      this.token = data.access_token
+      localStorage.setItem(TOKEN_KEY, data.access_token)
+      this.setupAxiosAuth()
+      return data
+    },
+
     // #3164: whether the signed-in user has a personal GitHub token saved in
     // Settings — PRESENCE only, the value never leaves the backend. Fork-to-own
     // and repo binding use it in place of a typed token. A failed read answers
@@ -348,6 +375,10 @@ export const useAuthStore = defineStore('auth', {
         const formData = new FormData()
         formData.append('username', username)
         formData.append('password', password)
+        // trinity-enterprise#1107: the SPA declares its session interactive;
+        // the token then carries the claim the terms gate asks. The CLI sends
+        // nothing and is never asked.
+        formData.append('client', SPA_CLIENT)
 
         const response = await axios.post('/api/token', formData)
 
@@ -416,7 +447,7 @@ export const useAuthStore = defineStore('auth', {
       }
 
       try {
-        const response = await axios.post('/api/auth/email/verify', { email, code })
+        const response = await axios.post('/api/auth/email/verify', { email, code, client: SPA_CLIENT })
 
         // Enterprise 2FA (#5): a second factor is required — defer the token.
         if (response.data?.mfa_required) {
@@ -432,6 +463,35 @@ export const useAuthStore = defineStore('auth', {
         let detail = error.response?.data?.detail || 'Invalid or expired verification code'
         if (detail === 'email_code_disabled') detail = await this._emailCodeTurnedOff()
         this.authError = detail
+        return false
+      }
+    },
+
+    // #4157: held by the Workspace's code page after a correct code for a
+    // platform account, redeemed by `/login`.
+    setWorkspaceHandoff(email, token) {
+      this.workspaceHandoff = email && token ? { email: email.trim().toLowerCase(), token } : null
+    },
+
+    // #4157: redeem the hand-off for `email` at the platform door, in place of
+    // a second code. Returns true when signed in, false otherwise (including a
+    // 2FA challenge, which the Login view then shows). The token is dropped
+    // before the request, so it is never sent twice. A failure leaves no error
+    // on screen: the ordinary code form is the fallback.
+    async redeemWorkspaceHandoff(email) {
+      const held = this.workspaceHandoff
+      this.workspaceHandoff = null
+      const addr = (email || '').trim().toLowerCase()
+      if (!held || !addr || held.email !== addr || !this.emailCodeLoginEnabled) return false
+      try {
+        const response = await axios.post('/api/auth/email/handoff', { email: addr, token: held.token, client: SPA_CLIENT })
+        if (response.data?.mfa_required) {
+          this._setMfaChallenge(response.data)
+          return false
+        }
+        await this._finalizeLogin(response.data.access_token, response.data.user)
+        return true
+      } catch {
         return false
       }
     },
@@ -452,6 +512,12 @@ export const useAuthStore = defineStore('auth', {
     // post-2FA). `seedUser` is an optimistic profile overwritten by
     // fetchUserProfile().
     async _finalizeLogin(token, seedUser = null) {
+      // #3922: a platform login supersedes a Workspace client sign-in left in
+      // this browser. The Workspace sends a held portal token before the
+      // platform JWT, so leaving it would keep this account in the client view.
+      // Imported here, not at the top: the Workspace store imports this one.
+      const { useClientPortalStore } = await import('./clientPortal')
+      useClientPortalStore().signOut()
       this.token = token
       if (seedUser) this.user = seedUser
       this.isAuthenticated = true

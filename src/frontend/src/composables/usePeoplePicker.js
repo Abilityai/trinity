@@ -10,11 +10,18 @@
 // A 403 is a verdict, not a failure: this principal may not tag (an external
 // Workspace client). The picker then stays agents-only for the session rather
 // than asking again on every keystroke.
+//
+// trinity-enterprise#1153: the form field (BasePeopleInput) reuses this state
+// with its own `minQuery`, and `giveUpOn: 'failure'` — a network failure there
+// is a verdict too, so the field stays a plain input instead of retrying on
+// every keystroke. A 429 is never a verdict: the next query may ask again.
 
 import { ref } from 'vue'
 import { PEOPLE_DEBOUNCE_MS, PEOPLE_QUERY_MIN, addPicked, tagsInText } from '@/components/portal/portalMentions'
 
-export function usePeoplePicker({ fetch, debounceMs = PEOPLE_DEBOUNCE_MS } = {}) {
+export function usePeoplePicker({
+  fetch, debounceMs = PEOPLE_DEBOUNCE_MS, minQuery = PEOPLE_QUERY_MIN, giveUpOn = 'forbidden',
+} = {}) {
   const people = ref([])
   // The query the CURRENT `people` answer. A refusal line is drawn only when
   // the server said "no one" for exactly what is typed — never while a read is
@@ -28,7 +35,7 @@ export function usePeoplePicker({ fetch, debounceMs = PEOPLE_DEBOUNCE_MS } = {})
   function lookup(query) {
     const q = String(query || '').trim()
     if (timer) { clearTimeout(timer); timer = null }
-    if (unavailable.value || q.length < PEOPLE_QUERY_MIN || typeof fetch !== 'function') {
+    if (unavailable.value || q.length < minQuery || typeof fetch !== 'function') {
       people.value = []
       answeredFor.value = null
       asked = null
@@ -45,7 +52,8 @@ export function usePeoplePicker({ fetch, debounceMs = PEOPLE_DEBOUNCE_MS } = {})
         answeredFor.value = q
       } catch (err) {
         if (asked !== q) return
-        if (err?.response?.status === 403) unavailable.value = true
+        const status = err?.response?.status
+        if (status === 403 || (giveUpOn === 'failure' && !err?.response)) unavailable.value = true
         people.value = []
         answeredFor.value = null
       }

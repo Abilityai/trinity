@@ -318,7 +318,7 @@ const submit = async () => {
   if (!token && (!hasSavedGithubPat.value || patOverriding.value)) {
     binding.value = false
     error.value = {
-      message: 'A GitHub token is required — enter one, or save your personal token in Settings → GitHub token.',
+      message: 'A GitHub token is required — enter one, or save your personal token in Settings → MCP Keys → Personal GitHub Token.',
       code: 'FORK_PAT_REQUIRED',
       partial: false,
     }

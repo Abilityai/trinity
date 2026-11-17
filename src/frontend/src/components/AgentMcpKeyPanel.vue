@@ -165,6 +165,8 @@ const VERIFY_LABELS = {
   // #2323 — a bounded read-only ops key belongs to a monitoring integration;
   // it is not a person's key and must not be described as one.
   foreign_ops_key: 'The container authenticates with a read-only ops key, not as this agent',
+  // #3180 — likewise its write sibling, which belongs to an ops automation.
+  foreign_ops_write_key: 'The container authenticates with an ops-write key, not as this agent',
   foreign_agent_key: 'The container uses another agent’s key',
   unknown_key: 'The container’s key is not known to Trinity',
   not_configured: 'The container has no Trinity MCP entry',

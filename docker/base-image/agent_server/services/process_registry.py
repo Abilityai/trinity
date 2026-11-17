@@ -12,6 +12,7 @@ import subprocess
 import asyncio
 import logging
 import time
+import traceback
 from datetime import datetime
 from typing import Dict, Optional, List, AsyncIterator
 from threading import Lock
@@ -20,6 +21,7 @@ from ..utils.subprocess_pgroup import (
     signal_process_tree as _signal_process_tree,
 )
 from ..utils.orphan_sweep import kill_cgroup_orphans
+from ..utils.credential_sanitizer import redact_url_userinfo, sanitize_text
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +248,19 @@ class ProcessRegistry:
         Cancelling an asyncio coroutine does not stop its executor thread or
         child. Retain ownership (including logs and the sweep allowlist) until
         a process exit is observed, so cancellation cannot hide active work.
+
+        #3408 (AC 3), decided: an abandoned live child stays INELIGIBLE for the
+        periodic orphan sweep. This registry still owns it (it is listed as
+        running and reachable by ``terminate()``), so it stays in
+        ``active_execution_pids()`` until its exit is observed; a sweep that
+        killed it would contradict what this registry reports. That is the
+        agent's view only: the backend may already have released the
+        execution's capacity and failed its row. What still ends the child is
+        its runtime's own deadline where one exists, or a terminate request,
+        which the backend watchdog sends only while the row is still running
+        and past its timeout. Nothing reattaches to the abandoned turn. A
+        runtime whose waiter can be abandoned therefore hands a second call
+        here to its reader worker, made once the exit is observed.
         """
         with self._lock:
             entry = self._processes.get(execution_id)
@@ -405,8 +420,14 @@ class ProcessRegistry:
             return {"success": True, "returncode": returncode}
 
         except Exception as e:
-            logger.error(f"[ProcessRegistry] Error terminating {execution_id}: {e}")
-            return {"success": False, "reason": "error", "error": str(e)}
+            # abilityai/trinity#4284: the terminate route answers this "error"
+            # as its 500 detail, so it names the class; the text is logged.
+            logger.error(
+                "[ProcessRegistry] Error terminating %s: %s", execution_id,
+                sanitize_text(redact_url_userinfo("".join(traceback.format_exception(e)))),
+            )
+            return {"success": False, "reason": "error",
+                    "error": f"Termination failed: {type(e).__name__}"}
 
     def get_status(self, execution_id: str) -> Optional[dict]:
         """

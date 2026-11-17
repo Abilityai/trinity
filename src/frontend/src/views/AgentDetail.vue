@@ -1,13 +1,13 @@
 <template>
-  <div :class="isFullscreenTab ? 'h-screen overflow-hidden flex flex-col bg-gray-100 dark:bg-gray-900' : 'min-h-screen bg-gray-100 dark:bg-gray-900'">
+  <div :class="['bg-gray-100 dark:bg-gray-900', isFullscreenTab ? 'h-screen overflow-hidden flex flex-col' : isBoundedTab ? 'min-h-dvh flex flex-col' : 'min-h-screen']">
     <NavBar />
 
     <!-- #954: w-full keeps <main> at its max width in BOTH layout modes. Without it,
          the fullscreen (Chat) mode makes the root a flex column, and `mx-auto`'s auto
          inline margins override align-items:stretch on the flex item — collapsing
          <main> to content width and shifting/narrowing the whole card on tab switch. -->
-    <main :class="['w-full max-w-[1400px] mx-auto py-2 sm:px-6 lg:px-8', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
-      <div :class="['px-4 sm:px-0 py-2', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
+    <main :class="['w-full max-w-[1400px] mx-auto py-2 sm:px-6 lg:px-8', tabLayoutClass]">
+      <div :class="['px-4 sm:px-0 py-2', tabLayoutClass]">
         <!-- Only while there is nothing on screen yet. On an in-app agent
              switch the page is KeepAlive-cached and the previous agent stays
              rendered until the new one lands (ent#955: ~100ms); a spinner
@@ -73,7 +73,10 @@
           </button>
         </div>
 
-        <div v-if="agent" :class="['ml-16', isFullscreenTab ? 'flex-1 flex flex-col min-h-0' : '']">
+        <!-- `sm:ml-16` makes room for the header avatar that hangs off the card's
+             left edge. Below `sm` the avatar sits inside the card, so the page
+             keeps its full width (#3542). -->
+        <div v-if="agent" :class="['sm:ml-16', isFullscreenTab ? 'flex-1 flex flex-col min-h-0' : isBoundedTab ? BOUNDED_LINK : '']">
           <!-- Agent Header Component -->
           <AgentHeader
             :agent="agent"
@@ -112,7 +115,7 @@
           />
 
           <!-- Tabs -->
-          <div :class="['bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : '']">
+          <div :class="['bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : isBoundedTab ? BOUNDED_LINK : '']" data-testid="agent-tabs">
             <!-- #1114: tabs overflow into a "More ▾" dropdown instead of horizontal scroll -->
             <!-- trinity-enterprise#887: Settings is pinned at the end of the
                  strip, outside the overflow — the one configuration home is
@@ -139,7 +142,7 @@
             <!-- Tasks Tab Content (#1500: fullscreen flex-fill like Chat; padding
                  lives on TasksPanel's scroll root so content scrolls under it) -->
             <div v-if="activeTab === 'tasks'" class="flex-1 min-h-0 flex flex-col overflow-hidden">
-              <TasksPanel :agent-name="agent.name" :agent-status="agent.status" :highlight-execution-id="route.query.execution" :initial-message="taskPrefillMessage" @create-schedule="handleCreateSchedule" />
+              <TasksPanel :agent-name="agent.name" :agent-status="agent.status" :highlight-execution-id="route.query.execution" :initial-message="taskPrefillMessage" :own-rows-only="!agent.can_share" @create-schedule="handleCreateSchedule" />
             </div>
 
             <!-- Chat Tab Content.
@@ -188,9 +191,13 @@
                    with no `dashboard.yaml`, which is precisely the agent this
                    surface exists for. Mounted first so the declared numbers
                    lead. -->
+              <!-- trinity-enterprise#1006: an owner sees the tiles with no
+                   metrics declared too — the empty state is where they
+                   declare the first one. -->
               <DeclaredMetricsTiles
-                v-if="hasDeclaredMetrics"
+                v-if="hasDeclaredMetrics || canManageMetrics"
                 :agent-name="agent.name"
+                :can-manage="canManageMetrics"
               />
               <DashboardPanel
                 :agent-name="agent.name"
@@ -210,6 +217,7 @@
             <!-- Nevermined Payments Tab Content -->
             <div v-if="activeTab === 'nevermined'">
               <NeverminedPanel :agent-name="agent.name" :can-edit="agent.can_share" />
+              <NeverminedSpendingPanel :agent-name="agent.name" :can-edit="agent.can_share" :agent-status="agent.status" :notify="showNotification" />
             </div>
 
             <!-- A2A Tab Content (trinity-enterprise#158) -->
@@ -217,8 +225,8 @@
               <A2aPanel :agent-name="agent.name" :notify="showNotification" />
             </div>
 
-            <!-- Sharing Tab Content -->
-            <div v-if="activeTab === 'sharing' && agent.can_share">
+            <!-- Channels Tab Content (ent#225: formerly Sharing) -->
+            <div v-if="activeTab === 'channels' && agent.can_share">
               <SharingPanel
                 :agent-name="agent.name"
                 :shares="agent.shares"
@@ -258,7 +266,7 @@
 
             <!-- Skills Tab Content (trinity-enterprise#754: own + shared skills,
                  Run, Requires approval — it absorbed the Playbooks tab) -->
-            <div v-if="activeTab === 'skills'" class="p-6">
+            <div v-if="activeTab === 'skills'" class="p-6 grow basis-0 flex flex-col">
               <SkillsTab
                 :agent-name="agent.name"
                 :agent-status="agent.status"
@@ -311,7 +319,6 @@
                     :auth-status="authStatus"
                     :subscriptions="availableSubscriptions"
                     :subscription-changing="subscriptionChanging"
-                    :read-only-loading="readOnlyLoading"
                     :tags="agentTags"
                     :all-tags="allTags"
                     :resource-limits="resourceLimits"
@@ -327,11 +334,15 @@
                     @add-tag="addTag"
                     @remove-tag="removeTag"
                     @change-subscription="changeSubscription"
-                    @toggle-read-only="toggleReadOnly"
                     @save-resources="saveResourceLimits"
                     @delete="deleteAgent"
                     @navigate-tab="handleOverviewNavigate"
                     @info-item-click="handleInfoItemClick"
+                  />
+                  <CredentialsPane
+                    v-else-if="section === 'credentials'"
+                    :agent-name="agent.name"
+                    :agent-status="agent.status"
                   />
                   <GuardrailsPane
                     v-else-if="section === 'guardrails'"
@@ -339,13 +350,15 @@
                     :autonomy-enabled="!!agent.autonomy_enabled"
                     :is-system="!!agent.is_system"
                     :notify="showNotification"
+                    :tool-access-profile="agent.tool_access_profile || ''"
                     @navigate-tab="handleOverviewNavigate"
+                    @tool-access-saved="onToolAccessSaved"
                   />
                   <PeoplePane v-else-if="section === 'people'" :agent-name="agent.name" :agent-owner="agent.owner" />
                   <ChannelsPane
                     v-else-if="section === 'channels'"
                     :agent-name="agent.name"
-                    :has-sharing-tab="visibleTabIds.includes('sharing')"
+                    :has-channels-tab="visibleTabIds.includes('channels')"
                     @navigate-tab="handleOverviewNavigate"
                   />
                   <IntegrationsPane
@@ -415,6 +428,7 @@ import { emotionCacheVersion, emotionAvatarUrl as buildEmotionUrl } from '../uti
 import { buildTabs, TAB_ALIASES } from '../utils/agentTabs'
 import { settingsSections, LEGACY_TAB_SECTIONS } from '../utils/agentSettings'
 import { useAgentRestartStore } from '../stores/agentRestart'
+import { isStrict, toggleMessage } from '../utils/toolAccess'
 import NavBar from '../components/NavBar.vue'
 
 // Component name for KeepAlive matching
@@ -439,6 +453,7 @@ import DeclaredMetricsTiles from '../components/DeclaredMetricsTiles.vue'
 // trinity-enterprise#887/#888/#890/#891 — the Settings home and its panes
 import AgentSettingsHome from '../components/agent-settings/AgentSettingsHome.vue'
 import GeneralPane from '../components/agent-settings/GeneralPane.vue'
+import CredentialsPane from '../components/agent-settings/CredentialsPane.vue'
 import GuardrailsPane from '../components/agent-settings/GuardrailsPane.vue'
 import PeoplePane from '../components/agent-settings/PeoplePane.vue'
 import ChannelsPane from '../components/agent-settings/ChannelsPane.vue'
@@ -457,6 +472,7 @@ import TerminalPanelContent from '../components/TerminalPanelContent.vue'
 import SkillsTab from '../components/skills/SkillsTab.vue'  // trinity-enterprise#754
 import ChatPanel from '../components/ChatPanel.vue'
 import NeverminedPanel from '../components/NeverminedPanel.vue'
+import NeverminedSpendingPanel from '../components/NeverminedSpendingPanel.vue'
 import A2aPanel from '../components/A2aPanel.vue'  // trinity-enterprise#158: A2A config tab
 import OverflowTabs from '../components/OverflowTabs.vue'  // #1114: tab overflow dropdown
 
@@ -549,7 +565,9 @@ let skipNextActivation = false
 // two hooks can't drift again.
 //
 function applyDeepLinkRouting() {
-  const resolvedTab = route.query.tab ? resolveDeepLinkTab(route.query.tab) : null
+  // ent#967 (D30): Nevermined's redirect return carries no `tab` (its returnUrl takes no query).
+  const tab = route.query.tab ?? (route.query.delegationId && route.query.state ? 'nevermined' : undefined)
+  const resolvedTab = tab ? resolveDeepLinkTab(tab) : null
   // #2900: no tab named (or one that names nothing). The view is KeepAlive-
   // cached, so it may be showing a tab remembered from the last visit — make
   // the URL say so, or a reload would land somewhere else.
@@ -608,6 +626,18 @@ function redirectRetiredSessionLink() {
 // `flex-1 min-h-0 overflow-y-auto` scroll region (see TasksPanel).
 const FULLSCREEN_TABS = ['chat', 'tasks']
 const isFullscreenTab = computed(() => FULLSCREEN_TABS.includes(activeTab.value))
+// trinity#3448: a tab whose list scrolls in a BoundedRegion that fills the window.
+// Unlike a fullscreen tab the page is `min-h-dvh`, so on a short window it scrolls
+// by the shortfall rather than clipping the region's 20rem floor. Every element
+// from the root down to the region is a flex column growing from a 0px basis:
+// never `flex-1`, which regrows the page here (see BoundedRegion).
+const BOUNDED_TABS = ['skills']
+const BOUNDED_LINK = 'grow basis-0 flex flex-col'
+const isBoundedTab = computed(() => BOUNDED_TABS.includes(activeTab.value))
+const tabLayoutClass = computed(() => {
+  if (isFullscreenTab.value) return 'flex-1 flex flex-col overflow-hidden'
+  return isBoundedTab.value ? BOUNDED_LINK : 'overflow-visible'
+})
 const showAvatarModal = ref(false)
 const avatarIdentityPrompt = ref('')
 const avatarHasReference = ref(false)
@@ -624,6 +654,9 @@ const hasDashboard = ref(false)
 // as tiles with no `dashboard.yaml` at all, and both flags arrive from the same
 // DB-only /exists probe, so this is never a second request.
 const hasDeclaredMetrics = ref(false)
+// Owner tier — the same `can_share` flag the owner-only tabs read; the
+// declaration routes enforce it server-side (trinity-enterprise#1006).
+const canManageMetrics = computed(() => Boolean(agent.value?.can_share) && !agent.value?.is_system)
 // #58 (trinity-enterprise) — Brain Orb: per-agent half of the gate. True when the
 // agent's template.yaml declares the generalizable `brain-orb` capability token.
 const hasBrainOrb = ref(false)
@@ -771,44 +804,34 @@ async function toggleAutonomy() {
   }
 }
 
+// trinity-enterprise#341: the header's Read-only toggle is the shortcut to the
+// Strict read-only tool-access profile — ON selects it, OFF returns to the
+// profile the agent had before. Through the store (Invariant #7).
 async function toggleReadOnly() {
   if (!agent.value || readOnlyLoading.value) return
 
   readOnlyLoading.value = true
-  const newState = !agent.value.read_only_enabled
+  const name = agent.value.name
 
   try {
-    const response = await fetch(`/api/agents/${agent.value.name}/read-only`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${readStoredToken()}`
-      },
-      body: JSON.stringify({ enabled: newState })
-    })
-
-    if (!response.ok) {
-      const error = await response.json()
-      throw new Error(error.detail || 'Failed to update read-only mode')
-    }
-
-    const result = await response.json()
-
-    // Update local state
-    agent.value.read_only_enabled = newState
-
-    showNotification(
-      newState
-        ? `Read-only mode enabled. Agent cannot modify source files.${result.hooks_injected ? '' : ' Hooks will be applied on next agent start.'}`
-        : 'Read-only mode disabled. Agent can modify all files.',
-      'success'
-    )
+    const result = await agentsStore.setReadOnly(name, !isStrict(agent.value))
+    if (agent.value?.name !== name) return
+    agent.value.tool_access_profile = result.profile
+    agent.value.read_only_enabled = result.read_only_layer
+    restartStore.report(name, 'tool-access', 'Tool access', !!result.restart_required)
+    showNotification(toggleMessage(result, agent.value.display_label || name), 'success')
   } catch (error) {
-    console.error('Failed to toggle read-only mode:', error)
-    showNotification(error.message || 'Failed to update read-only mode', 'error')
+    showNotification(error.response?.data?.detail || error.message || 'Failed to update read-only mode', 'error')
   } finally {
     readOnlyLoading.value = false
   }
+}
+
+// A Tool access save in Settings: the header's Read-only toggle follows it.
+function onToolAccessSaved(view) {
+  if (!agent.value || !view || view.agent_name !== agent.value.name) return
+  agent.value.tool_access_profile = view.profile
+  agent.value.read_only_enabled = view.read_only
 }
 
 // Toggle running state (start/stop)
@@ -1629,7 +1652,7 @@ onActivated(async () => {
   // reconcileDeepLinkVisibility reads `deepLinkedTab`, acts, and clears it — so
   // running it here, before onMounted's awaits have loaded the agent, would
   // evaluate `visibleTabs` against `agent.value === null`, decide that
-  // ?tab=sharing / ?tab=brain are "not visible", fall back to Overview, and
+  // ?tab=channels / ?tab=brain are "not visible", fall back to Overview, and
   // clear the flag so onMounted's own later call becomes a no-op. That
   // regresses #2130 and #2153 and no request-count assertion would see it.
   if (isInitialActivation) return

@@ -98,17 +98,19 @@ def _maintenance_phase():
 def test_startup_registers_the_skill_gate_ending_observer(monkeypatch):
     import services.ask_service as ask_service
     import services.skill_gate_service as sgs
+    from shared_sessions import service as rooms
 
     monkeypatch.setattr(ask_service, "_observers", [])
     phase, started, logger = _maintenance_phase()
     asyncio.run(phase())
     assert "operator_queue" in started                      # the slice really ran
-    assert ask_service._observers == [sgs.on_ending]
+    # abilityai/trinity-enterprise#1135: the rooms' ending line, after the gate
+    assert ask_service._observers == [sgs.on_ending, rooms.on_ask_ending]
     logger.error.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# 3. operator_queue_service.py — the poll cycle runs the sweep
+# 3. operator_queue_service/poller.py — the poll cycle runs the sweep
 # ---------------------------------------------------------------------------
 
 def test_every_leader_poll_cycle_runs_the_skill_gate_sweep(monkeypatch):
@@ -125,8 +127,8 @@ def test_every_leader_poll_cycle_runs_the_skill_gate_sweep(monkeypatch):
     db = MagicMock()
     db.mark_operator_queue_unconfirmed.return_value = 0
     db.mark_operator_queue_undelivered_for_stopped_agents.return_value = []
-    monkeypatch.setattr(oqs, "db", db)
-    monkeypatch.setattr(oqs, "ask_service", SimpleNamespace(expire=lambda: SimpleNamespace(rows=[])))
+    monkeypatch.setattr(oqs.deps, "db", db)
+    monkeypatch.setattr(oqs.deps, "ask_service", SimpleNamespace(expire=lambda: SimpleNamespace(rows=[])))
     monkeypatch.setitem(sys.modules, "services.docker_service",
                         SimpleNamespace(agent_container_states=lambda: {}))
     ws = MagicMock()

@@ -88,6 +88,108 @@ Shared User (view-only)
     Frontend shows read-only view with disabled form controls
 ```
 
+## Flow: Fund an agent with a card (ent#965/#966)
+
+The **buyer** side, beside the paywall above: a person funds one agent with a
+card mandate **held by Nevermined**. Nevermined stores the card, holds the
+mandate and settles every purchase; Trinity stores the delegation id it was
+handed, gives the agent its `NVM_*` keys, reads the budget back live from
+Nevermined and revokes the mandate at Nevermined on request.
+
+```
+Admin (once per instance)
+    PUT /api/nevermined/organization   {org_id, environment, widget_secret, agent_api_key}
+    ├─ require_admin
+    └─ one AES-256-GCM envelope in nevermined_organization (secrets write-only)
+
+Owner (ent#967 panel)
+    POST /api/nevermined/agents/{agent_name}/widget-session      require_person + owner
+    ├─ 409 nevermined_not_configured · 422 email_required · rate limit nvm-session
+    └─ delegation_slot() → Nevermined POST /api/v1/widgets/session {orgId, email, rawSecret}
+       → 200 {session, environment, org_id}  + Cache-Control: no-store
+    (the Nevermined widget enrols the card and creates the delegation in the browser)
+
+    POST /api/nevermined/agents/{agent_name}/delegation  {delegationId, paymentMethodId?, provider?}
+    ├─ 409 nevermined_not_configured → rate limit nvm-bind 10/min (before anything upstream)
+    ├─ active row exists → 409 delegation_active (no upstream call, no env read/write)
+    ├─ agent stopped → 409 agent_not_running
+    ├─ delegation_slot() → ONE Nevermined GET /api/v1/delegation/{id}/transactions
+    │     404 → 422 delegation_not_found · non-active status → 422 delegation_inactive
+    │     absent status → bind proceeds (live.status "unknown") · timeout → 503 nevermined_unreachable
+    ├─ agent GET /api/credentials/read (.env) — not text (non-UTF-8, read error, image too old
+    │     to report absence) → 409 env_unreadable, no row, no write (ent#1073) — → any NVM_API_KEY value in it that is not the
+    │     organization's agent key (every line, parsed as the agent's reader parses it,
+    │     constant-time) → 409 agent_key_present — no row, no write (R9: Trinity never
+    │     overwrites a key it did not write; its own left-behind key passes)
+    ├─ insert row (api_key_injected = always true since R9; the column stays as the record of
+    │     older or synthetic rows) — partial unique index race → 409 bind_in_progress
+    ├─ re-read .env → agent_env_patch.set_keys(NVM_DELEGATION_ID, NVM_API_KEY, NVM_ENVIRONMENT)
+    │     → agent POST /api/credentials/inject (disallowed_paths policy checked)
+    │     inject fails → delete ONLY the inserted row by id → 503 agent_unreachable
+    └─ audit nevermined_delegation_bind → 201 {…GET shape, effective: "next_execution", api_key_injected}
+
+Owner, shared user, or the agent itself (self only)
+    GET /api/nevermined/agents/{agent_name}/delegation   uniform 404; agent key: own agent only
+    ├─ rate limit nvm-read 30/min; no cache, per-delegation-id single-flight
+    └─ 200 {agent_name, configured, funded, delegation, live, history}
+          live: every number copied from Nevermined (null when absent — never limit − spent);
+          Nevermined down/busy → source "unavailable", status "unknown", numbers null
+
+    DELETE /api/nevermined/agents/{agent_name}/delegation   require_person + owner
+    ├─ no active row → 404 no_active_delegation
+    ├─ delegation_slot() → Nevermined DELETE /api/v1/delegation/{id}  (2xx/404 = revoked;
+    │     else 503/502 and nothing local changes)
+    ├─ row revoked_at/by → best-effort env: remove NVM_DELEGATION_ID (+ NVM_API_KEY,
+    │     NVM_ENVIRONMENT only if a bind introduced them); agent down → env_removed:false + env_note;
+    │     .env not text → env_removed:false, file untouched, env_note "env_unreadable — …" (ent#1073)
+    │     (the delegation id left behind is inert; the organization's agent key is live until the
+    │     next bind rewrites it or a person removes it)
+    └─ audit nevermined_delegation_revoke → 200 {revoked, delegation_id, env_removed, env_note}
+```
+
+The delegation gate (`NEVERMINED_DELEGATION_MAX_INFLIGHT`, default 4) is its own
+semaphore: a polling panel can never hold a slot the paid-chat verify/settle
+path needs.
+
+## Flow: Spending panel and organization form (ent#967)
+
+Frontend only; every call is one of the ent#966 routes above. Nevermined holds
+the card and the mandate; the panel shows Nevermined's card form and records
+the mandate id Nevermined returns.
+
+```
+Settings › Integrations (admin)  components/settings/NeverminedOrganizationPanel.vue
+    GET /api/nevermined/organization → configured / not configured (never a secret)
+    Save → PUT {org_id, environment, widget_secret?, agent_api_key?}
+           not configured: both secrets required · configured: an empty field is omitted (kept)
+           environment change → ConfirmDialog; Cancel resets the select
+    Remove → ConfirmDialog (danger) → DELETE · 409 delegations_active names the count
+
+Agent › Payments  components/NeverminedSpendingPanel.vue  (rules: utils/neverminedSpending.js)
+    GET …/delegation → loading | failed | not_configured | not_funded | funded | funded_unavailable
+    not_funded + owner + running → Enroll
+      POST …/widget-session → unwrapSession → NeverminedWidgets.initialize (SDK 1.80.0, dynamic import)
+        → hasValidSession (one re-mint) → delegations.setupCard
+           inline in a stable slot (≥ 440 px) | SDK fullscreen overlay (narrower; Esc closes)
+        never booted in 8 s → fallback offer · frame-src CSP violation → offer ("browser blocked")
+        booted, not ready in 15 s → InlineError naming the widget key's allowed origins (no offer)
+      onSuccess {result, handle} → pending persisted (sessionStorage nvm-pending:<agent>)
+        → POST …/delegation → 201 renders FUNDED (no re-read) → handle.close() → destroy
+        refused → pending kept; Retry bind (same ids, form not remounted);
+                  429/503 → Retry bind disabled for Retry-After seconds
+    fallback "Continue on Nevermined" → fresh widget-session → nonce (sessionStorage nvm-redirect:<agent>)
+        → embed.nevermined.app/cards/setup?sessionToken&returnUrl=<origin>/agents/<name>&state&provider=stripe
+    redirect return (?paymentMethodId&delegationId&state; AgentDetail maps it to the Payments tab)
+        → state = this tab's nonce (≤ 30 min) → bind as above; else "Nothing was bound"
+        → router.replace strips the three keys (explicit undefined), tab untouched
+    funded → Nevermined's live numbers; Revoke → ConfirmDialog → DELETE → env_note verbatim → re-read
+```
+
+CSP: `frame-src` lists `https://embed.nevermined.app`; `connect-src` lists both
+Nevermined API hosts (the SDK refreshes its session with a browser fetch). Both
+header copies (`vite.config.js`, `security-headers.conf`) are pinned equal by
+`tests/unit/cspMirrors.spec.js`; `Permissions-Policy: payment=()` stays.
+
 ## Files
 
 ### Backend
@@ -105,17 +207,25 @@ Shared User (view-only)
 | `src/backend/db/schema.py` | Table definitions |
 | `src/backend/db/migrations.py` | Migration #23 |
 | `src/backend/database.py` | Delegate methods |
+| `src/backend/routers/nevermined_delegation.py` | Card delegation routes (ent#966): organization, widget session, bind/read/revoke |
+| `src/backend/services/nevermined_delegation_service.py` | Nevermined upstream calls under `delegation_slot()`, bind/revoke orchestration, live read-back |
+| `src/backend/services/agent_env_patch.py` | Set/remove keys in an agent `.env` without touching other lines |
+| `src/backend/db/nevermined_delegation.py` | `NeverminedDelegationOperations` — organization envelope + `agent_delegations` rows |
+| `src/backend/migrations/versions/0102_nevermined_delegations.py` | Alembic revision (SQLite: `nevermined_delegations` in `migrations.py`) |
 
 ### Frontend
 | File | Purpose |
 |------|---------|
 | `src/frontend/src/components/NeverminedPanel.vue` | Payments tab component |
+| `src/frontend/src/components/NeverminedSpendingPanel.vue` | Payments tab › Spending: enroll a card with Nevermined, bind, retry, revoke (ent#967) |
+| `src/frontend/src/utils/neverminedSpending.js` | The panel's pure rules: state, recovery by code, money, redirect URL + nonce, copy |
+| `src/frontend/src/components/settings/NeverminedOrganizationPanel.vue` | Settings › Integrations: the instance's Nevermined organization (admin) |
 | `src/frontend/src/views/AgentDetail.vue` | Tab registration |
 
 ### MCP
 | File | Purpose |
 |------|---------|
-| `src/mcp-server/src/tools/nevermined.ts` | 4 MCP tools |
+| `src/mcp-server/src/tools/nevermined.ts` | 6 MCP tools (4 provider-side, 2 card-mandate — ent#966) |
 | `src/mcp-server/src/client.ts` | API methods |
 | `src/mcp-server/src/server.ts` | Tool registration |
 
@@ -123,6 +233,8 @@ Shared User (view-only)
 
 - **nevermined_agent_config** — Per-agent config with encrypted `NVM_API_KEY`
 - **nevermined_payment_log** — Audit trail of verify/settle/reject/settle_failed actions
+- **nevermined_organization** — Singleton (`id='default'`): `org_id`, `environment`, encrypted envelope `{widget_secret, agent_api_key}` (ent#966)
+- **agent_delegations** — One row per binding: `delegation_id`, `payment_method_id`, `provider`, `environment`, `api_key_injected`, `created_by/at`, `revoked_at/by`, `agent_deleted_at`. Partial unique index: one active row per agent (`revoked_at IS NULL AND agent_deleted_at IS NULL`); rows KEEP on agent delete (ent#966)
 
 ## API Endpoints
 
@@ -137,16 +249,23 @@ Shared User (view-only)
 | `PUT` | `/api/nevermined/agents/{name}/config/toggle` | JWT (owner) | Enable/disable |
 | `GET` | `/api/nevermined/agents/{name}/payments` | JWT (shared+) | Payment history |
 | `GET` | `/api/nevermined/settlement-failures` | Admin | Failed settlements |
+| `GET`/`PUT`/`DELETE` | `/api/nevermined/organization` | Admin | The instance's Nevermined organization (ent#966); secrets write-only; 409 `delegations_active` guards environment change, key rotation and delete |
+| `POST` | `/api/nevermined/agents/{agent_name}/widget-session` | Person + owner | Mint a Nevermined widget session for the signed-in person; `Cache-Control: no-store` |
+| `POST` | `/api/nevermined/agents/{agent_name}/delegation` | Person + owner | Bind the Nevermined delegation (201); 409 `delegation_active` / `bind_in_progress` / `agent_not_running` |
+| `GET` | `/api/nevermined/agents/{agent_name}/delegation` | JWT (shared+), agent key self only | Binding + live budget from Nevermined; `agent_name` in every shape; uniform 404 |
+| `DELETE` | `/api/nevermined/agents/{agent_name}/delegation` | Person + owner | Revoke the mandate at Nevermined, then the row and the agent's `NVM_*` keys |
 | `POST` | `/api/nevermined/retry-settlement/{log_id}` | Admin | Honest **501** (#1018) — server-side retry unsupported (token not stored); client re-presents `payment-signature`. Durable retry = Tier 2 follow-up |
 
 ## MCP Tools
 
 | Tool | Description |
 |------|-------------|
-| `configure_nevermined` | Set up payment config |
+| `configure_nevermined` | Set up payment config. The route takes a signed-in session, so the tool is listed to no MCP key (trinity-enterprise#719) |
 | `get_nevermined_config` | Read config (no key) |
-| `toggle_nevermined` | Enable/disable |
+| `toggle_nevermined` | Enable/disable. Listed to a person's own user-scoped key only (trinity-enterprise#719) |
 | `get_nevermined_payments` | Payment history |
+| `get_agent_spending` | What the agent can still spend from its Nevermined card mandate — live from Nevermined; agent keys own agent only (ent#966) |
+| `revoke_agent_delegation` | Revoke the agent's Nevermined card mandate — owner or admin, as a person; listed to a person's own user-scoped key only, so agent and system sessions are not shown it (ent#966, trinity-enterprise#719) |
 
 ## Error Handling
 
@@ -262,6 +381,7 @@ production there is one loop per worker and the bound is per worker.
 
 | Issue | Change |
 |-------|--------|
+| ent#966 | **Fund an agent with a card.** Nevermined organization (admin), widget-session mint, bind/read/revoke of one card mandate per agent (Nevermined holds the card and the mandate; Trinity stores the delegation id and injects `NVM_DELEGATION_ID`/`NVM_API_KEY`/`NVM_ENVIRONMENT`), its own `delegation_slot()` gate, MCP `get_agent_spending` / `revoke_agent_delegation`. Tables `nevermined_organization` + `agent_delegations` (Alembic `0102`). Requirement: `requirements/public-access.md` §23.8 |
 | [#3215](https://github.com/abilityai/trinity/issues/3215) | Card (fiat) plans are payable: the plan's x402 scheme reaches the facilitator (token-derived on the money path, plan-derived for the 402 and `/info`); one shared public origin for `resource.url` with an `X-Forwarded-Proto` upgrade and the nginx `$fwd_proto` map; the A2A reply Task mirrors its x402 metadata onto the top-level `metadata` |
 | #1018 | **Settlement-ordering / honest status.** Settle-fail → `success_unsettled` (was lying `"success"`); concurrent effect-guard settle → `settle_in_progress:true`; wired `Idempotency-Key` keyed on `(payment-signature ∥ message)` with in-flight-409 / settled-verbatim-replay / unsettled-re-drive-and-converge (`_finalize_settled` + `upgrade_snapshot`); `fail()` on 403/exception/failed paths; stop leaking the body on `failed` executions (keep it on `cancelled`); `/retry-settlement` stub → honest 501. Tier 2 durable stored-credential retry split to a follow-up. |
 | ent#679 | **The same paywall on the A2A door.** `paid.py`'s 402/verify/settle orchestration extracted to `services/paid_turn_service.py` (behaviour-preserving) and reused by `POST /a2a/{name}`; metadata-first token carriage with the `payment-signature` header as deprecated fallback; the priced agent's A2A card declares its plan; `credits_per_request` accepts **0** for a duration plan (a negative is still a named 422). No migration. Requirement: `requirements/mcp.md` §32.6. |

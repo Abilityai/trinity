@@ -125,6 +125,8 @@ export interface RunAgentChatParams {
    *  dispatches default to the platform turn without it); `manual` opts out.
    *  Which id goes out is `resolveReportBack`'s call — the header turn wins. */
   execution_id?: string;
+  /** ent#1105: the project to attribute the run to; forwarded only when set. */
+  project_id?: string;
 }
 
 /**
@@ -164,7 +166,7 @@ function asyncReceipt<T extends object>(agent: string, response: T): T {
   if (r.status === "accepted") {
     lead = `Accepted by '${agent}' as ${id} — it may still be running or already done.`;
   } else if (r.status === "queued") {
-    lead = `Queued on '${agent}' as ${id} while it was at capacity — it may have run since.`;
+    lead = `Queued on '${agent}' as ${id} — it may have run since.`;
   } else if (r.status === "queued_timeout" && !String(r.message ?? "").includes("Do not re-send:")) {
     lead = `The platform stopped waiting for ${id} on '${agent}' — it may still be running.`;
   } else {
@@ -249,9 +251,29 @@ export const REPORT_BACK_DEFAULT_NOTE =
   "Report-back is on by default: when this run ends it posts its outcome into the Slack, Telegram or " +
   "Workspace conversation your turn is serving, if there is one and it allows such notes, possibly after " +
   "your reply; runs it delegates onward may post too. If you follow up yourself (or set a reminder to), add " +
-  "what is new; do not repeat the outcome. A repeat of an earlier identical request reports where that run " +
-  "was asked to; never re-send or reword this call to change that. To stop it on a later call, pass " +
-  "execution_id=\"manual\".";
+  "what is new; do not repeat the outcome. Repeating this exact call from this same turn replays this run " +
+  "instead of starting another; never re-send or reword this call to change that. To stop it on a later call, " +
+  "pass execution_id=\"manual\".";
+
+/**
+ * #3296: on a receipt the backend REPLAYED. Keys are scoped to the caller's
+ * turn, so a replay only answers a repeat from this same turn — the run it
+ * names was asked to report here. What it must not claim is a fresh request.
+ */
+export const REPORT_BACK_REPLAY_NOTE =
+  "This repeats an earlier identical call from this same turn (or an earlier attempt of this run): no new " +
+  "run was started, and the receipt names that earlier run. It reports into this conversation once when it " +
+  "ends, and may already have. Do not re-send this one.";
+
+/**
+ * #3296 review: a replay on the TYPED arm. The key does not carry a typed id
+ * (Invariant #18), so with no header turn two typed ids collapse onto one key,
+ * and the replayed run reports into the parent the FIRST call named.
+ */
+export const REPORT_BACK_TYPED_REPLAY_NOTE =
+  "This repeats an earlier identical call: no new run was started, and the receipt names that earlier " +
+  "run. It reports once, into the execution the earlier call named, which may not be the one you named " +
+  "now. Do not re-send this one.";
 
 /**
  * On `report_back: off` results of an opted-in call. Future-only, and never on a
@@ -359,6 +381,16 @@ export function resolveReportBack(input: ReportBackInput): ReportBackDecision {
 }
 
 /**
+ * ent#1102: put the wake fields on a result the call answered with, beside the
+ * report-back fields and under the same rule — gate results, depth refusals and
+ * thrown errors stay byte-unchanged, because none of them is a dispatch and
+ * nothing will end.
+ */
+function withWake<T extends object>(result: T, fields: WakeFields | undefined): T {
+  return fields ? { ...result, ...fields } : result;
+}
+
+/**
  * #3232: put the report-back fields on a result the call answered with. Never
  * called for gate results, depth refusals or thrown errors — those stay
  * byte-unchanged. The remedy note on `off` is left off `queued_timeout` /
@@ -366,12 +398,164 @@ export function resolveReportBack(input: ReportBackInput): ReportBackDecision {
  */
 function withReportBack<T extends object>(result: T, fields: ReportBackFields | undefined): T {
   if (!fields) return result;
+  // #3296: a replayed receipt says it repeats an earlier run rather than
+  // reading as a fresh request. A typed-arm `requested` carries no note on a
+  // fresh run (the caller asked); on a replay it says where the report goes,
+  // since the replayed run reports into the parent the FIRST call named.
+  if (
+    fields.report_back === "requested" &&
+    (result as { idempotent_replay?: unknown }).idempotent_replay === true
+  ) {
+    const note = fields.report_back_note !== undefined ? REPORT_BACK_REPLAY_NOTE : REPORT_BACK_TYPED_REPLAY_NOTE;
+    return { ...result, ...fields, report_back_note: note };
+  }
   const status = (result as { status?: unknown }).status;
   if (fields.report_back === "off" && (status === "queued_timeout" || status === "agent_busy" || status === "rate_limited")) {
     const { report_back_note: _note, ...rest } = fields;
     return { ...result, ...rest };
   }
   return { ...result, ...fields };
+}
+
+/**
+ * #3296 review: the turn a delegation's idempotency key is scoped to — the
+ * retry chain's ORIGINAL execution when the caller's turn is a scheduler retry
+ * (the backend links each retry to it in `retry_of_execution_id`), else the
+ * turn itself. Read from the caller's own execution row; any failure to read
+ * it falls back to the turn (the #3296 behaviour: a retry then runs a second
+ * child rather than the call failing). No turn → undefined, so the key stays
+ * byte-identical to the pre-#3296 one.
+ */
+export async function delegationTurnScope(
+  apiClient: TrinityClient,
+  sourceAgent: string | undefined,
+  callerTurn: string | undefined,
+): Promise<string | undefined> {
+  if (!callerTurn || !sourceAgent) return callerTurn;
+  try {
+    const row = await apiClient.getExecution(sourceAgent, callerTurn);
+    const root = row?.retry_of_execution_id;
+    return typeof root === "string" && root.length > 0 ? root : callerTurn;
+  } catch (err) {
+    console.warn(
+      `[#3296] retry-chain lookup failed for ${sourceAgent}/${callerTurn}; scoping to the turn: ${String(err)}`,
+    );
+    return callerTurn;
+  }
+}
+
+/**
+ * ent#1102 — what the receipt says about the WAKE: whether the caller will be
+ * told the run ended, or has to come back for it itself.
+ *
+ * The backend now dispatches a turn on the caller when a delegated run reaches
+ * a terminal (`caller_wake_service`), so "set a reminder and poll" is no longer
+ * the only way to learn an outcome — and for a run that will be reported it is
+ * the wrong move. The delegation contract teaches the field; this decides it.
+ *
+ * Pure, and deliberately silent when it cannot know. Four stand-downs are
+ * knowable right here, whatever the policy says — there is nobody to wake, or
+ * nothing ran, or the caller already holds the reply, or the ending has its own
+ * reaction (a self-task's caller IS the callee; a `fan_out` leg ends into the
+ * batch join, #2524). The POLICY is the backend's to report, because only it
+ * reads the per-agent flag and the instance default: `policyEnabled` is what
+ * the dispatch answer said. When the answer carries no opinion we return
+ * `undefined` and the receipt makes NO claim, rather than promising a wake that
+ * an owner may have switched off — a receipt that says `on_ending` and then
+ * goes quiet costs exactly what ent#1102 set out to remove.
+ */
+export type WakeValue = "on_ending" | "none";
+export type WakeReason =
+  | "nothing_ran"
+  | "answered_inline"
+  | "self_task"
+  | "fan_out"
+  | "no_caller"
+  | "opted_out";
+export interface WakeFields {
+  wake: WakeValue;
+  wake_reason?: WakeReason;
+}
+export interface WakeInput {
+  /** How the call ended — the same three outcomes report-back reads. */
+  outcome: ChatOutcome;
+  /** Is there an agent to wake? A human's call has nobody to tell. */
+  hasCaller: boolean;
+  /** The caller dispatched to itself: the wake would be its own ending. */
+  isSelfTask: boolean;
+  /** A `fan_out` leg; the batch join is the ending's own reaction. */
+  batch?: boolean;
+  /** What the dispatch answer said about this caller's wake policy. */
+  policyEnabled?: boolean;
+}
+
+/**
+ * ent#1102 — the policy out of a backend dispatch answer.
+ *
+ * The backend stamps `wake_on_ending: {effective, source}` on every receipt it
+ * answers a delegation with (`chat_execution_service._wake_on_ending_receipt`),
+ * the same shape `get_agent_info` publishes. An answer without the key carries
+ * no opinion — a human's call, a self-task, a receipt this MCP server
+ * synthesised itself when its own fetch timed out — and `undefined` keeps the
+ * receipt silent rather than guessing.
+ *
+ * A bare boolean is accepted as well: it is what a backend older than ent#1102
+ * would send if the field were ever flattened, and reading the object's
+ * truthiness instead of its `effective` would turn `{effective: false}` into a
+ * promised wake — the one misreading that costs the caller a turn it was told
+ * to expect and never gets.
+ */
+export function wakePolicyFromAnswer(answer?: unknown): boolean | undefined {
+  if (!answer || typeof answer !== "object") return undefined;
+  const raw = (answer as { wake_on_ending?: unknown }).wake_on_ending;
+  if (typeof raw === "boolean") return raw;
+  if (raw && typeof raw === "object" && "effective" in raw) {
+    return Boolean((raw as { effective?: unknown }).effective);
+  }
+  return undefined;
+}
+
+export function resolveWake(input: WakeInput): WakeFields | undefined {
+  const no = (wake_reason: WakeReason): WakeFields => ({ wake: "none", wake_reason });
+  if (!input.hasCaller) return no("no_caller");
+  if (input.outcome === "busy") return no("nothing_ran");
+  if (input.outcome === "inline") return no("answered_inline");
+  if (input.isSelfTask) return no("self_task");
+  if (input.batch) return no("fan_out");
+  if (input.policyEnabled === false) return no("opted_out");
+  if (input.policyEnabled === true) return { wake: "on_ending" };
+  return undefined;
+}
+
+/**
+ * The three `none` reasons a RECEIPT stays silent about, for the same reason
+ * `chatRouteFields` prints nothing on a default-armed inline answer: the caller
+ * has no wake expectation to correct, so the field would be noise on a result
+ * that is otherwise byte-unchanged. A person's call has no agent to wake; a
+ * call that answered inline already carries the reply the wake would announce;
+ * a self-task's caller IS the callee and is the one turn in the system that
+ * cannot be waiting on itself.
+ *
+ * The decision above still names them — it is the full verdict, and the places
+ * that EXPLAIN a wake (audit rows, `get_agent_info`) want the reason even when
+ * the receipt does not print it. Only `nothing_ran`, `fan_out` and `opted_out`
+ * reach a caller that dispatched to a sibling and would otherwise be entitled
+ * to expect a turn.
+ */
+const WAKE_REASONS_THE_RECEIPT_KEEPS_QUIET = new Set<WakeReason>([
+  "no_caller",
+  "answered_inline",
+  "self_task",
+]);
+
+/** What `resolveWake`'s verdict puts on the result the call answers with. */
+export function wakeReceiptFields(input: WakeInput): WakeFields | undefined {
+  const verdict = resolveWake(input);
+  if (!verdict) return undefined;
+  if (verdict.wake_reason && WAKE_REASONS_THE_RECEIPT_KEEPS_QUIET.has(verdict.wake_reason)) {
+    return undefined;
+  }
+  return verdict;
 }
 
 /** How a sequential `/chat` call ended, which decides what it says about report-back (#3295). */
@@ -439,6 +623,7 @@ export async function runAgentChat(
     async: asyncMode,
     inject_result,
     chat_session_id,
+    project_id,
   } = params;
 
   // Get auth context from FastMCP session. Read unconditionally (mirrors
@@ -472,6 +657,18 @@ export async function runAgentChat(
 
   // SELF-EXEC-001: Detect self-call (agent calling itself)
   const isSelfTask = sourceAgent !== undefined && sourceAgent === agent_name;
+
+  // ent#1102: the wake fields for whatever this call ends up answering with.
+  // `wake_on_ending` is the dispatch answer's own report of the caller's policy;
+  // an answer that does not carry it leaves the receipt silent rather than
+  // promising a turn the backend may not spend.
+  const wakeFields = (outcome: ChatOutcome, answer?: unknown): WakeFields | undefined =>
+    wakeReceiptFields({
+      outcome,
+      hasCaller: sourceAgent !== undefined,
+      isSelfTask,
+      policyEnabled: wakePolicyFromAnswer(answer),
+    });
 
   // #946 pull pilot: route a SEQUENTIAL agent→agent call through the
   // durable async /task path instead of the synchronous held /chat. Gated
@@ -532,6 +729,23 @@ export async function runAgentChat(
   // in-flight key is invalidated on deploy.
   const routeToken = usePullRouting ? "chat-pull-task" : (parallel ? "task" : "chat");
 
+  // #3296: the turn this delegation is made from is part of its identity. The
+  // same text from a LATER turn is a new delegation that must run and report
+  // into that turn; only a repeat from the same turn (a transport retry) may
+  // replay. The turn is the PLATFORM-stamped one (`callerTurn`, #2392), never
+  // the model-typed `execution_id`: Invariant #18 still holds — a re-send that
+  // only adds, drops or changes report-back (a typed id, `manual`) keeps its
+  // key, so it cannot run the work twice. Appended only when there is a turn,
+  // so a key without one is byte-identical to before and nothing in flight for
+  // user keys or manual sessions is invalidated.
+  //
+  // #3296 review: a scheduler retry is a NEW execution row
+  // (`retry_of_execution_id` → the chain's original), so scoping by the raw
+  // turn made every delegation of a retried scheduled run run a second child.
+  // The scope is the retry chain's original execution, as the backend
+  // records it; attempt 1 and its retries share one key and replay.
+  const turnScope = await delegationTurnScope(apiClient, sourceAgent, callerTurn);
+
   // RELIABILITY-006 (#525): deterministic key so a transport retry of this
   // exact call dedupes at the backend.
   const idempotencyKey = deriveMcpIdempotencyKey([
@@ -541,6 +755,9 @@ export async function runAgentChat(
     model,
     asyncMode ? "async" : "sync",
     message,
+    ...(turnScope ? [`turn:${turnScope}`] : []),
+    // ent#1105: a different project is a different dispatch; absent → key unchanged.
+    ...(project_id ? [`project:${project_id}`] : []),
   ]);
 
   // Use parallel task mode or sequential chat mode based on parameter
@@ -564,6 +781,7 @@ export async function runAgentChat(
         // ent#224/#3232: carry the caller's turn so the child inherits the
         // originating channel/thread and its completion is reported back there.
         parent_execution_id: reportBack.parentExecutionId,
+        ...(project_id ? { project_id } : {}),  // ent#1105
       },
       sourceAgent,
       mcpKeyInfo,
@@ -582,7 +800,7 @@ export async function runAgentChat(
     if ('status' in response && response.status === 'queued_timeout') {
       console.log(`[Task Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#2661)`);
     }
-    return JSON.stringify(withReportBack(asyncReceipt(agent_name, response), reportBack.fields), null, 2);
+    return JSON.stringify(withWake(withReportBack(asyncReceipt(agent_name, response), reportBack.fields), wakeFields("receipt", response)), null, 2);
   }
 
   // #946 pull pilot: agent→agent sequential call routed through the
@@ -599,7 +817,11 @@ export async function runAgentChat(
     const receipt = await apiClient.task(
       agent_name,
       message,
-      { async_mode: true, parent_execution_id: reportBack.parentExecutionId },
+      {
+        async_mode: true,
+        parent_execution_id: reportBack.parentExecutionId,
+        ...(project_id ? { project_id } : {}),  // ent#1105
+      },
       sourceAgent,
       mcpKeyInfo,
       idempotencyKey,
@@ -607,11 +829,11 @@ export async function runAgentChat(
     );
     if (isGateResult(receipt)) return JSON.stringify(receipt, null, 2);
     if (isDepthRefusal(receipt)) return depthRefusalResult(receipt);
-    return JSON.stringify(withReportBack(asyncReceipt(agent_name, receipt), reportBack.fields), null, 2);
+    return JSON.stringify(withWake(withReportBack(asyncReceipt(agent_name, receipt), reportBack.fields), wakeFields("receipt", receipt)), null, 2);
   }
 
   // Sequential chat mode - uses queue, maintains context
-  const response = await apiClient.chat(agent_name, message, sourceAgent, mcpKeyInfo, idempotencyKey, callerTurn);
+  const response = await apiClient.chat(agent_name, message, sourceAgent, mcpKeyInfo, idempotencyKey, callerTurn, project_id);
 
   // trinity-enterprise#751: a gated skill — pending approval or refused by
   // name. Nothing ran; the model must not retry it or report it as done.
@@ -640,7 +862,7 @@ export async function runAgentChat(
         `armed=${armed === undefined ? "unknown" : armed}`,
       );
     }
-    return JSON.stringify(withReportBack(response, chatRouteFields(reportBack, "receipt", armed)), null, 2);
+    return JSON.stringify(withWake(withReportBack(response, chatRouteFields(reportBack, "receipt", armed)), wakeFields("receipt", response)), null, 2);
   }
 
   // #3244: a 429 that is not the admission refusal — the run may have started
@@ -649,13 +871,13 @@ export async function runAgentChat(
   // reads as answered inline, never `requested`.
   if (isRateLimitedRun(response)) {
     console.log(`[Rate Limited] Agent '${agent_name}' answered 429 after dispatch, execution_id=${response.execution_id ?? "unknown"} (#3244)`);
-    return JSON.stringify(withReportBack(response, chatRouteFields(reportBack, "inline")), null, 2);
+    return JSON.stringify(withWake(withReportBack(response, chatRouteFields(reportBack, "inline")), wakeFields("inline", response)), null, 2);
   }
 
   // Check if response is a queue status (agent busy)
   if ('queue_status' in response) {
     console.log(`[Queue Full] Agent '${agent_name}' is busy, queue is full`);
-    return JSON.stringify(withReportBack({
+    return JSON.stringify(withWake(withReportBack({
       status: "agent_busy",
       agent: agent_name,
       queue_status: response.queue_status,
@@ -664,10 +886,10 @@ export async function runAgentChat(
         `Please wait ${response.retry_after} seconds before retrying, or try a different agent. ` +
         `Consider using parallel=true for independent tasks.`,
       details: response.details,
-    }, chatRouteFields(reportBack, "busy")), null, 2);
+    }, chatRouteFields(reportBack, "busy")), wakeFields("busy")), null, 2);
   }
 
-  return JSON.stringify(withReportBack(response, chatRouteFields(reportBack, "inline")), null, 2);
+  return JSON.stringify(withWake(withReportBack(response, chatRouteFields(reportBack, "inline")), wakeFields("inline", response)), null, 2);
 }
 
 /**
@@ -709,9 +931,8 @@ export function createChatTools(
       // delegation-contract.test.ts pins the published length.
       description:
         "Delegate a task to another agent and get back its reply or a receipt." +
-        "\n\n**Modes:** `parallel=false` (default) continues the agent's own chat session, one queue for every " +
-        "caller. `parallel=true` runs a stateless task; several can run at once. `async=true` (with " +
-        "`parallel=true`) answers with a receipt at once.\n\n" +
+        "\n\n**Modes:** `parallel=false` (default) continues the agent's own chat session; `parallel=true` runs " +
+        "a stateless task; `async=true` answers with a receipt at once.\n\n" +
         DELEGATION_CONTRACT,
       parameters: z.object({
         agent_name: z.string().describe("The name of the agent to chat with"),
@@ -791,6 +1012,15 @@ export function createChatTools(
           .string()
           .optional()
           .describe(EXECUTION_ID_PARAM_DESCRIPTION),
+        project_id: z
+          .string()
+          .min(1)
+          .max(64)
+          .optional()
+          .describe(
+            "Optional. The project to attribute this run to. Omit it: the platform attributes a run from your current turn on its own. " +
+            "Refused before anything runs when the platform does not attribute runs to projects or the project does not fit this call."
+          ),
       }),
       execute: async (
         {
@@ -805,6 +1035,7 @@ export function createChatTools(
           inject_result,
           chat_session_id,
           execution_id,
+          project_id,
         }: {
           agent_name: string;
           message: string;
@@ -817,6 +1048,7 @@ export function createChatTools(
           inject_result?: boolean;
           chat_session_id?: string;
           execution_id?: string;
+          project_id?: string;
         },
         context: any
       ) => {
@@ -839,6 +1071,7 @@ export function createChatTools(
             inject_result,
             chat_session_id,
             execution_id,
+            project_id,
           },
           context,
           reportBackEnabled
@@ -979,6 +1212,15 @@ export function createChatTools(
             "Return {fan_out_id, status: 'accepted'} immediately instead of waiting; " +
             "poll get_fan_out_result for the outcome (default: false)"
           ),
+        project_id: z
+          .string()
+          .min(1)
+          .max(64)
+          .optional()
+          .describe(
+            "Optional. The project to attribute every subtask to. Omit it: the platform attributes runs from your current turn on its own. " +
+            "Refused before anything runs when the platform does not attribute runs to projects or the project does not fit this call."
+          ),
       }),
       execute: async (
         {
@@ -990,6 +1232,7 @@ export function createChatTools(
           system_prompt,
           allowed_tools,
           async_mode,
+          project_id,
         }: {
           agent_name: string;
           tasks: Array<{ id: string; message: string }>;
@@ -999,6 +1242,7 @@ export function createChatTools(
           system_prompt?: string;
           allowed_tools?: string[];
           async_mode?: boolean;
+          project_id?: string;
         },
         context: any
       ) => {
@@ -1022,6 +1266,25 @@ export function createChatTools(
 
         console.log(`[Fan-Out] ${sourceAgent || "user"} -> ${agent_name}: ${tasks.length} tasks (concurrency=${max_concurrency || 3})`);
 
+        // #3944 (the #3296 rule, for fan_out): the turn this fan-out is made
+        // from is part of its identity. The same batch from a LATER turn is new
+        // work that must run; only a repeat from the same turn (a transport
+        // retry) may replay. The turn is the PLATFORM-stamped one (#2392), read
+        // from the session as `chat_with_agent` reads it, and scoped to the
+        // retry chain's original execution so a scheduler retry replays
+        // attempt 1's batch instead of dispatching it again. No turn → nothing
+        // appended, so the key is byte-identical to before.
+        const session = context?.session as McpAuthContext | undefined;
+        const callerTurn =
+          session?.executionId && session.executionId !== MANUAL_EXECUTION_ID
+            ? session.executionId
+            : undefined;
+        const turnScope = await delegationTurnScope(
+          apiClient,
+          session?.scope === "agent" ? session.agentName : undefined,
+          callerTurn,
+        );
+
         // RELIABILITY-006 (#525): deterministic key over the whole fan-out so a
         // transport retry replays the original batch instead of re-dispatching.
         const idempotencyKey = deriveMcpIdempotencyKey([
@@ -1033,6 +1296,9 @@ export function createChatTools(
           // #2524: an async call's replay snapshot is the ACCEPTED receipt, so
           // a sync call with the same tasks must not share its key.
           ...(async_mode ? ["async"] : []),
+          ...(turnScope ? [`turn:${turnScope}`] : []),
+          // ent#1105: a different project is a different batch; absent → unchanged.
+          ...(project_id ? [`project:${project_id}`] : []),
         ]);
 
         const response = await apiClient.fanOut(
@@ -1045,6 +1311,7 @@ export function createChatTools(
             system_prompt,
             allowed_tools,
             async_mode,
+            ...(project_id ? { project_id } : {}),  // ent#1105
           },
           sourceAgent,
           mcpKeyInfo,

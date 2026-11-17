@@ -56,7 +56,7 @@ def _expect_403(fn, *args):
 
 
 # --------------------------------------------------------------------------- #
-# The five fences
+# The six fences
 # --------------------------------------------------------------------------- #
 
 def test_ephemeral_fence_reads_routed_path(monkeypatch):
@@ -72,6 +72,24 @@ def test_ops_fence_reads_routed_path():
     fence = deps._enforce_ops_key_fence
     fence(_honest("GET", "/api/version"))  # control: allowed
     _expect_403(fence, _crafted("GET", "/api/settings", "/api/version"))
+
+
+def test_ops_write_fence_reads_routed_path():
+    """#3180: both admission predicates come from the scope — the path from
+    `scope["path"]`, the mark from `scope["route"].endpoint` — so a Host that
+    makes `url.path` name a listed route does not admit an unlisted one. The
+    crafted request carries the real MARKED handler, so only the path decides."""
+    import dependencies as deps
+    import routers.agents as agents
+    fence = deps._enforce_ops_write_key_fence
+    owner = {"role": "admin"}
+    route = type("Route", (), {"endpoint": staticmethod(agents.start_agent_endpoint)})()
+    honest = _honest("POST", "/api/agents/agent-1/start")
+    honest.scope["route"] = route
+    fence(honest, owner)  # control: allowed
+    crafted = _crafted("POST", "/api/agents/agent-1/chat", "/api/agents/agent-1/start")
+    crafted.scope["route"] = route
+    _expect_403(fence, crafted, owner)
 
 
 @pytest.fixture

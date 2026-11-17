@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from ..models import ChatRequest, ModelRequest, ParallelTaskRequest
 from ..state import agent_state
 from ..services.claude_code import get_execution_lock
-from ..services.execution_env import AUTH_OVERRIDE_HEADER
+from ..services.execution_env import AUTH_OVERRIDE_HEADER, auto_memory_spawn_kwargs
 from ..services.runtime_adapter import get_runtime
 from ..services.process_registry import get_process_registry, PENDING_CHAT_TIMEOUT_SECONDS
 from ..services import result_callback
@@ -107,6 +107,8 @@ async def chat(request: ChatRequest, response: Response = None):
             # #3470: a SUB-003 re-issue's per-spawn credential (Claude only).
             auth_override = _accept_auth_override(request, runtime)
             execute_kwargs = {"auth_override": auth_override} if auth_override is not None else {}
+            # #4156: a turn serving someone other than the owner (Claude only).
+            execute_kwargs.update(auto_memory_spawn_kwargs(runtime, getattr(request, "disable_auto_memory", False)))
             # #1020: feed the richer /health signal — count this execution and
             # record success/failure (drives consecutive_failures).
             agent_state.record_task_start()
@@ -238,6 +240,8 @@ async def execute_task(request: ParallelTaskRequest, response: Response = None):
     # path above never carries one — the walk is inline-only (#1083 boundary).
     auth_override = _accept_auth_override(request, runtime)
     execute_kwargs = {"auth_override": auth_override} if auth_override is not None else {}
+    # #4156: a turn serving someone other than the owner (Claude only).
+    execute_kwargs.update(auto_memory_spawn_kwargs(runtime, getattr(request, "disable_auto_memory", False)))
     # #2433: register as ACCEPTED before anything can queue. The headless
     # executor's `Popen` + `registry.register()` run inside a pool thread, so a
     # request beyond the pool size was counted in /health `active_tasks` but
@@ -476,6 +480,18 @@ async def terminate_execution(execution_id: str):
         raise HTTPException(status_code=404, detail="Execution not found")
     elif result["reason"] == "already_finished":
         return {"status": "already_finished", "execution_id": execution_id, "returncode": result.get("returncode")}
+    elif result["reason"] == "termination_unconfirmed":
+        # #3408: the child outlived SIGINT and SIGKILL and is still registered.
+        # Name the reason but keep a 500: the backend reads a 2xx as stopped,
+        # which frees the execution's capacity, and a 404 as already gone, which
+        # makes an A2A cancel report success. Both would be false here.
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"termination_unconfirmed: execution {execution_id} did not exit after "
+                "SIGINT and SIGKILL; it remains registered and termination can be retried"
+            ),
+        )
     else:
         raise HTTPException(status_code=500, detail=result.get("error", "Termination failed"))
 

@@ -317,6 +317,47 @@ def validate_dispatch_model(raw: str | None) -> str | None:
     )
 
 
+# ent#1202: the short aliases Claude Code itself accepts, with their 1M-context
+# forms. Mirrors the agent server's own accepted set
+# (`docker/base-image/agent_server/routers/chat.py`, `valid_aliases`).
+CLAUDE_CODE_ALIASES = frozenset(
+    a + suffix
+    for a in ("sonnet", "opus", "haiku", "fable")
+    for suffix in ("", "[1m]")
+)
+
+_CATALOG_IDS = frozenset(m.id for m in MODEL_CATALOG)
+
+# Families that name another runtime's models (mirrors `_MODEL_FAMILY_PREFIXES`).
+_NON_CLAUDE_PREFIXES: tuple[str, ...] = ("gemini", "gpt-", "codex")
+
+
+def unrunnable_reason(model: str | None, runtime: str | None) -> str | None:
+    """Why this instance cannot run ``model`` as an agent's own model, or None.
+
+    ent#1202. An allowlist, because the value is author-controlled and would
+    reach the CLI's ``--model`` argument: on a Claude Code agent only a catalog
+    id or a Claude Code alias is runnable.
+
+    Returns:
+        ``None`` (runnable, or blank), ``"runtime_mismatch"`` (another
+        runtime's model on this agent, or a Claude model on a non-Claude
+        agent) or ``"not_in_catalog"`` (anything else on a Claude Code agent).
+        A non-Claude agent's own ids are not judged here.
+    """
+    value = (model or "").strip()
+    if not value:
+        return None
+    is_claude = value in _CATALOG_IDS or value in CLAUDE_CODE_ALIASES
+    if (runtime or "claude-code") != "claude-code":
+        return "runtime_mismatch" if (is_claude or value.lower().startswith("claude")) else None
+    if is_claude:
+        return None
+    if value.lower().startswith(_NON_CLAUDE_PREFIXES):
+        return "runtime_mismatch"
+    return "not_in_catalog"
+
+
 # snake_case source field -> camelCase JS key. Applied when building the emitted
 # records so the JS is a deliberate mirror, not a trivial ``asdict()`` dump.
 _JS_KEY_MAP: tuple[tuple[str, str], ...] = (

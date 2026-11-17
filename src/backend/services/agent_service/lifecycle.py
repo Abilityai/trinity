@@ -29,7 +29,9 @@ from services.docker_utils import (
 )
 from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
+from services.agent_ssh_binding import agent_ssh_port_binding, raise_for_ssh_bind_failure
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
+from services import skill_packaging
 from services.skill_service import skill_service
 from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_agent_name_env_matches, check_pull_mode_env_matches, check_agent_mcp_key_matches, check_base_image_matches, is_claude_runtime, is_system_agent_name
 from services.agent_auth import derive_agent_token
@@ -289,11 +291,9 @@ async def inject_assigned_skills(agent_name: str) -> dict:
 # endpoint returns it to REST and MCP callers, so it carries NAMES, STATUSES and
 # CODES only (the ent#334 projection rule): a per-skill `error` is free text
 # that can hold an exception string, a transport URL or a path, and is reduced
-# to a code here, never passed through.
-_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
-# `deprecated:<successor>` (#672) joins the two dep codes: its detail is a skill
-# name by construction (`skill_packaging.deprecation_warning`), never prose.
-_WARNING_RE = re.compile(r"^(missing_binary|missing_env|deprecated):[A-Za-z0-9_.+-]{1,128}$")
+# to a code here, never passed through. The code grammar and the warning rule
+# live in `skill_packaging` (#3136): the assign report projects the same
+# warnings and must keep exactly what this body keeps.
 _SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _PROSE_ERRORS = {
     "Skill not found in library": "not_in_library",
@@ -311,7 +311,7 @@ def _error_code(error) -> Optional[str]:
     if text in _PROSE_ERRORS:
         return _PROSE_ERRORS[text]
     head = text.split(":", 1)[0].strip()
-    return head if _CODE_RE.match(head) else "error"
+    return head if skill_packaging.PUBLIC_CODE_RE.match(head) else "error"
 
 
 def public_skills_result(raw) -> dict:
@@ -340,8 +340,7 @@ def public_skills_result(raw) -> dict:
         code = _error_code(r.get("error"))
         if code:
             entry["code"] = code
-        warnings = [w for w in (r.get("warnings") or []) if isinstance(w, str)
-                    and (_WARNING_RE.match(w) or _CODE_RE.match(w))]
+        warnings = skill_packaging.public_warnings(r.get("warnings"))
         if warnings:
             entry["warnings"] = warnings
         skills[name] = entry
@@ -362,7 +361,24 @@ def public_skills_result(raw) -> dict:
     return out
 
 
-async def start_agent_internal(agent_name: str) -> dict:
+# #3180: a start that would mint the agent a platform key, refused for a caller
+# that may not do that (an `ops_write` key). A person revoking or deleting the
+# agent's key is how it is contained, so only a person may undo that.
+_WOULD_MINT_KEY_MESSAGE = (
+    "Starting this agent would issue it a new platform key: its key is revoked, "
+    "deleted, missing or not its own, or its container must be rebuilt. An "
+    "ops-write key never does that, so a person has to start this agent."
+)
+
+
+def _refuse_key_mint(reason: str) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={"code": "ops_write_would_mint_key", "reason": reason, "message": _WOULD_MINT_KEY_MESSAGE},
+    )
+
+
+async def start_agent_internal(agent_name: str, *, allow_key_mint: bool = True) -> dict:
     """
     Internal function to start an agent.
 
@@ -371,6 +387,11 @@ async def start_agent_internal(agent_name: str) -> dict:
 
     Args:
         agent_name: Name of the agent to start
+        allow_key_mint: False refuses (409 ``ops_write_would_mint_key``, before
+            any side effect) a start that would mint the agent a platform key:
+            the #1559 rebuild of a missing container (``reason:
+            container_missing``) and the #1854 drift heal (``reason:
+            key_drift``). #3180: an ``ops_write`` start passes False.
 
     Returns:
         dict with start status and trinity_injection result
@@ -388,6 +409,8 @@ async def start_agent_internal(agent_name: str) -> dict:
         owner = db.get_agent_owner(agent_name)
         if not owner:
             raise HTTPException(status_code=404, detail="Agent not found")
+        if not allow_key_mint:
+            _refuse_key_mint("container_missing")
         container = await recreate_missing_container(agent_name)
 
     # Check if container needs recreation for shared folders, API key, resource limits, or capabilities
@@ -400,6 +423,13 @@ async def start_agent_internal(agent_name: str) -> dict:
     # other predicates are satisfied by the recreate's own derived-env rules; a
     # missing/stale MCP key is not, because the plaintext is unrecoverable.
     mcp_key_match = check_agent_mcp_key_matches(container, agent_name)
+    # #3180: an unsatisfied key predicate is exactly when the heal below mints.
+    # The verdict does not ask WHY the key is unrecognized: a person's revoke
+    # leaves an inactive row, but a person's delete leaves no row, which is
+    # also what the platform's own prune leaves, so the two cannot be told
+    # apart and neither is healed for a caller that may not mint.
+    if not mcp_key_match and not allow_key_mint:
+        _refuse_key_mint("key_drift")
     needs_recreation = (
         not shared_folder_match or
         not check_public_folder_mount_matches(container, agent_name) or
@@ -663,14 +693,33 @@ async def start_agent_internal(agent_name: str) -> dict:
             e,
         )
 
+    # abilityai/trinity-enterprise#1108 AC #4: an answered ask whose wake found
+    # this agent stopped reads "agent not yet woken" (`operator_queue.wake_state
+    # = pending`). Now that it runs, re-dispatch each ONCE through the ent#329
+    # path (the idempotency key is the ask's); a second start finds nothing
+    # pending. Fire-and-forget like the spawns above: zero added start latency.
+    try:
+        from services import operator_resume_service
+        operator_resume_service.spawn_pending_wakes(agent_name)
+    except Exception as e:
+        logger.warning(
+            "[ent#1108] failed to spawn the pending-wake re-dispatch for %s on "
+            "start: %s",
+            agent_name,
+            e,
+        )
+
     # trinity-enterprise#752: the skill-gate marker tells the in-container hook
     # to refuse skills while the platform cannot be reached — only on an agent
     # that has gates. It lives on the writable layer, so a fresh container has
-    # none. Fire-and-forget like the spawns above, and for gated agents only:
-    # the common agent with no gates costs no exec.
+    # none, and a stop and start keeps it: clearing the last gate on a stopped
+    # agent cannot exec, so the start has to remove it. The Bash guardrail reads
+    # it too (trinity-enterprise#1002), so a leftover marker would refuse nested
+    # CLIs on an agent with no gates. Every start syncs, at the cost of one exec.
+    # Fire-and-forget like the spawns above.
     try:
         from services import skill_gate_service
-        skill_gate_service.spawn_gate_marker_sync(agent_name)
+        skill_gate_service.spawn_gate_marker_sync(agent_name, only_if_gated=False)
     except Exception as e:
         logger.warning(
             "[ent#752] failed to spawn the skill-gate marker sync for %s on "
@@ -1145,6 +1194,10 @@ async def recreate_container_with_updated_config(
     # once enforcement is on). check_agent_auth_token_env_matches forces this
     # recreate whenever the running token is missing or stale.
     env_vars['TRINITY_AGENT_AUTH_TOKEN'] = derive_agent_token(agent_name)
+    # trinity-enterprise#1168: this dict is seeded from the OLD container, which
+    # may carry a baked ENABLE_SSH=true from before the change. Set, never
+    # setdefault — no listener until a grant starts one on demand.
+    env_vars['ENABLE_SSH'] = 'false'
     # #3813: the agent's own identity follows the same rule. Replaying the old
     # AGENT_NAME left a renamed agent's /health, heartbeat, pull workers and
     # result callback calling in under the dead name (403).
@@ -1475,43 +1528,54 @@ async def _provision_folders_and_run_agent_container(
     # - Always drop ALL caps, then add back only what's needed
     # - Always apply AppArmor profile
     # - Always apply noexec,nosuid to /tmp
-    new_container = await containers_run(
-        image,
-        detach=True,
-        name=f"agent-{agent_name}",
-        ports={'22/tcp': ssh_port},
-        volumes=volumes,
-        environment=env_vars,
-        labels=labels,
-        # Always apply AppArmor for additional sandboxing
-        security_opt=['apparmor:docker-default'],
-        # Always drop ALL capabilities first (defense in depth)
-        cap_drop=['ALL'],
-        # Add back only the capabilities needed for the mode
-        cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
-        read_only=False,
-        # Always apply noexec,nosuid to /tmp for security (#1098: scratch is
-        # redirected off this tiny tmpfs via the TMPDIR env var above).
-        tmpfs=AGENT_TMPFS_MOUNT,
-        # #1871: bound the container's json-file log (Docker's default is
-        # unbounded). This is the retrofit seam — `log_config` is creation-time,
-        # so an existing agent adopts the cap when it passes through here, which
-        # covers BOTH recreate_container_with_updated_config and
-        # recreate_missing_container (this is their shared tail).
-        log_config=AGENT_LOG_CONFIG,
-        network='trinity-agent-network',
-        mem_limit=memory,
-        # #1126: nano_cpus (Linux CFS quota → HostConfig.NanoCpus), NOT
-        # cpu_count — docker-py's cpu_count maps to the Windows-only CpuCount
-        # and leaves NanoCpus=0 on Linux, so the CPU limit was never enforced.
-        nano_cpus=int(cpu) * 1_000_000_000,
-        # #2541: re-bake the restart policy unconditionally — this is the
-        # retrofit seam for BOTH recreate paths, so an agent born `no` before
-        # #2541 adopts `unless-stopped` the first time it passes through here.
-        # Unconditional on purpose: the old container's policy is exactly what
-        # must NOT be preserved (see the docstring).
-        restart_policy=AGENT_RESTART_POLICY,
-    )
+    try:
+        new_container = await containers_run(
+            image,
+            detach=True,
+            name=f"agent-{agent_name}",
+            # trinity-enterprise#1168: published on AGENT_SSH_BIND_ADDRESS
+            # (loopback by default), never a bare int (= every interface). This
+            # is the retrofit seam — an existing agent adopts the binding the
+            # first time it passes through here (both recreate paths).
+            ports=agent_ssh_port_binding(ssh_port),
+            volumes=volumes,
+            environment=env_vars,
+            labels=labels,
+            # Always apply AppArmor for additional sandboxing
+            security_opt=['apparmor:docker-default'],
+            # Always drop ALL capabilities first (defense in depth)
+            cap_drop=['ALL'],
+            # Add back only the capabilities needed for the mode
+            cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
+            read_only=False,
+            # Always apply noexec,nosuid to /tmp for security (#1098: scratch is
+            # redirected off this tiny tmpfs via the TMPDIR env var above).
+            tmpfs=AGENT_TMPFS_MOUNT,
+            # #1871: bound the container's json-file log (Docker's default is
+            # unbounded). This is the retrofit seam — `log_config` is creation-time,
+            # so an existing agent adopts the cap when it passes through here, which
+            # covers BOTH recreate_container_with_updated_config and
+            # recreate_missing_container (this is their shared tail).
+            log_config=AGENT_LOG_CONFIG,
+            network='trinity-agent-network',
+            mem_limit=memory,
+            # #1126: nano_cpus (Linux CFS quota → HostConfig.NanoCpus), NOT
+            # cpu_count — docker-py's cpu_count maps to the Windows-only CpuCount
+            # and leaves NanoCpus=0 on Linux, so the CPU limit was never enforced.
+            nano_cpus=int(cpu) * 1_000_000_000,
+            # #2541: re-bake the restart policy unconditionally — this is the
+            # retrofit seam for BOTH recreate paths, so an agent born `no` before
+            # #2541 adopts `unless-stopped` the first time it passes through here.
+            # Unconditional on purpose: the old container's policy is exactly what
+            # must NOT be preserved (see the docstring).
+            restart_policy=AGENT_RESTART_POLICY,
+        )
+    except Exception as exc:  # noqa: BLE001 — classified, then re-raised unchanged
+        # trinity-enterprise#1168: name the knob when Docker cannot bind the
+        # configured host IP ("cannot assign requested address"); anything else
+        # re-raises as-is.
+        raise_for_ssh_bind_failure(exc)
+        raise
 
     logger.info(f"Recreated container for agent {agent_name} with updated configuration")
     return new_container
@@ -1698,7 +1762,8 @@ async def recreate_missing_container(agent_name: str):
     env_vars = {
         "AGENT_NAME": agent_name,
         "CREDENTIALS_FILE": "/config/credentials.json",
-        "ENABLE_SSH": "true",
+        # trinity-enterprise#1168: no sshd until a grant starts it on demand.
+        "ENABLE_SSH": "false",
         "ENABLE_AGENT_UI": "true",
         "AGENT_SERVER_PORT": "8000",
         "AGENT_RUNTIME": runtime,
@@ -1779,6 +1844,9 @@ async def recreate_missing_container(agent_name: str):
             agent_name,
         )
 
+    # trinity-enterprise#1007: no `trinity.kind` here — the create-time kind
+    # lived only on the vanished container, so the rebuilt agent reads as
+    # unknown (AgentStatus.kind None) rather than a fabricated default.
     labels = {
         "trinity.platform": "agent",
         "trinity.agent-name": agent_name,

@@ -821,21 +821,23 @@ chat_activity_id = await activity_service.track_activity(
 | ID Type | Format | Storage | TTL | Purpose |
 |---------|--------|---------|-----|---------|
 | **Queue Execution ID** | UUID v4 | Redis | 10 min | Internal queue management, transient |
-| **Database Execution ID** | `token_urlsafe(16)` | SQLite `schedule_executions` | Permanent | API access, UI navigation, activity linkage |
+| **Database Execution ID** | `token_urlsafe(16)`; UUID v4 for `/chat` rows | SQLite `schedule_executions` | Permanent | API access, UI navigation, activity linkage |
+
+A `/chat` turn uses one id for both (#3989): the admission mints a UUID, acquires the capacity slot under it, and `prepare_chat_execution` creates the row with that id. Canary S-01 relies on the slot member and the running row id being equal.
 
 **Usage**:
 - `related_execution_id` in `agent_activities` table links to `schedule_executions.id` (Database ID)
-- `execution.id` in queue operations is the Redis Queue ID (transient)
+- `execution.id` in queue operations is the Redis Queue ID (transient); for `/chat` it equals the Database ID
 - Navigation URLs use Database Execution ID: `/agents/{name}/executions/{database_id}`
 
 ### Execution Metadata in Response
-Chat responses include both IDs for clarity:
+Chat responses carry both fields; for `/chat` they hold the same id:
 ```json
 {
   "response": "...",
   "execution": {
-    "id": "uuid-123",               // Queue ID (transient, 10-min TTL)
-    "task_execution_id": "abc123...", // Database ID (permanent) - use for navigation
+    "id": "uuid-123",                 // Same as task_execution_id
+    "task_execution_id": "uuid-123",  // Database ID - use for navigation
     "queue_status": "running",
     "was_queued": false
   }
@@ -1179,6 +1181,7 @@ See [execution-termination.md](execution-termination.md) for full documentation.
 
 | Date | Changes |
 |------|---------|
+| 2026-10-16 | **A share holder sees only their own queued prompts** (trinity-enterprise#875): `GET /api/agents/{name}/queue` keeps `is_busy` and `queue_length` (counts) but filters `queued_executions` by `source_user_id` (the in-memory queue carries it as a string, so both sides compare as integers) and shows `current_execution` only when the running turn is theirs. `GET .../executions/running` and `GET .../executions/{id}/stream` follow the same rule; `POST .../queue/clear` and `/queue/release` were already owner tier. |
 | 2026-05-13 | **Circuit Breaker Sibling-Collapse Fix (#474)**: `AgentClient._request()` in `services/agent_client.py` rewritten to neutralise the burst-collapse where one mid-flight transport drop in a concurrent fan-out tripped the breaker. Added per-base_url `_recent_drops: Dict[str, float]` map with `_DROP_GRACE_SEC = 2.0` window (lines 442-473), helpers `_stamp_drop()` / `_is_within_drop_grace()` / `_build_http_client()` / `_acquire_client() -> (client, is_pooled)` (lines 462-514), and new exception `AgentConnectionDroppedError(AgentNotReachableError)` (lines 570-578). The rewritten exception handler in `_request()` (lines 671-727) now: (a) on `ConnectError` / `TimeoutException` within the drop-grace window, raises `AgentConnectionDroppedError` instead of `AgentNotReachableError` and skips `record_failure()`; (b) on `ReadError` / `WriteError` / `RemoteProtocolError` / `BrokenPipeError` / `ConnectionResetError` mid-flight, stamps the drop, evicts the pooled client only if its identity matches the one this worker acquired (`evicted is client` guard, prevents siblings double-closing), and raises `AgentConnectionDroppedError` — again no `record_failure()`. Non-pooled (in-grace) clients are single-use and `aclose()`'d in `finally` to prevent connection-handle leaks during sustained bursts. The grace map and pool are process-local (per uvicorn worker); the Redis-backed `CircuitState` from #631 remains the fleet-wide source of truth — transport drops never call `record_failure()` in any worker. `AgentConnectionDroppedError` inherits from `AgentNotReachableError` so tenacity `retry_if_exception_type` decorators on `get_session()` / `health_check()` continue to handle it. Solves the 10-concurrent-call scenario where one drop evicts the shared pool and sibling fresh-client retries die with `ConnectError`, previously tripping 9-of-10 sibling failures into the breaker. Tests: `tests/integration/test_circuit_breaker.py` (cross-worker burst scenarios), `tests/unit/test_circuit_breaker.py` (drop-grace state machine, pool-eviction identity check, `AgentConnectionDroppedError` raising). |
 | 2026-02-21 | **Bug Fix (EXEC-023)**: Fixed `DatabaseManager.update_execution_status()` wrapper in `src/backend/database.py:1295-1299` - was missing `claude_session_id` parameter. The wrapper now correctly forwards the parameter to `db/schedules.py:update_execution_status()` (lines 559-610). This affected all execution status updates (chat, task, scheduled) that tried to store Claude Code session IDs for the "Continue Execution as Chat" feature. |
 | 2026-03-15 | **Unified chat execution tracking (#96)**: All `/api/chat` calls now create `schedule_executions` records, not just MCP/agent-to-agent. User chats use `triggered_by=chat`. Execution records are updated on success/failure for all chat types. |

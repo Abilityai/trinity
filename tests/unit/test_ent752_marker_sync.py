@@ -194,7 +194,7 @@ def _settle():
     return main
 
 
-def test_a_start_syncs_only_a_gated_agent(gates, synced):
+def test_the_default_syncs_only_a_gated_agent(gates, synced):
     results = asyncio.run(_settle()([
         lambda: _GATE.spawn_gate_marker_sync("fin"),
         lambda: _GATE.spawn_gate_marker_sync("nobody"),
@@ -293,14 +293,43 @@ def _start(monkeypatch, *, running=True):
     monkeypatch.setattr(gs, "spawn_git_remote_token_scrub", MagicMock())
     import services.metric_registry as mr
     monkeypatch.setattr(mr, "spawn_refresh_from_running_agent", MagicMock())
-    return asyncio.run(lc.start_agent_internal("fin"))
+
+    async def _run():
+        result = await lc.start_agent_internal("fin")
+        await asyncio.gather(*list(_GATE._inflight))  # the spawn is fire-and-forget
+        return result
+
+    return asyncio.run(_run())
 
 
 @pytest.mark.parametrize("running", [True, False], ids=["already-running", "cold-start"])
 def test_every_start_syncs_the_marker(monkeypatch, spawned, running):
     result = _start(monkeypatch, running=running)
     assert result["message"] == "Agent fin started"
-    assert spawned == [("fin", {})]
+    assert spawned == [("fin", {"only_if_gated": False})]
+
+
+def test_a_start_removes_a_marker_left_behind_on_an_agent_with_no_gates(monkeypatch, gates, execs):
+    """trinity-enterprise#1002. Clearing the last gate on a stopped agent cannot
+    exec, and the marker survives stop and start. Since the Bash guardrail reads
+    it, a leftover marker refuses nested CLIs on an agent that has no gates, so
+    the start has to reconcile an ungated agent too."""
+    gates["map"] = {}
+    assert _start(monkeypatch)["message"] == "Agent fin started"
+    assert [c.command for c in execs.calls] == [_GATE.marker_command(False)]
+    assert execs.calls[0].user == "root"
+
+
+def test_a_start_writes_the_marker_on_an_agent_with_gates(monkeypatch, gates, execs):
+    assert _start(monkeypatch)["message"] == "Agent fin started"
+    assert [c.command for c in execs.calls] == [_GATE.marker_command(True)]
+
+
+def test_a_start_changes_nothing_when_the_map_is_unreadable(monkeypatch, gates, execs):
+    """An unreadable map must not remove the marker from a gated agent."""
+    gates["fail"] = "raise"
+    assert _start(monkeypatch)["message"] == "Agent fin started"
+    assert execs.calls == []
 
 
 def test_a_failing_sync_spawn_never_fails_the_start(monkeypatch):

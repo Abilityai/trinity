@@ -83,6 +83,38 @@ def get_agent_runtime(name: str) -> str:
         return "claude-code"
 
 
+def read_runtime_model(name: str) -> Optional[str]:
+    """The container's ``AGENT_RUNTIME_MODEL`` (its template's ``runtime.model``),
+    or None (#4442). Running or stopped; blocking, so call it off the loop.
+
+    Only that one key is taken. The env also holds credentials, so neither the
+    env nor ``attrs`` is returned or logged, and a failure logs its type only
+    (a traceback can carry ``attrs``).
+    """
+    try:
+        container = get_agent_container(name)
+        if container is None:
+            return None
+        env = ((container.attrs or {}).get("Config") or {}).get("Env") or []
+    except Exception as e:  # noqa: BLE001 — no exc_info, see above
+        logger.warning("could not read %s's runtime model: %s", name, type(e).__name__)
+        return None
+    for item in env:
+        if isinstance(item, str) and item.startswith("AGENT_RUNTIME_MODEL="):
+            return item.partition("=")[2].strip() or None
+    return None
+
+
+def kind_from_labels(labels) -> Optional[str]:
+    """trinity-enterprise#1007: the create-time kind from `trinity.kind`.
+
+    None means unknown — an agent created before the label existed, a container
+    rebuilt by `recreate_missing_container`, the system agent — and is never
+    defaulted to a kind; an unrecognised value reads as None too."""
+    value = (labels or {}).get("trinity.kind")
+    return value if value in ("agent", "deployment") else None
+
+
 def get_agent_status_from_container(container) -> AgentStatus:
     """Convert a Docker container to AgentStatus using container labels."""
     labels = container.labels
@@ -145,6 +177,7 @@ def get_agent_status_from_container(container) -> AgentStatus:
         runtime=runtime,
         base_image_version=base_image_version,
         ephemeral=labels.get("trinity.ephemeral") == "true",  # trinity-enterprise#69
+        kind=kind_from_labels(labels),  # trinity-enterprise#1007
     )
 
 
@@ -245,6 +278,7 @@ def list_all_agents_fast() -> List[AgentStatus]:
                 runtime=labels.get("trinity.agent-runtime", "claude-code"),
                 base_image_version=labels.get("trinity.base-image-version"),  # Label only, no image lookup
                 ephemeral=labels.get("trinity.ephemeral") == "true",  # trinity-enterprise#69
+                kind=kind_from_labels(labels),  # trinity-enterprise#1007
             )
             agents.append(agent)
 

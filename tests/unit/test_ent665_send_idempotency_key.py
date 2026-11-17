@@ -111,8 +111,8 @@ def pms(executions, audit, monkeypatch):
     svc.delivered = []
     svc.rate_increments = []
     svc.consent = consent
-    svc._check_rate_limit = lambda a, e: True
-    svc._increment_rate_limit = lambda a, e: svc.rate_increments.append((a, e))
+    svc.check_rate_limit = lambda a, e: True
+    svc.increment_rate_limit = lambda a, e: svc.rate_increments.append((a, e))
 
     async def _deliver(agent_name, recipient_email, text, channel, reply_to_thread):
         svc.delivered.append(text)

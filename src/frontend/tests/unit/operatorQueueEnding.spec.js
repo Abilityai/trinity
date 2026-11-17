@@ -139,7 +139,10 @@ describe('the Operating Room store', () => {
       axios.get.mockResolvedValue({ data: { items: [], count: 0 } })
       const store = useOperatorQueueStore()
       store.handleWebSocketEvent({ type, data: { id: 'i1', agent_name: 'agent-a' } })
-      expect(axios.get).toHaveBeenCalledTimes(1)
+      // #3302: with no list on screen the refetch is the two count reads —
+      // still the access-controlled route, never a patch from the payload.
+      expect(axios.get.mock.calls.map(([url]) => url)).toEqual(['/api/operator-queue', '/api/operator-queue'])
+      expect(axios.get.mock.calls.map(([, config]) => config.params)).toEqual([{ status: 'pending', limit: 1 }, { status: 'pending', priority: 'critical', limit: 1 }])
     },
   )
 })
@@ -187,11 +190,13 @@ describe('ResolvedCard renders the ending (mounted)', () => {
 })
 
 describe('the wake setting says what it spends on (mounted)', () => {
-  it('names every ending, not only an answer', async () => {
+  it('names the endings that wake it — an answer or a cancel, never an expiry', async () => {
     api.get.mockResolvedValue({ data: {} })
     const w = mount(ReliabilityPanel, { props: { agentName: 'agent-a' } })
     await new Promise((r) => setTimeout(r, 0))
-    expect(w.text()).toContain('when an ask it raised ends — answered, cancelled or expired')
+    expect(w.text()).toContain('When a person ends an ask this agent raised — answers it or cancels it')
+    expect(w.text()).toContain('An expiry wakes nobody')
+    expect(w.text()).not.toContain('cancelled or expired')
     expect(w.text()).not.toContain('Each answer then costs one agent turn')
   })
 })

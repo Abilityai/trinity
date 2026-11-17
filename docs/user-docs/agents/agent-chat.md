@@ -39,9 +39,11 @@ While a turn runs, **Send** becomes **Stop**. Click it, or press **Esc** with no
 
 Attach files to any chat message using the paperclip button or by dragging and dropping onto the chat input.
 
-**Supported types:** images (JPEG, PNG, GIF, WebP), plain text, CSV, JSON, and ZIP. Images are passed to the agent as vision content blocks. Other files are written to `/home/developer/uploads/` inside the agent container and are readable by name; a ZIP is stored as-is, not extracted. The paperclip picker filters to images and text-like files — drop a ZIP onto the input instead.
+**Supported types:** images (JPEG, PNG, GIF, WebP), plain text, CSV, JSON, and ZIP. Images are passed to the agent as vision content blocks. Other files are written to `/home/developer/uploads/` inside the agent container and are readable by name; a ZIP is stored as-is, not extracted.
 
-**Unsupported:** PDF, tar, gzip, rar, video, audio.
+**Unsupported:** tar, gzip, rar, video, audio. PDF is unsupported by default.
+
+**PDF (operator opt-in):** an operator can enable PDF delivery for the whole deployment by setting `ALLOW_PDF_UPLOADS=true` in `.env` and recreating the backend. The setting applies to every agent and to web, public and channel chat alike; there is no per-agent switch. An enabled PDF is written unchanged to `/home/developer/uploads/` like any other document, and reading it (text extraction, OCR) is up to the agent's own tools. Delivery is not validation: Trinity checks that the file is a PDF, not that it is safe to open. The paperclip picker does not list PDFs, so drop the file onto the input instead.
 
 **Limits per message:**
 | | |

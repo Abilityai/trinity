@@ -75,8 +75,8 @@
               <!-- Round 3: the agent keeps its width (to 60%) and the chat title
                    is what truncates — both shrank, and a long title left the
                    agent at 1–7 characters. -->
-              <span class="shrink-0 max-w-[60%] text-sm font-medium truncate text-gray-900 dark:text-gray-100" :data-testid="`inbox-row-agent-${it.key}`">{{ it.type === 'mention' ? (it.mention && it.mention.tagged_by) || 'Someone' : labelFor(it.agent_name) }}</span>
-              <span v-if="it.type === 'thread'" class="min-w-0 text-[12.5px] truncate" :class="meta(it)">· {{ threadTitle(it) }}</span>
+              <span class="shrink-0 max-w-[60%] text-sm font-medium truncate text-gray-900 dark:text-gray-100" :data-testid="`inbox-row-agent-${it.key}`">{{ it.type === 'mention' ? (it.mention && it.mention.tagged_by) || 'Someone' : it.type === 'room' ? roomAgentsLabel(it, labels) : labelFor(it.agent_name) }}</span>
+              <span v-if="isChatItem(it)" class="min-w-0 text-[12.5px] truncate" :class="meta(it)">· {{ threadTitle(it) }}</span>
               <span
                 class="ml-auto shrink-0 text-[12.5px] tabular-nums"
                 :class="meta(it)"
@@ -97,8 +97,12 @@
             <span v-else-if="it.type === 'mention'" class="mt-0.5 block text-sm truncate" :class="secondary(it)">Mentioned you {{ mentionWhere(it.mention) }}</span>
             <span v-else-if="it.latest && it.latest.excerpt" class="mt-0.5 block text-sm truncate" :class="secondary(it)">{{ it.latest.excerpt }}</span>
 
-            <span class="mt-1 flex items-center gap-1.5 flex-wrap">
-              <BaseBadge v-if="it.type === 'thread' && it.n > 0" variant="primary" class="tabular-nums" :data-testid="`inbox-row-new-${it.key}`">{{ newLabel(it.n) }}</BaseBadge>
+            <!-- #4229: the badge line always holds a badge, so a row is one
+                 height in every state and answering an ask swaps a badge in
+                 place instead of adding one (the skeleton reserves this line
+                 too, PortalInboxSkeleton.vue). -->
+            <span class="mt-1 flex items-center gap-1.5 flex-wrap" :data-testid="`inbox-row-badges-${it.key}`">
+              <BaseBadge v-if="isChatItem(it) && it.n > 0" variant="primary" class="tabular-nums" :data-testid="`inbox-row-new-${it.key}`">{{ newLabel(it.n) }}</BaseBadge>
               <!-- trinity-enterprise#631: a tag is New until opened, then Read
                    (kept in place, drawn read, until the selection moves). -->
               <BaseBadge v-if="it.type === 'mention' && it.status === 'unread'" variant="primary" :data-testid="`inbox-row-new-${it.key}`">New</BaseBadge>
@@ -111,7 +115,7 @@
               <!-- On a selected row the neutral fill is the row's own (gray-750
                    in dark), so it gets an edge (round 3). -->
               <BaseBadge
-                v-if="it.type === 'thread' && it.readInPlace"
+                v-if="isChatItem(it) && it.readInPlace"
                 variant="neutral"
                 :class="it.key === selectedKey ? 'ring-1 ring-inset ring-gray-300 dark:ring-gray-600' : ''"
                 :data-testid="`inbox-row-read-${it.key}`"
@@ -130,7 +134,10 @@
                    priority, and an expiry within the day — at most two badges;
                    a replacement adds the third that names what it replaces
                    (#3247), because that is what differs about it.
-                   "Waiting on you" was true of every row, so it said nothing. -->
+                   "Waiting on you" was true of every row, so it said nothing.
+                   #4229: a row with none of those still carries ONE badge —
+                   Unanswered, the state the ended badge replaces — so the
+                   line is never empty and the row never grows on answer. -->
               <template v-if="it.type === 'ask' && it.status === 'pending'">
                 <BaseBadge
                   v-if="priorityBadge(it.ask && it.ask.priority)"
@@ -150,6 +157,12 @@
                   variant="neutral"
                   :data-testid="`inbox-row-replaces-${it.key}`"
                 >{{ workspaceReplacesText(it.ask) }}</BaseBadge>
+                <BaseBadge
+                  v-if="pendingSaysNothing(it)"
+                  variant="neutral"
+                  :class="it.key === selectedKey ? 'ring-1 ring-inset ring-gray-300 dark:ring-gray-600' : ''"
+                  :data-testid="`inbox-row-pending-${it.key}`"
+                >Unanswered</BaseBadge>
               </template>
               <BaseBadge
                 v-else-if="it.type === 'ask'"
@@ -180,7 +193,7 @@ import { onBeforeUnmount, ref, watch } from 'vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import { relativeTime } from './portalUtils'
-import { newLabel } from './portalInbox'
+import { newLabel, isChatItem, roomAgentsLabel } from './portalInbox'
 import { mentionWhere } from './portalMentions'
 import { priorityBadge, expiresSoonLabel, needsExpiryTick, nextExpiryEntry, askKindIcon } from './portalAskUrgency'
 import { queueEnding, queueTypeLabel, workspaceEndingText, workspaceReplacesText } from '@/utils/operatorQueue'
@@ -252,6 +265,11 @@ watch([() => props.items, now], () => {
 }, { immediate: true })
 onBeforeUnmount(() => { stopTick(); stopEntry() })
 const expiry = (it) => expiresSoonLabel(it.ask && it.ask.expires_at, now.value)
+// #4229: a pending ask with no priority / expiry / replaces badge would leave
+// the badge line empty, and the ended badge then grows the row on answer. Such
+// a row carries Unanswered instead — one badge in every state.
+const pendingSaysNothing = (it) => it.type === 'ask' && it.status === 'pending'
+  && !priorityBadge(it.ask && it.ask.priority) && !expiry(it) && !workspaceReplacesText(it.ask)
 const kindLabel = (it) => queueTypeLabel(it.ask && it.ask.kind) || 'Ask'
 
 // trinity-enterprise#901: an ended ask the agent withdrew, and why.

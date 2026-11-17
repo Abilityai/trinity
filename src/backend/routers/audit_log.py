@@ -202,7 +202,7 @@ async def list_audit_log(
     end_time: Optional[str] = Query(None, description="ISO 8601 UTC inclusive upper bound"),
     request_id: Optional[str] = Query(None, description="Filter by request correlation id (joins MCP + backend rows, #905)"),
     mcp_key_id: Optional[str] = Query(None, description="Filter by the MCP API key that performed the action (#2323)"),
-    mcp_scope: Optional[str] = Query(None, description="Filter by credential kind: user/agent/system/connector/portal_delegate/ops (#2323)"),
+    mcp_scope: Optional[str] = Query(None, description="Filter by credential kind: user/agent/system/connector/portal_delegate/ops/ops_write (#2323, #3180)"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     _admin: User = Depends(require_admin),

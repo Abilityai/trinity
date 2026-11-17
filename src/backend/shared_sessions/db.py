@@ -98,13 +98,18 @@ def get_room(room_id: str) -> Optional[dict]:
 
 
 def list_rooms_for_participant(kind: str, identity: str) -> list[dict]:
-    """Rooms this participant is (or was) in — membership IS the visibility rule."""
+    """Rooms this participant is ACTIVELY in — membership IS the visibility rule.
+
+    A participant who left (`left_at` set — today only a removed agent) is not a
+    member: it no longer lists the room (trinity-enterprise#959 fix round 1).
+    Their row stays (`remove_participant` is soft) so the transcript's sender
+    label still resolves; `get_participant` reads it unfiltered for that."""
     stmt = text(
         "SELECT r.id, r.name, r.topic, r.status, r.stop_reason, r.created_at, "
         "       r.expires_at, r.max_messages, r.max_cost_usd "
         "FROM enterprise_rooms r "
         "JOIN enterprise_room_participants p ON p.room_id = r.id "
-        "WHERE p.kind = :kind AND p.identity = :identity "
+        "WHERE p.kind = :kind AND p.identity = :identity AND p.left_at IS NULL "
         "ORDER BY r.created_at DESC"
     )
     with get_engine().connect() as conn:
@@ -143,26 +148,81 @@ def close_room(room_id: str, stop_reason: str, now: str) -> bool:
 
 # --- participants ------------------------------------------------------------
 
-def add_participant(room_id: str, kind: str, identity: str, role: str, now: str) -> None:
-    """Idempotent — re-adding an existing participant is a no-op (the UNIQUE
-    triple is the claim), so a retried create doesn't 500."""
+def add_participant(room_id: str, kind: str, identity: str, role: str, now: str,
+                    *, rejoin: bool = False) -> None:
+    """Idempotent — re-adding an ACTIVE participant is a no-op (the UNIQUE
+    triple is the claim), so a retried create doesn't 500.
+
+    A participant who LEFT holds that triple too. ``rejoin=True`` (the
+    moderator's explicit add only) clears `left_at` and takes the new role and
+    join time, keeping the row; without it they stay out, so an @mention cannot
+    undo a moderator's removal (ent#959)."""
     from sqlalchemy.exc import IntegrityError
     stmt = text(
         "INSERT INTO enterprise_room_participants "
         "(room_id, kind, identity, role, joined_at, last_read_seq) "
         "VALUES (:room, :kind, :identity, :role, :now, 0)"
     )
+    reactivate = text(
+        "UPDATE enterprise_room_participants "
+        "SET left_at = NULL, role = :role, joined_at = :now "
+        "WHERE room_id = :room AND kind = :kind AND identity = :identity "
+        "AND left_at IS NOT NULL"
+    )
+    params = {"room": room_id, "kind": kind, "identity": identity,
+              "role": role, "now": now}
     try:
         with get_engine().begin() as conn:
-            conn.execute(stmt, {"room": room_id, "kind": kind, "identity": identity,
-                                "role": role, "now": now})
+            conn.execute(stmt, params)
     except IntegrityError:
-        pass
+        if rejoin:
+            with get_engine().begin() as conn:
+                conn.execute(reactivate, params)
+
+
+def seat_person(room_id: str, kind: str, identity: str, role: str,
+                visible_from_seq: int, now: str) -> None:
+    """Seat a PERSON in a room, or seat them again (trinity-enterprise#701).
+
+    Unlike ``add_participant`` this is an upsert that clears ``left_at``: a
+    person who left can be seated again, and the new seat sets their role and
+    their read floor afresh. People only — agents keep ``add_participant``'s
+    no-op-on-conflict, which ``list_active_claude_session_ids`` relies on
+    ("nothing clears ``left_at``" for an agent).
+    """
+    if kind == "agent":
+        raise ValueError("seat_person seats people, not agents")
+    params = {"room": room_id, "kind": kind, "identity": identity, "role": role,
+              "floor": int(visible_from_seq), "now": now}
+    # One statement, so two concurrent seats of the same person can't both miss
+    # the UPDATE and race the INSERT into the UNIQUE(room_id, kind, identity).
+    with get_engine().begin() as conn:
+        conn.execute(text(
+            "INSERT INTO enterprise_room_participants "
+            "(room_id, kind, identity, role, joined_at, last_read_seq, visible_from_seq) "
+            "VALUES (:room, :kind, :identity, :role, :now, 0, :floor) "
+            "ON CONFLICT (room_id, kind, identity) DO UPDATE SET "
+            "role = excluded.role, visible_from_seq = excluded.visible_from_seq, "
+            "joined_at = excluded.joined_at, left_at = NULL"
+        ), params)
+
+
+def set_visible_from(room_id: str, kind: str, identity: str, visible_from_seq: int) -> bool:
+    """Move a person's read floor (trinity-enterprise#701: a backscroll grant
+    sets it to 0). True iff an active seat was updated."""
+    stmt = text(
+        "UPDATE enterprise_room_participants SET visible_from_seq = :floor "
+        "WHERE room_id = :room AND kind = :kind AND identity = :identity AND left_at IS NULL"
+    )
+    with get_engine().begin() as conn:
+        return (conn.execute(stmt, {"room": room_id, "kind": kind, "identity": identity,
+                                    "floor": int(visible_from_seq)}).rowcount or 0) > 0
 
 
 def list_participants(room_id: str) -> list[dict]:
     stmt = text(
-        "SELECT kind, identity, role, joined_at, left_at, last_read_seq, cached_session_id "
+        "SELECT kind, identity, role, joined_at, left_at, last_read_seq, cached_session_id, "
+        "       visible_from_seq "
         "FROM enterprise_room_participants WHERE room_id = :room "
         "ORDER BY kind, identity"
     )
@@ -184,7 +244,7 @@ def list_participants_for_rooms(room_ids: list[str]) -> dict[str, list[dict]]:
     keys = [f"r{i}" for i in range(len(room_ids))]
     stmt = text(
         "SELECT room_id, kind, identity, role, joined_at, left_at, last_read_seq, "
-        "       cached_session_id "
+        "       cached_session_id, visible_from_seq "
         "FROM enterprise_room_participants "
         "WHERE room_id IN (%s) ORDER BY room_id, kind, identity"
         % ",".join(f":{k}" for k in keys)
@@ -252,7 +312,7 @@ def last_message_for_rooms(room_ids: list[str]) -> dict[str, str]:
 def get_participant(room_id: str, kind: str, identity: str) -> Optional[dict]:
     stmt = text(
         "SELECT kind, identity, role, joined_at, left_at, last_read_seq, "
-        "       cached_session_id, consecutive_resume_failures "
+        "       cached_session_id, consecutive_resume_failures, visible_from_seq "
         "FROM enterprise_room_participants "
         "WHERE room_id = :room AND kind = :kind AND identity = :identity"
     )
@@ -433,6 +493,153 @@ def get_recent_messages(room_id: str, limit: int) -> list[dict]:
     return rows
 
 
+# --- a paused mention chain and the offer to continue it (trinity#4302) ------
+#
+# `sender_kind` says WHO wrote a row; `kind` says WHAT the row is. Two typed
+# system rows live here: `chain_paused` (the engine stopped a chain at the cap;
+# `mentions` holds the agents that were next) and `chain_continued` (a person
+# asked them to carry on). The OFFER to continue a pause stands until the room
+# moves on: a conversational row, or another pause/continue row, after it.
+# Bookkeeping lines (joined, left, still busy, could not be reached) keep it.
+# ONE predicate, written once, read by `offer_stands` and enforced by the
+# guarded insert in `append_continue_receipt` — so the two cannot drift.
+
+_PAUSE_AT_SQL = (
+    "EXISTS (SELECT 1 FROM enterprise_room_messages p "
+    "        WHERE p.room_id = :room AND p.seq = :pause AND p.kind = 'chain_paused')"
+)
+_MOVED_ON_SQL = (
+    "EXISTS (SELECT 1 FROM enterprise_room_messages x "
+    "        WHERE x.room_id = :room AND x.seq > :pause "
+    "          AND (x.sender_kind != 'system' "
+    "               OR x.kind IN ('chain_paused', 'chain_continued')))"
+)
+
+
+def latest_pause(room_id: str) -> Optional[dict]:
+    """The room's newest `chain_paused` row, or None."""
+    stmt = text(
+        "SELECT id, seq, sender_kind, sender_identity, kind, mentions, content, "
+        "       execution_id, created_at "
+        "FROM enterprise_room_messages WHERE room_id = :room AND kind = 'chain_paused' "
+        "ORDER BY seq DESC LIMIT 1"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"room": room_id}).mappings().first()
+    if not row:
+        return None
+    out = dict(row)
+    try:
+        out["mentions"] = json.loads(out.get("mentions") or "[]")
+    except (TypeError, ValueError):
+        out["mentions"] = []
+    return out
+
+
+def offer_stands(room_id: str, pause_seq: int) -> bool:
+    """Is the Continue offer for the pause at ``pause_seq`` still open? A READ of
+    the same predicate the receipt insert enforces; a verdict for a payload,
+    never a guard (the guard is the insert)."""
+    stmt = text(f"SELECT CASE WHEN {_PAUSE_AT_SQL} AND NOT {_MOVED_ON_SQL} THEN 1 ELSE 0 END")
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"room": room_id, "pause": int(pause_seq)}).first()
+    return bool(row and int(row[0]) == 1)
+
+
+def append_continue_receipt(msg_id: str, room_id: str, pause_seq: int, content: str,
+                            mentions: Optional[list[str]], now: str) -> Optional[int]:
+    """Consume the offer at ``pause_seq`` by writing the `chain_continued`
+    receipt, and return its seq — or None when the offer no longer stood.
+
+    The insert carries the offer predicate (``INSERT … SELECT … WHERE NOT
+    EXISTS``) and runs in the same seq-allocation transaction as
+    ``append_message``: a check made before this call goes stale across an
+    await and across workers, so the row itself is the once-per-stop guard. Two
+    racers that both read the offer as open: one inserts, the other loses on
+    UNIQUE(room_id, seq) (or SQLite's write lock), recomputes, evaluates the
+    predicate again, finds the winner's receipt and inserts nothing.
+    """
+    import time
+
+    from sqlalchemy.exc import IntegrityError, OperationalError
+
+    payload = {
+        "id": msg_id, "room": room_id, "pause": int(pause_seq),
+        "mentions": json.dumps(mentions or []), "content": content, "now": now,
+    }
+    last_error: Optional[Exception] = None
+    for attempt in range(5):
+        try:
+            with get_engine().begin() as conn:
+                row = conn.execute(
+                    text("SELECT COALESCE(MAX(seq), 0) + 1 FROM enterprise_room_messages "
+                         "WHERE room_id = :room"),
+                    {"room": room_id},
+                ).first()
+                seq = int(row[0]) if row else 1
+                result = conn.execute(
+                    text(
+                        "INSERT INTO enterprise_room_messages "
+                        "(id, room_id, seq, sender_kind, sender_identity, kind, mentions, "
+                        " content, execution_id, created_at) "
+                        "SELECT :id, :room, :seq, 'system', NULL, 'chain_continued', "
+                        "       :mentions, :content, NULL, :now "
+                        f"WHERE {_PAUSE_AT_SQL} AND NOT {_MOVED_ON_SQL}"
+                    ),
+                    {**payload, "seq": seq},
+                )
+                if (result.rowcount or 0) == 0:
+                    return None
+                return seq
+        except IntegrityError as e:
+            last_error = e
+            continue  # lost the seq race — recompute and retry
+        except OperationalError as e:
+            # SQLite refuses the second writer outright when waiting would
+            # deadlock the first's commit; the same "lost the race" as above.
+            last_error = e
+            time.sleep(0.02 * (attempt + 1))
+            continue
+    raise RuntimeError(
+        f"could not write the continue receipt for room {room_id} after 5 attempts"
+    ) from last_error
+
+
+# --- what one agent's skill gate stopped (trinity#3402) -----------------------
+
+def record_gate_holds(room_id: str, agent_name: str, seqs, gate_hold: str,
+                      now: str) -> None:
+    """Record the messages ``agent_name``'s skill gate stopped in this room: the
+    post a hold was raised for (or a refusal that stands) and its notice line.
+    One row per (room, agent, seq); the first verdict stands."""
+    rows = [{"room": room_id, "agent": agent_name, "seq": int(seq), "hold": gate_hold,
+             "now": now} for seq in sorted({s for s in seqs if s is not None})]
+    if not rows:
+        return
+    stmt = text(
+        "INSERT INTO room_gate_holds (room_id, agent_name, seq, gate_hold, created_at) "
+        "VALUES (:room, :agent, :seq, :hold, :now) "
+        "ON CONFLICT (room_id, agent_name, seq) DO NOTHING"
+    )
+    with get_engine().begin() as conn:
+        conn.execute(stmt, rows)
+
+
+def gate_held_seqs(room_id: str, agent_name: str) -> set[int]:
+    """The seqs of this room ``agent_name`` must never be shown again."""
+    stmt = text("SELECT seq FROM room_gate_holds WHERE room_id = :room AND agent_name = :agent")
+    with get_engine().connect() as conn:
+        return {int(r[0]) for r in conn.execute(stmt, {"room": room_id, "agent": agent_name})}
+
+
+def max_seq(room_id: str) -> int:
+    """The room's newest message seq (0 for an empty room)."""
+    stmt = text("SELECT COALESCE(MAX(seq), 0) FROM enterprise_room_messages WHERE room_id = :room")
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"room": room_id}).first()
+        return int(row[0]) if row else 0
+
+
 def count_messages(room_id: str) -> int:
     with get_engine().connect() as conn:
         row = conn.execute(
@@ -450,7 +657,7 @@ def count_budget_messages(room_id: str) -> int:
     made with ``max_messages=1`` was dead on arrival: the creation line alone
     tripped the budget and the first human message was refused 410 before anyone
     spoke. More generally an ``N``-message room held fewer than ``N`` actual
-    messages, because "Room created", "Room closed", "Mention chain stopped" and
+    messages, because "Room created", "Room closed", the chain-paused line and
     "could not respond" all silently consumed the operator's budget — and the
     closing line is itself posted BY the budget check, so the feature charged
     its own bookkeeping to the user.

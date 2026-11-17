@@ -325,8 +325,8 @@ async def test_an_ordinary_event_does_not_hit_the_database():
 
 @pytest.mark.asyncio
 async def test_a_failing_resolver_leaves_the_previous_roster_in_place():
-    """The stale roster is the older, smaller one — degrading to it is the
-    safe direction; emptying it would break a working UI."""
+    """A failed read keeps the previous roster until the next read replaces
+    it; emptying it would break a working UI."""
     dispatcher = StreamDispatcher()
     slot = _slot(agents={"mine"})
     dispatcher._clients = {"a": slot}
@@ -459,7 +459,7 @@ FLEET_LEVEL_ALLOWLIST = {
     # state changed. Carries NO payload (#918); listeners refetch
     # GET /api/operator-queue, which scopes rows to the caller's accessible
     # agents — the same footing as `operator_queue_cleared` above.
-    ("services/operator_queue_service.py", "operator_queue_sync"),
+    ("services/operator_queue_service/poller.py", "operator_queue_sync"),
     # ent#170 room triggers are ids only (`room_id` + `seq`). `identity` on
     # `room_participant_state` IS an agent name, but the column is polymorphic
     # (agent name / user id / client email), so keying on it would drop the

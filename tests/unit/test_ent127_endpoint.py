@@ -56,7 +56,8 @@ _REPORT = {
 
 
 def _human(**over):
-    base = dict(username="owner", email="owner@example.com", agent_name=None)
+    # A signed-in person, with the scope field the human-only gate reads set.
+    base = dict(username="owner", email="owner@example.com", agent_name=None, mcp_scope=None)
     base.update(over)
     return types.SimpleNamespace(**base)
 
@@ -109,11 +110,11 @@ class TestAuthWiring:
         """Human-only, like every sibling credential route (inject/export/import)."""
         app, client = app_and_client
         app.dependency_overrides[get_current_user] = lambda: _human(
-            username="owner", agent_name="some-agent"
+            username="owner", agent_name="some-agent", mcp_scope="agent"
         )
         resp = client.get(f"/api/agents/{_AGENT}/credential-requirements")
         assert resp.status_code == 403
-        assert "human-only" in resp.json()["detail"]
+        assert "human-only" in resp.json()["detail"]["message"]
 
     def test_human_principal_allowed(self, client):
         assert client.get(f"/api/agents/{_AGENT}/credential-requirements").status_code == 200

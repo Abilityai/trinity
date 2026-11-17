@@ -10,6 +10,9 @@
  * is the grant, and a non-member gets a uniform 404 (never a 403 that would
  * confirm the room exists). The acting identity comes from the API key, so an
  * agent-scoped key always acts as its own agent and cannot post as anyone else.
+ * What is LISTED narrows once: `close_room` moderates, and only a person
+ * moderates a room, so it is shown to user-scoped keys only
+ * (abilityai/trinity-enterprise#719); the backend still decides who may close.
  *
  * Rooms are OSS core since ent#443, so on a CURRENT backend the routes always
  * answer. Against an older backend that does not serve them, these tools return
@@ -19,6 +22,7 @@
 import { z } from "zod";
 import { ApiError, TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { HUMAN_ONLY_KEYS_NOT_SHOWN, humanOnlyToolAccess } from "../access.js";
 
 const NOT_ENABLED = {
   error: "shared_sessions_not_enabled",
@@ -108,9 +112,14 @@ export function createRoomTools(client: TrinityClient, requireApiKey: boolean) {
         name: z.string().describe("Short room name"),
         agents: z.array(z.string()).min(1).describe("Agent names to add as participants"),
         topic: z.string().optional().describe("What the room is for"),
-        max_messages: z.number().int().positive().optional().describe("Message budget (default 60)"),
-        max_cost_usd: z.number().positive().optional().describe("Cost budget in USD"),
-        ttl_hours: z.number().int().min(0).optional().describe("Auto-close after N hours (default 24; 0 = never)"),
+        // Budgets are an operator control (ent#387, #3495): omitted fields take the
+        // operator's defaults, and a key below `operator` has its values ignored.
+        max_messages: z.number().int().positive().max(500).optional()
+          .describe("Message budget, at most 500 (default: the operator's room default)"),
+        max_cost_usd: z.number().positive().max(1000).optional()
+          .describe("Cost budget in USD, at most 1000 (default: the operator's room default, usually none)"),
+        ttl_hours: z.number().int().min(0).max(168).optional()
+          .describe("Auto-close after N hours, at most 168; 0 = never (default: the operator's room default)"),
         scribe: z.string().optional().describe("Participant designated to record outcomes"),
       }),
       execute: async (args: any, context?: { session?: McpAuthContext }) =>
@@ -164,7 +173,13 @@ export function createRoomTools(client: TrinityClient, requireApiKey: boolean) {
       name: "close_room",
       description:
         "Close a room. The transcript stays readable; no further messages can be " +
-        "posted. Idempotent.",
+        "posted. Idempotent. " +
+        "WHO MAY CALL: the room's moderator or an admin, as a person: a signed-in session or their own user-scoped key. " +
+        HUMAN_ONLY_KEYS_NOT_SHOWN.person,
+      // Closing moderates the room, and only a person moderates one
+      // (abilityai/trinity-enterprise#719; agent keys since ent#220), so it is
+      // listed to user keys only. Posting and reading stay the caller's own.
+      canAccess: humanOnlyToolAccess("person"),
       parameters: z.object({
         room_id: z.string(),
         reason: z.string().optional(),

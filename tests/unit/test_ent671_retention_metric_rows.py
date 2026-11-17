@@ -134,7 +134,7 @@ def test_a_stored_row_wins_over_env():
         ("0", "db-row"),         # unlimited
         ("42", "env"),
         ("not-a-number", "db-row"),
-        ("-1", "db-row"),        # reads as 0 in BOTH today — trinity#3089
+        ("-1", "db-row"),        # the default in both, never unlimited — trinity#3089
     ],
 )
 def test_quota_value_is_what_the_write_boundary_enforces(resolved, monkeypatch):

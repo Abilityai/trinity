@@ -21,20 +21,20 @@ Click any agent to open its detail page. The page lands on the **Overview** tab 
 | **Loops** | `loops` | Sequential bounded task runs -- see [Agent Loops](../automation/agent-loops.md) |
 | **Skills** | `skills` | The agent's own skills and those shared from the library, each with **Run**; owners also set approval and assign skills -- see [Skills](../automation/skills-and-playbooks.md) |
 | **Payments** | `nevermined` | Paid access configuration |
-| **Sharing** | `sharing` | External clients and channels (owners only) |
+| **Channels** | `channels` | External clients and channels (owners only) |
 | **Permissions** | `permissions` | Which agents may call this one (owners only) |
 | **A2A** | `a2a` | External-orchestrator interoperability (owners only, where available) |
 | **Git** | `git` | Git status, pending changes, recent commits, **Pull**, **Push** and **Refresh** — only for GitHub-synced agents |
 | **Files** | `files` | Workspace file browser |
-| **Settings** | `settings` | The one configuration home (owners only), pinned last on the strip: a rail of panes — **General**, **Guardrails**, **People**, **Channels**, **Integrations**, **Storage** — with the pane in `?section=`. See [Agent Configuration](agent-configuration.md#the-settings-home) |
+| **Settings** | `settings` | The one configuration home (owners only), pinned last on the strip: a rail of panes — **General**, **Credentials**, **Guardrails**, **People**, **Channels**, **Integrations**, **Storage** — with the pane in `?section=`. See [Agent Configuration](agent-configuration.md#the-settings-home) |
 
 Tabs marked *owners only* are hidden from users an agent is merely shared with. The system agent shows none of them except **Settings**, where it gets the General (read-only), Guardrails and Integrations panes. **Dashboard**, **Brain**, **Git**, and **A2A** appear only when that agent or instance supports them.
 
-The Info, Credentials, Access and Folders tabs no longer exist. Template details are under **Settings › General**, credentials and shared folders under **Settings › Storage**, and the access roster under **Settings › People**.
+The Info, Credentials, Access and Folders tabs no longer exist. Template details are under **Settings › General**, credentials under **Settings › Credentials**, shared folders under **Settings › Storage**, and the access roster under **Settings › People**.
 
 Every visible tab is deep-linkable with `?tab=` — including the conditional ones. The URL follows the tab you pick, so a reload keeps you on that tab, you can copy the address to link to it, and the browser's Back button steps back through the tabs you visited before it leaves the page. Returning to an agent page through a link that names no tab (from the Dashboard, say) keeps the tab you were on, as long as that agent has it. A `?tab=` value naming a tab you cannot see falls back to Overview, and the address is corrected to match.
 
-Inside Settings the pane is in the URL too: `?tab=settings&section=general|guardrails|people|channels|integrations|storage`. A bare `?tab=settings` opens General, a `section` naming a pane you cannot see lands on the first pane you can, and Back steps between the panes you visited. Legacy links still resolve: `?tab=info` opens **Settings › General**, `?tab=guardrails` opens **Settings › Guardrails**, `?tab=credentials` and `?tab=folders` open **Settings › Storage**, `?tab=access` opens **Settings › People**, `?tab=playbooks` opens **Skills**, and `?tab=session` redirects to that agent's [Workspace](../sharing-and-access/workspace.md) conversation.
+Inside Settings the pane is in the URL too: `?tab=settings&section=general|credentials|guardrails|people|channels|integrations|storage`. A bare `?tab=settings` opens General, a `section` naming a pane you cannot see lands on the first pane you can, and Back steps between the panes you visited. Legacy links still resolve: `?tab=info` opens **Settings › General**, `?tab=guardrails` opens **Settings › Guardrails**, `?tab=credentials` opens **Settings › Credentials**, `?tab=folders` opens **Settings › Storage**, `?tab=access` opens **Settings › People**, `?tab=playbooks` opens **Skills**, and `?tab=session` redirects to that agent's [Workspace](../sharing-and-access/workspace.md) conversation.
 
 When the window is too narrow to fit every tab, the trailing tabs collapse into a **More ▾** menu at the end of the tab strip. **Settings** sits outside that menu, pinned at the end of the strip, so it is always one click away. If the active tab is inside the menu, the More button carries the active highlight. Deep links via `?tab=` work either way.
 

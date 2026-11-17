@@ -31,6 +31,9 @@ export interface Agent {
   };
   container_id?: string;
   mcp_exposed?: boolean;  // #846 — exposed as a dedicated chat_with_<slug> MCP tool
+  // trinity-enterprise#1007: create-time kind from the `trinity.kind` label;
+  // null = unknown (never defaulted).
+  kind?: "agent" | "deployment" | null;
   // trinity-enterprise#15: present on the create response for a copy-import
   import_snapshot?: {
     source_repo: string;
@@ -53,9 +56,14 @@ export interface AgentConfig {
   port?: number;  // SSH port - ui_port removed for security
   template?: string;
   source_branch?: string;  // Branch to track (default: main). Can also use github:owner/repo@branch syntax.
-  // trinity-enterprise#15: GitHub-repo import intent. MCP exposes only
-  // "copy" | "clone" — "fork" is web-UI-only (its PAT arg would be audit-logged).
+  // trinity-enterprise#15: GitHub-repo import intent ("copy" | "clone" | "fork").
   import_intent?: string;
+  // trinity-enterprise#93 / #1007: fork-to-own. No github_pat over MCP — tool
+  // args land in transcripts; the backend uses the caller's saved token.
+  fork_to_own?: {
+    destination_repo: string;
+    private?: boolean;
+  };
   // trinity-enterprise#69: ephemeral "ghost" agent budget — at least one of
   // max_executions/ttl_seconds; entitlement-gated at the backend.
   ephemeral?: {
@@ -112,6 +120,8 @@ export interface McpAuthContext extends Record<string, unknown> {
   // tools until verify_login upgrades it (#848),
   // portal_delegate=trusted issuer that exchanges an end-user email for a portal
   // session and nothing else (ent#163).
+  // ops / ops_write=bounded machine credentials for ops tooling (#2323 reads,
+  // #3180 writes); neither is in OPERATOR_SCOPES, so neither gets MCP tools.
   //
   // #1854: `portal_delegate` was missing here, so a fifth live value arrived as
   // a runtime string outside the declared union — the backend column is
@@ -120,7 +130,7 @@ export interface McpAuthContext extends Record<string, unknown> {
   // "user-scoped keys see all accessible agents" branch. Keep this union
   // exhaustive against `mcp_api_keys.scope`; anything not listed must be
   // treated as least-privileged, never as `user`.
-  scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous" | "ops";
+  scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous" | "ops" | "ops_write";
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
   // #2392: X-Trinity-Execution-Id of THIS request (turn id or "manual"); wins over an agent-supplied execution_id.
   executionId?: string;
@@ -161,14 +171,24 @@ export interface AgentAccessCheckResult {
 
 /**
  * #2807: the outcome a tool RETURNED rather than threw, stamped on the
- * per-call tool context by `access.ts::accessDenied` and read by the audit
- * wrapper after `execute` — the same seam #905 uses for `requestId`. `denied`
- * is the only kind today; a returned non-denial failure is the registered
- * follow-up and adds a kind here, not a second field.
+ * per-call tool context and read by the audit wrapper after `execute` — the
+ * same seam #905 uses for `requestId`. Either kind makes the row
+ * `success: false` with `error: reason`.
+ *
+ * - `denied`: an AUTHORIZATION refusal, by the MCP gate or by the backend.
+ *   Stamped by `access.ts::accessDenied`; the row also says `denied: true`.
+ * - `failed` (#4026): any other failure the tool returned instead of throwing:
+ *   an operational refusal (a 409 blocker, a 503 retryable), a route this
+ *   build lacks, a rejected request, a lost connection. Stamped by
+ *   `audit.ts::toolFailed`; the row carries no `denied` key.
  */
 export interface ToolOutcome {
-  kind: "denied";
-  /** What the AUDIT row records — by default the reason the caller was given. */
+  kind: "denied" | "failed";
+  /**
+   * What the AUDIT row records as `error`. `toolFailed` never stamps an empty
+   * `failed` reason (an empty `error` is dropped from the row); `accessDenied`
+   * records the reason it is given, as it always has.
+   */
   reason: string;
 }
 
@@ -214,6 +234,18 @@ export interface AgentTemplateInfo {
   skills?: string[];
   use_cases?: string[];
   status?: "running" | "stopped";
+  /**
+   * ent#1102: whether a delegated run's ending wakes this agent, and which
+   * layer decided — the standing policy behind a receipt's `wake` field.
+   * `source`: "agent" (the owner's own tri-state), "legacy_resume" (ent#329's
+   * pre-tri-state opt-in), "instance" (the instance default), "unreadable"
+   * (fail-closed: the flag could not be read, so no turn is spent) or
+   * "no_owner" (no live ownership row — nobody to bill, so no turn is spent).
+   */
+  wake_on_ending?: {
+    effective: boolean;
+    source: "agent" | "legacy_resume" | "instance" | "unreadable" | "no_owner";
+  };
 }
 
 // SSH Access Types
@@ -223,6 +255,9 @@ export interface SshConnectionInfo {
   host: string;
   port: number;
   user: string;
+  // trinity-enterprise#1168: the host interface Docker publishes this agent's
+  // SSH port on ("0.0.0.0" = every interface; null when unknown).
+  bind_address?: string | null;
 }
 
 export interface SshAccessResponse {
@@ -232,6 +267,9 @@ export interface SshAccessResponse {
   connection: SshConnectionInfo;
   expires_at: string;
   expires_in_hours: number;
+  // trinity-enterprise#1168: always present (possibly empty) — e.g. "bound to
+  // loopback, jump through the host" or "recreate to apply the binding".
+  warnings?: string[];
   instructions: string[];
 }
 
@@ -347,6 +385,9 @@ export interface ScheduleExecution {
   attempt_number?: number;
   retry_of_execution_id?: string;
   retry_scheduled_at?: string;
+  // ent#1105: the project an edition attributed this run to — present only
+  // when the reader may see that project; absent otherwise.
+  project_id?: string | null;
 }
 
 /** The aggregated result a completed `POST /fan-out` returns. */
@@ -570,12 +611,12 @@ export interface OperatorAskCreate {
   request_id: string;
   title: string;
   question?: string;
-  type?: "approval" | "question" | "alert";
+  type?: "approval" | "question" | "alert" | "credential";   // credential: trinity-enterprise#1066, raised by ask_for_credential only
   priority?: "critical" | "high" | "medium" | "low";
   options?: string[];
   context?: Record<string, unknown> | null;
   proposal?: Record<string, unknown> | null;
-  to?: "primary" | "approver" | "viewer" | "operator";
+  to?: "primary" | "approver" | "viewer" | "operator" | "project" | `role:${string}`;   // trinity-enterprise#1007: or a canon role id; ent#1134: or the turn's project
   expires_at?: string;
   supersedes_expired?: string;
   replaces?: string;   // #3247: request_id of one of the agent's own PENDING asks
@@ -604,6 +645,14 @@ export interface OperatorAskReceipt {
   replaced_by?: string | null;   // #3247: request_id of the ask that replaced this one
   disposed_by?: string | null;
   agent_ending?: "replaced" | "withdrawn" | null;  // trinity-enterprise#901
+  // abilityai/trinity-enterprise#1108 AC #4: the answer wake's status — `pending`
+  // (answered, the agent was not running; its next start delivers it) | `owed`
+  // (ent#1135: the wake is being delivered) | `woken` | null (no wake owed). On a
+  // `created` receipt it is null; a replay carries it.
+  wake_state?: "pending" | "owed" | "woken" | null;
+  // trinity-enterprise#1109: where a credential lands when that is not the
+  // asking agent — the agent and the host, never the key's variable name.
+  credential_destination?: { agent_name: string; host: string } | null;
   differs?: string[];
 }
 

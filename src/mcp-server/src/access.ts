@@ -129,10 +129,10 @@ export function accessDenied(
  *
  * - no auth context → allowed (dev mode installs no `authenticate`; the backend gates)
  * - `system` → allowed (Phase 11.1: the system agent talks to everyone)
- * - `agent` → itself, or a target with an `agent_permissions` edge from it
- *   (`GET /api/agents/{caller}/permissions`, which the client reads FAIL-CLOSED:
- *   an unreadable list is an empty list). A key row with no agent name is
- *   denied, not promoted to the user rule.
+ * - `agent` → itself, or a target with an `agent_permissions` edge from it or
+ *   that it spawned (`GET /api/agents/{caller}/reach/{target}`, decided from the
+ *   database and read FAIL-CLOSED: any error is "not reachable", ent#629). A key
+ *   row with no agent name is denied, not promoted to the user rule.
  * - `user` → allowed HERE: the backend already scopes a user key to what its
  *   owner can access (`AuthorizedAgent*` / `assert_agent_access`), and it does so
  *   by ROLE and per-user grant, which this layer cannot see (#2824).
@@ -176,6 +176,91 @@ export async function checkAgentEdge(
 }
 
 // ---------------------------------------------------------------------------
+// Who may SEE a human-only tool (the #3435 shape, one home since
+// abilityai/trinity-enterprise#719)
+// ---------------------------------------------------------------------------
+
+/**
+ * The human-only rule a tool's backend route follows, and the key scopes that
+ * rule admits. A tool is listed to exactly those scopes, so no key is shown a
+ * tool that its scope can never call (#3435). Visibility is decided by scope
+ * alone: within a listed scope the route still decides who passes (the agent's
+ * owner, the room's moderator, the admin role), so a key that is listed a tool
+ * can still be refused by it for who it is.
+ *
+ *   - `person`      — the PERSON rule (`require_person`, or
+ *                     `is_person_principal` inline): a signed-in session or the
+ *                     person's own `user`-scoped key. Listed to `user` keys.
+ *   - `interactive` — `require_interactive`: a signed-in session only (a route
+ *                     that binds a credential). Listed to no key.
+ *   - `admin`       — `require_admin` on a human-only admin read. Listed to
+ *                     `user` and `system` keys; the backend admits an
+ *                     administrator only, so a non-admin's `user` key is shown
+ *                     the tool and refused.
+ *
+ * An ALLOW-list over `mcp_api_keys.scope`, which is free text (#848, #2323): a
+ * context with an unknown scope, a non-string scope or no scope, and a missing
+ * auth context, are all refused. A validated key whose row carries no scope
+ * never reaches this predicate scope-less: `server.ts` authenticate maps it to
+ * `user`, the same default the backend applies to that key (the column's
+ * `DEFAULT 'user'`, `dependencies.py` `scope or "user"`), so its listing still
+ * equals what the route admits. FastMCP consults `canAccess` only when an auth
+ * context exists, so the keyless dev mode (`MCP_REQUIRE_API_KEY=false`) still
+ * lists every tool.
+ */
+export type HumanOnlyRule = "person" | "interactive" | "admin";
+
+const HUMAN_ONLY_TOOL_SCOPES: Readonly<Record<HumanOnlyRule, ReadonlySet<string>>> = {
+  person: new Set(["user"]),
+  interactive: new Set(),
+  admin: new Set(["user", "system"]),
+};
+
+/** The `canAccess` predicate for a tool whose backend route follows `rule`. */
+export function humanOnlyToolAccess(rule: HumanOnlyRule): (auth: unknown) => boolean {
+  const scopes = HUMAN_ONLY_TOOL_SCOPES[rule];
+  return (auth: unknown): boolean => {
+    const scope = (auth as { scope?: unknown } | null | undefined)?.scope;
+    return typeof scope === "string" && scopes.has(scope);
+  };
+}
+
+/**
+ * The sentence every `person` or `interactive` tool's description carries: which
+ * keys can never call it, and so are not shown it. It is what the predicate
+ * lists, stated once.
+ */
+export const HUMAN_ONLY_KEYS_NOT_SHOWN: Readonly<Record<Exclude<HumanOnlyRule, "admin">, string>> = {
+  person: "Agent-scoped and system-scoped keys can never call it, so their sessions are not shown it.",
+  interactive: "No MCP key (user, agent or system scope) can call it, so no key session is shown it.",
+};
+
+/**
+ * The caller sentence of a `person` or `interactive` tool that acts on one agent
+ * as its owner or an admin. A tool whose route names a different caller (a
+ * room's moderator, a person with access to a queue item's agent) writes its own
+ * WHO MAY CALL sentence and appends `HUMAN_ONLY_KEYS_NOT_SHOWN[rule]`.
+ */
+export const HUMAN_ONLY_WHO_MAY_CALL: Readonly<Record<Exclude<HumanOnlyRule, "admin">, string>> = {
+  person:
+    "WHO MAY CALL: the agent's owner or an admin, as a person: a signed-in session or their own user-scoped key. " +
+    HUMAN_ONLY_KEYS_NOT_SHOWN.person,
+  interactive:
+    "WHO MAY CALL: the agent's owner or an admin, from a signed-in session only. " +
+    HUMAN_ONLY_KEYS_NOT_SHOWN.interactive,
+};
+
+/** The `TOOL_ACCESS_POLICY` owner of a tool listed by `humanOnlyToolAccess`. */
+export const HUMAN_ONLY_POLICY_OWNER: Readonly<Record<Exclude<HumanOnlyRule, "admin">, string>> = {
+  person:
+    "backend require_person (abilityai/trinity-enterprise#719): a signed-in session or the person's own " +
+    "user-scoped key; the tool's canAccess lists it to user keys only",
+  interactive:
+    "backend require_interactive (abilityai/trinity-enterprise#719): a signed-in session only; " +
+    "the tool's canAccess lists it to no key",
+};
+
+// ---------------------------------------------------------------------------
 // The policy table
 // ---------------------------------------------------------------------------
 
@@ -205,13 +290,13 @@ export const AGENT_TARGET_PARAMS: ReadonlySet<string> = new Set([
 
 const ADMIN_ONLY =
   "backend rejects agent principals (require_admin / assert_admin / reject_agent_principal, #1890)";
-const CREDENTIAL_HUMAN_ONLY =
-  "backend: get_owned_agent_by_name + reject_agent_principal (trinity-enterprise#69 Part 2) — owner or admin, human-only; hidden from agent sessions by a per-tool canAccess (#3435)";
+const PERSON_ONLY = HUMAN_ONLY_POLICY_OWNER.person;
+const INTERACTIVE_ONLY = HUMAN_ONLY_POLICY_OWNER.interactive;
 const KEY_ADMIN_ONLY =
   "backend require_admin (#1890): admin + human-only; hidden from agent sessions by a per-tool canAccess (#3435)";
 const TEARDOWN_HUMAN_ONLY =
   "backend fence: the gated route requires role 'creator' AND a HUMAN caller — reject_agent_principal plus a credential-kind refusal, because one call removes N agents without delete_agent's per-agent spawn-scope check (abilityai/trinity-enterprise#454)";
-const REMINDER_SELF_GATE = "backend self-gate: reminders.py::_self_gate refuses an agent key naming another agent";
+const REMINDER_SELF_GATE = "backend self-gate: reminders.py assert_own_agent refuses an agent key naming another agent (abilityai/trinity-enterprise#840)";
 const SKILL_MANAGER_FENCE =
   "backend fence: routers/skills.py get_skill_managed_agent_by_name refuses an agent key whose agent does not hold the skills.manage capability — on a sibling AND on itself (abilityai/trinity-enterprise#596)";
 const SKILL_GATE_FENCE =
@@ -234,8 +319,12 @@ const A2A_OUTBOUND_LIST =
   "a2a.ts refuses agent-scoped keys itself (human_only, no round trip) — the OSS settings route behind it is admin + human-only, not self-scoped, so a permission lookup would be inert";
 const ASSIGNMENTS_SELF =
   "assignments.ts — an agent key reads only its own roster (fails closed without an agent name); user/system keys are scoped by the backend, whose 404 is uniform (ent#500)";
+const GRANTS_OWNER_TIER =
+  "backend fence: agent_config.py OwnedAgentByName — an agent key reads itself or an agent it spawned, never through a permission edge; a person key only as owner or admin (ent#164, ent#756). An `enforce` row would admit an edge peer the route refuses (trinity-enterprise#991)";
 const A2A_CALL_SELF = "a2a_call.ts checkSelf — self-only by design (an agent spends only its own endpoint credential)";
 const AGENTS_INLINE = "agents.ts inline getPermittedAgents filter ({self} ∪ permitted)";
+const ACT_AS =
+  "self-acting (resolveActingAgent): an agent or system key acts as itself and an agent_name naming another agent is refused; a user key's agent_name rides X-Trinity-Act-As-Agent, which the backend admits only for an admin's user key and holds to that one agent (dependencies.admit_act_as / get_self_acting_agent / assert_own_agent, trinity-enterprise#1024)";
 const LOOP_RESOLVE =
   "resolves the loop's agent (GET /api/loops/{id}) then checkAgentEdge; compound uniform denial (ent#628)";
 
@@ -251,23 +340,23 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   get_agent_info: { kind: "in-tool", how: AGENTS_INLINE },
   get_agent_compatibility_report: { kind: "in-tool", how: AGENTS_INLINE },
   create_agent: { kind: "none", why: "creates the agent; `name` is the new agent's name, not a target" },
-  rename_agent: { kind: "baselined", owner: ADMIN_ONLY },
+  rename_agent: { kind: "baselined", owner: PERSON_ONLY },
   delete_agent: { kind: "enforce", param: "name" },
   start_agent: { kind: "enforce", param: "name" },
   stop_agent: { kind: "enforce", param: "name" },
   list_templates: { kind: "none", why: "no agent target" },
   get_credential_status: { kind: "enforce", param: "name" },
-  inject_credentials: { kind: "baselined", owner: ADMIN_ONLY },
-  export_credentials: { kind: "baselined", owner: CREDENTIAL_HUMAN_ONLY },
-  import_credentials: { kind: "baselined", owner: CREDENTIAL_HUMAN_ONLY },
+  inject_credentials: { kind: "baselined", owner: PERSON_ONLY },
+  export_credentials: { kind: "baselined", owner: PERSON_ONLY },
+  import_credentials: { kind: "baselined", owner: INTERACTIVE_ONLY },
   export_agent_data: { kind: "enforce", param: "name" },
   import_agent_data: { kind: "enforce", param: "name" },
   get_credential_encryption_key: { kind: "none", why: "no agent target; " + KEY_ADMIN_ONLY },
   get_agent_ssh_access: { kind: "baselined", owner: ADMIN_ONLY },
   deploy_local_agent: { kind: "none", why: "creates the agent; `name` is the new agent's name, not a target" },
-  initialize_github_sync: { kind: "enforce", param: "agent_name" },
+  initialize_github_sync: { kind: "baselined", owner: PERSON_ONLY },
   get_agent_github_pat_status: { kind: "enforce", param: "agent_name" },
-  set_agent_github_pat: { kind: "enforce", param: "agent_name" },
+  set_agent_github_pat: { kind: "baselined", owner: PERSON_ONLY },
   // --- chat.ts ---
   chat_with_agent: { kind: "in-tool", how: CHAT_GATE },
   get_chat_history: { kind: "enforce", param: "agent_name" },
@@ -285,6 +374,10 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   list_systems: { kind: "none", why: "no agent target" },
   restart_system: { kind: "none", why: "a system name, not an agent" },
   get_system_manifest: { kind: "none", why: "a system name, not an agent" },
+  apply_system: {
+    kind: "none",
+    why: "a system manifest, no agent target; person-only: its own canAccess shows it to user-scoped sessions alone, and the backend's require_person refuses every other key",
+  },
   // --- docs.ts ---
   get_agent_requirements: { kind: "none", why: "no agent target" },
   ask_trinity: { kind: "none", why: "no agent target" },
@@ -328,22 +421,22 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- notifications.ts ---
   send_notification: { kind: "none", why: "no agent target" },
   // --- reports.ts ---
-  report: { kind: "none", why: "self-published; the backend self-gates the path agent (#918)" },
-  record_metrics: { kind: "none", why: "self-recorded; the backend self-gates the path agent (ent#478)" },
-  refresh_metric_definitions: { kind: "none", why: "self-scoped; reconciles the calling agent's own template (ent#478)" },
+  report: { kind: "in-tool", how: ACT_AS + " — self-published; the backend self-gates the path agent (#918)" },
+  record_metrics: { kind: "in-tool", how: ACT_AS + " — self-recorded; the backend self-gates the path agent (ent#478)" },
+  refresh_metric_definitions: { kind: "in-tool", how: ACT_AS + " — self-scoped; reconciles the calling agent's own template (ent#478)" },
   // ent#727: `agent` is the cross-agent read. Unlike the `baselined` rows, the
   // backend RE-CHECKS this edge (routers/agent_files.py `_metric_read_gate`),
   // so this route is closed for ent#629's purposes, not on its work list.
   get_metrics: { kind: "enforce", param: "agent" },
-  get_objectives: { kind: "none", why: "self-scoped read; the backend self-gates the path agent (ent#666)" },
+  get_objectives: { kind: "in-tool", how: ACT_AS + " — self-scoped read; the backend self-gates the path agent (ent#666)" },
   list_reports: { kind: "in-tool", how: REPORTS_GATE },
   get_report: { kind: "in-tool", how: "reports.ts resolves the report's agent, then " + REPORTS_GATE },
   // --- canvas.ts ---
-  set_canvas: { kind: "none", why: "the calling agent's own canvas (ent#438)" },
-  patch_canvas: { kind: "none", why: "the calling agent's own canvas (ent#438)" },
-  get_canvas: { kind: "none", why: "the calling agent's own canvas (ent#438)" },
-  list_canvases: { kind: "none", why: "the calling agent's own canvases (ent#438)" },
-  clear_canvas: { kind: "none", why: "the calling agent's own canvas (ent#438)" },
+  set_canvas: { kind: "in-tool", how: ACT_AS + " — the calling agent's own canvas (ent#438)" },
+  patch_canvas: { kind: "in-tool", how: ACT_AS + " — the calling agent's own canvas (ent#438)" },
+  get_canvas: { kind: "in-tool", how: ACT_AS + " — the calling agent's own canvas (ent#438)" },
+  list_canvases: { kind: "in-tool", how: ACT_AS + " — the calling agent's own canvases (ent#438)" },
+  clear_canvas: { kind: "in-tool", how: ACT_AS + " — the calling agent's own canvas (ent#438)" },
   // --- files.ts ---
   share_file: { kind: "none", why: "the calling agent's own public folder (FILES-001)" },
   // --- pipelines.ts ---
@@ -352,8 +445,8 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- subscriptions.ts ---
   register_subscription: { kind: "none", why: "`name` is the subscription's name, not an agent" },
   list_subscriptions: { kind: "none", why: "no agent target" },
-  assign_subscription: { kind: "enforce", param: "agent_name" },
-  clear_agent_subscription: { kind: "enforce", param: "agent_name" },
+  assign_subscription: { kind: "baselined", owner: INTERACTIVE_ONLY },
+  clear_agent_subscription: { kind: "baselined", owner: PERSON_ONLY },
   get_agent_auth: { kind: "enforce", param: "agent_name" },  // also: the secrets branch is assert_admin
   delete_subscription: { kind: "none", why: "a subscription name, not an agent" },
   // --- monitoring.ts ---
@@ -365,10 +458,12 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   get_agent_health: { kind: "enforce", param: "agent_name" },
   trigger_health_check: { kind: "enforce", param: "agent_name" },
   // --- nevermined.ts ---
-  configure_nevermined: { kind: "enforce", param: "agent_name" },
+  configure_nevermined: { kind: "baselined", owner: INTERACTIVE_ONLY },
   get_nevermined_config: { kind: "enforce", param: "agent_name" },
-  toggle_nevermined: { kind: "baselined", owner: ADMIN_ONLY },
+  toggle_nevermined: { kind: "baselined", owner: PERSON_ONLY },
   get_nevermined_payments: { kind: "baselined", owner: ADMIN_ONLY },
+  get_agent_spending: { kind: "enforce", param: "agent_name" },
+  revoke_agent_delegation: { kind: "enforce", param: "agent_name" },
   // --- executions.ts ---
   list_recent_executions: { kind: "in-tool", how: EXECUTIONS_GATE },
   get_execution_result: { kind: "in-tool", how: EXECUTIONS_GATE },
@@ -393,9 +488,11 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   send_voice_reply: { kind: "enforce", param: "agent_name" },  // also: effect-guarded per execution (#1084)
   // --- memory.ts ---
   write_user_memory: { kind: "enforce", param: "agent_name" },
+  search_memory: { kind: "enforce", param: "agent_name" },  // ent#1028 — same self-fence as the write
   // --- decisions.ts (ent#638) --- the target is only ever the seat's own agent
   record_decision: { kind: "enforce", param: "agent_name" },
   list_seat_decisions: { kind: "enforce", param: "agent_name" },
+  get_autonomy: { kind: "enforce", param: "agent_name" },
   // --- loops.ts ---
   run_agent_loop: { kind: "enforce", param: "agent_name" },
   get_loop_status: { kind: "in-tool", how: LOOP_RESOLVE },
@@ -415,9 +512,10 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
       "operator_queue.ts resolves the item's agent, then " + OPERATOR_QUEUE_GATE +
       "; the backend then refuses every key but a person's (reject_non_person_principal, trinity-enterprise#611)",
   },
-  get_my_ask: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent); the backend re-checks identity (trinity-enterprise#611)" },
-  ask_operator: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent), `to` is a role and never an agent; the backend re-checks identity (trinity-enterprise#611)" },
-  withdraw_ask: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent), request_id names one of its own asks; the backend re-checks identity and ownership (trinity-enterprise#901)" },
+  get_my_ask: { kind: "in-tool", how: ACT_AS + " — self-acting: the agent comes from the key (resolveActingAgent); the backend re-checks identity (trinity-enterprise#611)" },
+  ask_operator: { kind: "in-tool", how: ACT_AS + " — self-acting: the agent comes from the key (resolveActingAgent), `to` is a role and never an agent; the backend re-checks identity (trinity-enterprise#611)" },
+  withdraw_ask: { kind: "in-tool", how: ACT_AS + " — self-acting: the agent comes from the key (resolveActingAgent), request_id names one of its own asks; the backend re-checks identity and ownership (trinity-enterprise#901)" },
+  ask_for_credential: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent), the ask goes to its own primary person; the backend re-checks identity (trinity-enterprise#1066)" },
   // --- git.ts ---
   get_git_status: { kind: "in-tool", how: GIT_GATE },
   git_sync: { kind: "in-tool", how: GIT_GATE },
@@ -455,21 +553,38 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   list_available_credentials: { kind: "none", why: "the calling agent's own grants (ent#279)" },
   fetch_credential: { kind: "none", why: "`name` is a credential; the backend scopes it to the calling agent (ent#279)" },
   // --- projects.ts ---
-  list_projects: { kind: "none", why: "the calling agent's own active projects (ent#661)" },
-  get_project: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  list_project_tasks: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  create_project_task: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  update_project_task: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  add_project_task_note: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  get_project_log: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  add_project_log_entry: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  link_to_project: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  get_steward_digest: { kind: "none", why: "the calling agent's own stewarded projects (ent#661 v3)" },
-  set_project_health: { kind: "none", why: "a project id; the backend answers only when the calling agent is its active steward (ent#661 v3)" },
-  create_project: { kind: "none", why: "creates on the calling agent's OWN owner's behalf; the backend gates it on projects.manage (ent#588)" },
-  import_project: { kind: "none", why: "a path in the calling agent's OWN files; the backend gates it on projects.manage (ent#588)" },
+  list_projects: { kind: "in-tool", how: ACT_AS + " — the calling agent's own active projects (ent#661)" },
+  get_project: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  list_project_tasks: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  create_project_task: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  update_project_task: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  add_project_task_note: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  get_project_log: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  read_project_context: { kind: "in-tool", how: ACT_AS + " — a project id and a context item marked for agents; the backend answers only for a project the calling agent is active on, in an internal turn (ent#1193)" },
+  add_project_log_entry: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  link_to_project: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  get_steward_digest: { kind: "in-tool", how: ACT_AS + " — the calling agent's own stewarded projects (ent#661 v3)" },
+  list_project_executions: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on, in its own live turn, and fences rows it may not open (ent#1105)" },
+  start_project_task: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only when the calling agent is the project's steward, in the mode a person set (ent#1235)" },
+  set_project_health: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only when the calling agent is its active steward (ent#661 v3)" },
+  create_project: { kind: "in-tool", how: ACT_AS + " — creates on the calling agent's OWN owner's behalf; the backend gates it on projects.manage (ent#588)" },
+  import_project: { kind: "in-tool", how: ACT_AS + " — a path in the calling agent's OWN files; the backend gates it on projects.manage (ent#588)" },
+  // `agents` are never acted on by the caller: the backend checks each against the rosters of
+  // the agent's primary contacts, nothing happens until one of them approves, and adding one
+  // someone else owns still raises that owner's consent ask (R39). The gate is projects.manage.
+  propose_project_changes: { kind: "baselined", owner: "trinity-enterprise#1089: projects/proposals.py — the agent's primary approves (ent#816 first answer wins) + the agent owner's consent ask" },
+  // --- platform_files.ts ---
+  list_platform_files: { kind: "in-tool", how: ACT_AS + " — a space id; the backend resolves the space's access for the calling agent on every call (uniform 404 otherwise) (ent#1237)" },
+  read_platform_file: { kind: "in-tool", how: ACT_AS + " — a space id and a file name; the backend resolves the space's and the file's access for the calling agent on every call (ent#1237)" },
+  write_platform_file: { kind: "in-tool", how: ACT_AS + " — a space id and a file name; the backend resolves write access for the calling agent on every call (ent#1237)" },
+  remove_platform_file: { kind: "in-tool", how: ACT_AS + " — a space id and a file name; the backend resolves write access for the calling agent on every call (ent#1237)" },
   // --- assignments.ts ---
   get_agent_assignments: { kind: "in-tool", how: ASSIGNMENTS_SELF },
+  // --- permissions.ts ---
+  get_agent_permissions: { kind: "enforce", param: "agent_name" },
+  get_agent_capability_grants: { kind: "baselined", owner: GRANTS_OWNER_TIER },
+  // --- member_progress.ts ---
+  set_member_progress: { kind: "enforce", param: "agent_name" },
   // --- connector.ts (connector / anonymous tiers) ---
   list_playbooks: { kind: "baselined", owner: CONNECTOR_SCOPE },
   run_playbook: { kind: "baselined", owner: CONNECTOR_SCOPE },
@@ -593,8 +708,10 @@ export function withAgentAccess<P extends Record<string, unknown>>(
  *     carries one. The name comes from the key row, never from a parameter,
  *     so this widens identity by exactly zero: a system key already reaches
  *     every agent's data on the read surfaces.
- *   - everything else — `user`, `connector`, `portal_delegate`, `ops`,
- *     `anonymous`, and whatever ships next — is refused. `connector` is the
+ *   - `user`   → the agent named by `requested` (trinity-enterprise#1024). The
+ *     backend decides whether this key may: only an admin's is admitted.
+ *   - everything else — `connector`, `portal_delegate`, `ops`, `anonymous`,
+ *     and whatever ships next — is refused. `connector` is the
  *     one worth naming: it carries an `agentName` too (it is bound to one
  *     agent), and it is an END USER's consumption key. Letting it through
  *     would let a client publish reports as the agent serving them.
@@ -608,16 +725,54 @@ export const SELF_ACTING_SCOPES: ReadonlySet<string> = new Set(["agent", "system
 export function resolveActingAgent(
   authContext: McpAuthContext | undefined,
   what: string,
+  requested?: string,
 ): string {
   const scope = authContext?.scope;
   const agentName = authContext?.agentName;
+  const target = typeof requested === "string" && requested.trim() ? requested.trim() : undefined;
   if (scope !== undefined && SELF_ACTING_SCOPES.has(scope) && agentName) {
+    // An agent's own key acts as that agent only; naming itself is harmless.
+    if (target !== undefined && target !== agentName) {
+      throw new Error(
+        `${what}: this key acts only as '${agentName}' and cannot act as '${target}'. ` +
+          `Omit agent_name.`,
+      );
+    }
     return agentName;
+  }
+  // trinity-enterprise#1024: a user-scoped key may name the agent it acts for.
+  // The BACKEND decides whether this key may (only an admin's user key is
+  // admitted, `dependencies.admit_act_as`); this layer only asks.
+  if (scope === "user") {
+    if (target !== undefined) return target;
+    throw new Error(
+      `${what}: this call requires a key that carries an agent identity (an ` +
+        `agent-scoped key), or agent_name. This key is 'user'-scoped: pass agent_name — ` +
+        `an admin's user key can act on behalf of any agent it administers.`,
+    );
   }
   throw new Error(
     `${what}: this call requires a key that carries an agent identity — an ` +
-      `agent-scoped key, or the platform orchestrator's system-scoped key. ` +
-      `This key is ${scope ? `'${scope}'-scoped` : "unscoped"}` +
+      `agent-scoped key, the platform orchestrator's system-scoped key, or an ` +
+      `admin's user key with agent_name. This key is ${scope ? `'${scope}'-scoped` : "unscoped"}` +
       `${agentName ? "" : " and names no agent"}.`,
   );
 }
+
+/**
+ * trinity-enterprise#1024: the client a self-acting tool calls with. For a
+ * user-scoped key the requests carry `X-Trinity-Act-As-Agent` (an admin acting
+ * on behalf of `agentName`); for an agent or system key, the client unchanged.
+ */
+export function actingClient(
+  client: TrinityClient,
+  authContext: McpAuthContext | undefined,
+  agentName: string,
+): TrinityClient {
+  return authContext?.scope === "user" ? client.asAgent(agentName) : client;
+}
+
+/** The parameter every self-acting tool takes (ent#1024), one description. */
+export const ACT_AS_PARAM_DESCRIPTION =
+  "Only for an admin's user key: the agent to act on behalf of. An agent's own key " +
+  "always acts as itself — omit this.";

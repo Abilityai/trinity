@@ -75,12 +75,26 @@
       </div>
 
       <template v-else>
+        <!-- trinity-enterprise#1101 — the instance refuses MCP callers from
+             outside this server, so a copied config would point at a URL that
+             does not answer. Say so, and hold the copy actions below. -->
+        <div
+          v-if="externalAccessOff"
+          data-testid="mcp-external-access-off"
+          class="mb-3 p-3 rounded-lg border border-status-warning-200 dark:border-status-warning-800 bg-status-warning-50 dark:bg-status-warning-900/30 text-xs text-status-warning-800 dark:text-status-warning-300"
+        >
+          External MCP access is off: clients outside this server are refused with
+          <code class="font-mono">external_mcp_access_off</code>. Agents are unaffected.
+          An admin turns it on in Settings → MCP Keys.
+        </div>
+
         <!-- No key yet: one click mints + copies a live config -->
         <div v-if="!connector.has_key">
           <button
             type="button"
             @click="mintAndCopy"
-            :disabled="connectorBusy"
+            :disabled="connectorBusy || externalAccessOff"
+            :title="externalAccessOff ? EXTERNAL_ACCESS_OFF_REASON : undefined"
             class="inline-flex items-center justify-center gap-2 px-4 py-2 text-sm font-semibold rounded-md text-white disabled:opacity-50 transition-all duration-300"
             :class="copied === 'config'
               ? 'bg-status-success-600 hover:bg-status-success-600 ring-2 ring-status-success-400 ring-offset-2 ring-offset-white dark:ring-offset-gray-900 shadow-lg shadow-status-success-500/40 copied-btn-flash'
@@ -118,7 +132,8 @@
                 <button
                   type="button"
                   @click="copyExistingConfig"
-                  :disabled="connectorBusy"
+                  :disabled="connectorBusy || externalAccessOff"
+                  :title="externalAccessOff ? EXTERNAL_ACCESS_OFF_REASON : undefined"
                   class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-semibold rounded-md disabled:opacity-50 transition-all duration-300"
                   :class="copied === 'existing'
                     ? 'bg-status-success-600 text-white ring-2 ring-status-success-400 shadow-md shadow-status-success-500/40 copied-btn-flash'
@@ -130,7 +145,8 @@
                 <button
                   type="button"
                   @click="mintAndCopy"
-                  :disabled="connectorBusy"
+                  :disabled="connectorBusy || externalAccessOff"
+                  :title="externalAccessOff ? EXTERNAL_ACCESS_OFF_REASON : undefined"
                   class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50"
                 >{{ connectorBusy ? 'Working…' : 'Regenerate & copy' }}</button>
                 <button
@@ -193,7 +209,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import api from '../api'
 import { copyToClipboard } from '../utils/clipboard'
@@ -224,6 +240,13 @@ const connectorLoading = ref(false)
 const connectorBusy = ref(false)
 const connectorAccessDenied = ref(false)
 const freshSnippets = ref([])
+
+// trinity-enterprise#1101 — `external_access` comes with the connector status.
+// Only an explicit `enabled: false` holds the copy actions: a backend that
+// sends no `external_access` predates the gate, so its URL does answer.
+const externalAccessOff = computed(() => connector.value.external_access?.enabled === false)
+const EXTERNAL_ACCESS_OFF_REASON =
+  'External MCP access is off — an outside client would be refused (external_mcp_access_off).'
 
 // Transient "Copied!" affordance — holds the id of the last-copied target
 // ('config' | 'existing' | a snippet client) for ~1.6s, then clears. One shared

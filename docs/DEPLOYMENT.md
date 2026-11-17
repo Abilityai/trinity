@@ -45,6 +45,12 @@ one of them (`container-security.yml` → `verify-compose-file-sets`):
 | Production (source build) | `docker compose -f docker-compose.prod.yml up -d` (+ `-f docker-compose.prod.enterprise.yml` with the enterprise submodule) | bind mount `${TRINITY_DATA_PATH:-./trinity-data}` |
 | Hosted (prebuilt GHCR images) | `./scripts/deploy/start.sh --hosted` — day-two: `docker compose -f docker-compose.hosted.yml …` | bind mount `${TRINITY_DATA_PATH:-./trinity-data}` |
 
+**Updating any of these: `./scripts/deploy/update.sh`** (#3007). It reads which
+file set the host runs from the running backend's compose labels — including the
+enterprise overlay — so an update never recreates the backend from the wrong set.
+`--check` previews it and changes nothing; see
+[Upgrading](user-docs/guides/deploying/upgrading.md).
+
 **Never stack the dev file under prod or hosted** (`-f docker-compose.yml -f
 docker-compose.prod.yml`). Compose merges list-type keys by concatenation, so the
 combination either fails validation on the duplicated hardening entries (Compose
@@ -153,6 +159,42 @@ one of these before putting an instance on a public address:
 Plain HTTP on a public IPv4 with none of the above is the one combination to
 avoid: credentials and JWTs cross the network in the clear.
 
+### Firewall: Docker publishes past ufw
+
+A host firewall does not cover ports Docker publishes. Docker inserts its own
+iptables rules ahead of ufw's `INPUT` chain, so `ufw default deny incoming`
+with `22`, `80` and `443` allowed still leaves every published container port
+— the backend's 8000, the MCP server's 8080, Vector's 8686 and each agent's SSH
+port in 2222–2262 — answering on the public interface. The hook Docker honours
+is the `DOCKER-USER` chain.
+
+On a hand-installed VM (anything that did not run `start.sh --provision`) do
+one of these:
+
+1. **Run the firewall script Trinity ships** (recommended; it is what
+   `--provision` installs):
+
+   ```bash
+   sudo ./scripts/deploy/docker-firewall.sh
+   ```
+
+   It fills `DOCKER-USER` with a `TRINITY-FW` chain that lets established
+   traffic and the Docker bridges through and drops everything else arriving at
+   a container from outside, with no per-port list to keep in step with the
+   compose files. Re-run it after a Docker reinstall.
+
+2. **Or keep the exposure off the interface in the first place.** Agent SSH
+   ports are published on `127.0.0.1` unless you set `AGENT_SSH_BIND_ADDRESS`
+   in `.env` (a VPN interface IP, or `0.0.0.0` for every interface); the MCP
+   server's 8080 follows `MCP_BIND_ADDRESS` the same way. This is defense in
+   depth, not a substitute for (1): Docker engines before the loopback-DNAT fix
+   could reach a loopback publication from off-box via `route_localnet`, and a
+   specific interface IP must be assigned on the host at every container start.
+
+Agents created before this release still publish SSH on every interface until
+they are recreated; the SSH grant response names them, and the one-shot steps
+are in [`docs/migrations/AGENT_SSH_BIND_2026-11.md`](migrations/AGENT_SSH_BIND_2026-11.md).
+
 The webhook URLs and the auto-detected MCP URL Trinity shows take their scheme
 from the proxy's `X-Forwarded-Proto`: a proxy that sends `https` gets
 `https://<host>/api/webhooks/…` and `https://<host>/mcp`. A proxy that sends no
@@ -183,8 +225,8 @@ is gated on install provenance and never appears on an install like this one. A
 Marketplace droplet also boots with **no admin account**: the first person to
 open it in a browser creates one at `/setup` (ent#580) — see Security
 Recommendations below for what that means before you open it. A
-`trinity-do-create.sh` droplet does not: the installer asks for the admin
-password before it creates the droplet.
+`trinity-do-create.sh` droplet does the same: the installer asks for no
+password, so none reaches the droplet's user-data.
 
 Provenance is written by whatever provisions the box (in this repo,
 `start.sh --provision`) — `TRINITY_INSTALL_SOURCE` in
@@ -236,7 +278,11 @@ minute after boot and every five minutes after that. When the address changed it
 rewrites the Caddyfile and the certificate, rewrites `FRONTEND_URL` only if it
 still points at the old IP (a domain you set is kept), and recreates the backend
 from the images already on the instance. It never pulls or upgrades Trinity, and
-it logs only when something changed or failed. Allow a few minutes after a start before opening the new address. An
+it logs only when something changed or failed. If the Caddyfile was edited by hand
+since Trinity wrote it, the new address is **not applied at all** — `.env`, Caddy
+and the backend all stay on the old one — and every tick logs why, until you move
+your own sites to `/etc/caddy/Caddyfile.d/*.caddy` and run `start.sh --provision
+--cloud aws --refresh-ip --caddy-overwrite` once. Allow a few minutes after a start before opening the new address. An
 Elastic IP avoids the change altogether.
 
 **No public IPv4.** `start.sh` stops with "this EC2 instance has no public IPv4
@@ -257,13 +303,10 @@ setting. The AMI is published in us-east-1 only.
 
 ## Configuration
 
-> **Database backend:** a hosted install (`start.sh --hosted`, every one-click
-> image) runs on the PostgreSQL service bundled in `docker-compose.hosted.yml`;
-> `start.sh --hosted` generates `POSTGRES_PASSWORD` and `DATABASE_URL` on a new
-> install and keeps an existing `trinity.db` install on SQLite (#3159, see
-> [SQLITE_TO_POSTGRES.md](migrations/SQLITE_TO_POSTGRES.md#hosted-installs-one-click-images-and-startsh---hosted)).
-> The dev and prod compose files default to SQLite; to run them on
-> **PostgreSQL**, see [POSTGRESQL_SETUP.md](POSTGRESQL_SETUP.md) (`DATABASE_URL`, #300).
+> **Database backend:** every compose file runs a bundled PostgreSQL service, and `start.sh`
+> generates `POSTGRES_PASSWORD`. Running compose directly, set it yourself. SQLite is refused at
+> boot (#4175): see [SQLITE_TO_POSTGRES.md](migrations/SQLITE_TO_POSTGRES.md) and
+> [POSTGRESQL_SETUP.md](POSTGRESQL_SETUP.md).
 
 ### Required Environment Variables
 
@@ -338,7 +381,7 @@ ADMIN_PASSWORD=your-secure-password
 │  Frontend (Vue.js)  │  Backend (FastAPI)  │  MCP Server     │
 │      Port 80        │     Port 8000       │    Port 8080    │
 ├─────────────────────────────────────────────────────────────┤
-│  Redis (secrets)    │  SQLite (data)      │  Vector (logs)  │
+│  Redis (secrets)    │  PostgreSQL (data)  │  Vector (logs)  │
 │   Internal only     │   /data volume      │    Port 8686    │
 ├─────────────────────────────────────────────────────────────┤
 │                    Agent Containers                          │
@@ -353,7 +396,7 @@ ADMIN_PASSWORD=your-secure-password
 
 | Data | Location | Backup Strategy |
 |------|----------|-----------------|
-| SQLite (users, agents) | `~/trinity-data/trinity.db` | Regular file backup |
+| PostgreSQL (users, agents) | `postgres-data` volume | Automatic `pg_dump` under `trinity-data/backups/` |
 | Redis (credentials) | Docker volume | Redis RDB snapshots |
 | Agent workspaces | Docker volumes | Per-agent backup |
 
@@ -363,9 +406,11 @@ ADMIN_PASSWORD=your-secure-password
 # Backup database
 ./scripts/deploy/backup-database.sh ./backups/
 
-# Restore from backup
+# Restore from backup (SQLite installs only)
 ./scripts/deploy/restore-database.sh ./backups/trinity_backup.db
 ```
+
+`restore-database.sh` restores a SQLite file and does not read `DATABASE_URL`. On a PostgreSQL install it writes a file the backend never reads. Restore PostgreSQL from the `pg_dump` under `trinity-data/backups/` with `pg_restore`.
 
 ## Troubleshooting
 
@@ -423,8 +468,9 @@ If you frequently pull `dev`, alias this to a single command in your
 shell — Trinity does not currently auto-detect the staleness on
 `start.sh` because the cost of doing so on every cold start is too high
 relative to how rarely the failure occurs (see #557 for the discussion).
-A future `scripts/deploy/upgrade.sh` will wrap backup + rebuild + start
-+ verify for the explicit upgrade path.
+For the explicit upgrade path, `./scripts/deploy/update.sh` wraps preflight +
+backup + checkout + rebuild + restart + published-URL verification, and
+rebuilds whichever platform images the update needs (#3007).
 
 **Redis connection errors**
 - Ensure Redis is running: `docker compose ps redis`
@@ -499,9 +545,12 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
    a trusted LAN this is a non-issue. After setup, login is fully authenticated
    and the window is closed.
 
-   **Marketplace one-click droplets are claimed in the browser — an accepted
-   risk.** DigitalOcean's 1-Click create page has no input form, so a droplet
-   created without a password boots with **no admin account**, and the first
+   **DigitalOcean droplets are claimed in the browser — an accepted risk.**
+   This covers the Marketplace 1-Click and the `trinity-do-create.sh` script
+   install (`TRINITY_INSTALL_SOURCE=do-script`), and the Vultr Marketplace
+   server. DigitalOcean's 1-Click create page has no input form, and the script
+   install puts no password in user-data (#3799), so the droplet boots with
+   **no admin account**, and the first
    person to open `https://<droplet-ip>` creates it — email, password,
    product-updates consent — without ever opening a terminal (ent#580). Between
    creating the droplet and that first visit, **anyone who finds its IP can claim
@@ -518,7 +567,8 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
      to `/etc/trinity/admin-password`, see
      [`packer/digitalocean/README.md`](../packer/digitalocean/README.md). That
      droplet boots with the admin already provisioned and never shows the
-     wizard.
+     wizard. The password stays in the droplet's user-data for the droplet's
+     life ([#3942](https://github.com/abilityai/trinity/issues/3942)).
 
    If a droplet you have never opened sends you to the login page rather than
    the "create your admin account" screen, someone else got there first:
@@ -539,8 +589,15 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
    [Hardening a Marketplace Install](user-docs/guides/deploying/hardening.md).
    The TLS choices themselves are summarised under
    [TLS on a bare VM](#tls-on-a-bare-vm) above.
-3. **Never expose Redis externally** - Keep it internal only
-4. **Use strong SECRET_KEY** - Generate with `openssl rand -hex 32`
-5. **Use email whitelist** - Restrict access to approved email addresses only
-6. **Regular backups** - Automate database backups
-7. **Keep Docker updated** - Regular security patches
+3. **Firewall the container ports with `DOCKER-USER`, not ufw alone.** Docker
+   publishes past the host firewall; on a hand-installed VM run
+   `sudo ./scripts/deploy/docker-firewall.sh` (what `--provision` does for you).
+   Agent SSH ports are published on `127.0.0.1` by default
+   (`AGENT_SSH_BIND_ADDRESS`); agents created before that default existed keep
+   publishing on every interface until recreated — see
+   [Firewall: Docker publishes past ufw](#firewall-docker-publishes-past-ufw).
+4. **Never expose Redis externally** - Keep it internal only
+5. **Use strong SECRET_KEY** - Generate with `openssl rand -hex 32`
+6. **Use email whitelist** - Restrict access to approved email addresses only
+7. **Regular backups** - Automate database backups
+8. **Keep Docker updated** - Regular security patches

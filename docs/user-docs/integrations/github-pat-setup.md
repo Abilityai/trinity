@@ -150,7 +150,7 @@ A classic PAT with `repo` scope grants access to **every repository your GitHub 
 
 The test shows your GitHub username and confirms repo access. The first-run setup asks for the same token on its optional keys step — see [Platform Keys](../credentials/platform-keys.md#github-access-token).
 
-**Saving auto-propagates to running agents.** When the platform PAT changes, Trinity pushes the new token into every running agent's `.env` file within seconds — no restart required. The save response lists which agents were updated, skipped, or failed. Agents with a per-agent PAT override, or agents that never configured GitHub, are skipped. Per-agent failures are reported but never block the save.
+**Saving auto-propagates to running agents.** When the platform PAT changes, Trinity pushes the new token into every running agent's `.env` file within seconds — no restart required. The save response lists which agents were updated, skipped, or failed. Agents with a per-agent PAT override, or agents that never configured GitHub, are skipped. So is an agent whose `.env` cannot be read as plain text: Trinity does not rewrite that file (doing so would replace every other credential in it), and Settings lists the agent as skipped with *.env not readable as text — not rewritten*. Per-agent failures are reported but never block the save.
 
 ### Option B: Fine-Grained Token (scoped, safer, more maintenance)
 
@@ -298,12 +298,12 @@ Content-Type: application/json
 
 ### Per-agent PAT override
 
-An agent's own token sits on its **Git** tab under **GitHub Authentication** (**Configure** / **Change**, and **Clear agent PAT (revert to global)**). The agent must already have Git sync configured.
+An agent's own token sits in its **Settings → Storage → Repository → GitHub authentication** (**Set token** / **Replace**, and **Clear**). The agent must already have Git sync configured.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents/{name}/github-pat` | GET | Status only — `configured`, `source` (`agent` or `global`), `has_global`; never the token |
-| `/api/agents/{name}/github-pat` | PUT | Set the agent's token (body `{pat}`, owner-only). Validated against GitHub (`400` when rejected), encrypted at rest, and pushed into the running agent at once; the response's `note` says whether it applied live |
+| `/api/agents/{name}/github-pat` | PUT | Set the agent's token (body `{pat}`; the owner, signed in or with their own user-scoped key: agent and system keys are refused). Validated against GitHub (`400` when rejected), encrypted at rest, and pushed into the running agent at once; the response's `note` says whether it applied live |
 | `/api/agents/{name}/github-pat` | DELETE | Clear it; the agent falls back to the global PAT. Restart the agent to apply the change |
 
 A stopped agent picks up a newly set token on its next start.
@@ -313,10 +313,11 @@ A stopped agent picks up a newly set token on its next start.
 ```
 initialize_github_sync(agent_name, repo_owner, repo_name, create_repo?, private?, description?)
 get_agent_github_pat_status(agent_name)
-set_agent_github_pat(agent_name, pat)      # pass an empty string to clear
+set_agent_github_pat(agent_name, pat)      # sets the override, with your own user-scoped key
+set_agent_github_pat(agent_name, "")       # clears the override
 ```
 
-`initialize_github_sync` uses the configured PAT to create (by default, private) or connect a GitHub repository for the agent. `get_agent_github_pat_status` and `set_agent_github_pat` read and set the per-agent override above; the status never includes the token.
+`initialize_github_sync` uses the configured PAT to create (by default, private) or connect a GitHub repository for the agent; it takes a person, so call it with your own user-scoped key. `get_agent_github_pat_status` reads the per-agent override above and never includes the token. `set_agent_github_pat` sets the override with your own user-scoped key, and with an empty string clears it; an agent's own key and the system key are refused on both.
 
 ## Troubleshooting
 

@@ -13,7 +13,6 @@ Related flow: docs/memory/feature-flows/effect-idempotency.md
 
 import logging
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -36,16 +35,22 @@ ARGS = {"recipient": "u@example.com", "channel": "telegram"}
 
 @pytest.fixture
 def alarms(monkeypatch):
-    """Stub the operator-queue seam the guard imports lazily; record alarms."""
+    """Record the alarms the guard reports.
+
+    #3254 re-pin (write-observation point): the alarm reports through the
+    platform-alert seam, ``platform_alerts.observe`` (a stdlib leaf, patched on
+    the module the guard imports), instead of a ``sys.modules`` stub of
+    ``operator_queue_service`` — which lacked the names ``observe`` reaches
+    back for, so the seam would have turned every alarm into ``failed``."""
+    from services import platform_alerts
+
     calls = []
-    stub = types.ModuleType("services.operator_queue_service")
 
-    async def create_bounded_alert(agent_name, item):
-        calls.append((agent_name, item))
-        return True
+    def observe(agent_name, kind, key=None, **kw):
+        calls.append((agent_name, kind, key, kw))
+        return platform_alerts.OBSERVED_CREATED
 
-    stub.create_bounded_alert = create_bounded_alert
-    monkeypatch.setitem(sys.modules, "services.operator_queue_service", stub)
+    monkeypatch.setattr(platform_alerts, "observe", observe)
     return calls
 
 
@@ -85,11 +90,16 @@ class TestPullAgentRefuses:
         assert exc.value.reason == reason
         assert "Do not retry" in str(exc.value)
         assert len(alarms) == 1
-        agent, item = alarms[0]
+        agent, kind, key, kw = alarms[0]
         assert agent == PILOT
-        assert item["type"] == "effect_unguarded"
-        assert item["id"].startswith(effect_service.EFFECT_UNGUARDED_ALERT_PREFIX + PILOT)
-        assert item["context"] == {"effect_type": "message", "reason": reason}
+        # #3254 re-pin (id shape): the seam mints the id under the kind's
+        # reserved prefix; the row is one per (effect type, reason) on the agent.
+        from services import platform_alerts
+        assert kind == "effect_unguarded"
+        assert platform_alerts.KINDS[kind].budgeted_type == "effect_unguarded"
+        assert platform_alerts.KINDS[kind].prefix == effect_service.EFFECT_UNGUARDED_ALERT_PREFIX
+        assert key == f"message:{reason}"
+        assert kw["context"] == {"effect_type": "message", "reason": reason}
 
     async def test_foreign_execution_refused(self, effect_service, alarms, pilot_env):
         _register_execution(effect_service, "exec-other", "someone-else")
@@ -103,10 +113,13 @@ class TestPullAgentRefuses:
     async def test_refused_even_when_alarm_budget_exhausted(
         self, effect_service, alarms, pilot_env, monkeypatch
     ):
-        async def at_cap(agent_name, item):
-            return False  # budget full — no queue item, but the send still must not go
+        from services import platform_alerts
 
-        monkeypatch.setattr(sys.modules["services.operator_queue_service"], "create_bounded_alert", at_cap)
+        def at_cap(agent_name, kind, key=None, **kw):
+            # budget full — no queue item, but the send still must not go
+            return platform_alerts.OBSERVED_REFUSED_AT_BUDGET
+
+        monkeypatch.setattr(platform_alerts, "observe", at_cap)  # #3254 re-pin: at the seam
         sends = []
         with pytest.raises(effect_service.EffectUnguardedError):
             await _send(effect_service, execution_id=None, agent_name=PILOT, sends=sends)

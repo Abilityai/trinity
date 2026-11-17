@@ -502,6 +502,17 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // trinity-enterprise#459: email a pending person their invitation again.
+    async resendInvite(name, email) {
+      const authStore = useAuthStore()
+      const response = await axios.post(
+        `/api/agents/${name}/share/${encodeURIComponent(email)}/invite`,
+        null,
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
     async unshareAgent(name, email) {
       const authStore = useAuthStore()
       await axios.delete(`/api/agents/${name}/share/${encodeURIComponent(email)}`, {
@@ -519,6 +530,16 @@ export const useAgentsStore = defineStore('agents', {
 
     // #17 Access tab: operator (Trinity-user) roster — allow-list emails resolved
     // against `users` (active operator vs pending invite).
+    // trinity-enterprise#450: accounts to suggest in the Access tab's add field.
+    async getAccessCandidates(name, query) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/access/candidates`, {
+        params: { q: query },
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
     async getAgentAccess(name) {
       const authStore = useAuthStore()
       const response = await axios.get(`/api/agents/${name}/access`, {
@@ -581,6 +602,17 @@ export const useAgentsStore = defineStore('agents', {
     async getAgentPeerSkills(name) {
       const authStore = useAuthStore()
       const response = await axios.get(`/api/agents/${name}/peer-skills`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // abilityai/trinity-enterprise#925: does the agent hold peer skill grants
+    // inside itself? `{ reachable, hook }` — both null unless the caller may
+    // manage the agent's skills.
+    async getAgentPeerSkillEnforcement(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/peer-skills/enforcement`, {
         headers: authStore.authHeader
       })
       return response.data
@@ -904,6 +936,59 @@ export const useAgentsStore = defineStore('agents', {
       })
     },
 
+    // Declaring metrics from the UI (trinity-enterprise#1006). Every write
+    // edits the agent's template.yaml `metrics:` block and carries the
+    // template hash the read returned; the backend refuses a stale one with
+    // `template_changed`. Errors are rethrown for the form to show inline.
+    async getMetricDeclarations(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/metrics/declarations`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async declareMetric(name, fields, baseHash) {
+      const authStore = useAuthStore()
+      const response = await axios.post(
+        `/api/agents/${name}/metrics/declarations`,
+        { ...fields, base_hash: baseHash },
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
+    async updateMetricDeclaration(name, metric, fields, baseHash) {
+      const authStore = useAuthStore()
+      const response = await axios.put(
+        `/api/agents/${name}/metrics/declarations/${encodeURIComponent(metric)}`,
+        { ...fields, base_hash: baseHash },
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
+    async getMetricReferences(name, metric) {
+      const authStore = useAuthStore()
+      const response = await axios.get(
+        `/api/agents/${name}/metrics/declarations/${encodeURIComponent(metric)}/references`,
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
+    async retireMetricDeclaration(name, metric, baseHash, { acknowledgeReferences = false } = {}) {
+      const authStore = useAuthStore()
+      const response = await axios.delete(
+        `/api/agents/${name}/metrics/declarations/${encodeURIComponent(metric)}`,
+        {
+          headers: authStore.authHeader,
+          params: { base_hash: baseHash, acknowledge_references: acknowledgeReferences }
+        }
+      )
+      return response.data
+    },
+
     // Agent Dashboard Actions
     async getAgentDashboard(name) {
       return dedupe(`agentDashboard:${name}`, async () => {
@@ -1177,6 +1262,36 @@ export const useAgentsStore = defineStore('agents', {
     async setGuardrails(name, guardrails) {
       const authStore = useAuthStore()
       const response = await axios.put(`/api/agents/${name}/guardrails`, guardrails, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // Tool access (GUARD-008, trinity-enterprise#341) — the profile, its five
+    // cards with per-runtime coverage, and whether a restart is waiting.
+    async getToolAccess(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/tool-access`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // `body`: { profile, custom?: { read_only, disallowed_tools } }
+    async setToolAccess(name, body) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/tool-access`, body, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // The header and list Read-only toggle: ON selects Strict read-only, OFF
+    // returns to the profile it came from (409 when read-only belongs to
+    // another profile). Answers with the resolved tool access.
+    async setReadOnly(name, enabled) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/read-only`, { enabled }, {
         headers: authStore.authHeader
       })
       return response.data

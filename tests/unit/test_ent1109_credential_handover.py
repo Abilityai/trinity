@@ -1,0 +1,905 @@
+"""trinity-enterprise#1109 — a credential ask with a DESTINATION: the value a
+person types into the Workspace secret field lands on another instance, in
+the agent it is for, and never on the instance that asked.
+
+The ent#1066 sink wrote the value into the ASKING agent's `.env`. A hub Regent
+asks on behalf of an agent it is building elsewhere, so the ask now carries
+`context.credential_destination = {instance_url, agent_name, key_env}`:
+where the agent is, which agent, and the NAME of the variable in the asking
+agent's own `.env` that holds its key to that instance. The sink reads that
+key by name through the asking agent's read endpoint, re-validates the URL
+at delivery time, pins the connection, and POSTs a MERGE inject to the
+destination; after a 2xx nothing of the value rests here (the scrub staging
+is removed). Every failure is a named plain retry.
+
+Pinned, through the real ask sink, the real credential sink and the real
+inject router over the real SQLite; the agents' HTTP servers, the destination
+instance, DNS, Docker, Redis (fakeredis) and the audit sink are stood in for:
+
+* the ask: a destination is validated at raise time by name and stored
+  normalised; the receipt and the Workspace projection say where in plain
+  words and never name the key variable; a destination on another kind is
+  refused;
+* the delivery: the key read by name from the asking agent, the merge inject
+  on the destination under that key, nothing written on the asking agent,
+  nothing staged afterwards, the audit row `credential_delivered` with host
+  and agent only;
+* every refusal: named, the ask pending, the value and the key in no log, no
+  audit row, no refusal text; unstaged when nothing could have been written;
+* the receiving side: `mode: "merge"` on the owner inject route patches one
+  line and keeps every other byte, the whole-file default is unchanged;
+* the manifest: `credentials:` names are parsed, validated and previewed.
+"""
+from __future__ import annotations
+
+import asyncio
+import functools
+import json
+import logging
+import os
+import socket
+import ssl
+import sys
+import threading
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import fakeredis
+import httpx
+import pytest
+
+pytest.importorskip("sqlalchemy")
+pytest.importorskip("fastapi")
+
+os.environ.setdefault("REDIS_URL", "redis://u:p@localhost:6379")
+os.environ.setdefault("SECRET_KEY", "test-secret")
+
+_REPO = Path(__file__).resolve().parents[2]
+_BACKEND = str(_REPO / "src" / "backend")
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+
+pytestmark = pytest.mark.unit
+
+# Bound once, at collection, like `test_ent719_credential_and_key_routes_human_only.py`:
+# the override key below and the route's own `Depends(get_current_user)` must be
+# the same function object, and a module first imported inside a test is not
+# kept across tests on this island.
+import dependencies  # noqa: E402
+import routers.credentials as r_credentials  # noqa: E402
+from models import User  # noqa: E402
+
+OWNER = "owner-1109@example.com"
+ASKER = "regent-1109"            # the agent that asks (the hub Regent)
+TARGET = "lopez-digest"          # the agent the credential is for, elsewhere
+HOST = "member.example.com"
+INSTANCE = f"https://{HOST}"
+ADDRESS = "93.184.216.34"
+NAME = "TELEGRAM_BOT_TOKEN"
+KEY_ENV = "MEMBER_TRINITY_KEY"
+KEY = "trinity_mcp_k3y_Zm9yLW1lbWJlci1pbnN0YW5jZQ"
+VALUE = "7421:AAH-bot-token-value-with\"quote\\and\\backslash"
+DEST = {"instance_url": INSTANCE, "agent_name": TARGET, "key_env": KEY_ENV}
+
+
+# ---------------------------------------------------------------------------
+# Stand-ins
+# ---------------------------------------------------------------------------
+
+
+def _record(addr, port=0):
+    return (socket.AF_INET, socket.SOCK_STREAM, 6, "", (addr, port))
+
+
+def _resolver(host, port, *a, **k):
+    if host == HOST:
+        return [_record(ADDRESS, port)]
+    if host == "private.example.com":
+        return [_record("10.0.0.5", port)]
+    raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+
+class _Resp:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _AgentServer:
+    """An agent's internal HTTP server as the sink reaches it: an in-memory
+    `.env`, a read endpoint and an inject endpoint. Records every call."""
+
+    def __init__(self, env_text=""):
+        self.env_text = env_text
+        self.calls = []
+
+    def client(self, agent_name):
+        server = self
+
+        class _Ctx:
+            async def __aenter__(self):
+                return server
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Ctx()
+
+    async def get(self, url, params=None, **kw):
+        self.calls.append(("GET", url))
+        if self.env_text is None:
+            return _Resp(200, {"files": {}, "files_b64": {}, "missing": [".env"]})
+        return _Resp(200, {"files": {".env": self.env_text}, "files_b64": {}, "missing": []})
+
+    async def post(self, url, json=None, **kw):
+        self.calls.append(("POST", url))
+        self.env_text = json["files"][".env"]
+        return _Resp(200, {"status": "success", "files_written": [".env"]})
+
+
+def _streaming(resp: httpx.Response) -> httpx.Response:
+    """A buffered mock response rebuilt as a STREAMING one, so the sink's
+    capped reader (`aiter_raw`) sees it the way the wire would hand it over."""
+    if not resp.is_stream_consumed:
+        return resp
+    return httpx.Response(resp.status_code, headers=resp.headers, stream=httpx.ByteStream(resp.content))
+
+
+class _Instance:
+    """The DESTINATION instance's backend as the sink reaches it over the
+    pinned transport — a real `httpx.AsyncClient` over a `MockTransport`, so
+    the request the sink builds (pinned URL, Host, SNI, body) is what httpx
+    would put on the wire. Records the request it saw; answers as told."""
+
+    def __init__(self):
+        self.calls = []
+        self.status = 200
+        self.error = None
+        self.response = None
+
+    def client(self, *a, **k):
+        inst = self
+
+        async def _handler(request):
+            inst.calls.append({"url": str(request.url),
+                               "json": json.loads(request.content or b"null"),
+                               "headers": request.headers,
+                               "extensions": dict(request.extensions)})
+            if inst.error:
+                raise inst.error
+            if inst.response is not None:
+                return _streaming(inst.response)
+            if inst.status != 200:
+                return _streaming(httpx.Response(inst.status, json={"detail": "nope"}))
+            return _streaming(httpx.Response(200, json={"status": "success", "files_written": [".env"]}))
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(_handler), follow_redirects=False)
+
+
+@pytest.fixture
+def real_db():
+    from database import db as real
+    return real
+
+
+@pytest.fixture(autouse=True)
+def roster(monkeypatch):
+    import client_portal.service as portal_service
+    monkeypatch.setattr(portal_service, "agent_on_roster", lambda *a, **k: True)
+
+
+@pytest.fixture(autouse=True)
+def dns(monkeypatch):
+    """The resolver the DELIVERY-time check uses (`a2a_client.validate_endpoint`,
+    off the loop). Raise time resolves nothing — pinned below."""
+    from services import a2a_client
+    from utils.url_validation import validate_a2a_endpoint_url
+    monkeypatch.setattr(a2a_client, "validate_a2a_endpoint_url",
+                        functools.partial(validate_a2a_endpoint_url, resolver=_resolver))
+
+
+@pytest.fixture(autouse=True)
+def approved(monkeypatch):
+    """The admin's outbound A2A endpoint registry (the OSS `system_settings`
+    list, read through the real provider seam) holds the member instance, and
+    the outbound switch is ON. A test flips either."""
+    from services import a2a_outbound, a2a_outbound_service
+    records = [{"id": "ep-member", "name": "member", "url": INSTANCE}]
+    switch = {"on": True}
+    a2a_outbound.clear_provider()
+    monkeypatch.setattr(a2a_outbound, "_load_endpoint_records", lambda: [dict(r) for r in records])
+    monkeypatch.setattr(a2a_outbound_service, "is_outbound_enabled", lambda: switch["on"])
+    yield SimpleNamespace(records=records, switch=switch)
+    a2a_outbound.clear_provider()
+
+
+class _FakeEnc:
+    def encrypt(self, d):
+        return "ENV:" + json.dumps(d)
+
+    def decrypt(self, s):
+        return json.loads(s[len("ENV:"):])
+
+
+@pytest.fixture
+def ask(real_db, monkeypatch):
+    """The real ask sink; the world around it stubbed as the ent#1066 suite stubs it."""
+    import services.ask_service as svc
+    import services.operator_queue_service as oqs
+    from services import assignment_provider
+    from services.rate_limiter import RateLimitResult
+
+    audit, sent, events = [], [], []
+
+    class _Audit:
+        async def log(self, **kw):
+            audit.append(kw)
+            return "evt"
+
+    class _WS:
+        async def broadcast(self, message):
+            sent.append(json.loads(message))
+
+    monkeypatch.setattr(svc, "platform_audit_service", _Audit())
+    monkeypatch.setattr(svc, "_websocket_manager", _WS())
+    monkeypatch.setattr(svc, "_observers", [events.append])
+    monkeypatch.setattr(svc, "_owner_email", lambda agent: OWNER)
+    monkeypatch.setattr(oqs, "_workspace_attachment", lambda agent, email, **_: (f"thread-{email}", True))
+    monkeypatch.setattr(real_db, "get_operator_resume_enabled", lambda agent: False, raising=False)
+    monkeypatch.setattr(oqs.rate_limiter, "check", lambda *a, **k: RateLimitResult(True, 10, 0, 60))
+    assignment_provider.clear_provider()
+    yield SimpleNamespace(svc=svc, audit=audit, sent=sent, events=events, db=real_db)
+    assignment_provider.clear_provider()
+
+
+@pytest.fixture
+def world(real_db, monkeypatch):
+    """The real credential sink over the real SQLite: the asking agent's
+    server holds the key under KEY_ENV; the destination instance records what
+    it is sent; every side channel recorded so a test can grep it."""
+    import services.ask_service as svc
+    import services.credential_sink as sink
+    import services.runtime_secret_scrub as scrub
+
+    fake = fakeredis.FakeStrictRedis(decode_responses=True)
+    monkeypatch.setattr(scrub, "get_breaker_redis", lambda: fake)
+    monkeypatch.setattr(scrub, "_enc_svc", lambda: _FakeEnc())
+    monkeypatch.setattr(scrub, "_redis_down_until", 0.0, raising=False)
+    monkeypatch.setattr(sink, "get_breaker_redis", lambda: fake)
+
+    asker = _AgentServer(f'OTHER="keep me"\n{KEY_ENV}="{KEY}"\n')
+    monkeypatch.setattr(sink, "_agent_client", asker.client)
+    instance = _Instance()
+    monkeypatch.setattr(sink, "_destination_client", instance.client)
+    status = {"status": "running"}
+    monkeypatch.setattr(sink, "get_agent_container", lambda name: MagicMock())
+    monkeypatch.setattr(sink, "get_agent_status_from_container",
+                        lambda c: SimpleNamespace(status=status["status"]))
+
+    audit, events = [], []
+
+    class _Audit:
+        async def log(self, **kw):
+            audit.append(kw)
+            return "evt"
+
+    monkeypatch.setattr(sink, "platform_audit_service", _Audit())
+    monkeypatch.setattr(sink.credential_requirements_service, "invalidate_report_cache",
+                        lambda name: None)
+    monkeypatch.setattr(svc, "platform_audit_service", _Audit())
+    monkeypatch.setattr(svc, "_websocket_manager", None)
+    monkeypatch.setattr(svc, "_observers", [events.append])
+    monkeypatch.setattr(real_db, "get_operator_resume_enabled", lambda a: False, raising=False)
+
+    return SimpleNamespace(db=real_db, sink=sink, scrub=scrub, fake=fake, asker=asker,
+                           instance=instance, status=status, audit=audit, events=events)
+
+
+def _body(request_id, **over):
+    b = {"request_id": request_id, "type": "credential", "title": f"Needs {NAME}",
+         "question": "For the digest agent to post to Telegram.",
+         "context": {"credential_name": NAME, "credential_destination": dict(DEST)}}
+    b.update(over)
+    return b
+
+
+def _raise(ask, body, agent=ASKER):
+    return ask.svc.raise_ask(agent, body, raised_by="agent", channel="mcp")
+
+
+def _refused_raise(ask, body, code):
+    with pytest.raises(ask.svc.AskRejected) as info:
+        _raise(ask, body)
+    assert (info.value.status_code, info.value.code) == (422, code), (
+        info.value.status_code, info.value.code, info.value.message)
+    return info.value
+
+
+def _pending(real_db, rid, destination=DEST, name=NAME, **over):
+    context = {"credential_name": name}
+    if destination is not None:
+        context["credential_destination"] = dict(destination)
+    item = {"id": rid, "type": "credential", "status": "pending", "priority": "medium",
+            "title": f"Needs {name}", "question": "to post the digest", "options": None,
+            "context": context, "created_at": "2026-11-04T10:00:00Z",
+            "addressed_to_email": OWNER}
+    item.update(over)
+    return real_db.create_operator_queue_item(ASKER, item)
+
+
+def _provide(uid, value=VALUE, email=OWNER, is_platform=False):
+    from client_portal.asks import service
+    return asyncio.run(service.provide_credential(uid, email, is_platform, value,
+                                                  actor_ip="127.0.0.1",
+                                                  endpoint="/api/enterprise/client-portal/asks/x/credential"))
+
+
+def _refused(uid, status, code, **kw):
+    from client_portal.asks import service
+    with pytest.raises(service.AskError) as info:
+        _provide(uid, **kw)
+    assert (info.value.status_code, info.value.code) == (status, code), (
+        info.value.status_code, info.value.code, info.value.detail)
+    return info.value
+
+
+def _staged(world):
+    return world.fake.hlen("secret_scrub:staged") or 0
+
+
+# ===========================================================================
+# 1. The ask carries a destination
+# ===========================================================================
+
+
+class TestTheAsk:
+    def test_a_destination_is_stored_normalised_and_the_receipt_says_where_in_plain_words(self, ask):
+        receipt = _raise(ask, _body("d-1"))
+        assert receipt["status"] == "created"
+        row = ask.db.get_operator_queue_item(receipt["id"])
+        stored = row["context"]["credential_destination"]
+        assert stored == {"instance_url": INSTANCE, "agent_name": TARGET, "key_env": KEY_ENV}
+        # the receipt names the agent and the host — the key's variable never
+        assert receipt["credential_destination"] == {"agent_name": TARGET, "host": HOST}
+        assert KEY_ENV not in json.dumps(receipt)
+
+    def test_a_trailing_slash_and_upper_case_host_are_normalised(self, ask):
+        body = _body("d-2")
+        body["context"]["credential_destination"]["instance_url"] = f"https://{HOST.upper()}/"
+        receipt = _raise(ask, body)
+        row = ask.db.get_operator_queue_item(receipt["id"])
+        assert row["context"]["credential_destination"]["instance_url"] == INSTANCE
+
+    def test_a_receipt_without_a_destination_carries_none(self, ask):
+        body = _body("d-3")
+        body["context"].pop("credential_destination")
+        receipt = _raise(ask, body)
+        assert receipt["credential_destination"] is None
+
+    @pytest.mark.parametrize("url,reason", [
+        (f"ftp://{HOST}", "scheme"),
+        (f"https://user:pw@{HOST}", "userinfo"),
+        (f"{INSTANCE}/api", "path"),
+        (f"{INSTANCE}/?x=1", "path"),
+        ("https://", "missing_host"),
+        ("", "missing"),
+        (42, "not_a_string"),
+        ("https://" + "a" * 510, "too_long"),
+    ])
+    def test_a_bad_instance_url_is_refused_by_name(self, ask, url, reason):
+        body = _body("d-url")
+        body["context"]["credential_destination"]["instance_url"] = url
+        e = _refused_raise(ask, body, "destination_url_invalid")
+        assert e.extra.get("reason") == reason
+
+    # -- the operator's ruling: a destination is an instance an admin approved --
+
+    @pytest.mark.parametrize("url", [
+        "https://elsewhere.example.com",        # a public host nobody registered
+        f"http://{HOST}",                        # the registered host, another scheme
+        f"{INSTANCE}:8443",                      # the registered host, another port
+        "https://private.example.com",           # not registered; never resolved
+        "https://nowhere.invalid",               # not registered; never resolved
+    ])
+    def test_an_instance_no_admin_registered_is_refused_and_told_where_to_register(self, ask, url):
+        body = _body("d-unapproved")
+        body["context"]["credential_destination"]["instance_url"] = url
+        e = _refused_raise(ask, body, "destination_not_approved")
+        assert e.extra.get("reason") == "not_registered"
+        assert "Settings → Integrations → Outbound A2A endpoints" in e.message
+        assert "admin" in e.message
+
+    def test_the_approval_is_the_registered_origin_not_its_spelling(self, ask):
+        # default port, trailing dot, upper case, trailing slash: one origin
+        body = _body("d-origin")
+        body["context"]["credential_destination"]["instance_url"] = f"https://{HOST.upper()}.:443/"
+        receipt = _raise(ask, body)
+        row = ask.db.get_operator_queue_item(receipt["id"])
+        assert row["context"]["credential_destination"]["instance_url"] == INSTANCE
+
+    def test_the_registry_is_read_through_the_effective_provider(self, ask, approved):
+        """An endpoint a registered module scopes to THIS agent approves the
+        destination for this agent and nobody else; the OSS list is not
+        consulted while a provider is registered."""
+        from services import a2a_outbound
+
+        class _Scoped:
+            def resolve_endpoint(self, agent_name, ref):
+                return None
+
+            def list_endpoints(self, agent_name):
+                return ([{"id": "p1", "name": "partner", "url": "https://partner.example.com"}]
+                        if agent_name == ASKER else [])
+
+        a2a_outbound.register_provider(_Scoped())
+        body = _body("d-prov")
+        body["context"]["credential_destination"]["instance_url"] = "https://partner.example.com"
+        assert _raise(ask, body)["credential_destination"]["host"] == "partner.example.com"
+        # the OSS record is shadowed while the provider answers
+        _refused_raise(ask, _body("d-prov-2"), "destination_not_approved")
+        # another agent gets nothing from a per-agent provider
+        body = _body("d-prov-3")
+        body["context"]["credential_destination"]["instance_url"] = "https://partner.example.com"
+        with pytest.raises(ask.svc.AskRejected) as info:
+            _raise(ask, body, agent="other-agent")
+        assert info.value.code == "destination_not_approved"
+
+    def test_outbound_a2a_switched_off_refuses_the_destination_at_raise(self, ask, approved):
+        approved.switch["on"] = False
+        e = _refused_raise(ask, _body("d-off"), "destination_outbound_disabled")
+        assert e.extra.get("reason") == "outbound_disabled"
+        assert "Settings → Integrations → Outbound A2A endpoints" in e.message
+        # a plain credential ask is untouched by the switch
+        body = _body("d-off-plain")
+        body["context"].pop("credential_destination")
+        assert _raise(ask, body)["status"] == "created"
+
+    def test_raise_time_never_resolves_the_host(self, ask, monkeypatch):
+        """`raise_ask` is synchronous under an async route: a resolver call
+        here would block the worker's loop. The registry entry was resolved
+        when the admin registered it; delivery resolves again, off the loop."""
+        def _never(*a, **k):
+            raise AssertionError("getaddrinfo called at raise time")
+        monkeypatch.setattr(socket, "getaddrinfo", _never)
+        assert _raise(ask, _body("d-nodns"))["status"] == "created"
+
+    def test_an_ipv6_literal_stays_bracketed_and_a_trusted_http_scheme_is_kept(self, ask, approved):
+        approved.records.append({"id": "ep-6", "name": "six", "url": "https://[2001:db8::1]:8443"})
+        approved.records.append({"id": "ep-lan", "name": "lan", "url": "http://10.0.0.7:8000"})
+        for given, stored in [("https://[2001:DB8::1]:8443/", "https://[2001:db8::1]:8443"),
+                              ("http://10.0.0.7:8000", "http://10.0.0.7:8000")]:
+            body = _body(f"d-{stored[:5]}")
+            body["context"]["credential_destination"]["instance_url"] = given
+            receipt = _raise(ask, body)
+            row = ask.db.get_operator_queue_item(receipt["id"])
+            assert row["context"]["credential_destination"]["instance_url"] == stored
+
+    @pytest.mark.parametrize("agent", ["", "../etc", "has space", "x" * 65, 7])
+    def test_a_bad_agent_name_is_refused_by_name(self, ask, agent):
+        body = _body("d-agent")
+        body["context"]["credential_destination"]["agent_name"] = agent
+        _refused_raise(ask, body, "destination_agent_invalid")
+
+    @pytest.mark.parametrize("key_env,reason", [
+        ("not a name", "not_a_name"), ("TRINITY_MCP_API_KEY", "reserved"),
+        ("K" * 65, "too_long"), (None, "not_a_name"),
+    ])
+    def test_a_bad_key_variable_is_refused_by_name(self, ask, key_env, reason):
+        body = _body("d-key")
+        body["context"]["credential_destination"]["key_env"] = key_env
+        e = _refused_raise(ask, body, "destination_key_env_invalid")
+        assert e.extra.get("reason") == reason
+
+    @pytest.mark.parametrize("shape", ["text", [1], {"instance_url": INSTANCE}])
+    def test_a_destination_of_the_wrong_shape_is_refused(self, ask, shape):
+        body = _body("d-shape")
+        body["context"]["credential_destination"] = shape
+        _refused_raise(ask, body, "destination_invalid")
+
+    def test_a_destination_on_a_question_is_refused(self, ask):
+        body = _body("d-kind", type="question", options=None)
+        body["context"] = {"credential_destination": dict(DEST)}
+        _refused_raise(ask, body, "destination_on_non_credential")
+
+    def test_the_workspace_projection_says_where_and_never_names_the_key_variable(self, ask):
+        from client_portal.asks import service
+        receipt = _raise(ask, _body("d-proj"))
+        row = ask.db.get_operator_queue_item(receipt["id"])
+        out = service._project(row, viewer_email=OWNER)
+        assert out.credential_name == NAME
+        assert out.credential_destination == {"agent_name": TARGET, "host": HOST}
+        assert KEY_ENV not in json.dumps(out.model_dump(), default=str)
+
+    def test_the_wake_says_the_credential_went_elsewhere_and_is_not_in_the_environment(self, ask):
+        from services import operator_resume_service as ors
+        receipt = _raise(ask, _body("d-wake"))
+        row = ask.db.get_operator_queue_item(receipt["id"])
+        row = dict(row, response="provided", status="answered")
+        text = ors._framed_message(row, "provided", None)
+        assert TARGET in text and HOST in text
+        assert "not in your environment" in text
+        assert KEY_ENV not in text
+
+
+# ===========================================================================
+# 2. The delivery
+# ===========================================================================
+
+
+class TestDelivery:
+    def test_the_value_lands_on_the_destination_under_the_asking_agents_key_and_nowhere_here(
+            self, world, caplog):
+        caplog.set_level(logging.DEBUG)
+        uid = _pending(world.db, "del-1")
+        out = _provide(uid)
+
+        # one merge inject on the destination, pinned to the resolved address,
+        # the registered host in Host + SNI, the key read by name as the bearer
+        assert len(world.instance.calls) == 1
+        call = world.instance.calls[0]
+        assert call["url"] == f"https://{ADDRESS}/api/agents/{TARGET}/credentials/inject"
+        assert call["headers"]["Host"] == HOST
+        assert call["headers"]["Authorization"] == f"Bearer {KEY}"
+        assert call["extensions"]["sni_hostname"] == HOST
+        assert call["json"] == {"mode": "merge", "env": {NAME: VALUE}}
+        # the asking agent was READ for its key and never written
+        assert [m for m, _ in world.asker.calls] == ["GET"]
+        assert NAME not in world.asker.env_text
+        # nothing rests here after delivery
+        assert _staged(world) == 0
+        # the ask ended provided, by name
+        row = world.db.get_operator_queue_item(uid)
+        assert row["disposition"] == "answered" and row["response"] == "provided"
+        assert out.answer == "provided"
+        # the audit row: name, ask, destination — never the value or the key
+        delivered = [a for a in world.audit if a.get("event_action") == "credential_delivered"]
+        assert len(delivered) == 1
+        details = delivered[0]["details"]
+        assert details["name"] == NAME and details["ask_id"] == uid
+        assert details["destination"] == {"host": HOST, "agent_name": TARGET}
+        # the attempt was recorded BEFORE the request left, with the same names
+        actions = [a["event_action"] for a in world.audit
+                   if str(a.get("event_action", "")).startswith("credential_deliver")]
+        assert actions == ["credential_delivery_attempt", "credential_delivered"]
+        attempt = [a for a in world.audit if a["event_action"] == "credential_delivery_attempt"][0]["details"]
+        assert attempt["name"] == NAME and attempt["ask_id"] == uid
+        assert attempt["destination"] == {"host": HOST, "agent_name": TARGET}
+        everything = caplog.text + json.dumps(world.audit, default=str) + json.dumps(row, default=str) \
+            + json.dumps(out.model_dump(), default=str)
+        assert VALUE not in everything and KEY not in everything and KEY_ENV not in json.dumps(out.model_dump())
+
+    def test_the_destination_is_read_from_the_stored_row_not_from_the_request(self, world, approved):
+        approved.records.append({"id": "ep-8443", "name": "member-alt", "url": f"https://{HOST}:8443"})
+        uid = _pending(world.db, "del-2", destination={"instance_url": f"https://{HOST}:8443",
+                                                         "agent_name": TARGET, "key_env": KEY_ENV})
+        _provide(uid)
+        call = world.instance.calls[0]
+        assert call["url"] == f"https://{ADDRESS}:8443/api/agents/{TARGET}/credentials/inject"
+        assert call["headers"]["Host"] == f"{HOST}:8443"
+
+    def test_a_row_without_a_destination_still_writes_the_asking_agent(self, world):
+        uid = _pending(world.db, "del-3", destination=None)
+        _provide(uid)
+        assert world.instance.calls == []
+        assert f'{NAME}=' in world.asker.env_text
+        assert any(a.get("event_action") == "chat_provide" for a in world.audit)
+
+    def test_a_missing_key_is_a_named_409_with_no_remote_call_and_nothing_staged(self, world):
+        world.asker.env_text = 'OTHER="keep me"\n'
+        uid = _pending(world.db, "del-4")
+        e = _refused(uid, 409, "destination_key_missing")
+        assert world.instance.calls == []
+        assert _staged(world) == 0
+        assert world.db.get_operator_queue_item(uid)["status"] == "pending"
+        assert KEY_ENV not in f"{e.detail} {json.dumps(e.data, default=str)}"
+
+    def test_an_asking_agent_that_is_not_running_is_the_same_409_as_before(self, world):
+        world.status["status"] = "stopped"
+        uid = _pending(world.db, "del-5")
+        _refused(uid, 409, "agent_not_running")
+        assert world.instance.calls == [] and _staged(world) == 0
+
+    def test_a_connect_failure_is_a_503_and_unstages(self, world):
+        world.instance.error = httpx.ConnectError("boom")
+        uid = _pending(world.db, "del-6")
+        e = _refused(uid, 503, "destination_unreachable")
+        assert _staged(world) == 0
+        assert "nothing was stored" in e.detail.lower()
+        assert world.db.get_operator_queue_item(uid)["status"] == "pending"
+
+    def test_a_timeout_after_the_request_left_keeps_the_value_staged_and_says_so(self, world):
+        world.instance.error = httpx.ReadTimeout("slow")
+        uid = _pending(world.db, "del-7")
+        e = _refused(uid, 503, "destination_unreachable")
+        assert _staged(world) == 1
+        assert "may or may not" in e.detail
+        assert e.data.get("may_have_written") is True
+
+    @pytest.mark.parametrize("status,code", [
+        (401, "destination_key_refused"), (403, "destination_key_refused"),
+        (404, "destination_agent_missing"), (400, "destination_refused"),
+        (409, "destination_refused"),
+    ])
+    def test_a_refusal_from_the_destination_is_named_and_unstaged(self, world, caplog, status, code):
+        caplog.set_level(logging.DEBUG)
+        world.instance.status = status
+        uid = _pending(world.db, f"del-{status}")
+        e = _refused(uid, 409, code)
+        if code == "destination_refused":
+            assert e.data.get("status") == status
+        assert _staged(world) == 0
+        assert world.db.get_operator_queue_item(uid)["status"] == "pending"
+        text = f"{e.detail} {json.dumps(e.data, default=str)} {caplog.text}"
+        assert VALUE not in text and KEY not in text
+        assert not [a for a in world.audit if a.get("event_action") == "credential_delivered"]
+
+    @pytest.mark.parametrize("answer,reason", [
+        (lambda h, p, *a, **k: [_record("10.0.0.9", p)], "endpoint_private_address"),
+        (lambda h, p, *a, **k: _resolver("nowhere.invalid", p), "endpoint_dns_failure"),
+    ])
+    def test_a_url_that_no_longer_validates_at_delivery_time_is_refused(self, world, monkeypatch,
+                                                                         answer, reason):
+        from services import a2a_client
+        from utils.url_validation import validate_a2a_endpoint_url
+        monkeypatch.setattr(a2a_client, "validate_a2a_endpoint_url",
+                            functools.partial(validate_a2a_endpoint_url, resolver=answer))
+        uid = _pending(world.db, "del-8")
+        e = _refused(uid, 422, "destination_url_invalid")
+        assert e.data.get("reason") == reason
+        assert world.instance.calls == [] and _staged(world) == 0
+
+    def test_delivery_resolves_the_host_off_the_event_loop(self, world, monkeypatch):
+        from services import a2a_client
+        from utils.url_validation import validate_a2a_endpoint_url
+        seen = {}
+
+        def _where(url, **kw):
+            seen["thread"] = threading.current_thread().name
+            try:
+                asyncio.get_running_loop()
+                seen["on_loop"] = True
+            except RuntimeError:
+                seen["on_loop"] = False
+            return validate_a2a_endpoint_url(url, resolver=_resolver, **kw)
+
+        monkeypatch.setattr(a2a_client, "validate_a2a_endpoint_url", _where)
+        _provide(_pending(world.db, "del-thread"))
+        assert seen["on_loop"] is False and len(world.instance.calls) == 1
+
+    # -- the operator's ruling, re-read at delivery --
+
+    def test_outbound_a2a_switched_off_at_delivery_refuses_before_anything_is_read(
+            self, world, approved):
+        approved.switch["on"] = False
+        uid = _pending(world.db, "del-off")
+        e = _refused(uid, 422, "destination_outbound_disabled")
+        assert "nothing was stored" in e.detail and "Settings → Integrations" in e.detail
+        assert world.asker.calls == [] and world.instance.calls == []
+        assert _staged(world) == 0
+        assert world.db.get_operator_queue_item(uid)["status"] == "pending"
+        assert not [a for a in world.audit if a.get("event_action", "").startswith("credential_deliver")]
+
+    def test_an_instance_removed_from_the_registry_is_refused_at_delivery(self, world, approved):
+        approved.records.clear()
+        uid = _pending(world.db, "del-unreg")
+        e = _refused(uid, 422, "destination_not_approved")
+        assert "nothing was stored" in e.detail and "admin" in e.detail
+        assert world.asker.calls == [] and world.instance.calls == []
+        assert _staged(world) == 0
+
+    # -- the transport --
+
+    def test_a_5xx_from_the_destination_may_or_may_not_have_stored_and_keeps_the_value_staged(
+            self, world, caplog):
+        """The receiving inject route answers 503 for exactly "the agent did
+        not confirm it stored the credential", so a 5xx is that sentence —
+        and the attempt row written before the request is the trace."""
+        caplog.set_level(logging.DEBUG)
+        for status in (500, 503):
+            world.instance.status = status
+            uid = _pending(world.db, f"del-5xx-{status}")
+            e = _refused(uid, 503, "destination_unconfirmed")
+            assert "may or may not" in e.detail and e.data.get("status") == status
+            assert e.data.get("may_have_written") is True
+            assert world.db.get_operator_queue_item(uid)["status"] == "pending"
+        assert _staged(world) == 1          # one value, staged once, kept
+        attempts = [a for a in world.audit if a.get("event_action") == "credential_delivery_attempt"]
+        assert len(attempts) == 2
+        assert not [a for a in world.audit if a.get("event_action") == "credential_delivered"]
+        text = f"{e.detail} {json.dumps(e.data, default=str)} {caplog.text} {json.dumps(world.audit, default=str)}"
+        assert VALUE not in text and KEY not in text
+
+    def test_a_redirect_from_the_destination_is_a_refusal_never_a_hop(self, world):
+        world.instance.response = httpx.Response(302, headers={"Location": "https://evil.example/"})
+        uid = _pending(world.db, "del-3xx")
+        e = _refused(uid, 409, "destination_refused")
+        assert e.data.get("reason") == "inject_redirect"
+        assert len(world.instance.calls) == 1 and _staged(world) == 0
+
+    def test_an_oversized_or_encoded_answer_is_unconfirmed_and_bounded(self, world):
+        big = b"x" * (world.sink.a2a_client.A2A_ERROR_BODY_MAX_BYTES + 100)
+        world.instance.response = httpx.Response(200, content=big)
+        uid = _pending(world.db, "del-big")
+        e = _refused(uid, 503, "destination_unconfirmed")
+        assert e.data.get("reason") == "inject_too_large" and _staged(world) == 1
+
+    def test_the_destination_transport_is_pinned(self):
+        """No redirects, no proxy env, a verifying TLS context — and the request
+        goes through the A2A client's capped reader under its total deadline.
+        Red if `follow_redirects` becomes True or `verify` becomes False."""
+        from services import credential_sink as sink
+        client = sink._destination_client()
+        try:
+            assert client.follow_redirects is False
+            assert client.trust_env is False
+            ctx = client._transport._pool._ssl_context
+            assert isinstance(ctx, ssl.SSLContext)
+            assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname is True
+        finally:
+            asyncio.run(client.aclose())
+        src = (Path(_BACKEND) / "services" / "credential_sink.py").read_text(encoding="utf-8")
+        assert "a2a_client._with_deadline(a2a_client._read_capped(" in src
+        assert "max_bytes=a2a_client.A2A_ERROR_BODY_MAX_BYTES" in src
+
+    def test_a_key_that_cannot_travel_as_a_header_is_a_named_refusal(self, world, caplog):
+        """A non-ASCII (or whitespace-bearing) key in the asking agent's .env:
+        a named 409 before any request, never an encoding error that leaves
+        the value staged — and the key is in no text."""
+        caplog.set_level(logging.DEBUG)
+        bad = "trinity_mcp_kéy_with_umlaut"
+        world.asker.env_text = f'{KEY_ENV}="{bad}"\n'
+        uid = _pending(world.db, "del-key-ascii")
+        e = _refused(uid, 409, "destination_key_invalid")
+        assert "nothing was stored" in e.detail
+        assert world.instance.calls == [] and _staged(world) == 0
+        assert world.db.get_operator_queue_item(uid)["status"] == "pending"
+        assert bad not in f"{e.detail} {json.dumps(e.data)} {caplog.text}"
+        assert KEY_ENV not in f"{e.detail} {json.dumps(e.data)}"
+
+    def test_the_scrub_is_armed_before_the_key_is_read(self, world, monkeypatch):
+        monkeypatch.setattr(world.scrub, "get_breaker_redis", lambda: None)
+        uid = _pending(world.db, "del-9")
+        _refused(uid, 503, "scrub_unavailable")
+        assert world.asker.calls == [] and world.instance.calls == []
+
+
+# ===========================================================================
+# 3. The receiving side: mode "merge" on the owner inject route
+# ===========================================================================
+
+
+@pytest.fixture
+def inject_app(real_db, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import services.credential_sink as sink
+
+    fake = fakeredis.FakeStrictRedis(decode_responses=True)
+    monkeypatch.setattr(sink, "get_breaker_redis", lambda: fake)
+    agent = _AgentServer('OTHER="keep me"\n# note\nFOO=bar\n')
+    monkeypatch.setattr(sink, "_agent_client", agent.client)
+    monkeypatch.setattr(sink, "get_agent_container", lambda name: MagicMock())
+    monkeypatch.setattr(sink, "get_agent_status_from_container",
+                        lambda c: SimpleNamespace(status="running"))
+    monkeypatch.setattr(r_credentials, "get_agent_container", lambda name: MagicMock())
+    monkeypatch.setattr(r_credentials, "get_agent_status_from_container",
+                        lambda c: SimpleNamespace(status="running"))
+    monkeypatch.setattr(r_credentials, "agent_httpx_client", agent.client)
+    monkeypatch.setattr(r_credentials, "enforce_rate_limit", lambda *a, **k: None, raising=False)
+    audit = []
+
+    async def _log(**kw):
+        audit.append(kw)
+
+    monkeypatch.setattr(r_credentials.platform_audit_service, "log", _log)
+    monkeypatch.setattr(r_credentials.credential_requirements_service, "invalidate_report_cache",
+                        lambda name: None)
+
+    app = FastAPI()
+    app.include_router(r_credentials.router)
+    person = User(id=1, username="owner", email=OWNER, role="admin")
+    app.dependency_overrides[dependencies.get_current_user] = lambda: person
+    app.dependency_overrides[dependencies.get_owned_agent_by_name] = lambda: TARGET
+    yield SimpleNamespace(client=TestClient(app), agent=agent, audit=audit)
+    app.dependency_overrides.clear()
+
+
+class TestMergeInject:
+    def test_merge_sets_the_named_lines_and_keeps_every_other_byte(self, inject_app):
+        r = inject_app.client.post(f"/api/agents/{TARGET}/credentials/inject",
+                                   json={"mode": "merge", "env": {NAME: VALUE, "FOO": "baz"}})
+        assert r.status_code == 200, r.text
+        assert r.json()["files_written"] == [".env"]
+        env = inject_app.agent.env_text
+        assert env.startswith('OTHER="keep me"\n# note\nFOO="baz"\n')
+        assert env.count(f"{NAME}=") == 1 and "keep me" in env
+        assert [m for m, _ in inject_app.agent.calls] == ["GET", "POST"]
+        row = inject_app.audit[-1]
+        assert row["event_action"] == "inject"
+        assert row["details"]["mode"] == "merge" and sorted(row["details"]["names"]) == sorted([NAME, "FOO"])
+        assert VALUE not in json.dumps(inject_app.audit, default=str)
+
+    def test_merge_with_files_or_without_env_is_a_named_400(self, inject_app):
+        r = inject_app.client.post(f"/api/agents/{TARGET}/credentials/inject",
+                                   json={"mode": "merge", "env": {NAME: VALUE}, "files": {".env": "X=1\n"}})
+        assert r.status_code == 400 and r.json()["detail"]["code"] == "merge_takes_env"
+        r = inject_app.client.post(f"/api/agents/{TARGET}/credentials/inject",
+                                   json={"mode": "merge"})
+        assert r.status_code == 400 and r.json()["detail"]["code"] == "merge_takes_env"
+        assert inject_app.agent.calls == []
+
+    @pytest.mark.parametrize("env", [{"not a name": "v"}, {NAME: "two\nlines"}, {NAME: ""}])
+    def test_a_bad_name_or_value_is_refused_before_the_agent_is_read(self, inject_app, env):
+        r = inject_app.client.post(f"/api/agents/{TARGET}/credentials/inject",
+                                   json={"mode": "merge", "env": env})
+        assert r.status_code in (400, 422), r.text
+        assert inject_app.agent.calls == []
+
+    def test_the_default_mode_is_the_whole_file_write_unchanged(self, inject_app):
+        r = inject_app.client.post(f"/api/agents/{TARGET}/credentials/inject",
+                                   json={"files": {".env": "ONLY=this\n"}})
+        assert r.status_code == 200, r.text
+        assert inject_app.agent.env_text == "ONLY=this\n"
+        assert [m for m, _ in inject_app.agent.calls] == ["POST"]
+
+
+# ===========================================================================
+# 4. The manifest: credentials are names
+# ===========================================================================
+
+
+class TestManifestCredentials:
+    def _manifest(self, creds):
+        return (
+            "name: digest\n"
+            "agents:\n"
+            "  digest:\n"
+            "    template: local:digest\n"
+            f"    credentials: {creds}\n"
+        )
+
+    def test_credential_names_are_parsed_kept_and_not_warned_about(self):
+        from services import system_service
+        manifest = system_service.parse_manifest(self._manifest("[TELEGRAM_BOT_TOKEN, SLACK_TOKEN]"))
+        assert manifest.agents["digest"].credentials == ["TELEGRAM_BOT_TOKEN", "SLACK_TOKEN"]
+        assert manifest.unknown_agent_keys == {}
+        assert not [w for w in system_service.validate_manifest(manifest) if "credentials" in w]
+
+    @pytest.mark.parametrize("creds", ["[not a name]", "[1]", "[TRINITY_MCP_API_KEY]"])
+    def test_a_bad_credentials_entry_is_refused_by_name(self, creds):
+        from services import system_service
+        with pytest.raises(ValueError, match="credentials"):
+            system_service.parse_manifest(self._manifest(creds))
+
+    def test_a_bad_credentials_entry_is_named_by_position_never_echoed(self):
+        """A value pasted where a name belongs must not come back in the error."""
+        from services import system_service
+        with pytest.raises(ValueError) as info:
+            system_service.parse_manifest(self._manifest("[TELEGRAM_BOT_TOKEN, 'sk-live-pasted-by-mistake']"))
+        text = str(info.value)
+        assert "sk-live-pasted-by-mistake" not in text
+        assert "entry 2" in text and "not_a_name" in text
+
+    @pytest.mark.parametrize("creds", ["{}", "{OPENAI_API_KEY: sk-value}", "TELEGRAM_BOT_TOKEN"])
+    def test_the_older_map_form_stays_an_unknown_key_warned_and_dropped(self, creds):
+        # The shape this parser never read keeps its exact pre-1109 fate (the
+        # ent#695 golden and the ent#1030 pins): unknown, warned, no value read.
+        from services import system_service
+        manifest = system_service.parse_manifest(self._manifest(creds))
+        assert manifest.agents["digest"].credentials is None
+        assert manifest.unknown_agent_keys == {"digest": ["credentials"]}
+        warnings = system_service.validate_manifest(manifest)
+        assert any(w.startswith("Agent 'digest': ignored unknown key(s): credentials.") for w in warnings)
+        assert "sk-value" not in " ".join(warnings)
+
+    def test_the_preview_lists_the_names_per_member(self):
+        from services import system_service
+        manifest = system_service.parse_manifest(self._manifest("[TELEGRAM_BOT_TOKEN]"))
+        extras = system_service._configured_preview(manifest.agents["digest"])
+        assert extras["credentials"] == ["TELEGRAM_BOT_TOKEN"]
+        bare = system_service.parse_manifest(self._manifest("[]"))
+        assert "credentials" not in system_service._configured_preview(bare.agents["digest"])

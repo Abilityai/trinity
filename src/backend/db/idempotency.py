@@ -14,6 +14,7 @@ IntegrityError and reads the existing row. This holds across processes
 
 import json
 import logging
+import secrets
 from typing import Optional
 
 from sqlalchemy import select, insert, update, delete, func, and_
@@ -31,6 +32,16 @@ STATE_IN_FLIGHT = "in_flight"  # a prior claim is still running
 STATE_COMPLETED = "completed"  # a prior claim finished — replay its snapshot
 
 
+def _owned_by(claim_token: Optional[str]):
+    """#3298: the WHERE clause that pins a write to the claim it was handed.
+
+    A token-less pre-#3298 claim is matched by ``IS NULL``, so it can still be
+    completed, released and reclaimed."""
+    if claim_token is None:
+        return idempotency_keys.c.claim_token.is_(None)
+    return idempotency_keys.c.claim_token == claim_token
+
+
 class IdempotencyOperations:
     """CRUD for the idempotency_keys table."""
 
@@ -45,7 +56,9 @@ class IdempotencyOperations:
     ) -> dict:
         """Atomically claim (scope, key).
 
-        Returns a dict: {state, execution_id, snapshot}.
+        Returns a dict: {state, execution_id, snapshot, claim_token, updated_at}.
+        ``claim_token`` is the row's owner token (#3298): the caller's own on
+        ``new``, the holder's on ``in_flight`` (what a reclaim compares on).
         - state == "new":      row inserted as in_flight; caller dispatches.
         - state == "in_flight": a prior claim is mid-dispatch (return 409).
         - state == "completed": replay {execution_id, snapshot}.
@@ -92,6 +105,7 @@ class IdempotencyOperations:
                 # whole transaction — PostgreSQL aborts the entire transaction on
                 # any error (InFailedSqlTransaction) and would reject the
                 # follow-up SELECT otherwise (#300). SQLite emulates savepoints.
+                token = secrets.token_hex(16)
                 with conn.begin_nested():
                     conn.execute(
                         insert(idempotency_keys).values(
@@ -102,9 +116,11 @@ class IdempotencyOperations:
                             response_snapshot=None,
                             created_at=now,
                             updated_at=now,
+                            claim_token=token,
                         )
                     )
-                return {"state": STATE_NEW, "execution_id": None, "snapshot": None}
+                return {"state": STATE_NEW, "execution_id": None, "snapshot": None,
+                        "claim_token": token, "updated_at": now}
             except IntegrityError:
                 # Lost the race / genuine duplicate — read the surviving row.
                 row = conn.execute(
@@ -112,6 +128,8 @@ class IdempotencyOperations:
                         idempotency_keys.c.status,
                         idempotency_keys.c.execution_id,
                         idempotency_keys.c.response_snapshot,
+                        idempotency_keys.c.claim_token,
+                        idempotency_keys.c.updated_at,
                     ).where(
                         and_(
                             idempotency_keys.c.scope == scope,
@@ -125,6 +143,7 @@ class IdempotencyOperations:
                     # rather than proceed with no row — an unrecorded send would be
                     # repeated by the next caller (ent#665).
                     try:
+                        token = secrets.token_hex(16)
                         with conn.begin_nested():
                             conn.execute(
                                 insert(idempotency_keys).values(
@@ -135,9 +154,11 @@ class IdempotencyOperations:
                                     response_snapshot=None,
                                     created_at=now,
                                     updated_at=now,
+                                    claim_token=token,
                                 )
                             )
-                        return {"state": STATE_NEW, "execution_id": None, "snapshot": None}
+                        return {"state": STATE_NEW, "execution_id": None, "snapshot": None,
+                                "claim_token": token, "updated_at": now}
                     except IntegrityError:
                         return {"state": STATE_IN_FLIGHT, "execution_id": None, "snapshot": None}
                 snapshot = None
@@ -150,19 +171,23 @@ class IdempotencyOperations:
                     "state": row["status"],
                     "execution_id": row["execution_id"],
                     "snapshot": snapshot,
+                    "claim_token": row["claim_token"],
+                    "updated_at": row["updated_at"],
                 }
 
-    def attach_execution(self, scope: str, key: str, execution_id: str) -> None:
-        """Record the execution_id for an in-flight claim (best-effort)."""
+    def attach_execution(
+        self, scope: str, key: str, execution_id: str, *, claim_token: Optional[str] = None,
+    ) -> None:
+        """Record the execution_id for an in-flight claim (best-effort).
+
+        With ``claim_token`` (#3298) only the claim that token owns is written."""
+        where = [idempotency_keys.c.scope == scope, idempotency_keys.c.idempotency_key == key]
+        if claim_token is not None:
+            where.append(_owned_by(claim_token))
         with get_engine().begin() as conn:
             conn.execute(
                 update(idempotency_keys)
-                .where(
-                    and_(
-                        idempotency_keys.c.scope == scope,
-                        idempotency_keys.c.idempotency_key == key,
-                    )
-                )
+                .where(and_(*where))
                 .values(execution_id=execution_id, updated_at=utc_now_iso())
             )
 
@@ -172,23 +197,28 @@ class IdempotencyOperations:
         key: str,
         execution_id: Optional[str],
         snapshot: Optional[dict],
+        *,
+        claim_token: Optional[str] = None,
     ) -> None:
-        """Mark a claim completed and store the response snapshot for replay."""
+        """Mark a claim completed and store the response snapshot for replay.
+
+        With ``claim_token`` (#3298) only the claim that token owns is written:
+        a request whose stale claim was reclaimed cannot overwrite the
+        reclaimer's row. Without it (intent keys, ``upgrade_snapshot``) the
+        write is by (scope, key) as before."""
         snapshot_json = None
         if snapshot is not None:
             try:
                 snapshot_json = json.dumps(snapshot, default=str)
             except (TypeError, ValueError):
                 snapshot_json = None
+        where = [idempotency_keys.c.scope == scope, idempotency_keys.c.idempotency_key == key]
+        if claim_token is not None:
+            where.append(_owned_by(claim_token))
         with get_engine().begin() as conn:
             conn.execute(
                 update(idempotency_keys)
-                .where(
-                    and_(
-                        idempotency_keys.c.scope == scope,
-                        idempotency_keys.c.idempotency_key == key,
-                    )
-                )
+                .where(and_(*where))
                 .values(
                     status=STATE_COMPLETED,
                     execution_id=func.coalesce(
@@ -199,22 +229,43 @@ class IdempotencyOperations:
                 )
             )
 
-    def release(self, scope: str, key: str) -> None:
+    def release(self, scope: str, key: str, *, claim_token: Optional[str] = None) -> None:
         """Delete an in-flight claim so a failed first attempt can be retried.
 
         Only deletes rows still in_flight — never removes a completed row
-        (which must stay to keep replaying the original result).
+        (which must stay to keep replaying the original result). With
+        ``claim_token`` (#3298) only the claim that token owns is deleted.
+        """
+        where = [
+            idempotency_keys.c.scope == scope,
+            idempotency_keys.c.idempotency_key == key,
+            idempotency_keys.c.status == STATE_IN_FLIGHT,
+        ]
+        if claim_token is not None:
+            where.append(_owned_by(claim_token))
+        with get_engine().begin() as conn:
+            conn.execute(delete(idempotency_keys).where(and_(*where)))
+
+    def reclaim_in_flight(self, scope: str, key: str, claim_token: Optional[str]) -> bool:
+        """Compare-and-delete a stale ``in_flight`` claim (#3298).
+
+        Deletes only while the row is still in_flight AND still owned by
+        ``claim_token`` (the token the caller saw; ``None`` matches a pre-#3298
+        token-less claim). Two retries racing on one stale claim: the first
+        deletes and re-claims under a NEW token; the second's delete then
+        matches nothing and it answers in-progress, so one run starts. Whether
+        the claim is stale is the caller's decision. Returns True iff deleted.
         """
         with get_engine().begin() as conn:
-            conn.execute(
-                delete(idempotency_keys).where(
-                    and_(
-                        idempotency_keys.c.scope == scope,
-                        idempotency_keys.c.idempotency_key == key,
-                        idempotency_keys.c.status == STATE_IN_FLIGHT,
-                    )
-                )
+            result = conn.execute(
+                delete(idempotency_keys).where(and_(
+                    idempotency_keys.c.scope == scope,
+                    idempotency_keys.c.idempotency_key == key,
+                    idempotency_keys.c.status == STATE_IN_FLIGHT,
+                    _owned_by(claim_token),
+                ))
             )
+            return (result.rowcount or 0) > 0
 
     def discard_completed(self, scope: str, key: str) -> None:
         """Delete a COMPLETED row whose recorded resource no longer exists.

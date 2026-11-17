@@ -65,7 +65,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from canary import collect_snapshot, run_invariants
 from canary.snapshot import ViolationReport
 from database import db
-from redis_breaker_util import ScriptCache, get_breaker_redis
+from redis_breaker_util import LEASE_REFRESH_LUA, LEASE_RELEASE_LUA, get_breaker_redis
 from services.canary_alerts import AlertDelivery, CanaryAlerts
 from utils.helpers import parse_iso_timestamp
 
@@ -311,28 +311,9 @@ _MAX_CYCLE_LEASE_SECONDS = 900
 # Refresh was NOT exposed the same way — an EXPIRE landing on a successor's key
 # merely re-arms it to an identical TTL, destroying nothing — but it is Lua too
 # so there is a single uniform predicate rather than two that can drift.
-# `redis_breaker_util.lock_token_matches` (#1919) exists because exactly that
-# drift happened once already.
-_LEASE_RELEASE_LUA = """
-if redis.call('get', KEYS[1]) == ARGV[1] then
-    return redis.call('del', KEYS[1])
-else
-    return 0
-end
-"""
-
-_LEASE_REFRESH_LUA = """
-if redis.call('get', KEYS[1]) == ARGV[1] then
-    return redis.call('expire', KEYS[1], ARGV[2])
-else
-    return 0
-end
-"""
-
-_LEASE_SCRIPTS = ScriptCache(
-    release=_LEASE_RELEASE_LUA,
-    refresh=_LEASE_REFRESH_LUA,
-)
+# Both scripts are `redis_breaker_util`'s `LEASE_REFRESH_LUA` /
+# `LEASE_RELEASE_LUA` — the one home `SingleFlightLock` uses too (trinity#4028)
+# — registered on the client at each call.
 
 
 def _parse_iso_to_unix(ts: Optional[str]) -> Optional[float]:
@@ -383,6 +364,10 @@ def _truncate_error(error: Optional[str]) -> Optional[str]:
     return text[:_MAX_ALERT_ERROR_CHARS]
 
 
+_CANARY_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_CANARY_FALSY = frozenset({"", "0", "false", "no", "off"})
+
+
 class CanaryService:
     """Background watcher loop for the canary invariant harness."""
 
@@ -430,7 +415,14 @@ class CanaryService:
     def start(self):
         """Start the background loop. No-op if already running or disabled."""
         if not self._is_enabled():
-            logger.info("canary: disabled (set CANARY_ENABLED=1 to enable)")
+            raw = os.getenv("CANARY_ENABLED", "")
+            if raw.strip().lower() not in _CANARY_FALSY:
+                logger.warning(
+                    f"canary: CANARY_ENABLED={raw!r} is not a recognised value, "
+                    f"so the canary is disabled (use 1/true/yes/on to enable)"
+                )
+            else:
+                logger.info("canary: disabled (set CANARY_ENABLED=1 to enable)")
             return
         if self._running:
             return
@@ -483,7 +475,9 @@ class CanaryService:
 
     @staticmethod
     def _is_enabled() -> bool:
-        return os.getenv("CANARY_ENABLED", "0") == "1"
+        # #1988: any common truthy spelling, any case. Strict "1" made
+        # CANARY_ENABLED=true a silently dead canary.
+        return os.getenv("CANARY_ENABLED", "").strip().lower() in _CANARY_TRUTHY
 
     @staticmethod
     def is_enabled() -> bool:
@@ -628,9 +622,8 @@ class CanaryService:
         cycles, and the transition-only logging the whole design leans on would
         stop telling the truth.
         """
-        scripts = _LEASE_SCRIPTS.ensure(r)
         return bool(
-            scripts["refresh"](
+            r.register_script(LEASE_REFRESH_LUA)(
                 keys=[REDIS_KEY_LEADER], args=[self._worker_id, ttl], client=r
             )
         )
@@ -638,15 +631,17 @@ class CanaryService:
     def _release_leadership(self) -> None:
         """Delete the lease iff we hold it (atomic, best-effort, never raises).
 
-        Compare-and-delete in Lua rather than GET-then-DELETE — see
-        `_LEASE_RELEASE_LUA` for the successor's-lease race that shape has.
+        Compare-and-delete in Lua (`redis_breaker_util.LEASE_RELEASE_LUA`)
+        rather than GET-then-DELETE — see the module-level lease comment for
+        the successor's-lease race that shape has.
         """
         try:
             r = get_breaker_redis()
             if r is None:
                 return
-            scripts = _LEASE_SCRIPTS.ensure(r)
-            scripts["release"](keys=[REDIS_KEY_LEADER], args=[self._worker_id], client=r)
+            r.register_script(LEASE_RELEASE_LUA)(
+                keys=[REDIS_KEY_LEADER], args=[self._worker_id], client=r
+            )
         except Exception:
             pass
 

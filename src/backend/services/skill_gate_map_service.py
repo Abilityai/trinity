@@ -328,7 +328,16 @@ def _validate_name(skill_name: str) -> str:
     return skill_name.lower()
 
 
-def _validate_changes(agent_name: str, changes: Mapping[str, Any]) -> Dict[str, Any]:
+def validate_gate_changes(agent_name: str, skill_name: str,
+                          changes: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """Everything `set_gate` refuses by name before it writes, as
+    `(stored skill key, validated fields)`: the skill name (`invalid_skill_name`),
+    the approver (`invalid_approver`, `approver_unavailable`, `unknown_role`)
+    and the deadline (`invalid_deadline`). Public so a dry run that plans a
+    gate write (a manifest, trinity-enterprise#1030) reports exactly the
+    refusal the write would give — one validator, never a second copy that
+    could drift from it. Raises `SkillGateMapRefused`; writes nothing."""
+    key = _validate_name(skill_name)
     out: Dict[str, Any] = {}
     if "approver" in changes:
         approver = changes["approver"]
@@ -357,7 +366,7 @@ def _validate_changes(agent_name: str, changes: Mapping[str, Any]) -> Dict[str, 
                 f"{MAX_DEADLINE_HOURS}, or empty for the {skill_gate_service.DEFAULT_DEADLINE_HOURS}-hour "
                 "default.")
         out["deadline_hours"] = hours
-    return out
+    return key, out
 
 
 def _validate_role(agent_name: str, role_id: str) -> str:
@@ -499,8 +508,7 @@ async def set_gate(agent_name: str, skill_name: str, *, changes: Mapping[str, An
     stored value; an explicit null deadline resets to the default. Any
     well-formed name may be gated — one the agent does not have gates nothing
     until a skill answers to it (decision 6)."""
-    key = _validate_name(skill_name)
-    fields = _validate_changes(agent_name, changes)
+    key, fields = validate_gate_changes(agent_name, skill_name, changes)
     _refuse_ghost(agent_name)
     set_by, set_by_agent = _who(ctx)
 

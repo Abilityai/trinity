@@ -94,6 +94,10 @@ Every switch is logged as an activity on the agent and sends a **high**-priority
 
 Auth failures are treated differently from quota: a rejected token is recorded as an **auth** event and the subscription is never shown as rate-limited. Past auth events alone do not trigger the pre-dispatch switch, since a credential problem may be shared by every subscription; a turn the provider actually rejects still switches and retries. Re-register the token.
 
+**Failures no credential can fix never switch.** A turn that stopped because it reached its turn limit, or a prompt the provider refused as too long, fails the same way on every subscription. Neither starts the walk, neither is recorded as an auth event against the subscription, and neither counts toward the dispatch circuit breaker's credential failures. The turn fails once, with its own error.
+
+**Pull-mode agents walk the same way.** On an agent in the pull-mode pilot, a refused turn is re-run in place on the next candidate, under the same claim, so the person sees one result rather than a failed message per refused subscription. An agent on an older base image, or on a non-Claude runtime, keeps the older one-shot switch.
+
 ### Where pressure shows up
 
 - **Settings → Integrations → Claude Subscriptions** — the Pressure column and the Usage block, above.
@@ -144,7 +148,7 @@ Retention for probe history and failure events is 30 days each (`subscription_he
 
 - `register_subscription(name, token, subscription_type?, rate_limit_tier?)` -- Register a new subscription (or replace the token of an existing name). Admin.
 - `list_subscriptions()` -- List subscriptions and their assigned agents.
-- `assign_subscription(agent_name, subscription_name)` -- Assign a subscription to an agent. Owner or admin.
+- `assign_subscription(agent_name, subscription_name)` -- Assign a subscription to an agent. Owner or admin, signed in: an MCP API key is refused. Assign from the **Funding** row of the agent's **Settings** → **General**, or, as an admin, from **Settings** → **Integrations** → **Claude Subscriptions**. The Funding row offers every subscription to an admin; any other owner sees only the subscriptions they registered, and registering is admin-only.
 - `clear_agent_subscription(agent_name)` -- Remove the subscription assignment from an agent. Owner or admin.
 - `get_agent_auth(agent_name)` -- Get the auth configuration for an agent.
 - `delete_subscription(subscription_name)` -- Delete a subscription. Admin.
@@ -160,6 +164,7 @@ Usage, headroom, and the settings toggles have no MCP tool; use the REST endpoin
 - Headroom percentages come from a provider probe, so they are only as fresh as the last probe: surfaces show a percentage only when the reading is under 30 minutes old and fall back to a qualitative state otherwise. A reset time is shown regardless of age.
 - The weekly-limit alert keeps the figure it was raised with; a later, higher reading arrives as the separate escalation alert rather than an edit.
 - Headroom history is API-only; no page charts it yet.
+- Scheduled runs started by the scheduler (cron ticks, retries, reminders) were not attributed to the agent's subscription before this was fixed, so a cron-driven agent's **Observed consumption** under-counts runs recorded before your upgrade. Runs from then on are counted; older ones are not backfilled.
 - **An API key in `.env` will not override a subscription.** On a Claude-runtime agent authenticated by a subscription, Trinity strips `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from the execution environment before each run. Claude prefers an API key over the subscription token, so a stale one left on the agent's workspace volume would silently authenticate every run — and its failures would be blamed on the subscription, marking healthy subscriptions unhealthy in turn. If you genuinely want an agent on an API key, clear its subscription rather than putting a key in `.env`. Agents on other runtimes are unaffected. `GET /api/agents/{name}/credentials/env-drift` (owner-only) lists the suppressed keys by name, flagged `suppressed_for_spawn`.
 
 ## See Also

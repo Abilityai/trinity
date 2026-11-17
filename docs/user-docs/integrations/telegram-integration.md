@@ -53,10 +53,10 @@ By default, Telegram bots have **Privacy Mode enabled**. This means:
 
 ## How It Works
 
-### Connect Bot to Agent (Agent Detail -> Sharing Tab)
+### Connect Bot to Agent (Agent Detail -> Channels Tab)
 
 1. Open the agent detail page
-2. Select the **Sharing** tab and find the **Telegram** row under **Channels**
+2. Select the **Channels** tab and find the **Telegram** row under **Channels**
 3. Click **Configure** — the Telegram configuration opens in a dialog
 4. Paste your bot token and click **Connect Bot**
 5. Trinity validates the token and registers the webhook
@@ -71,9 +71,14 @@ After connecting:
 | Status | Meaning |
 |--------|---------|
 | Green "Connected" | Bot configured, webhook active |
-| Yellow "Bot connected but webhook not registered" | Bot configured, but no Public URL set in Settings -- messages won't be received |
+| Yellow "Bot connected, but Telegram can't deliver messages to it yet." | Bot configured, but Telegram has no working webhook for it -- messages won't be received |
 
-If you see the yellow warning, go to **Settings → General** and set **Public URL** to your Trinity instance's public URL. The webhook registers automatically once saved.
+Telegram delivers messages to Trinity over the internet, so Trinity needs a public HTTPS address. The yellow warning says which case you are in:
+
+- **No Public URL is set.** An admin sets it under **Settings → General → Public URL** (the warning links there; anyone else is told to ask an admin). Once saved, the bot registers automatically; nothing needs redoing in the dialog.
+- **The Public URL is set, but Telegram has not accepted the webhook.** Check that the Public URL is reachable from the internet over HTTPS, then press **Verify** to retry.
+
+**Verify** checks the whole path, not only the bot token. It reads Telegram's own record of the webhook, registers it when Telegram holds none or one for another address, and answers **Operational** beside the button only when Telegram can deliver. Otherwise it shows **Not receiving messages**, and the warning adds Telegram's own reason under *Last attempt*. A delivery error Telegram is still reporting while updates wait counts as not operational. The binding refreshes in place, and the result clears when you connect or disconnect the bot.
 
 ### Message Flow
 
@@ -82,6 +87,15 @@ User sends message -> Telegram API -> Trinity webhook -> Agent -> Response -> Te
 ```
 
 The agent receives the message text plus context for any media (photos, documents, voice notes). Responses are sent back as replies in the same chat.
+
+### Albums
+
+When someone sends several photos or files together as an album, the agent gets them as **one message**: every file, in the order they were sent, with the album's caption. The agent answers once, not once per photo. Trinity waits about 1.5 seconds after the album's last item before handing it over, so an album takes slightly longer to start than a single photo.
+
+- In a group, a mention in the album's caption (or a reply to the bot on any item) triggers the agent for the whole album. A mention in a single photo's caption counts as a mention too.
+- An album can hold up to 10 files, and images in one album share a 10 MB total. An image past that limit is skipped, and the agent is told which one.
+- Videos and audio files in an album are listed for the agent but it cannot open them.
+- In a group with **Privacy Mode** on, Telegram only sends the bot messages that mention it. The other photos of a tagged album may never reach the bot, so the agent may see only the tagged one. Turn Privacy Mode off (see Step 2) if your group sends albums.
 
 ### Formatting in replies
 
@@ -97,7 +111,7 @@ A Telegram-triggered task can run for minutes or hours. Three layers of feedback
 2. **Typing indicator** — the standard Telegram "typing…" state.
 3. **Elapsed-time note** — if the turn passes 30 seconds, the bot posts a quiet "⏳ Working on it — N min elapsed" message (sent without a notification) and edits it in place about every minute. It is deleted when the turn finishes; if deletion isn't possible it is edited to a neutral "✔ Done." or "⚠️ Finished with an error."
 
-This is **on by default** per bot binding, and can be turned off in the Telegram dialog on the agent's Sharing tab. In groups it fires on @mentions and replies — a bot in `observe` mode stays silent, since a visible reaction would give away that it is listening.
+This is **on by default** per bot binding, and can be turned off in the Telegram dialog on the agent's Channels tab. In groups it fires on @mentions and replies — a bot in `observe` mode stays silent, since a visible reaction would give away that it is listening.
 
 If Telegram refuses any of it (reactions disabled for the chat, missing permissions), the rest still works and the turn is unaffected.
 
@@ -134,7 +148,7 @@ Users in Telegram can use these commands:
 | `/start` | Welcome message |
 | `/help` | Shows capabilities |
 | `/reset` | Clears conversation history |
-| `/login <email>` | Verify email for access-controlled agents |
+| `/login <email>` | Verify email for access-controlled agents. Code requests are capped (5 per sender, 3 per address and 20 per bot in 10 minutes); over a cap the bot says *Too many sign-in code requests. Try again in 10 minutes.* |
 | `/logout` | Clear verified email |
 | `/whoami` | Show current verified email |
 
@@ -144,7 +158,7 @@ When a bot joins a Telegram group, Trinity automatically creates a group config.
 
 ### View and Manage Groups
 
-1. Go to Agent Detail -> **Sharing** tab
+1. Go to Agent Detail -> **Channels** tab
 2. Connected groups appear in the **Telegram Groups** section
 3. Each group shows:
    - Group name and type (group/supergroup)
@@ -190,7 +204,7 @@ Notes:
 
 By default, anyone in a group can chat with the bot. To require at least one verified member before the bot responds:
 
-1. Go to Agent Detail -> **Sharing** tab -> **Channel Access Policy**
+1. Go to Agent Detail -> **Channels** tab -> **Channel Access Policy**
 2. Set **Group auth mode** to "Any verified member"
 3. When someone @mentions the bot in an unverified group, the bot will prompt for verification
 4. Once any group member completes `/login`, the group is unlocked for everyone
@@ -217,10 +231,10 @@ Click the remove button next to a group to deactivate it. The bot will stop resp
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents/{name}/telegram` | GET | Bot binding status |
+| `/api/agents/{name}/telegram` | GET | Bot binding status; `webhook_url` only while it is registered under the current Public URL, and `public_url_set` |
 | `/api/agents/{name}/telegram` | PUT | Configure bot token |
 | `/api/agents/{name}/telegram` | DELETE | Remove bot binding |
-| `/api/agents/{name}/telegram/test` | POST | Verify bot or send test message |
+| `/api/agents/{name}/telegram/test` | POST | Verify the bot and its webhook (registering a missing one; `webhook_registered` and `webhook_error` in the answer), or send a test message |
 | `/api/agents/{name}/telegram/groups` | GET | List group configs |
 | `/api/agents/{name}/telegram/groups/{id}` | PUT | Update trigger mode / welcome, plus the group's `allow_proactive` consent flag and its `context_enabled` (Group context) switch — those two are human-only |
 | `/api/agents/{name}/telegram/groups/{id}` | DELETE | Deactivate group config |
@@ -268,9 +282,9 @@ curl -X PUT http://localhost:8000/api/agents/my-agent/telegram/groups/1 \
 3. **Check trigger mode**: In Trinity, verify the group is set to the expected trigger mode
 4. **Check agent status**: Ensure the agent container is running
 
-### "Bot connected but webhook not registered" warning
+### "Bot connected, but Telegram can't deliver messages to it yet" warning
 
-Set **Public URL** under **Settings → General** to your Trinity instance's publicly accessible URL. The webhook registers automatically.
+If no Public URL is set, set **Public URL** under **Settings → General** to your Trinity instance's publicly accessible HTTPS URL; the webhook registers automatically. If one is set, make sure it is reachable from the internet over HTTPS and press **Verify**: it re-registers the webhook and shows Telegram's reason if delivery still fails.
 
 ### Messages delayed or not arriving
 
@@ -283,7 +297,7 @@ Set **Public URL** under **Settings → General** to your Trinity instance's pub
 **Trinity docs:**
 
 - [Slack Integration](slack-integration.md) · [WhatsApp Integration](whatsapp-integration.md)
-- [Agent Sharing](../sharing-and-access/agent-sharing.md) — the Sharing tab that hosts the Telegram dialog
+- [Agent Sharing](../sharing-and-access/agent-sharing.md) — the Channels tab that hosts the Telegram dialog
 - [Public Links](../sharing-and-access/public-links.md)
 - [Voice Replies](../advanced/voice-replies.md) — spoken replies across channels
 

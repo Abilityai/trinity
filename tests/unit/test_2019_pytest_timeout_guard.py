@@ -229,10 +229,21 @@ class TestTheSuiteRunsInParallel:
 
     def test_the_unit_suite_is_parallelised(self, workflow):
         step = _pytest_step(workflow)
-        assert re.search(r"-n\s+(auto|\d+)", step), (
+        assert re.search(r"-n\s+(logical|\d+)", step), (
             "the unit suite runs serially again — a starved runner returns to "
             "reaching the 45-minute cap, and the red lands on whichever PR is "
             "open (#2461)"
+        )
+
+    def test_the_worker_count_is_logical_cpus_not_physical(self, workflow):
+        # #4096: with psutil importable (tests/requirements-test.txt), xdist's
+        # `auto` is psutil.cpu_count(logical=False) — PHYSICAL cores — and the
+        # 4-vCPU runner has two of them, so `auto` ran 2 workers for two months
+        # while the comment beside it said 4.
+        step = _pytest_step(workflow)
+        assert not re.search(r"-n\s+auto\b", step), (
+            "`-n auto` is physical cores under psutil (2 on ubuntu-latest); "
+            "use `-n logical` (#4096)"
         )
 
     def test_distribution_keeps_a_file_on_one_worker(self, workflow):

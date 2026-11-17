@@ -13,7 +13,8 @@
   >
     <template v-if="card">
       <h3 class="font-mono text-[18px] font-[650] text-gray-900 dark:text-gray-100 break-all">/{{ card.name }}</h3>
-      <p v-if="card.description" class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-300">{{ card.description }}</p>
+      <!-- trinity-enterprise#584: the card's own line, author hint included. -->
+      <p class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-300" :class="{ italic: descLine.muted }" :title="descLine.title"><template v-for="(seg, i) in descLine.segments" :key="i"><code v-if="seg.code" class="font-mono not-italic">{{ seg.code }}</code><template v-else>{{ seg.text }}</template></template></p>
 
       <!-- #2914: which skill, what is running, and the two ways out. The
            library package was NOT written; the agent's own directory is
@@ -67,9 +68,10 @@
 <script setup>
 import BaseButton from '../base/BaseButton.vue'
 import BaseModal from '../base/BaseModal.vue'
-import { warningText } from '../../utils/skillCards'
+import { computed } from 'vue'
+import { warningText, descriptionLine } from '../../utils/skillCards'
 
-defineProps({
+const props = defineProps({
   modelValue: { type: Boolean, default: false },
   card: { type: Object, default: null },
   canManage: { type: Boolean, default: false },
@@ -77,4 +79,6 @@ defineProps({
 })
 
 defineEmits(['update:modelValue', 'unassign'])
+
+const descLine = computed(() => descriptionLine(props.card))
 </script>

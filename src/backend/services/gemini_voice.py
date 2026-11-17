@@ -3,7 +3,7 @@ Gemini Live API voice service for Trinity (VOICE-001).
 
 Provides a wrapper around the google-genai SDK's Live API for real-time
 speech-to-speech conversations with agents (model: `VOICE_MODEL`, default
-`models/gemini-3.1-flash-live-preview` — the newest general-purpose Live model
+`models/gemini-3.8-live` — the newest general-purpose Live model
 as of 2026-09; the `gemini-3.5-*-live` ids are transcribe/translate-only).
 
 Architecture:
@@ -1485,7 +1485,9 @@ class GeminiVoiceService:
             return str(e)
         try:
             client = get_agent_client(agent_name)
-            response = await client.task(prompt, timeout=28.0)
+            # #4156: the prompt is the caller's speech, and this path has no
+            # execution row for the rule to read, so auto-memory is always off.
+            response = await client.task(prompt, timeout=28.0, disable_auto_memory=True)
             return response.response_text or "Task completed with no response."
         except AgentNotReachableError:
             return f"Agent {agent_name!r} is not currently running."

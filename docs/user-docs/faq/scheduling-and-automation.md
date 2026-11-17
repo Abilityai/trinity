@@ -20,7 +20,7 @@ Yes. Set `deliver_to_workspace_email` on the schedule over the API or with `crea
 
 ## Can a scheduled brief remember things about the person it's for?
 
-Yes. A run of a schedule that names a person with `deliver_to_workspace_email` runs as that person's seat: the agent receives their per-person memory before it starts and can write it back with `write_user_memory`, so the next brief builds on the last. Cron, **Run now** and webhook fires all serve the named person. The tool replaces the whole notes blob, so the agent must write the complete updated notes. The person sees every write in their Workspace and can undo the latest one. See [Scheduling](../automation/scheduling.md#the-run-remembers-the-person).
+Yes. A run of a schedule that names a person with `deliver_to_workspace_email` runs as that person's seat: the agent receives their per-person memory before it starts and can write it back with `write_user_memory`, so the next brief builds on the last. Cron, **Run now** and webhook fires all serve the named person. The tool replaces the whole notes blob, so the agent must write the complete updated notes. The write is refused while another turn for someone else is running on the same agent, so give each brief its own time. The person sees every write in their Workspace and can undo the latest one. See [Scheduling](../automation/scheduling.md#the-run-remembers-the-person).
 
 ## Why was my companion agent's scheduled brief skipped with "Held"?
 
@@ -48,7 +48,7 @@ Each agent has an execution timeout cap (default 60 minutes, configurable from 1
 
 ## Do failed scheduled runs retry automatically?
 
-Only if you turn retries on. Each schedule has `max_retries` (range 0–5) and `retry_delay_seconds` (default 60, range 30–600). A schedule created in the UI or over the REST API starts with retries off (`max_retries: 0`); one created with the `create_agent_schedule` MCP tool starts with 1 retry. Rate-limit errors use double the delay, capped at 300 seconds. Each retry creates a new execution record linked to the original via `retry_of_execution_id`, and the execution list groups retries under their parent run. See [Scheduling](../automation/scheduling.md).
+Only if you turn retries on. Each schedule has `max_retries` (range 0–5) and `retry_delay_seconds` (default 60, range 30–600). A schedule created in the UI or over the REST API starts with retries off (`max_retries: 0`); one created with the `create_agent_schedule` MCP tool starts with 1 retry. Rate-limit errors use double the delay, capped at 300 seconds. Each retry creates a new execution record linked to the original via `retry_of_execution_id`, and the execution list groups retries under their parent run. A run that stopped at its turn limit is never retried, since it would stop at the same place. A retry of a cron run also respects autonomy and the git-sync pause: turn autonomy off and a pending retry is dropped. See [Scheduling](../automation/scheduling.md#automatic-retry).
 
 ## Can Trinity check that a scheduled run actually did its job?
 
@@ -60,7 +60,7 @@ Deleting a schedule is a soft delete: it stops firing immediately, but the sched
 
 ## Can my agent skip a scheduled run when there's nothing to do?
 
-Yes, with the pre-check hook. If the agent's template ships an executable at `~/.trinity/pre-check`, Trinity runs it before each cron tick: empty stdout with exit 0 records a `skipped` execution at zero cost without ever invoking the model, while non-empty stdout becomes the actual task message. The hook is language-agnostic (any shebang works) and fail-open — a broken or slow hook never suppresses a run. Manual **Run now** triggers bypass it. See [Scheduling](../automation/scheduling.md).
+Yes, with the pre-check hook. If the agent's template ships an executable at `~/.trinity/pre-check`, Trinity runs it before each cron tick: empty stdout with exit 0 records a `skipped` execution at zero cost without ever invoking the model, while non-empty stdout becomes the actual task message. The hook is language-agnostic (any shebang works) and fail-open — a broken or slow hook never suppresses a run. It runs before every cron schedule on the agent, and `TRINITY_SCHEDULE_ID`, `TRINITY_SCHEDULE_NAME` and `TRINITY_SCHEDULE_MESSAGE` in its environment say which one is firing — so a hook can gate one schedule and print the others' own message back. Manual **Run now** triggers bypass it. See [Scheduling](../automation/scheduling.md).
 
 ## Can an agent schedule itself to run again later?
 
@@ -70,13 +70,21 @@ Yes, with a self-reminder. While it's running, an agent can set a one-shot remin
 
 A schedule is a recurring, owner-created cron job that fires on a cadence you define in the UI or API. A reminder is one-shot and agent-initiated: the agent decides during a run to wake itself once at a later time, without an owner setting anything up. Use schedules for standing recurring work; reminders are for an agent deferring a single follow-up it discovered mid-task. See [Agent Reminders](../automation/agent-reminders.md).
 
+## Do agents run on a heartbeat, or on triggers?
+
+Mostly on schedules. A schedule fires one message on a cron cadence, ideally a one-line playbook call such as `/daily-briefing`, so each standard operating procedure becomes its own schedule, and an agent can have as many as it needs. The triggered cases have their own tools: a webhook fires a schedule from an outside system, event subscriptions react to other agents, loops run bounded back-to-back work, and reminders let an agent wake itself once. Polling on a schedule ("check the inbox every hour") is often simpler and sturdier than waiting for a push, and a pre-check hook keeps the empty runs free. See [Scheduling](../automation/scheduling.md), [What should a schedule's message contain?](#what-should-a-schedules-message-contain) and [How do I trigger a schedule from an external system like CI/CD?](#how-do-i-trigger-a-schedule-from-an-external-system-like-cicd).
+
+## How does an agent carry a piece of work that takes many days across many sessions?
+
+Through a project and a steward that runs on a schedule. The `agent-dev` project skills keep the project's goal, tasks and log outside any single chat, and the steward skill (`/agent-dev:project-steward`) runs on its own schedule. Each pass reads what needs attention, checks finished work, moves the next task forward and raises an ask when something is stalled. Trinity doesn't run the steward for you: an agent steward needs that schedule, and the project's Steward card says **No sweep scheduled** until it has one. On instances licensed for Projects the same record appears in the Workspace, and elsewhere the skills keep it in the agent's repository. See [Workspace Projects → The steward](../sharing-and-access/workspace-projects.md#the-steward) and [What is the Steward card on a project page?](chat-and-sessions.md#what-is-the-steward-card-on-a-project-page).
+
 ## How do I see or cancel the reminders an agent set for itself?
 
 When a reminder fires it runs as a normal execution, so it shows up in the agent's Executions list grouped under a **Reminders** trigger bucket. The agent manages its own pending reminders through its tools — listing and cancelling them — and this is self-only: an agent can only see and cancel the reminders it set for itself, not another agent's. See [Agent Reminders](../automation/agent-reminders.md).
 
 ## How do I trigger a schedule from an external system like CI/CD?
 
-Enable a webhook on the schedule: open the schedule's **Webhook** panel and click **Enable webhook**, which mints a public URL containing a 256-bit token. Any external system can then `POST` to that URL — no Trinity account or JWT needed — and gets back `202 Accepted`. You can include an optional `{"context": "..."}` body (up to 4,000 characters) that is appended to the schedule's message, and every call is audit-logged. See [Webhook Triggers](../api-reference/webhook-triggers.md).
+Enable a webhook on the schedule: open the schedule's **Webhook** panel and click **Enable webhook**, which mints a public URL containing a 256-bit token. Any external system can then `POST` to that URL — no Trinity account or JWT needed — and gets back `202 Accepted`. You can include an optional `{"context": "..."}` body (up to 4,000 characters). It is added below the schedule's message, marked as external data rather than instructions, and the agent receives it with the run. Every call is audit-logged. See [Webhook Triggers](../api-reference/webhook-triggers.md).
 
 ## What should I do if my webhook URL leaks?
 
@@ -178,6 +186,10 @@ The card shows which agent would run which skill (each with its description), th
 ## Why didn't I receive an approval request for a gated skill?
 
 Most often because you cannot open the agent. An approval reaches only the people in the approver role who own the agent, have it shared with them or are admins; if the role names you but the agent is not shared with you, the request is refused with `approver_cannot_open_agent` and nothing is raised — the agent's **Skills** tab shows the gate as *not shared with them*, and sharing the agent fixes it. If nobody fills the role at all, the request is refused with `role_unassigned` instead. If you asked for the skill yourself, as the approver, it ran at once without a card and was marked *Ran without approval*. And an approval that was raised but already decided, expired or cancelled has left the **Inbox**'s **Action** tab — look under **All**, or on the Operations page's **Resolved** tab. See [Approvals → Gated-skill approvals](../automation/approvals.md#gated-skill-approvals).
+
+## What happens when an agent's work needs a human decision?
+
+The agent raises an ask (a question or an approval) with `ask_operator` and ends its turn. The ask doesn't block the agent while it waits. It goes to the person in the role it's addressed to, by default the agent's primary contact, and the owner when nobody holds that seat. An ask addressed to a canon role (`role:<id>`, where your install provides roles) has no such fallback: when it reaches nobody (roles unavailable on the install, nobody seated, or nobody seated who can open the agent), the ask is refused and the agent is told why. That person sees it in their Workspace **Inbox**. *When* to ask is the agent's own rule, written in its instructions or a shared policy. Role assignments under the agent's **Settings › People** decide only *who* gets asked. If a skill must never run without sign-off, don't leave that to the agent's judgment: turn on **Requires approval** for the skill so Trinity holds every request before the agent sees it. See [Approvals → Asks addressed to a Workspace user](../automation/approvals.md#asks-addressed-to-a-workspace-user) and [How do I make a skill wait for someone's approval before it runs?](#how-do-i-make-a-skill-wait-for-someones-approval-before-it-runs).
 
 ## How can I see whether a schedule is actually performing well?
 

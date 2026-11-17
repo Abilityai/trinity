@@ -1,4 +1,6 @@
-"""Agent-template sources — the GitHub repo list and the remote template registry.
+"""Agent-template sources — the GitHub repo list, the remote template registry,
+and the allowlist that bounds which of them an agent may create agents from
+(trinity-enterprise#591).
 
 Carved out of the 3,529-line `routers/settings.py` (#1028). The package
 `__init__` composes every sub-router onto one `/api/settings` router, so the
@@ -28,6 +30,7 @@ from models import (
     ElevenLabsSettingsUpdate,
     GitHubTemplatesUpdate,
     TemplateRegistryUpdate,
+    AgentCreationAllowlistUpdate,
     MaxParallelTasksCeilingUpdate,
     McpUrlUpdate,
     OpsSettingsUpdate,
@@ -40,7 +43,7 @@ from models import (
     User,
 )
 from database import db, SystemSetting, SystemSettingUpdate
-from dependencies import get_current_user, assert_admin
+from dependencies import get_current_user, assert_admin, assert_interactive_admin
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services import operator_intake_service, telemetry_sharing_service
 
@@ -393,3 +396,59 @@ async def delete_template_registry(
         "deleted": deleted,
         "message": "Template registry reset to defaults",
     }
+
+
+# ---------------------------------------------------------------------------
+# trinity-enterprise#591 — template sources for agent-created agents
+# ---------------------------------------------------------------------------
+
+@router.get("/agent-creation-allowlist")
+async def get_agent_creation_allowlist(current_user: User = Depends(get_current_user)):
+    """The allowlist, its state, and its impact. Admin-only.
+
+    `bounded` is what governs agents (a damaged row is bounded with zero
+    entries, `stored_invalid: true`), never the entry count. `in_use` lists the
+    templates live agent-created agents use, each allowed or refused under the
+    saved list; `None` when it could not be read.
+    """
+    assert_admin(current_user)
+    from services import template_source_policy
+
+    # Sync Docker + DB reads (the impact view): off the event loop.
+    return await asyncio.to_thread(template_source_policy.describe)
+
+
+@router.put("/agent-creation-allowlist")
+async def update_agent_creation_allowlist(
+    body: AgentCreationAllowlistUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Replace the allowlist. Admin **and interactive**: it decides what every
+    agent may build, so an API key — an admin's own included — cannot write it
+    (the grant gate, `assert_interactive_admin`). `[]` clears it (unbounded).
+    One invalid entry refuses the whole save (422, a reason per entry).
+    """
+    assert_interactive_admin(current_user)
+    from services import template_source_policy as tsp
+
+    entries, errors = tsp.parse_entries(body.entries)
+    if errors:
+        raise HTTPException(status_code=422, detail={
+            "code": tsp.CODE_INVALID,
+            "message": "Some entries aren't valid sources — nothing was saved.",
+            "errors": errors,
+        })
+    previous = tsp.read_stored().texts
+    tsp.write_entries(entries)
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="agent_creation_allowlist_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=request.scope["path"],
+        request_id=getattr(request.state, "request_id", None),
+        details={"old": previous, "new": [e.text for e in entries]},
+    )
+    return await asyncio.to_thread(tsp.describe)

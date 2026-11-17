@@ -109,7 +109,12 @@ Invariant #12 already blesses for `elevenlabs_api_key_encrypted`.
 | DELETE | `/api/settings/a2a-endpoints/{ref}` | admin + human-only | Remove one |
 
 Both call routes **404 when the kill switch is off** — Trinity's answer for
-"this capability is not present" everywhere else.
+"this capability is not present" everywhere else. The switch is a route
+**dependency** (`Depends(_require_outbound_enabled)`), solved before the body is
+validated, so a body that fails schema validation (or none) answers the same
+404 as a good one rather than a 422 that says the route exists
+(trinity-enterprise#840, the `require_live` shape). JSON that does not parse is
+still a 422 — FastAPI decodes the body before it solves dependencies.
 
 ---
 
@@ -122,8 +127,8 @@ agent container (LLM — prompt-injectable)
 mcp-server  tools/a2a_call.ts        canAccess: operatorOnly {user,agent,system}
    │  self-only check for scope=="agent"        AbortController 40s
    ▼
-backend  routers/a2a.py              AuthorizedAgentByName + self-check
-   │                                 kill switch → 404 when off
+backend  routers/a2a.py              AuthorizedAgentByName → kill switch (dependency, 404 when off)
+   │                                 → body validation → assert_own_agent (self-check)
    ▼
 services/a2a_outbound_service.py
    ├─ rate bounds: a2a_out:agent:{name} 30/60s  AND  a2a_out:fleet 120/60s
@@ -156,9 +161,12 @@ genuinely cancellable awaits.
 
 ## The gates, in order
 
-1. **Kill switch** (`A2A_OUTBOUND_ENABLED`, default OFF) → 404. First, so a
-   disabled feature costs nothing and advertises nothing.
-2. **`AuthorizedAgentByName`** — owner, admin, or shared.
+1. **`AuthorizedAgentByName`** — owner, admin, or shared, inside an agent key's
+   reach (uniform 404).
+2. **Kill switch** (`A2A_OUTBOUND_ENABLED`, default OFF) → 404 — a dependency,
+   before the body is validated, so a disabled feature costs nothing and
+   advertises nothing for a schema-invalid or missing body (unparseable JSON
+   is still FastAPI's 422).
 3. **Agent self-check** — an agent-scoped key may call only **as itself**.
    `AuthorizedAgentByName` resolves an agent key to its OWNER, so without this
    a *permitted sibling* could place calls under a neighbour's name. Be precise

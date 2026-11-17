@@ -81,10 +81,26 @@ DDL in `db/tables.py` for fresh builds):
 | `quality` | the graded axis, nullable — **null is normal**: a run can be evaluated for completion before any grader has scored it |
 | `checks_json` | Tier-0 deterministic check results |
 | `judge_json` | Tier-1 judge output (enterprise layer, child 5) |
-| `evaluator` | who produced it (`tier0`, a judge id, an admin username) |
+| `evaluator` | who produced it (`platform:tier0`, `admin:<user>`, `workspace:<email>`, a judge id) |
 
 `quality` being nullable is a contract, not laziness: the two axes are
 independent, and a UI must render "not yet graded" rather than assuming 0.
+
+**Stored vs. read (ent#781).** The row keeps the full `evaluator`, person
+included; what a reader is *served* depends on who is reading. All three GET
+routes (`/api/agents/{name}/evaluations`, `/api/evaluations`,
+`/api/evaluations/{id}`) and the POST echo project every row through
+`routers/evaluations.py::_to_response`. A human owner or admin of the row's
+agent (JWT or their own `user`-scoped key) reads the stored value. Every machine
+principal and every human the agent is merely shared with reads
+`services/evaluation_read_service.redact_evaluator(...)`: the exact names
+`platform:tier0` / `platform:tier0:pair` unchanged, `platform:tier1:<model>` as
+`platform:tier1`, any other `kind:rest` as `kind` (so `admin:<email>` reads
+`admin`) when the kind is an identity-free lowercase token, and a value with no
+kind or a malformed kind (an address before the colon, uppercase, whitespace) as
+`unknown`. The canonical rule is
+lifecycle-observability §46 FR-3. It covers the `evaluator` field only; `judge`
+and `checks` are returned as submitted.
 
 ## Completion relabel
 
@@ -126,3 +142,28 @@ is free, the AI/managed tier is not.
 | Cascade | `db/agent_cleanup.py` (`AGENT_REFS`) |
 | Frontend | `ExecutionsPanel.vue`, `OverviewPanel.vue`, `ScheduleAnalyticsCard.vue` (relabel only) |
 | Tests | `tests/unit/test_206_agent_evaluations.py` |
+
+## Testing
+
+Automated (unit island, no live stack):
+
+- `tests/unit/test_206_agent_evaluations.py` — the write fence, the table and the
+  read scoping.
+- `tests/unit/test_937_projection.py` — grader identity (ent#781): the issue's
+  failing test adopted verbatim, driving the real admin POST route as an
+  email-login admin and projecting the stored row for the graded agent's key, the
+  system scope and a shared non-operator (each reads `admin`, never the address),
+  plus the operator controls and the `redact_evaluator` table.
+- `tests/unit/test_937_ent781_census.py` — an AST census of every statically named
+  call to `create_agent_evaluation` / `upsert_workspace_rating` /
+  `create_evaluation`; each site is driven through its real writer and read back
+  by four machine readers. It covers those three APIs only, not a writer added
+  under a new name, which the read projection still covers.
+- `tests/unit/test_ent781_read_routes.py` — the evaluator output contract, a
+  malformed kind (an address before the colon, uppercase, whitespace) reading
+  `unknown`, human operators vs. machines carrying operator membership, a failed
+  operator lookup, and all three GET routes over HTTP on the real router.
+
+On the pre-fix router the ent#781 files fail 56 of 85 behavioural cases (each on
+the disclosed address), and the malformed-kind cases fail 16 of 20 without the
+kind-grammar check; with both, all 115 tests pass.

@@ -24,11 +24,23 @@ for a platform principal that is not a person: a system-scoped key reads here bu
 The field defaults to False, and the principal also carries `self_approves` + `credential` (#3404): a
 portal session token says how it was minted (`minted_by`: `otp` | `delegate`), and only a platform
 person or an `otp`-minted session may self-approve a gated skill — see `feature-flows/skill-gate.md`.
+**The portal-token branch is terms-gated (trinity-enterprise#1107, ruling A(1)):** after the
+client-block check and before the session slides, `get_portal_principal` calls
+`terms_gate.enforce_portal_session(request, email, interactive=portal_session_is_interactive(token))`
+— a portal session minted with the Workspace's `"client": "web"` declaration on `/auth/verify`
+carries `interactive: true` (carried across rotation) and is refused 403 `terms_required` until its
+address has an acceptance row for the current version; a bare or delegate-minted token is not a
+visit. The two terms routes accept the portal token (`routers/terms.py::terms_caller`), the record is
+a `terms_acceptances` row with `user_id` NULL keyed by (email, version), and the Workspace shell
+renders `components/portal/PortalTerms.vue` in place of the roster for such a session —
+`feature-flows/terms-of-use.md`. The order matters: a blocked client is refused, never shown
+terms, and a refused session is never handed a fresh token.
 
 **The `user` rung is Workspace-only (trinity-enterprise#837).** A platform account whose role is
 `user` is a member who works with agents here and nowhere else: `get_current_user` refuses it on
 every operator route (403 `workspace_only`, `architecture/security.md` §1). The Workspace doors —
-`get_portal_principal`, `shared_sessions/router.py::get_room_principal`, the Workspace voice start —
+`get_portal_principal`, `shared_sessions/router.py::get_room_principal` (which also authenticates
+the `/api/enterprise/rooms/` paths that seat people in a room, ent#701), the Workspace voice start —
 resolve the credential through `resolve_platform_user_unfloored`, so such a member reaches this
 surface exactly as before, roster included (shared agents plus any they own). The handful of
 operator-side routes the Workspace calls (session identity, sign-out, the `/ws` ticket, preferences,
@@ -44,7 +56,13 @@ with the code. Inside the Workspace such a member keeps the **team view**: signe
 (`agent_page.canvas_audience_for`), the agent's whole activity, loop runs included
 (`agent_page._client_scope`), voice and model choice — the narrower client view is for people
 without an account (decided at #837; nothing new is exposed, a `user` saw all of it on Agent Detail
-before). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
+before). **The code page is not a second door for a platform account (#3922).** An address with a
+platform account that `/login` can sign in (`service.platform_login_admits`: a `users` row, and
+either a password or the email login would admit it — email login on, the policy allows codes,
+allow-listed; an allow-list row alone is not an account) gets no portal session: after its code verifies, `/auth/verify` answers
+409 `platform_login_required`, and the Workspace sends it to `/login` with a return path. Every
+platform login (`auth._finalizeLogin`) ends a leftover Workspace client sign-in, since `authHeader`
+prefers a held portal token. **Nor is it a door for a deactivated account (trinity-enterprise#1258).** A portal session carries an email and no account, so `users.suspended_at` (#995) is read explicitly: `service.email_account_suspended` refuses the three mint paths (inside `email_has_access`, and first in `/auth/request` and `/auth/verify`), and `portal_auth._reject_if_blocked` — the check every `decode_portal_session` consumer makes — refuses a live session on its next request. Suspension wins over a share; fail-closed. Detail: [workspace-only-role.md](../feature-flows/workspace-only-role.md). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
 reads (`WORKSPACE_WS_EVENT_TYPES` / `_FIELDS`, `architecture/integrations.md`). An agent whose owner
 is Workspace-only is refused at the rooms door.
 
@@ -91,13 +109,37 @@ source guard says so, because the first cut of this fix guarded `auth.js` alone 
 the tab (the merge-train review's C1); the two sync actions and `logout()` delete it as a
 belt. The reaction itself (`reactToPlatformUnauthorized`), the storage listener
 (`reactToStorageEvent`) and the request rebuild (`applyRequestCredential`) are functions
-of their collaborators, executed by unit tests with fakes — `main.js` is wiring only. The
+of their collaborators, executed by unit tests with fakes — `main.js` is wiring only. A
+`logout` verdict sends the page it happened on as `/login?redirect=` (`loginLocation`,
+#3444) — on the Workspace too, so an operator whose token died mid-chat comes back to the
+chat; a session ended in another tab still never navigates, and the Workspace sign-in card
+offers "Have a Trinity account? Sign in" to the same return path whenever no platform
+session is held (#3466). The
 logout revoke carries its token **explicitly**, because #2258's clear-before-revoke
 ordering means storage is already empty by then. The Workspace veto in the verdict reads
 the **per-tab** portal token from the store, not shared `localStorage`, so a client
 signing in in another tab cannot strand an operator's Workspace tab on an expired JWT.
 Full model and the verdict table:
 [workspace-session-signout.md](../feature-flows/workspace-session-signout.md).
+
+**The open thread catches up on the 20 s tick; the sidebar is not the only reader of
+the list (#3439).** `PortalConversation.loadThread` runs on mount and on a thread switch,
+and the Workspace has no history poll — so a row the agent wrote after the person's turn
+ended (a completion report, an approval outcome #3709, a recovered lost turn #2319, a
+background task's reply) used to badge the open chat on the shell's 20 s tick while the
+transcript stayed stale until a reload. The conversation now watches its OWN row in the
+`threads` prop the shell already hands it, compared as the string
+`` `${message_count}|${last_message_at}` `` (`portalThreadTail.tailSignature`) — never the
+object, which `decorate()` re-creates every tick, and never `unread`, which counts assistant
+rows only and is reset by the turn-end mark-read. When it moves and no turn or call is in
+flight it reads the newest rows (`unread + 8`, capped at the server's 50), adopts the server
+id onto its own id-less local question (or that question renders twice), appends the unseen
+ids through `historyRow` as an arrival (#2624), and emits `thread-caught-up` — a distinct
+event, because `sessions-changed` also drives the #2579 title-settle cycle — which the shell
+answers with mark-read only if the thread is the one on screen. The ent#747 ask-result poll
+rides the same `reconcileTail`. `startAsksPoll` also runs the tick body on
+`visibilitychange` → visible. See
+[workspace-open-thread-catch-up.md](../feature-flows/workspace-open-thread-catch-up.md).
 
 **Membership is a DB fact; container state is a projection onto the card (#2196).** The
 roster is built from `agent_ownership` / `agent_sharing` and is **never** filtered by
@@ -264,9 +306,10 @@ cleared from three sites (the next turn-done, `onBeforeUnmount`, and `watch(conv
 the only one that fires on a thread switch). The notice rides
 `PortalConversation`'s `#notice` slot for platform admins only
 (`shouldFetchTitleHealth`), through `clientPortal.js::fetchTitleGenerationHealth` on
-`portalHttp` — never `@/api`, whose 401 handler hard-navigates to `/login` under
-`/workspace` and would bounce an operator out of a conversation over a background
-diagnostic. **Known blind spot, accepted:** `_title_health` is a module global and prod
+`portalHttp` — never `@/api`, because `portalHttp`'s interceptor is the one place a
+Workspace credential is decided. (Not to avoid a bounce: since #2791 both clients report
+a 401 to the same handler, and a dead platform session goes to `/login` with the page as
+its return path either way, #3444.) **Known blind spot, accepted:** `_title_health` is a module global and prod
 runs `--workers 2`, so a probe can land on a worker that ran no generation and answer
 `unknown`, which shows no notice. Honest under-reporting; making it cross-worker means
 new Redis-shared state for a diagnostic. `PortalEditableTitle.vue` is the one editor for the row, the 1:1 header and the
@@ -290,7 +333,15 @@ exposable-skills config (ent#178) slots into this same seam. A chat holds one ag
 or, where the capability below is present, several — and the picker starts a new chat
 either way, so hints scope to the active agent by construction. ent#380 also fixed the
 briefing's metadata read — #138 called a nonexistent agent `/info` route, so descriptions
-were silently always `None`.
+were silently always `None`. **Each hint says which tier it is (trinity-enterprise#584):**
+`PortalPlaybook.kind` is `playbook` (a capability, described by its SKILL.md
+`description:`, `null` → "No description yet") or `use_case` (rendered as "What you can
+ask", never as a capability missing a description); the typeahead copy carries it too, and
+the default keeps an older payload reading as a playbook. Descriptions are cleaned once,
+where they enter (`connector_service.resolve_exposed_playbooks` →
+`services/skill_packaging.py::clean_description`), not in `_agent_briefing`. `/page` carries
+`capabilities_state` (the card's `briefing_state`), so the rail's empty arm can tell
+"never answered" from "published nothing".
 
 **Briefing hint grid is bounded (#2101):** with no connector allow-list configured every
 `user_invocable` skill becomes a "Things you can ask" card, so the hint set is belted
@@ -348,6 +399,13 @@ chat. It is bound to the **Workspace thread**: `POST
 `client_portal/voice.py::start_workspace_voice`, which builds the context from the thread's
 recent rows and creates the session with `portal_session_id` + `client_email`,
 `canvas_audience="operator"` and `max_duration=WORKSPACE_VOICE_MAX_DURATION` (1800 s).
+The start response also carries the audio socket's single-use ticket (trinity-enterprise#595),
+minted in the router for the platform user it resolved — which must be an interactive
+session, so a Workspace-only account gets a call and an MCP key does not — and the client
+sends it as the socket's first frame. The ticket comes from the same `portalHttp` request the
+store's credential decision authorized; the composable never reads a session token for the
+socket, and `startWith` resolves (the orb shows *listening*) only after the server's
+`auth_ok` and a live mic. Protocol: [integrations.md → WebSocket auth](integrations.md#real-time-delivery-reliability-003-306).
 The transcript is **written turn by turn on the worker holding the live socket**
 (`persist_voice_turn`, called from the bridge's `on_turn`) as `enterprise_portal_messages`
 rows carrying `source='voice'` + `voice_call_id`; the call closes with one `system` label
@@ -380,6 +438,33 @@ hands-free STT→turn→TTS loop is **retired** by the same ruling (one voice en
 hold-to-dictate (#2212) and spoken replies (#2157) stay as composer affordances. **OSS-core
 by the standing ruling, deliberately ungated.** See
 [workspace-voice-conversation.md](../feature-flows/workspace-voice-conversation.md).
+
+**Direct calls — every spoken turn goes to the agent (trinity-enterprise#1046).** The
+second call kind, its own button beside the Live call's in the composer (each button
+carries its own reason when it is off; while one call is on the other says so; the Direct
+strip's live mark is `portal/CallBars.vue`, four token-tinted bars: green listening,
+amber working, blue speaking, flat gray dots muted). No model is in the conversational path: the browser endpoints an utterance
+(`utils/voiceEndpointing.js`), the backend transcribes it, and the browser sends the text
+through the **same `POST …/chat/stream` a typed message uses**, carrying the call's `vd_`
+id — so limits, idempotency, skill gates, attachments and attribution are the typed
+path's, and `turn_may_join_call` refuses any id that is not the caller's live call on this
+agent and thread (uniform 404). The browser then sends `speak{execution_id}`; the bridge
+(`services/direct_voice_service.py`, on the shared `/ws/voice/{id}` door, owner-only, no
+admin attach) reads the turn's stream through `client_portal.router.direct_call_stream`
+and speaks it sentence by sentence. **Harness-agnostic by construction:** every reply is
+spoken from the persisted row (`db.get_turn_reply_row`); a runtime whose stream carries
+messages (`normalize_stream_entry`: Claude Code, Codex; Gemini CLI publishes none) only
+starts sooner, and `unspoken_tail` reconciles so nothing repeats. The socket never starts
+a turn and never answers an ask: an ask the turn raised is read aloud (`speak_ask`), and a
+whole-utterance yes/no that starts ≥300 ms after the prompt finished is posted by the
+browser on the person's own `POST /asks/{id}/answer`; an approved run is spoken only if it
+is the caller's own execution. Speech providers sit behind `services/speech/`
+(`SpeechProvider`: Gemini REST STT/TTS, ElevenLabs), resolved per call from
+`GET/PUT /api/settings/direct-voice` (admin, audit-logged). One call per thread across
+both modes: `portal_direct_active:{thread}` is claimed atomically when the socket opens.
+The Direct reply is the agent's own session answering, so it moves the #2694 delta cursor
+(the call's label row stays out of the delta). Flow:
+[workspace-direct-voice.md](../feature-flows/workspace-direct-voice.md).
 
 **Thread readability, copy, new-tab entry, agent search (#2515 / ent#456 / ent#402).**
 `components/portal/PortalMarkdown.vue` is the single home of the rendered agent body — the one
@@ -535,6 +620,10 @@ renders FROM the durable #2320 verdict, so it survives a reload; **Ask about it*
 never a send — the ruled lesser control) and for `PortalWork`, the tab body (Now · Earlier; since the ent#610 2026-09-30 ruling Work draws no ask — one `PortalAsksWaitingLine` ("N ask(s) waiting on you · Open in Inbox", counted from `openAsks`, to `asksHomeRoute(agent)`), which Info also mounts for every principal; the ask row itself renders in the Inbox, in its raising chat's thread as a tile when `raised_in_turn` (placed by server time; the chat also reads its own chat-turn asks, `GET …/asks?chat_id=`, with no ended window, merged under the store's fresher rows), and in a project's Needs you — since #2915 the projection (`WorkspaceAsk`) carries a coarse `sync ∈ {confirmed, changed, closed, unconfirmed}` + `aging` (never the reason or a poller timestamp), rendered by the shared `queueSyncBadge` rule (in the Workspace through `workspaceAskBadge`, which drops the operator-only "Unconfirmed" since ent#610 PR A2), and an answer to a changed/closed ask is refused with `AskError(409, "item_diverged")` until `acknowledge_divergence` rides the resend; since trinity-enterprise#611 the list also carries asks that ENDED in the last 7 days (`include_ended`, read past the operator's Clear All) with a coarse `ended_by ∈ {you, operator, timeout}` + `ended_at` and never an email or the cancel reason — since trinity-enterprise#816 (the 2026-10-07 ruling) an ask to a role several people fill is ONE row delivered to each of them: "addressed to the viewer" is `addressed_to_email = viewer` OR `viewer ∈ resolved_to`, in SQL for the list and its count (`db/operator_queue._resolved_to_contains`) and in `_is_addressed_to` for every per-ask door (answer, dismiss, discuss, context — a non-addressee keeps the uniform 404); the projection carries `shared`, the first answer wins (a later one is `already_resolved`), the others read `ended_by = someone_else` + `answered_by` (that co-addressee's name, else address; never an operator's), and Dismiss/Discuss are refused 422 `shared_ask` and hidden in `PortalAsks` until they are per person; a shared ask has no single addressee, so it attaches to no chat and lives in the Inbox only — `pending-only` keeps a project's Needs you to what is still open; a chat's ended chat-turn asks are its own read, not this window — and the answer is person-only; since PR B the projection also names `proposal`, the exact action an approval asks the person to approve (rendered read-only by `QueueProposal`), while `context` stays off; since trinity-enterprise#610 PR A2 (§3g L7) a selected ask's context is its own lazy read, `GET …/asks/{id}/context` → `asks/service.get_ask_context` (the run only after the agent / live-window / audience checks on the agent-written `execution_id`; an origin excerpt only from a chat TURN's thread (`triggered_by = public`) verified as the viewer's, else the ask's own chat only for an in-turn ask — a background ask has no chat origin; no `cost` or `execution_id` — stricter than Work's projection by decision), rendered by `PortalAskContext` below the pane's card;
 rooms grouped by participant, absence visible). **OSS-core by decision (ent#525): deliberately
 ungated.** See [workspace-work.md](../feature-flows/workspace-work.md).
+**Own rows on a shared agent (ent#875):** the roster unions owned and shared agents, so the Work
+read (`work/service.get_work`, and the `/activity` lines) narrows every agent the viewer does not
+own to their own rows — by user id, or by email as requester or spawned-for client — in the WHERE
+before each LIMIT (`_own_rows`; owner of the rule: `security.md` §5d).
 
 
 **The roster payload is *the* portal capability channel (#2128).** A portal principal
@@ -655,6 +744,17 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   `/budget-defaults` path there would sit beside `/{room_id}`, one ordering slip from
   being read as a room id (Invariant #4) on the one surface whose reader must never be
   a client.
+- **Ask return** (abilityai/trinity-enterprise#1135): an ask raised from a room turn
+  carries the platform key `context.workspace_room_id` (`room_for_execution`, a RUNNING
+  room turn of this agent in an open room it sits in; never a credential ask). The room
+  gets one system line when it is raised (`post_ask_raised_line`) and one when it ends
+  (`on_ask_ending`, the sink's ending observer registered from `main.py` — every
+  disposition, one line per room/agent/event; coarse *who*, never the answer). The answer
+  or a cancel/dismiss wake runs **through the turn engine** (`return_ask_to_room` →
+  `_wake_agent(…, ask_block=…)`) under an engine `Waker` that acts for nobody (client
+  stamp only for a seated answerer; mention reach = the moderator rebuilt from its row);
+  closed / departed / over budget / capped / lock-busy declines with one clause and the
+  resume service runs today's wake. Normative text: `requirements/security.md` §26.9, §26.12.
 - **Turn engine** (`service.py::post_message` → `_wake_agent`): mentions resolve against
   participants; each woken agent runs an **ordinary** `execute_task(triggered_by="room")`,
   so slots, the circuit breaker, cost and observability come for free, and its reply is
@@ -664,7 +764,7 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   cancellation shield bound the cascade; the ent#218 rule keeps an in-flight reply that
   was already billed from being discarded by a budget trip.
 - **A reply is never refused for its size, and a landed message never fails its post
-  (#3210).** `MAX_CONTENT_CHARS` (8,000) is an **inbound** rule — people, Workspace
+  (#3210).** `MAX_CONTENT_CHARS` (100,000 since #3706, matching Workspace chat and `MAX_AGENT_REPLY_CHARS`) is an **inbound** rule — people, Workspace
   clients, and agents calling the API. The engine's own post of a turn's reply is fitted
   to `MAX_AGENT_REPLY_CHARS` (100,000) by `_fit_reply` instead: past the bound it keeps
   head and tail around a marker, and there is no size at which it raises. It stays **one
@@ -687,6 +787,45 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   replies raise a room's spend per message (the turn prompt suggests sharing a file plus a
   summary for a long deliverable); and `GET /api/rooms/{id}` is unpaginated, so a room's
   first load grows with its message sizes.
+- **People in a room (trinity-enterprise#701).** A room can hold more than one person. Each
+  person has a read floor (`visible_from_seq`: the first seq they may read, 0 = all) that
+  `get_room` applies, and leaving is real: `_require_membership` gives a person whose row has
+  `left_at` the uniform 404, `list_rooms` drops the room for them, and `db.seat_person` is the
+  people-only upsert that seats someone again (clearing `left_at`). Agents keep their own
+  rules: `add_participant` never clears `left_at`, which the #2610 keep set relies on. The
+  room payload carries `you`, `people` and `can_seat_people` (UI capability only — offered to
+  a platform moderator of an open room when seating is provided through the entitlement seam).
+  With two or more people present the turn prompt names them and what each may decide, and an
+  `@username` of a seated person becomes a tag through the #631 path, never a wake.
+  `POST /api/rooms/{id}/leave` is people-only (no MCP tool: an agent is removed, never leaves).
+- **A paused chain says so, and a person continues it (trinity#4302).** At
+  `ROOM_MAX_CHAIN_DEPTH` `_after_landing` writes a typed system row
+  (`_post_pause_line`: `kind = "chain_paused"`, `mentions` = who was next, facts-only
+  content) instead of waking. `get_room` derives `paused_chain` `{seq, next}` at read time
+  (`_paused_chain`: newest pause → `db.offer_stands` → still-seated agents), for every
+  reader. `POST /api/rooms/{id}/continue` → `service.continue_chain` (membership → person →
+  budgets → offer → seated → reachable) consumes the offer with a `chain_continued` receipt
+  that `db.append_continue_receipt` inserts `INSERT … SELECT … WHERE NOT EXISTS` under the
+  same moved-on predicate (`_MOVED_ON_SQL`, one fragment, two readers) inside the
+  seq-allocation transaction, then wakes through `_wake_targets` — the per-target loop
+  extracted from `_after_landing`, so a Continue and a landed message wake one way, here at
+  depth 1. The idempotency claim has its own scope `room-continue:{room_id}` and is never
+  the once-per-stop guard. **Readers key a system row on `sender_kind`, not `kind`**: `kind`
+  now types some system rows, so a `kind === 'system'` test misreads them as messages
+  (`PortalRoom.vue`'s transcript and `isMine`, as `portalInbox.js` already did). The
+  Workspace control is `portal/PortalRoomContinue.vue`, rendered once after the transcript
+  from the payload. No MCP tool: Continue is a person's action.
+- **A gated wake is recorded, not re-run (trinity#3402).** A wake the skill gate held — or
+  refused for a reason the same request would get again (`STANDING_REFUSALS`) — records in
+  `room_gate_holds` each shown post whose own text invokes a skill gated on that agent, plus
+  the notice line. Every later wake of that agent leaves those rows out of the transcript
+  and of the text the gate scans (one list feeds both), and so does MCP `read_room` by that
+  agent; other agents and people still read them. The read cursor keeps its success-only
+  rule, so an ordinary post that landed in the held delta is delivered on the next wake; a
+  refusal that clears by itself records nothing and the post comes back. Before this, a held
+  wake left the cursor in place and every later wake asked again for the same post.
+  `room_gate_holds` is an `AGENT_REFS` CASCADE entry, and deliberately carries no
+  `enterprise_` prefix: on the room tables that prefix is the three legacy names' history.
 - **Three tables** — `enterprise_rooms`, `enterprise_room_participants`,
   `enterprise_room_messages`. The `enterprise_` prefix is **retained history, not a
   licensing claim** (the ent#356 portal precedent): every entitled install already holds
@@ -748,7 +887,12 @@ agent never names the user. The details panel's `PortalAgentMemory.vue` reads
 `public_user_memory_writes` history with schedule names through the page's bounded map)
 and `POST …/memory/writes/{id}/undo` (latest-first; `409 not_latest` / `already_undone`
 named, unknown id the uniform 404). Requirement §10.19 of `scheduling.md`; flow in
-`schedule-workspace-delivery.md`.
+`schedule-workspace-delivery.md`. **Since trinity-enterprise#962** the history and the undo
+are shared with the owner's view (`services/person_memory_service`): this view stays
+**notes-only** (`section='notes'`, and its undo is pinned to it — a summary write id is the
+404), pages with a keyset cursor (`?before=` → `next_before`, 20 a page), and a write
+someone else undid carries `undone_by_operator` (never who) so the panel reads "Undone by an
+operator of this agent". The owner's side is `routers/person_memory.py` (`backend.md`).
 
 ## The role card — a projection of the agent's files, and the owner's readiness stamp (ent#527, #663)
 
@@ -783,6 +927,56 @@ ambiguity fails open and is logged. The rollout is a one-time data seed on both 
 `changed_by = rollout:ent#689`, insert-if-absent, for every live agent with autonomy on and an
 enabled seat brief at deploy. `effective_readiness` reports that stamp as `source: "rollout"` with no person; the card's
 `brief_held` (platform viewers only; false when autonomy is off) says a seat brief is paused.
+
+## The autonomy dial — what a companion may do unprompted (ent#641, P12)
+
+Autonomy was one switch per agent. The dial adds two scopes above and below it.
+**Above**: one instance LEVEL (canon `tandem-06` §2.3 — L0 Continuity, L1
+Companion, L2 Delegated classes, L3 Load-bearing judgment), stored as one
+validated `system_settings` key and written only through
+`PUT /api/settings/autonomy-dial` (admin **and** interactive — raising the
+ceiling is what lets anything run unprompted, so it is a grant; the generic
+`/{key}` catch-all refuses the key, the ent#297 shape). **Below**: a state per
+(seat, ask class) in `seat_ask_class_state`, earned from the seat's decision
+record — ≥3 non-expired records from ≥3 distinct conversations (each distinct
+`source_execution_id` is one; each person-written record is its own), ONE
+normalized criterion, no reversals in the window — plus a clean rating history for that seat in the last 30 days.
+Promotion is earned; there is no promote control. A person may HOLD a class
+(a refusal anyone may make for their own seat); only the agent's owner may
+RELEASE one (a grant).
+
+**The shape is a stored earned-state × three read-time conjuncts** — the
+instance level, the agent's `autonomy_enabled`, and `now <= evidence_expires_at`
+(the EARLIEST `review_by` in the window). Written instead of read, each is a
+silent failure: a class whose records all lapse at UTC midnight fires no event,
+so a materialised verdict would outlive its own evidence with nobody watching,
+and re-evaluating the fleet inside a level change is an unbounded fan-out with
+no fleet-wide seat query to drive it. As conjuncts, a level drop needs zero
+writes and restores exactly what each class had earned when it goes back up.
+Writes happen only on real events (a decision recorded or acted on, a rating by
+the seat, a hold/release), CAS'd on an evidence hash; reads persist nothing.
+
+**Reversals count over the window, not over all history.** `effective_status`
+returns `reversed` unconditionally, so a reversed record never expires — counted
+that way, one reversal would block a class forever and `on_request` would be the
+only reachable steady state. #638 shipped `stats().reversals` as this issue's
+INPUT and deferred the verdict; `autonomy_dial_service.class_evidence` is the
+verdict, and #638's contract is unchanged.
+
+**The rating query's three shapes were each a defect first**: it matches
+`operator:<email>` as well as `workspace:<email>` (on a single-operator install
+the seat person IS the platform principal, so their thumbs-down lands under the
+other prefix and the class could never demote); it reads
+`COALESCE(updated_at, created_at)` (an up→down flip updates only `updated_at`,
+and that flip is exactly a demotion); and the window is a FIXED 30-day span, not
+"since the oldest surviving record", which would let a blocking rating fall out
+as records expire — promotion by the clock, which R25 forbids.
+
+The companion is told: `autonomy_dial_service.prompt_lines` rides the seat's
+memory block, so the model reads which classes it may act on unprompted and, for
+the rest, the same sentence the panel shows. `PortalAgentAutonomy.vue` in Agent
+details; `get_autonomy` on MCP (seat from `execution_id`, never a parameter).
+Requirement §5.40 of `core-agent.md`; flow in `workspace-autonomy-dial.md`.
 
 ## The seat decision record — why things were approved, deferred or killed (ent#638, R25)
 
@@ -886,6 +1080,57 @@ agent itself (a human sharer's publish places no card at all), is stamped to the
 addressee's Main and that Main is touched (`added=0`). That is what makes the
 deliverable arm count it, gives the card an inline home and an anchor, and keeps
 the Main visible to `sidebarThreads` (which hides `is_main && !last_message_at`).
+
+**The read write covers what the client held; a room's cursor is per identity space
+(trinity-enterprise#1010, #1011).** `mark_chat_read(…, through=)` moves the cursor to the
+client's `through` (the later of `GET /chat-state`'s `as_of` and the newest row it rendered),
+clamped to now and never backwards, instead of to server time — so an arrival between the last
+fetch and the write stays unread. A room's cursor row is `chat_kind = 'room:<kind>'`
+(`db.room_cursor_kind`); the plain `room` row keeps the star and is every space's floor until
+that space writes its own. No schema change: `chat_kind` is free text in the existing PK.
+
+**A room's unread is the same cursor, read through membership (trinity-enterprise#959).**
+`db.unread_room_arrivals(email, kind, identity)` counts agent messages after the viewer's
+`chat_kind = 'room'` cursor (or the #557 baseline), in one windowed statement that also
+yields the latest arrival and the first unread id. It reaches a message only by JOINing the
+viewer's own **active participant row** in the identity space their credential acts in —
+`service.room_reader_of(principal)`: a platform session is `user` + `PortalPrincipal.username`,
+a Workspace session `workspace_user` + email, anything else no rooms at all (fail closed) —
+because the cursor row is keyed by EMAIL, which the two identity spaces share, and a count read
+any other way would be an oracle over rooms the viewer is not in. `get_chat_state(room_reader=…)`
+fills the room entries' `unread` and emits cursorless member rooms under the same cap rule; the
+rooms list marks each row `member` (an admin lists every room), and the Inbox draws a room only
+when it is true. The rooms' own `last_read_seq` stays the agents' delta cursor. No table, no
+migration, no `/ws` change (ent#531 is untouched: nothing new rides a broadcast).
+
+*Fix round 1 (security review).* Three more places hold the same rule. (1) The stored room
+**rows** are filtered through one batched read, `db.active_room_ids(kind, identity)`: a room row
+comes back only for a room the reader is actively in, and with no reader for none — so a
+platform account no longer receives the id of a room only its same-email Workspace identity is
+in. A platform admin (`service.room_sees_all`: `is_platform and is_admin`), who lists every
+room through `GET /api/rooms` anyway, keeps their own starred rows for rooms they are not in,
+at a count of 0. (2) The **write** — `mark_chat_read(…, room_reader=…)` moves a room cursor only
+when `db.is_active_room_participant` holds; an unknown room, a room the reader is not in or
+left, and a call with no reader all return the same 204 and write nothing. (3) **Departed
+participants** are not members: `shared_sessions.service._require_membership` 404s a
+participant with `left_at` set (uniformly, like a room that does not exist), and
+`db.list_rooms_for_participant` lists active membership only — so a removed agent's own key no
+longer reads, lists or posts into the room. `get_participant` stays unfiltered for the sender
+label. One exception, by caller rather than by principal (round 2): the engine re-entering
+`post_message` with an already-dispatched reply (`_sender_override`, never set by a route)
+passes `allow_departed=True`, because a wake runs under the WAKER's principal — possibly an agent
+that posted `@B` with its own key — and B's paid-for reply must land even if that agent was
+removed mid-turn. The participant row must still exist; only `left_at` is relaxed. The cursor row itself still has no identity-space column, so if one email is a member of
+the SAME room in both spaces, either credential's read clears both — a follow-up, not fixed here.
+
+*Reading a room only when all of it is on screen (fix round 1, code review).*
+`portalInbox.roomTranscriptComplete(held, data)` is the one rule the Inbox pane
+(`PortalInboxRoomCard`) and the room view (`PortalRoom`) read by: a room may be marked read only
+when the messages held reach the `message_count` that `GET /api/rooms/{id}` returns beside its
+bounded, oldest-first page; a response without a usable count is never complete. The pane pages
+up to ten times and, short of the count, shows "too long to show here" and stays unread; the
+room view owes its read from the open (or an agent's message) and pays it once its poll has
+brought the rest (the poll keeps loading a closed room only while that read is owed). `Portal.vue::openRoom` no longer writes the read at the click.
 
 **The frontend.** Route `/workspace/inbox` (`WorkspaceInbox`) renders in the same
 `Portal.vue` shell, as a stage branch `isInboxRoute && stage.state === 'ready'`
@@ -1010,8 +1255,13 @@ and an external Workspace client (`tagging_unavailable`: the colleagues it would
 the organisation's, #78). `taggable_people` / `resolve_tags` share ONE predicate
 (`db.users._taggable_conds`): an account with an email, not suspended, that is an admin, an
 owner, or a sharee of one of the conversation's agents. The picker requires a query, caps
-at 8 and is rate-limited (`room_people:*`, `portal_people:*`, 120/min) — the ent#450 shape,
-never a directory. The send-time check refuses before ANY write (in a room, before the
+at 8 and is rate-limited by the one people search (`people_search_service.search`,
+trinity-enterprise#1153): both pickers go through `taggable_people` with the `agent_reach`
+scope, so the limiter key is `people-search:agent_reach:<tagger email, else username>` and
+the room `@` and the Workspace chat `@` draw on ONE shared budget per person, 120 lookups
+a minute (`PEOPLE_RATE_LIMIT`; past it, a `rate_limited` 429 with `Retry-After`). The
+picker never lists the person asking (`requester_email`). The ent#450 shape, never a
+directory. The send-time check refuses before ANY write (in a room, before the
 newcomer join): one `unknown_person` for "no account" and "no access", so it is no oracle;
 `cannot_tag_yourself`; `too_many_tags` past 10 distinct.
 
@@ -1092,7 +1342,7 @@ chat when the execution row is a still-running Workspace chat turn (`triggered_b
 that pair (a reset, archived Main included — it stays resumable) — the link the portal creation sites already stamp (ent#457), so no column. Anything
 else, including a schedule that DELIVERS into Main (portal stamp, `schedule` trigger) and
 every file-ingested ask, falls through to Main; a lookup failure falls through with a warning.
-Because Main is then both a chat-turn ask's home and a background ask's reply target, the
+Because Main serves as a chat-turn ask's home, a reminder-wake ask's tile home (ent#1171), and a pure background ask's reply target — the
 row also carries `context.workspace_raised_in_turn` (platform-written, only on a turn match),
 projected as `WorkspaceAsk.raised_in_turn` — the fact a chat strip needs to draw a tile
 (trinity#3101 is the consumer; no frontend reads it yet).
@@ -1494,12 +1744,36 @@ is the edition-agnostic surface it plugs into:
   `tabPassesDoor` checks a declared capability fail-closed against
   `session.capabilities`, so a session without it — including a platform
   session on a build without the module — sees exactly the tabs it saw before.
+- **Tasks board (trinity-enterprise#957)** — the Tasks tab is one task surface
+  with two views, List | Board (`BaseSegmented`, remembered per person in
+  `localStorage`). `ProjectTaskBoard.vue` only draws and emits; the columns and
+  every rule are pure data in `projectsUtils.js` (`BOARD_COLUMNS`, `columnOf`,
+  `boardColumns`, `boardMove`), so a new step of the path is one array entry and
+  a status no column names lands in the first column instead of vanishing.
+  `ProjectTasks.vue` owns the writes: a move is the existing status-only task
+  update (`store.moveTask` — the answer is merged into the rows at once and the
+  re-reads reconcile in the background), tracked in ONE in-flight map
+  (`useTaskBoardMoves`) shared with Confirm. The dragged task is component
+  state; the drag payload is never read back, because task ids repeat across
+  projects. Tasks are re-read while the tab is visible (`useVisiblePolling`),
+  `fetchTasks` lets only the newest read of a project write (success and error
+  alike), and fresh rows are held while a drag or a keyboard pick is in
+  progress. Under `boardMinWidth()` of container width the list renders.
 - **Project page (v2)** — `OverflowTabs` over Overview / Tasks
   (`ProjectTasks.vue`) / Log (`ProjectLog.vue`) / Files & reports
   (`ProjectMaterial.vue`, reusing `ReportRenderer`). An invited guest gets one
   narrow view (the server omits the log, tasks, decisions and members); the
   controls it cannot use are absent, not disabled. `ProjectImportModal.vue`
-  imports a folder project once.
+  imports a folder project once. A contributor edits a task's title, objective
+  and definition of done as fields in the detail form's one Save / one dirty
+  path, so the rendered objective and definition-of-done blocks render only
+  when those fields are NOT offered (a reader, an archived project, or a task
+  whose status is done and therefore locked) — a mount spec that reads the
+  rendered objective must pick that audience, or it finds nothing. Lengths are
+  checked client-side by the shared `projectsUtils.validateTaskFields` in
+  CODE POINTS, which is what the server's `len` counts; a refusal that names a
+  field (`invalid_title` / `invalid_objective` / `invalid_done_definition`)
+  is shown under it rather than as the form's error.
 - **Project page Overview (v3 hub + #3694 + ent#896)** — ONE layout owned by
   `ProjectPage.vue`: a `lg:grid-cols-3 lg:items-start` wrapper holding a
   main stack (`lg:col-span-2`) and a side stack, cards stacking within their
@@ -1524,6 +1798,12 @@ is the edition-agnostic surface it plugs into:
   roll-up; a person steward's waiting lines are `attentionLines` filtered to
   verify/stuck; "Open I steward" emits `open-stewarding`, which
   `PortalProjects.vue` turns into the list's `initialFilter = 'steward'`.
+  A pending steward proposal (`proposal {proposed_by, proposed_at,
+  waiting_on, ask_id, changes}`, trinity-enterprise#980) is a tinted
+  "Waiting on you" / "Waiting on <email>" block at the top of the card, with
+  "Review in Inbox" (a `router-link` from `askInboxRoute` with
+  `INBOX_LINK_CLASS`, like the Needs you row's) for the person it waits on
+  only.
   **Markdown (#3692)**: the goal, task objectives and task/project log bodies
   mount `PortalMarkdown` (the one sanitized `v-html`), never
   `whitespace-pre-line` text. **Needs you** is `ProjectNeedsYou.vue`: the
@@ -1603,7 +1883,7 @@ capability default, because the mistakes are not symmetrical.
 
 **A negative rating reaches the operator.** ent#366's redaction stands — the rated agent reads
 the score and never the words — so the operator's copy goes straight to `operator_queue`,
-routed through `create_bounded_alert` (the volume is driven by a client clicking, which is the
+reported through `platform_alerts.observe` with the #1677 budget (the volume is driven by a client clicking, which is the
 agent-influenceable side of the #1677 classification) with its own registered type and a
 reserved id prefix, one item per person per target. It fires on EVERY thumbs-down, not only
 commented ones: "this was not useful" is the report and the words are the elaboration.

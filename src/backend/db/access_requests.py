@@ -23,6 +23,27 @@ from .tables import access_requests
 from utils.helpers import utc_now_iso
 
 
+# trinity-enterprise#737 — who asked, as the channel saw them. Every field is
+# optional: what the channel does not expose stays None, never fabricated.
+REQUESTER_FIELDS = (
+    "requester_channel_id",  # the channel's stable user id (Telegram id, Slack member id, phone)
+    "requester_handle",      # @username / Slack handle
+    "requester_name",        # display name
+    "requester_chat_id",     # the chat it arrived in, when that is not the user itself
+    "requester_thread_id",   # the thread, on channels that have one
+)
+
+
+def _identity_values(identity: Optional[dict]) -> dict:
+    identity = identity or {}
+    out = {}
+    for field in REQUESTER_FIELDS:
+        value = identity.get(field)
+        value = str(value).strip() if value is not None else ""
+        out[field] = value[:256] or None
+    return out
+
+
 class AccessRequestOperations:
     """Operations for access_requests table."""
 
@@ -37,6 +58,7 @@ class AccessRequestOperations:
             "status": row["status"],
             "decided_by": row["decided_by"],
             "decided_at": row["decided_at"],
+            **{field: row.get(field) for field in REQUESTER_FIELDS},
         }
 
     def upsert_pending(
@@ -44,12 +66,19 @@ class AccessRequestOperations:
         agent_name: str,
         email: str,
         channel: Optional[str] = None,
+        identity: Optional[dict] = None,
     ) -> dict:
         """Insert or refresh a pending access request for (agent_name, email).
 
         If an approved/denied record exists and the user now has no access
         anyway (e.g. share removed), we reset to pending so the owner sees it.
+
+        ``identity`` (trinity-enterprise#737) is who asked, as the channel saw
+        them (``REQUESTER_FIELDS``). It describes THIS request, so a refresh
+        replaces all of it: a request from a channel that exposes less (the
+        public link exposes none) never inherits another channel's identity.
         """
+        ident = _identity_values(identity)
         email = email.lower()
         now = utc_now_iso()
         rid = secrets.token_urlsafe(16)
@@ -61,6 +90,7 @@ class AccessRequestOperations:
             channel=channel,
             requested_at=now,
             status="pending",
+            **ident,
         )
         # On conflict with the existing (agent_name, email) row: refresh status
         # to pending, bump the timestamp, keep the existing channel when no new
@@ -73,6 +103,7 @@ class AccessRequestOperations:
                 "channel": func.coalesce(ins.excluded.channel, access_requests.c.channel),
                 "decided_by": None,
                 "decided_at": None,
+                **{field: getattr(ins.excluded, field) for field in REQUESTER_FIELDS},
             },
         )
 
@@ -96,6 +127,19 @@ class AccessRequestOperations:
         if status:
             stmt = stmt.where(access_requests.c.status == status)
         stmt = stmt.order_by(access_requests.c.requested_at.desc())
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_dict(r) for r in rows]
+
+    def list_by_requester(self, channel: str, channel_user_id: str) -> List[dict]:
+        """Every request — any agent, any status — this channel identity made
+        (trinity-enterprise#737). The caller filters to what its viewer may see."""
+        stmt = (
+            select(access_requests)
+            .where(access_requests.c.channel == channel)
+            .where(access_requests.c.requester_channel_id == channel_user_id)
+            .order_by(access_requests.c.requested_at.desc())
+        )
         with get_engine().connect() as conn:
             rows = conn.execute(stmt).mappings().all()
         return [self._row_to_dict(r) for r in rows]

@@ -84,19 +84,21 @@ describe("ent#628 TOOL_ACCESS_POLICY is total over the registered tools", () => 
   });
 
   it("ent#629: no row is left pointing at an open question — the backend narrows agent reach", () => {
-    // Every former `baselined: ENT629` row is `enforce` on its agent parameter.
+    // Every former `baselined: ENT629` row is `enforce` on its agent parameter,
+    // except the tools ent#719 hides from agent keys behind a human-only backend
+    // rule (their rows name that rule; tool-visibility.test.ts pins them).
     // A row that names #629 again would say the gap is still open.
     for (const [name, policy] of Object.entries(TOOL_ACCESS_POLICY)) {
       if (policy.kind === "baselined") assert.doesNotMatch(policy.owner, /#629/, name);
     }
-    for (const tool of ["get_chat_history", "get_agent_logs", "set_agent_github_pat", "delete_agent", "get_agent"]) {
+    for (const tool of ["get_chat_history", "get_agent_logs", "delete_agent", "get_agent"]) {
       assert.equal(TOOL_ACCESS_POLICY[tool].kind, "enforce", tool);
     }
   });
 
   it("every baselined row names an owner — an issue or a backend gate, never free text", () => {
     const OWNER =
-      /#\d+|reject_agent_principal|require_admin|assert_admin|_self_gate|_enforce_connector_scope|agent_permissions|rooms service/;
+      /#\d+|reject_agent_principal|require_admin|assert_admin|assert_own_agent|_enforce_connector_scope|agent_permissions|rooms service/;
     for (const [name, policy] of Object.entries(TOOL_ACCESS_POLICY)) {
       if (policy.kind === "baselined") {
         assert.match(policy.owner, OWNER, `${name}: baselined owner does not name an issue or a backend gate`);

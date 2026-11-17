@@ -158,6 +158,48 @@ def _skill_gate_hook() -> str:
     return "ok"
 
 
+VENDOR_TELEMETRY_OPT_OUT = "/etc/claude-code/managed-settings.d/70-vendor-telemetry.json"
+VENDOR_TELEMETRY_OPT_OUT_NAMES = (
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING",
+)
+
+
+def _vendor_telemetry_opt_out() -> str:
+    """trinity-enterprise#1093: is Claude Code's vendor-traffic opt-out in force here?
+
+    An agent on an image built before it has no drop-in ("missing") and keeps
+    sending Anthropic usage telemetry until it is recreated on the current
+    image; this is how the platform can tell which agents are covered. The same
+    ownership checks as `skill_gate_hook`, plus "altered" when the file no
+    longer sets every opt-out name to a non-empty value (the CLI treats a
+    non-empty value as on). Enum only.
+    """
+    from ..services.runtime_adapter import _CLAUDE_RUNTIMES
+
+    if str(agent_state.agent_runtime or "").lower() not in _CLAUDE_RUNTIMES:   # as get_runtime()
+        return "unsupported_runtime"
+    stats = []
+    for path in (VENDOR_TELEMETRY_OPT_OUT, os.path.dirname(VENDOR_TELEMETRY_OPT_OUT)):
+        try:
+            stats.append((path, os.stat(path)))
+        except OSError:
+            return "missing"
+    if any(st.st_uid != 0 for _path, st in stats):
+        return "not_root_owned"
+    if any(os.access(path, os.W_OK) for path, _st in stats):
+        return "writable"
+    try:
+        with open(VENDOR_TELEMETRY_OPT_OUT, "r", encoding="utf-8") as f:
+            env = json.loads(f.read(4096)).get("env")
+    except (OSError, ValueError, AttributeError):
+        return "altered"
+    if not isinstance(env, dict) or not all(
+        str(env.get(name) or "").strip() for name in VENDOR_TELEMETRY_OPT_OUT_NAMES
+    ):
+        return "altered"
+    return "ok"
+
+
 @router.get("/")
 async def root():
     """Root endpoint - no UI, just API info"""
@@ -250,6 +292,9 @@ async def health_check():
         # trinity-enterprise#752: the same, for the gated-skill hook, plus
         # "unsupported_runtime" (no hooks on Codex / Gemini).
         "skill_gate_hook": _skill_gate_hook(),
+        # trinity-enterprise#1093: the same, for Claude Code's vendor-traffic
+        # opt-out, plus "altered" when it no longer sets every name on.
+        "vendor_telemetry_opt_out": _vendor_telemetry_opt_out(),
         "diagnostics": _diagnostics(),
     }
 

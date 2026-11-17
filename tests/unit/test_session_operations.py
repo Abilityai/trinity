@@ -135,7 +135,9 @@ def session_ops(tmp_path, monkeypatch):
         "db.sessions", str(_BACKEND / "db" / "sessions.py")
     )
     sessions_mod = importlib.util.module_from_spec(spec)
-    sys.modules["db.sessions"] = sessions_mod
+    # Restored at teardown (#3390): left in place, this private copy and the real
+    # package's `db.sessions` attribute were two modules for the rest of the run.
+    monkeypatch.setitem(sys.modules, "db.sessions", sessions_mod)
     spec.loader.exec_module(sessions_mod)
     return sessions_mod.SessionOperations()
 

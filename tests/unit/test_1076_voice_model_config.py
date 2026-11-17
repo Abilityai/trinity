@@ -7,7 +7,7 @@ string that shadowed the default and sent `model=""` to Gemini Live
 ("model is required" → every voice path DOA on a stock deploy).
 
 Fix (src/backend/config.py):
-    VOICE_MODEL = os.getenv("VOICE_MODEL") or "models/gemini-3.1-flash-live-preview"
+    VOICE_MODEL = os.getenv("VOICE_MODEL") or "models/gemini-3.8-live"
 
 These tests load the REAL config.py module fresh under a controlled
 environment and assert the resolved `VOICE_MODEL` for the three input
@@ -30,7 +30,7 @@ import pytest
 # tests/unit/<this file> → parent=tests/unit, .parent=tests, .parent=repo root
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _CONFIG_PATH = _REPO_ROOT / "src" / "backend" / "config.py"
-_EXPECTED_DEFAULT = "models/gemini-3.1-flash-live-preview"
+_EXPECTED_DEFAULT = "models/gemini-3.8-live"
 
 
 def _load_config_with_env(monkeypatch, env: dict[str, str | None]):
@@ -81,7 +81,7 @@ def test_voice_model_override_is_respected(monkeypatch):
 
 @pytest.mark.parametrize(
     "compose_file",
-    ["docker-compose.yml", "docker-compose.prod.yml"],
+    ["docker-compose.yml", "docker-compose.prod.yml", "docker-compose.hosted.yml"],
 )
 def test_compose_default_is_non_empty(compose_file):
     """Defense-in-depth: compose must not inject an empty VOICE_MODEL.

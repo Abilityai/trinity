@@ -683,6 +683,10 @@ class TestShutdownHandlersCloseActivity:
                         triggered_by="schedule",
                         execution_id="exec-shutdown",
                         timeout_seconds=300,
+                        # An explicit model skips the default-model lookup, which
+                        # also resolves the runtime and would raise before the
+                        # activity is tracked.
+                        model="claude-sonnet-4-6",
                     )
                 )
 

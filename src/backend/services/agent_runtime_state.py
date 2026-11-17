@@ -79,6 +79,17 @@ CLEARED_KEYSPACES: Tuple[str, ...] = (
     # `clear_agent_breakers`, which also runs on every start, where the copy is
     # exactly what a stopped-then-started agent still needs.
     "agent:skills_list:",
+    # #4257: per-agent count of pull claims the backend refused. A COUNTER, not
+    # a timestamp — which is why it is cleared here while its twin
+    # `agent:pull_poll:` is exempt below. A recycled name would otherwise
+    # inherit its predecessor's refusals and make the stall alert report
+    # "alive and being turned away" about a pilot/`TRINITY_PULL_MODE`
+    # disagreement that no longer exists: #1560 verbatim. Clearing it is safe
+    # against a RUNNING container (so it belongs in `clear_agent_breakers`,
+    # which the start path calls): it is backend-owned diagnostic bookkeeping,
+    # never the agent's own work, and a live disagreement re-increments it on
+    # the next poll (<=15 s).
+    "agent:pull_claim_denied:",
 )
 
 # Deliberately NOT cleared here, each with the reason. Registered so the parity
@@ -202,6 +213,21 @@ def clear_agent_breakers(agent_name: str) -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "clear_agent_breakers: canary zombie-marker clear failed for %s: %s",
+            agent_name,
+            e,
+        )
+
+    # #4257: the denied-claim counter. Imported from `pull_pilot` (the module
+    # that defines the prefix) rather than spelled out here, so the key name
+    # keeps exactly one definition.
+    try:
+        from services.pull_pilot import PULL_CLAIM_DENIED_KEY_PREFIX
+        from services.slot_service import get_slot_service
+
+        get_slot_service().redis.delete(f"{PULL_CLAIM_DENIED_KEY_PREFIX}{agent_name}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "clear_agent_breakers: denied-claim counter clear failed for %s: %s",
             agent_name,
             e,
         )

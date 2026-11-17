@@ -119,6 +119,19 @@ from services.subscription_headroom_alerts import (
 router = APIRouter()
 
 
+@router.get("/memory")
+async def get_retrieval_memory_status(current_user: User = Depends(get_current_user)):
+    """Platform status of retrieval memory (trinity-enterprise#1022): the switch,
+    whether the embedder loaded (and why not), the model, the backend, counts.
+    Admin-only — it is the Settings → General card's honest status line. The
+    switch itself is written through ``PUT /api/settings/trinity_memory_enabled``.
+    """
+    assert_admin(current_user)
+    import asyncio
+    from services import memory_service
+    return await asyncio.to_thread(memory_service.status)
+
+
 @router.get("/feature-flags")
 async def get_public_feature_flags(
     current_user: User = Depends(get_current_user)
@@ -199,6 +212,11 @@ async def get_public_feature_flags(
         # actually agree after a deploy — the failure mode that shipped this PR
         # with the flag wired into neither container. NOT a UI surface.
         "mcp_inline_auth_enabled": MCP_INLINE_AUTH_ENABLED,
+        # External MCP access (trinity-enterprise#1101) — default OFF on a
+        # fresh install. Observability-only here, like the two flags above:
+        # the gate is the MCP server's read of GET /api/internal/mcp-external-access.
+        # The Settings page reads the full state from /mcp-external-access.
+        "mcp_external_access_enabled": settings_service.is_mcp_external_access_enabled()[0],
         # Re-delivery governor (#1085) — default OFF. Observability-only here:
         # the actual gates live at the callback endpoint / reaper / drain read
         # points. Lets an operator confirm via the API whether the correlated-

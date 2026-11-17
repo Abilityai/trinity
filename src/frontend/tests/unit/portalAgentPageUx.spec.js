@@ -322,8 +322,10 @@ describe('Overview containment', () => {
     // full-width row) must not come back with the chart's third home. ent#523
     // moved it into the band, where it is the flexible cell between the stat
     // figures and the window selector.
+    // trinity-enterprise#968: the chart in that cell is the activity wave now.
     const src = pageSource()
-    expect(src).toContain('StackedBarChart')
+    expect(src).toContain('ActivityWave')
+    expect(src).not.toContain('StackedBarChart')
     expect(src).not.toMatch(/max-w-2xl/)
   })
 

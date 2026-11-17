@@ -19,7 +19,7 @@ Append-only log of administrative actions across the platform. Records who did w
 |------------|---------|
 | `agent_lifecycle` | create, start, stop, delete, rename, recover |
 | `authentication` | login_success, login_failure, logout |
-| `authorization` | permission_granted, permission_denied |
+| `authorization` | permission_granted, permission_denied, capability_used, capability_refused, capability_grant, capability_revoke |
 | `configuration` | settings_changed, quota_updated |
 | `credentials` | injected, exported, imported |
 | `mcp_operation` | tool_call — every MCP tool call, captured via a transparent wrapper, including calls the tool refused |
@@ -27,6 +27,23 @@ Append-only log of administrative actions across the platform. Records who did w
 | `system` | startup, shutdown, migration |
 
 All entry-emitting code paths now write to the audit log; the earlier "Phase 1 coverage" caveat no longer applies.
+
+Some actions worth knowing by name:
+
+| Action | Event type | When it is written |
+|--------|------------|--------------------|
+| `circuit_breaker_reset` | `configuration` | Someone resets an agent's circuit breaker. It records the request, with the caller's address, whether or not the breaker feature is switched on |
+| `execution_terminate` | `execution` | A terminate request actually ended work: a queued turn cancelled, a parked turn cancelled, or the agent confirmed it stopped a running one. One entry per turn, however many times terminate is pressed; a terminate of a turn that had already finished writes none |
+| `permissions_set` | `authorization` | An agent's call permissions are saved; `details.targets` lists the agents it may now call (an empty list when cleared) |
+| `acted_as_agent` | `authorization` | An admin's `user` key acted for an agent ([An admin's key acting for an agent](../api-reference/authentication.md#an-admins-key-acting-for-an-agent)); names both the user and the agent |
+| `human_only_refused` | `authorization` | A key tried a route that takes a person or a signed-in session and was refused. One entry per attempt (bounded per caller and route), with no request body |
+| `template_source_refused` | `authorization` | An agent tried to create an agent from a template source the instance's allowlist does not include |
+| `agent_creation_allowlist_change` | `configuration` | An admin changed that allowlist |
+| `tool_access_change` | `configuration` | An agent's [tool access profile](../agents/agent-guardrails.md#tool-access) or read-only mode changed, with the state before and after |
+| `channel_client_block`, `channel_client_unblock`, `channel_client_revoke` | `authorization` | An owner blocked, unblocked or revoked one channel client from the roster |
+| `password_changed`, `password_change_failed` | `authentication` | A password change succeeded or was refused; no password is recorded |
+| `terms_accepted` | `authorization` | A person accepted a terms version |
+| `terms_updated`, `terms_restored` | `configuration` | An admin saved new terms or restored the default; the entry carries the version, never the text |
 
 An action taken with an MCP API key is recorded against its owner (`actor_type` stays `user`, since the owner is the accountable party) **and** against the key: `mcp_key_id`, `mcp_key_name` and `mcp_scope` say which credential acted. That is what makes "what did that leaked key touch?" answerable — filter the list on `mcp_key_id`. A browser session records no key fields.
 

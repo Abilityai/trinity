@@ -26,6 +26,7 @@ from models import (
     ApiKeyTest,
     ApiKeyUpdate,
     BrainOrbSettingsUpdate,
+    DirectVoiceSettingsUpdate,
     ElevenLabsSettingsUpdate,
     GitHubTemplatesUpdate,
     TemplateRegistryUpdate,
@@ -365,6 +366,56 @@ def _brain_orb_flag_state() -> Dict[str, Any]:
             source = "env" if env_on else "default"
         state[field] = {"value": value, "source": source}
     return state
+
+
+def _direct_voice_state() -> dict:
+    from services.speech import direct_voice_readiness
+    choice = settings_service.get_direct_voice_provider()
+    provider, reason = direct_voice_readiness(choice)
+    return {
+        "enabled": settings_service.is_direct_voice_enabled(),
+        "provider": choice,
+        "ready_provider": provider,
+        "reason": reason,
+    }
+
+
+@router.get("/direct-voice")
+async def get_direct_voice_settings(current_user: User = Depends(get_current_user)):
+    """Direct-call settings and readiness (trinity-enterprise#1046). Admin-only. Names
+    the provider, never a key. Registered before the `/{key}` catch-all (Invariant #4)."""
+    assert_admin(current_user)
+    return _direct_voice_state()
+
+
+@router.put("/direct-voice")
+async def update_direct_voice_settings(
+    body: DirectVoiceSettingsUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Update Direct-call settings. Applies to the next call, no restart. Audit-logged:
+    the provider setting decides where people's voices are sent."""
+    assert_admin(current_user)
+    before = _direct_voice_state()
+    if body.enabled is not None:
+        db.set_setting("direct_voice_enabled", "true" if body.enabled else "false")
+    if body.provider is not None:
+        db.set_setting("direct_voice_provider", body.provider)
+    after = _direct_voice_state()
+    changed = {k: {"old": before[k], "new": after[k]} for k in ("enabled", "provider") if before[k] != after[k]}
+    if changed:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="settings_change",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=request.scope["path"],
+            request_id=getattr(request.state, "request_id", None),
+            details={"setting": "direct_voice", "changed": changed},
+        )
+    return after
 
 
 @router.get("/brain-orb")

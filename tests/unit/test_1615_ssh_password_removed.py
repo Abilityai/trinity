@@ -58,6 +58,11 @@ def ssh(monkeypatch):
     calls: dict = {}
 
     class _Svc:
+        async def ensure_sshd_running(self, agent_name):
+            # trinity-enterprise#1168: the grant path starts sshd on demand first.
+            calls["sshd_started"] = agent_name
+            return True
+
         async def inject_ssh_key(self, agent_name, key):
             calls["injected"] = (agent_name, key)
             return True
@@ -73,6 +78,8 @@ def ssh(monkeypatch):
     monkeypatch.setitem(sys.modules, "services.ssh_service", types.SimpleNamespace(
         get_ssh_service=lambda: _Svc(),
         get_ssh_host=lambda: "ssh.example.com",
+        # trinity-enterprise#1168: the handler reads the host AND its source.
+        get_ssh_host_detail=lambda: ("ssh.example.com", "ssh_host"),
         SSH_ACCESS_MAX_TTL_HOURS=24,
     ))
     monkeypatch.setitem(sys.modules, "services.settings_service", types.SimpleNamespace(

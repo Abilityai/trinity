@@ -11,9 +11,9 @@
  */
 
 import { z } from "zod";
-import { TrinityClient } from "../client.js";
+import { TrinityClient, reportListTarget } from "../client.js";
 import type { McpAuthContext } from "../types.js";
-import { accessDenied, resolveActingAgent } from "../access.js";
+import { ACT_AS_PARAM_DESCRIPTION, accessDenied, actingClient, resolveActingAgent } from "../access.js";
 
 
 /**
@@ -28,6 +28,15 @@ export function filterReportsForAgentScope<T extends { agent_name: string }>(
 ): T[] {
   return reports.filter((r) => allowedNames.has(r.agent_name));
 }
+
+// #3300: bounds for the permit set a broad agent-key read sends as
+// `agent_names` — the backend refuses more than 500 names; 8 KB keeps the
+// request target inside common HTTP request-line limits (as ent#815's queue).
+const AGENT_NAMES_MAX = 500;
+const REQUEST_TARGET_MAX_BYTES = 8192;
+
+export const LIST_REPORTS_BELT_WARNING =
+  "some reports were withheld by your permissions; this page may be short";
 
 /**
  * Strip the client's email address from report metadata (ent#365 review).
@@ -75,8 +84,8 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
    * and metrics tools (#2975; it admits the platform orchestrator's
    * system-scoped key, which carries `trinity-system`, and nothing else).
    */
-  const getAgentName = (authContext: McpAuthContext | undefined): string =>
-    resolveActingAgent(authContext, "The report tool");
+  const getAgentName = (authContext: McpAuthContext | undefined, requested?: string): string =>
+    resolveActingAgent(authContext, "The report tool", requested);
 
   /**
    * Agent-to-agent READ gate (mirrors operator_queue.ts / executions.ts).
@@ -120,6 +129,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
         "leads found, emails sent, deals progressed, KPI snapshots, weekly summaries, health rollups. " +
         "The report is persisted and shown on your agent's Reports tab and the fleet Reports view.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         report_type: z.string().describe(
           "Namespaced report type, lower_snake segments joined by '.', " +
           "e.g. 'recon.weekly_summary', 'prospector.leads_found', 'ops.daily_health', 'custom.notes'."
@@ -176,6 +186,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
       }),
       execute: async (
         params: {
+          agent_name?: string;
           report_type: string;
           title: string;
           payload: Record<string, unknown>;
@@ -190,11 +201,11 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
         context?: { session?: McpAuthContext }
       ) => {
         const authContext = context?.session;
-        const apiClient = getClient(authContext);
+        let apiClient = getClient(authContext);
 
         let agentName: string;
         try {
-          agentName = getAgentName(authContext);
+          agentName = getAgentName(authContext, params.agent_name);
         } catch (error) {
           return JSON.stringify(
             { success: false, error: error instanceof Error ? error.message : String(error) },
@@ -202,6 +213,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
             2
           );
         }
+        apiClient = actingClient(apiClient, authContext, agentName);
 
         console.log(`[report] ${agentName}: ${params.report_type} - ${params.title}`);
 
@@ -329,9 +341,54 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           }
         }
 
+        // #3300 (the ent#815 shape): a broad listing under an agent-scoped key
+        // reads the permits FIRST — strict, so a Docker fault is an error rather
+        // than "no peers" — and sends them as `agent_names`, so the backend cuts
+        // the page over exactly the rows this tool delivers. Post-filtering
+        // after the cut let a permitted peer's reports sit below rows dropped here.
+        const broadAgentRead =
+          !params.agent_name && authContext?.scope === "agent" && !!authContext?.agentName;
+        let allowed: Set<string> | undefined;
+        if (broadAgentRead) {
+          const caller = authContext!.agentName!;
+          try {
+            allowed = new Set([caller, ...(await apiClient.getPermittedAgents(caller, { strict: true }))]);
+          } catch (error) {
+            const cause = error instanceof Error ? error.message : String(error);
+            console.error(`[list_reports] permissions read failed for '${caller}': ${cause}`);
+            return JSON.stringify({
+              error: "permissions_unavailable",
+              cause,
+              retryable: true,
+              fix: "Retry the broad listing, or read one agent with agent_name=<name>.",
+            }, null, 2);
+          }
+        }
+
+        const fleetParams = {
+          report_type: params.report_type,
+          hours: params.hours,
+          search: params.search,
+          limit: params.limit,
+          offset: params.offset,
+          agent_names: allowed ? [...allowed] : undefined,
+        };
+        if (allowed) {
+          const bytes = Buffer.byteLength(reportListTarget(fleetParams), "utf8");
+          if (allowed.size > AGENT_NAMES_MAX || bytes > REQUEST_TARGET_MAX_BYTES) {
+            return JSON.stringify({
+              error: "permit_set_too_large",
+              cause:
+                `${allowed.size} agents (${bytes}-byte request); the limit is ` +
+                `${AGENT_NAMES_MAX} agents and ${REQUEST_TARGET_MAX_BYTES} bytes`,
+              retryable: false,
+              fix: "read per agent with agent_name=<name>",
+            }, null, 2);
+          }
+        }
+
         try {
-          // Scoped listing uses the per-agent route (it takes report_type but no
-          // time window); a broad listing uses the fleet route.
+          // Scoped listing uses the per-agent route; a broad listing the fleet route.
           let reports = params.agent_name
             ? await apiClient.listAgentReports(params.agent_name, {
                 report_type: params.report_type,
@@ -340,34 +397,31 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
                 limit: params.limit,
                 offset: params.offset,
               })
-            : await apiClient.listReports({
-                report_type: params.report_type,
-                hours: params.hours,
-                search: params.search,
-                limit: params.limit,
-                offset: params.offset,
-              });
+            : await apiClient.listReports(fleetParams);
 
-          // Broad listing under an agent-scoped key: the backend filtered to the
-          // KEY OWNER's accessible agents — broader than this agent's permits.
-          // Narrow to {self} ∪ permitted (same rule as list_operator_queue).
-          if (
-            !params.agent_name &&
-            authContext?.scope === "agent" &&
-            authContext?.agentName
-          ) {
-            const caller = authContext.agentName;
-            const permitted = await apiClient.getPermittedAgents(caller);
-            const allowed = new Set([caller, ...permitted]);
+          // The belt: the backend already narrowed to the same set, so this
+          // should drop nothing. If it does (a backend that ignores
+          // `agent_names`), the caller is told the page may be short.
+          let withheld = 0;
+          if (allowed) {
+            const caller = authContext!.agentName!;
             const before = reports.length;
             reports = filterReportsForAgentScope(reports, allowed);
-            console.log(
-              `[list_reports] Agent '${caller}' filtered: ${reports.length}/${before} visible`,
-            );
+            withheld = before - reports.length;
+            if (withheld > 0) {
+              console.warn(
+                `[list_reports] Agent '${caller}': the backend returned ${withheld} report(s) ` +
+                  `outside {self} ∪ permitted; withheld`,
+              );
+            }
           }
 
           return JSON.stringify(
-            { count: reports.length, reports: stripAudienceFromReports(reports) },
+            {
+              count: reports.length,
+              reports: stripAudienceFromReports(reports),
+              ...(withheld > 0 ? { withheld, warnings: [LIST_REPORTS_BELT_WARNING] } : {}),
+            },
             null,
             2,
           );

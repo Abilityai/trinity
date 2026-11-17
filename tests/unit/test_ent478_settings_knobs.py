@@ -110,11 +110,13 @@ def test_the_window_is_not_a_community_floor_key():
 # ---------------------------------------------------------------------------
 
 def test_both_knobs_are_env_backed():
-    # #2806 opted a third key in: the inter-agent chain-depth cap.
+    # #2806 opted a third key in: the inter-agent chain-depth cap; #4357 a
+    # fourth: the caller-wake budget.
     assert config.ENV_BACKED_OPS_KEYS == {
         "metrics_retention_days": "METRICS_RETENTION_DAYS",
         "metrics_daily_point_cap": "METRICS_DAILY_POINT_CAP",
         "inter_agent_max_chain_depth": "INTER_AGENT_MAX_CHAIN_DEPTH",
+        "caller_wake_max_per_hour": "CALLER_WAKE_MAX_PER_HOUR",
     }
 
 

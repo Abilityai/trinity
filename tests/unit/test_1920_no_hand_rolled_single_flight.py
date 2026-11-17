@@ -55,7 +55,10 @@ admin-gate spelling, #1891 python-version parity).
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
+
+import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
 _BACKEND = _REPO / "src" / "backend"
@@ -76,12 +79,22 @@ _ALLOWED = {
     "services/session_turn_service.py": "ResumeLock — async redis.asyncio + atomic Lua CAD + blocking poll; "
     "do NOT merge onto the weaker GET-then-DELETE release (#1920)",
     "services/monitoring_service.py": "monitoring:leader — leader lease, stable cross-cycle worker id (#1464)",
-    "services/operator_queue_service.py": "opqueue:leader — leader lease, verbatim copy of monitoring (#1632)",
+    "services/operator_queue_service/poller.py": "opqueue:leader — leader lease, verbatim copy of monitoring (#1632)",
     # --- genuine non-lock nx uses ---
+    "adapters/transports/telegram_webhook.py": "per-update webhook DEDUP claim (trinity-enterprise#934: "
+    "trinity:telegram:update:{binding}:{update_id}, 24 h) — claimed once, never waited on, released or renewed; "
+    "Telegram delivers in parallel and out of order, so each id is claimed instead of a <= watermark. A lost "
+    "claim (Redis down) falls back to the watermark; not a single-flight lock",
     "services/subscription_auto_switch.py": "once-per-window NOTIFICATION dedupe markers for the SUB-003 walk (#3470: "
     "agent:api_key_route:, agent:pool_exhausted_notice:) — nothing waits on, releases or renews them, and a lost "
     "marker costs one repeated notice, never a correctness failure; not a single-flight lock",
+    "services/direct_voice_service.py": "portal_direct_active:{thread} — a CALL lease owned by the call's own "
+    "session id (trinity-enterprise#1046): claimed once when the socket opens, refreshed by that owner, released "
+    "only if still its own. NOT adoptable: SingleFlightLock mints a unique token per acquire, so a second worker's "
+    "refresh could never recognise the call's grant; the stable owner is the call id for exactly that",
     "services/skills_sync_service.py": "skills:sync:leader — leader lease (ent#236)",
+    "services/fleet_image_service.py": "fleetimage:leader — leader lease, stable cross-cycle worker id, the "
+    "monitoring shape (#4483)",
     "services/canary_service.py": "canary:leader — Lua-CAD leader lease, the 8th shape (#1881)",
     "services/sync_health_service.py": "synchealth:leader — leader lease in the #1464 monitoring shape (#2742). NOT adoptable: SingleFlightLock mints a unique token per acquire, so a lease could never recognise — and therefore never refresh — its own grant across cycles; a stable per-worker id is kept for exactly that",
     "services/subscription_recovery_service.py": "subscription:recovery:leader — leader lease in the #1464 monitoring shape (#447). NOT adoptable: SingleFlightLock mints a UNIQUE token per acquire, so a lease could never recognise — and therefore never refresh — its own grant across cycles; this one keeps a stable per-worker id for exactly that",
@@ -112,6 +125,12 @@ _ALLOWED = {
     "services/heartbeat_service.py": "agent:heartbeat:seen:{name} liveness marker — not a lock",
     "services/event_dispatch_service.py": "trinity:evt_fires:{source}:{subscriber}:alerted once-per-window alert "
     "flag (#2973) — a once-guard, not a mutex: no release, no token, TTL-expiry with the budget window only",
+    "services/caller_wake_service.py": "{wake budget key}:alerted once-per-window 'wakes capped' notification "
+    "marker (#4357) — a once-guard, not a mutex: no release, no token, TTL-expiry with the wake window only",
+    "services/chat_execution_service.py": "terminate_audit:{agent}:{execution_id} audit-row DEDUP claim (#4475) — "
+    "a once-guard, not a mutex: nothing waits on or renews it, it expires after 24 h, and it is deleted only when "
+    "the audit write fails so a repeat terminate can record the turn. Fails OPEN by design (a duplicate audit "
+    "row costs less than a missing one)",
 }
 
 # The sync-lock files #1920 adopted MUST no longer hand-roll a nx=True set.
@@ -215,16 +234,64 @@ def test_allowlist_has_no_stale_entries():
     )
 
 
+# The keyspace-scan COMMAND in the spellings the leaf could issue it: an
+# attribute call (`.keys(`, `.scan (`, `.scan_iter(`), the command name as a
+# string literal in any case (`execute_command('keys')`, `redis.pcall('SCAN')`,
+# `getattr(client, 'keys')`), and the bare uppercase words. A Lua script's
+# declared-key table `KEYS[n]` is not the command: it is how a script names the
+# keys it touches (trinity#4028 moved the lease scripts onto it), so the bare
+# word is refused only when no `[` follows. Dynamic dispatch built from pieces
+# (`getattr(c, "ke" + "ys")`) is out of reach of any text guard.
+_SCAN_SPELLINGS = (
+    ("a .keys() / .scan() / .scan_iter() call",
+     re.compile(r"\.(keys|scan|scan_iter)\s*\(")),
+    ("a keys/scan command name as a string",
+     re.compile(r"['\"](keys|scan|scan_iter)['\"]", re.IGNORECASE)),
+    ("the word SCAN", re.compile(r"SCAN")),
+    ("the word KEYS (not a script's KEYS[n])", re.compile(r"KEYS(?!\[)")),
+)
+
+
+def _scan_spellings(src: str) -> list:
+    return [name for name, pattern in _SCAN_SPELLINGS if pattern.search(src)]
+
+
 def test_helper_has_no_KEYS_or_scan():
     """The backend Redis ACL is `-@dangerous`: `KEYS`/`SCAN` raise at runtime
     and a stubbed client hides it. The single-flight lock uses single fixed
     keys, so the leaf helper must never introduce a keyspace scan."""
     src = (_BACKEND / "redis_breaker_util.py").read_text(encoding="utf-8")
-    for needle in (".keys(", "KEYS", ".scan(", ".scan_iter(", "SCAN"):
-        assert needle not in src, (
-            f"redis_breaker_util.py must not use {needle!r} — the ACL blocks "
-            "KEYS/SCAN and the locks are single fixed keys (no scan needed)."
-        )
+    found = _scan_spellings(src)
+    assert not found, (
+        f"redis_breaker_util.py must not use {found} — the ACL blocks "
+        "KEYS/SCAN and the locks are single fixed keys (no scan needed)."
+    )
+
+
+@pytest.mark.parametrize("spelling", [
+    "client.keys('agent:*')",
+    "client.scan(0, match='x')",
+    "client.scan_iter('x')",
+    "client.execute_command('SCAN', 0)",
+    "client.execute_command('KEYS', '*')",
+    "redis.call('keys', '*')",
+    "redis.call( \"SCAN\", 0)",
+    "client.execute_command('keys', '*')",
+    "client.execute_command('scan', 0)",
+    "client.keys ('*')",
+    "client.scan_iter ('x')",
+    "getattr(client, 'keys')('*')",
+    "redis.pcall('keys', KEYS[1])",
+    "redis.call ('keys', '*')",
+])
+def test_every_scan_spelling_is_still_refused(spelling):
+    """Narrowing the guard to admit `KEYS[1]` must not let the command through
+    (the review-found spellings at the bottom were missed by the old guard too)."""
+    assert _scan_spellings(f"x = 1\n{spelling}\n"), spelling
+
+
+def test_a_scripts_declared_key_is_not_a_scan():
+    assert _scan_spellings("if redis.call('get', KEYS[1]) == ARGV[1] then") == []
 
 
 def test_both_trees_are_actually_walked():

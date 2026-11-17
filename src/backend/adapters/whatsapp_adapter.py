@@ -31,7 +31,7 @@ from adapters.base import (
 )
 from services.agent_shared_files_service import create_share_from_bytes
 from services.turn_audience import whatsapp_recipient
-from services import login_policy_gate
+from services import channel_login_limit, login_policy_gate
 from services.email_service import EmailService
 from services.settings_service import get_public_chat_url
 
@@ -603,6 +603,17 @@ class WhatsAppAdapter(ChannelAdapter):
             return None
         return db.get_whatsapp_verified_email(binding["id"], message.sender_id)
 
+    def requester_identity(self, message: NormalizedMessage) -> dict:
+        """trinity-enterprise#737: the sender's WhatsApp number is the stable
+        id, and the profile name Twilio forwards is the display name. WhatsApp
+        has no handle, and a DM's chat is the sender, so neither is recorded."""
+        identity = super().requester_identity(message)
+        identity.pop("requester_thread_id", None)  # the message SID, not a thread
+        name = (message.metadata or {}).get("wa_user_name")
+        if name and not identity.get("requester_name"):
+            identity["requester_name"] = name
+        return identity
+
     async def record_inbound_activity(
         self, message: NormalizedMessage, agent_name: str
     ) -> None:
@@ -719,7 +730,13 @@ class WhatsAppAdapter(ChannelAdapter):
                 )
 
             try:
-                db.upsert_access_request(agent_name, pending_email, "whatsapp")
+                # trinity-enterprise#737: who asked, from the same /login message.
+                identity = None
+                try:
+                    identity = self.requester_identity(message)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"requester_identity failed: {type(e).__name__}")
+                db.upsert_access_request(agent_name, pending_email, "whatsapp", identity=identity)
             except Exception as e:
                 logger.error(
                     f"Failed to upsert access_request for {pending_email} on agent={agent_name}: {e}"
@@ -734,6 +751,14 @@ class WhatsAppAdapter(ChannelAdapter):
         email = arg.lower()
         if "@" not in email or " " in email or len(email) > 254:
             return "That doesn't look like an email address. Try */login you@example.com*."
+
+        # ent#1253: cap code requests per sender, address and bot before the
+        # ent#849 branch, so both paths are capped and the reply is the same
+        # for members and outsiders.
+        if not channel_login_limit.login_code_request_allowed(
+            "whatsapp", str(binding["id"]), str(message.sender_id), email
+        ):
+            return channel_login_limit.OVER_LIMIT_REPLY
 
         # ent#849: while the login policy refuses email codes, every address
         # takes the same background path: members get no code, and neither the

@@ -1,11 +1,17 @@
 <template>
   <div class="p-6 space-y-8">
-    <!-- Framing: Google-Docs-style "share this agent" (trinity-enterprise#18) -->
+    <!-- Framing (trinity-enterprise#18, #225): this tab is for outsiders; people
+         the agent is shared with by email are in Settings › People. -->
     <div>
-      <h3 class="text-lg font-medium text-gray-900 dark:text-white">Share this agent</h3>
+      <h3 class="text-lg font-medium text-gray-900 dark:text-white">Channels</h3>
       <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
         Let external clients reach this agent through channels — Slack, Telegram, WhatsApp, voice, and public links.
-        Trinity <strong>operators</strong> (your teammates) are managed on the <span class="font-medium">Access</span> tab.
+        Your teammates are managed in
+        <router-link
+          :to="{ query: { ...$route.query, tab: 'settings', section: 'people' } }"
+          class="font-medium text-action-primary-600 hover:text-action-primary-700 dark:text-action-primary-400 dark:hover:text-action-primary-300"
+          data-testid="channels-people-link"
+        >Settings › People</router-link>.
       </p>
     </div>
 
@@ -72,12 +78,37 @@
           External clients who verified their identity but aren't approved yet. Approving lets them chat.
         </p>
         <ul class="divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
-          <li v-for="req in pendingRequests" :key="req.id" class="px-4 py-3 flex items-center justify-between">
-            <div>
-              <p class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ req.email }}</p>
-              <p class="text-xs text-gray-500 dark:text-gray-400">
-                via {{ req.channel || 'unknown' }} · {{ formatRequestedAt(req.requested_at) }}
+          <!-- trinity-enterprise#737: the requester as a person — name, handle,
+               channel and its own id — with the email as one attribute. -->
+          <li v-for="req in pendingRequests" :key="req.id" class="px-4 py-3 flex items-center justify-between gap-3" :data-testid="`access-request-${req.id}`">
+            <div class="min-w-0">
+              <p class="text-sm font-medium text-gray-900 dark:text-gray-100" data-testid="access-request-who">{{ requesterTitle(req) }}</p>
+              <p class="text-xs text-gray-500 dark:text-gray-400" data-testid="access-request-facts">
+                {{ requesterFacts(req) }} · {{ formatRequestedAt(req.requested_at) }}
               </p>
+              <div v-if="!req.identity_captured || req.known_as?.length" class="mt-1 flex flex-wrap gap-1">
+                <BaseBadge
+                  v-if="!req.identity_captured"
+                  size="sm"
+                  variant="neutral"
+                  :title="req.channel === 'web' ? 'A public-link request carries a verified email and nothing else.' : 'This request predates identity capture.'"
+                  data-testid="access-request-no-identity"
+                >{{ req.channel === 'web' ? 'Email only — public link' : 'Identity not captured' }}</BaseBadge>
+                <BaseBadge
+                  v-for="k in (req.known_as || []).slice(0, 3)"
+                  :key="`${k.agent_name}:${k.status}:${k.email}`"
+                  size="sm"
+                  :variant="KNOWN_AS_VARIANT[k.status] || 'neutral'"
+                  :title="k.email ? `as ${k.email}` : undefined"
+                  data-testid="access-request-known-as"
+                >{{ KNOWN_AS_LABEL[k.status] || k.status }} on {{ k.agent_name }}</BaseBadge>
+                <BaseBadge
+                  v-if="(req.known_as || []).length > 3"
+                  size="sm"
+                  variant="neutral"
+                  :title="req.known_as.slice(3).map(k => `${KNOWN_AS_LABEL[k.status] || k.status} on ${k.agent_name}`).join(', ')"
+                >+{{ req.known_as.length - 3 }} more</BaseBadge>
+              </div>
             </div>
             <div class="flex items-center gap-2">
               <button
@@ -222,13 +253,16 @@
          in", that one is "who has messaged". -->
     <PortalClientsPanel :agent-name="agentName" />
 
-    <!-- Client Roster (#20) — external channel users (read-only) -->
+    <!-- Client Roster (#20) — external channel users, with per-client
+         controls (trinity-enterprise#21): approve / revoke / block / unblock -->
     <div>
       <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">
         Client roster <span class="font-normal text-gray-500 dark:text-gray-400">— who's reaching this agent</span>
       </h4>
       <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
-        External users who have messaged this agent through a channel (Telegram, WhatsApp). Read-only.
+        External users who have messaged this agent through a channel (Telegram, WhatsApp).
+        <strong>Revoke</strong> removes an approved client's access; <strong>Block</strong> stops a client
+        reaching this agent at all, whatever the access policy, with no reply. Their history is kept.
       </p>
 
       <div v-if="clients.length === 0" class="text-center py-6 text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-dashed border-gray-300 dark:border-gray-700">
@@ -253,6 +287,13 @@
                 title="Direct messages received from this client. Counting starts when this feature is deployed — earlier history is not backfilled."
               >Messages</th>
               <th class="px-4 py-2">Last active</th>
+              <!-- Fixed widths for the two columns whose content changes on a
+                   row action (badge label, button set, BaseButton's in-flight
+                   spinner). Sized for the widest state — Approve in flight +
+                   Block — so an auto-layout table never re-balances the other
+                   columns mid-action. -->
+              <th class="px-4 py-2 w-28">Access</th>
+              <th class="px-4 py-2 w-52"><span class="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
@@ -269,6 +310,45 @@
               </td>
               <td class="px-4 py-2 text-right tabular-nums text-gray-700 dark:text-gray-200">{{ client.message_count }}</td>
               <td class="px-4 py-2 text-gray-500 dark:text-gray-400">{{ formatLastActive(client.last_active) }}</td>
+              <td class="px-4 py-2 whitespace-nowrap">
+                <BaseBadge
+                  size="sm"
+                  :variant="ACCESS_BADGE[client.access]?.variant || 'neutral'"
+                  :title="blockedTitle(client)"
+                  :data-testid="`client-access-${client.channel}-${client.client_id}`"
+                >{{ ACCESS_BADGE[client.access]?.label || 'By policy' }}</BaseBadge>
+              </td>
+              <td class="px-4 py-2">
+                <div class="flex items-center justify-end gap-2 whitespace-nowrap">
+                  <BaseButton
+                    v-if="client.access === 'pending' && client.access_request_id"
+                    size="sm"
+                    :loading="clientBusy === clientKey(client)"
+                    @click="approveClient(client)"
+                  >Approve</BaseButton>
+                  <BaseButton
+                    v-if="client.access === 'granted'"
+                    size="sm"
+                    variant="secondary"
+                    :disabled="clientBusy === clientKey(client)"
+                    @click="askClientControl(client, 'revoke')"
+                  >Revoke</BaseButton>
+                  <BaseButton
+                    v-if="client.access === 'blocked'"
+                    size="sm"
+                    variant="secondary"
+                    :loading="clientBusy === clientKey(client)"
+                    @click="runClientControl(client, 'unblock')"
+                  >Unblock</BaseButton>
+                  <BaseButton
+                    v-else
+                    size="sm"
+                    variant="danger"
+                    :disabled="clientBusy === clientKey(client)"
+                    @click="askClientControl(client, 'block')"
+                  >Block</BaseButton>
+                </div>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -293,6 +373,16 @@
         </ChannelDisclosure>
       </div>
     </div>
+
+    <ConfirmDialog
+      :visible="!!clientConfirm"
+      :title="clientConfirm?.title"
+      :message="clientConfirm?.message || ''"
+      :confirm-text="clientConfirm?.confirmText"
+      variant="warning"
+      @confirm="confirmClientControl"
+      @cancel="clientConfirm = null"
+    />
   </div>
 </template>
 
@@ -313,6 +403,9 @@ import WhatsAppChannelPanel from './WhatsAppChannelPanel.vue'
 import VoipChannelPanel from './VoipChannelPanel.vue'
 import ConnectorChannelPanel from './ConnectorChannelPanel.vue'
 import PortalClientsPanel from './PortalClientsPanel.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
+import BaseBadge from './base/BaseBadge.vue'
+import BaseButton from './base/BaseButton.vue'
 
 const props = defineProps({
   agentName: {
@@ -441,6 +534,79 @@ const loadClients = async () => {
   }
 }
 
+// Per-client controls (trinity-enterprise#21). The row's `access` comes from the
+// roster; approve is the existing access-request decision.
+const ACCESS_BADGE = {
+  blocked: { label: 'Blocked', variant: 'danger' },
+  granted: { label: 'Approved', variant: 'success' },
+  pending: { label: 'Pending', variant: 'warning' },
+  none: { label: 'By policy', variant: 'neutral' },
+}
+const clientBusy = ref(null)
+const clientConfirm = ref(null)
+const clientKey = (c) => `${c.channel}:${c.client_id}`
+const clientName = (c) => c.display_name || c.identity
+
+const blockedTitle = (c) => {
+  if (c.access !== 'blocked') return undefined
+  const by = c.blocked_by_email ? ` by ${c.blocked_by_email}` : ''
+  const why = c.block_reason ? ` — “${c.block_reason}”` : ''
+  return `Blocked ${formatLastActive(c.blocked_at)}${by}${why}`
+}
+
+const CLIENT_CONFIRM = {
+  block: (c) => ({
+    title: `Block ${clientName(c)}?`,
+    message: `Their ${c.channel} messages to this agent will be dropped with no reply, whatever the access policy. Their history and any approval are kept; unblocking restores them.`,
+    confirmText: 'Block',
+  }),
+  revoke: (c) => ({
+    title: `Revoke ${clientName(c)}'s access?`,
+    message: `${c.verified_email} loses access to this agent. While access is Restricted, their next message asks for approval again; while it is Open, they can still chat — block them to stop that.`,
+    confirmText: 'Revoke',
+  }),
+}
+
+const askClientControl = (client, action) => {
+  clientConfirm.value = { client, action, ...CLIENT_CONFIRM[action](client) }
+}
+
+const confirmClientControl = async () => {
+  const { client, action } = clientConfirm.value || {}
+  clientConfirm.value = null
+  if (client) await runClientControl(client, action)
+}
+
+const CLIENT_DONE = { block: 'Blocked', unblock: 'Unblocked', revoke: 'Revoked access for' }
+
+const runClientControl = async (client, action) => {
+  clientBusy.value = clientKey(client)
+  try {
+    await axios.post(
+      `/api/agents/${props.agentName}/clients/${action}`,
+      { channel: client.channel, client_id: client.client_id },
+      { headers: authStore.authHeader }
+    )
+    showNotification(`${CLIENT_DONE[action]} ${clientName(client)}`, 'success')
+    await loadClients()
+    if (action === 'revoke') await loadAgent()
+  } catch (err) {
+    console.error(`Failed to ${action} client:`, err)
+    showNotification(err.response?.data?.detail || `Failed to ${action} client`, 'error')
+  } finally {
+    clientBusy.value = null
+  }
+}
+
+const approveClient = async (client) => {
+  clientBusy.value = clientKey(client)
+  try {
+    await decideRequest({ id: client.access_request_id, email: client.verified_email }, true)
+  } finally {
+    clientBusy.value = null
+  }
+}
+
 const formatLastActive = (iso) => {
   if (!iso) return 'never'
   try {
@@ -508,7 +674,7 @@ const decideRequest = async (req, approve) => {
       approve ? `Approved ${req.email}` : `Denied ${req.email}`,
       'success'
     )
-    await loadAccessRequests()
+    await Promise.all([loadAccessRequests(), loadClients()])
     if (approve) await loadAgent()
   } catch (err) {
     console.error('Failed to decide request:', err)
@@ -516,6 +682,21 @@ const decideRequest = async (req, approve) => {
   } finally {
     decisionLoading.value = null
   }
+}
+
+// trinity-enterprise#737 — who asked, as the channel saw them.
+const CHANNEL_LABEL = { telegram: 'Telegram', whatsapp: 'WhatsApp', slack: 'Slack', web: 'Public link' }
+const KNOWN_AS_LABEL = { approved: 'Approved', denied: 'Denied', pending: 'Asked', verified: 'Verified' }
+const KNOWN_AS_VARIANT = { approved: 'success', denied: 'danger', pending: 'warning', verified: 'info' }
+const handleOf = (req) => (req.requester_handle ? `@${req.requester_handle.replace(/^@/, '')}` : '')
+const requesterTitle = (req) => req.requester_name || handleOf(req) || req.email
+const requesterFacts = (req) => {
+  const channel = CHANNEL_LABEL[req.channel] || req.channel || 'unknown channel'
+  const parts = []
+  if (req.requester_name && handleOf(req)) parts.push(handleOf(req))
+  parts.push(req.requester_channel_id ? `${channel} id ${req.requester_channel_id}` : `via ${channel}`)
+  if (requesterTitle(req) !== req.email) parts.push(req.email)
+  return parts.join(' · ')
 }
 
 const formatRequestedAt = (iso) => {

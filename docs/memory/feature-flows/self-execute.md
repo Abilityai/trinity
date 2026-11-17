@@ -208,6 +208,10 @@ VALUES (..., 'self_task', ...)
 
 This allows frontend to render them differently from regular assistant messages.
 
+## Pull pilots (#4105)
+
+`self_task` is in `pull_pilot.PULL_REACHABLE_TRIGGERS` and `_AUTONOMOUS_TRIGGERS`. On an agent listed in `PULL_MODE_PILOT_AGENTS`, the `/task` pre-acquire (`overflow_policy="queue_persistent"`) queues the row for the agent's own worker, so a self-task shares `max_parallel_tasks` with the turn that queued it. The pull sink (`pull_coordination_service._deliver_and_signal`) runs the same chat-session injection and closes the self-task activity. A sync self-call waits for a free worker; with `max_parallel_tasks=1` it waits out its timeout.
+
 ## Testing
 
 Test file: `tests/test_self_execute.py`

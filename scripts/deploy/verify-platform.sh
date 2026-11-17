@@ -127,7 +127,23 @@ if [ "$all_running" = true ]; then
     echo "Access points:"
     echo "  - Web UI:       $FRONTEND_URL"
     echo "  - Backend API:  http://localhost:8000/docs"
-    echo "  - MCP Server:   http://localhost:8080/mcp"
+    # trinity-enterprise#1101: a loopback-bound raw port means MCP clients use
+    # the web UI's /mcp, once External MCP access is on. (The health probe
+    # above dials localhost:8080, which answers from this host either way.)
+    MCP_BIND_ADDRESS=${MCP_BIND_ADDRESS:-$(grep -E '^MCP_BIND_ADDRESS=' .env 2>/dev/null | tail -1 | cut -d'=' -f2-)}
+    case "$MCP_BIND_ADDRESS" in
+        127.0.0.1|::1|localhost)
+            echo "  - MCP Server:   $FRONTEND_URL/mcp once an admin turns on External MCP access (Settings → MCP Keys); the container port is published on $MCP_BIND_ADDRESS only" ;;
+        ""|0.0.0.0|::)
+            echo "  - MCP Server:   http://localhost:8080/mcp"
+            echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
+        *:*)
+            echo "  - MCP Server:   http://[$MCP_BIND_ADDRESS]:8080/mcp"
+            echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
+        *)
+            echo "  - MCP Server:   http://$MCP_BIND_ADDRESS:8080/mcp"
+            echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
+    esac
     echo "  - Scheduler:    http://localhost:8001/health"
     echo "  - Vector logs:  http://localhost:8686/health"
     echo ""

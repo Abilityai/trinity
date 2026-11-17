@@ -55,6 +55,13 @@ def world(db_backend, monkeypatch):
         return None
 
     monkeypatch.setattr(skill_gate_service, "audit_self_approved", _no_audit)
+    # ent#875: these tests are about the self-approval flags, not the viewer tier.
+    # Their viewers hold no ownership row and the seeded runs carry no
+    # source_user_id, so as share holders they would see none of them: read the
+    # list and detail as the agent's owner. (The tier itself is pinned in
+    # test_ent875_exec_control_routes.py.)
+    import dependencies
+    monkeypatch.setattr(dependencies.db, "can_user_share_agent", lambda u, a: True)
 
     mine = seed_execution("__manual__", AGENT, exec_id="exec-self", triggered_by="manual",
                           started_at="2026-10-08T10:00:00.000000Z")
@@ -198,3 +205,19 @@ def test_a_record_for_another_agents_run_does_not_leak_across(world):
     runs = db.get_self_approved_runs("someone-else", [world["self"]])
 
     assert runs == {}
+
+
+def test_the_detail_names_the_retry_chains_original(world):
+    """#3296 review: the MCP server scopes a delegation's idempotency key to the
+    retry chain's original execution, read from this detail. A scheduler retry
+    is a new row whose `retry_of_execution_id` names the original."""
+    from db_harness import _engine
+    from sqlalchemy import text
+
+    retry = seed_execution("__manual__", AGENT, exec_id="exec-retry", triggered_by="retry",
+                           started_at="2026-10-08T11:00:00.000000Z")
+    with _engine().begin() as conn:
+        conn.execute(text("UPDATE schedule_executions SET retry_of_execution_id = :o WHERE id = :i"),
+                     {"o": world["plain"], "i": retry})
+    assert _detail(world, APPROVER, retry).retry_of_execution_id == world["plain"]
+    assert _detail(world, APPROVER, world["plain"]).retry_of_execution_id is None

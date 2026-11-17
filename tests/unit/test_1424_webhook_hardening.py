@@ -70,6 +70,14 @@ def client(monkeypatch):
 
     monkeypatch.setattr(webhooks.db, "get_schedule_by_webhook_token", _fake_lookup)
 
+    # #4397: no test here may dispatch to the scheduler. A call that reaches the
+    # real httpx POST depends on DNS and on which exception classes httpx maps
+    # under the suite's shuffled order, so it fails here instead, loudly.
+    class _NoNetwork:
+        def __init__(self, *a, **k):
+            raise AssertionError("test_1424 reached the scheduler dispatch (real network)")
+    monkeypatch.setattr(webhooks.httpx, "AsyncClient", _NoNetwork)
+
     app = FastAPI()
     app.include_router(webhooks.router)
     c = TestClient(app)
@@ -125,11 +133,19 @@ def test_per_token_limit_preserved_for_valid_token(client, monkeypatch):
     monkeypatch.setattr(webhooks, "WEBHOOK_RATE_LIMIT", 2)
     _short_circuit_dispatch(monkeypatch)
 
-    statuses = [client.post(f"/api/webhooks/{_VALID_TOKEN}").status_code for _ in range(5)]
+    # An explicit Idempotency-Key: since #1422 the idempotency gate engages only
+    # for keyed calls, so without it every allowed call went past the stub to a
+    # real scheduler POST (#4397, the sibling below already sends one).
+    statuses = [
+        client.post(f"/api/webhooks/{_VALID_TOKEN}",
+                    headers={"Idempotency-Key": "k-1424-per-token"}).status_code
+        for _ in range(5)
+    ]
     # Allowed calls short-circuit to 409 (in-flight replay); once the per-token
     # window saturates the gate returns 429.
     assert 429 in statuses, statuses
     assert statuses.index(429) <= 2, statuses
+    assert all(s == 409 for s in statuses[:statuses.index(429)]), statuses
 
 
 def test_oversized_body_rejected_with_413(client, monkeypatch):

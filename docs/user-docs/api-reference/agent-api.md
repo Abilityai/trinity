@@ -38,6 +38,11 @@ Core REST API endpoints for agent lifecycle management, configuration, files, an
 | `/api/agents/{name}/metrics/points` | POST | Record a batch of metric points (all-or-nothing; accepts `Idempotency-Key`). An agent key records only as itself |
 | `/api/agents/{name}/metrics/definitions` | GET | The declared-metric registry built from `template.yaml` `metrics:` |
 | `/api/agents/{name}/metrics/definitions/refresh` | POST | Re-read `template.yaml` into the registry (agent must be running) |
+| `/api/agents/{name}/metrics/declarations` | GET | What `template.yaml metrics:` declares, as written, with the `template_hash` every write sends back (owner tier) |
+| `/api/agents/{name}/metrics/declarations` | POST | Declare a metric: add one `metrics:` entry to `template.yaml` (owner tier, agent running) |
+| `/api/agents/{name}/metrics/declarations/{metric}` | PUT | Edit one declared metric; name and type cannot change (owner tier, agent running) |
+| `/api/agents/{name}/metrics/declarations/{metric}/references` | GET | What still uses a metric: recorded points, objectives, dashboard widgets, linked projects |
+| `/api/agents/{name}/metrics/declarations/{metric}` | DELETE | Retire a metric: remove its entry (`?base_hash=`; `?acknowledge_references=true` when it is in use) |
 | `/api/agents/{name}/objectives` | GET | Objectives joined to metrics — target, actual, freshness, gap. An agent key reads only its own |
 
 See [Dynamic Dashboards → Declared Metrics](../advanced/dynamic-dashboards.md#declared-metrics).
@@ -52,7 +57,7 @@ See [Dynamic Dashboards → Declared Metrics](../advanced/dynamic-dashboards.md#
 | `/api/agents/{name}/ssh-access` | POST | Generate SSH credentials |
 | `/api/agents/{name}/circuit-breaker` | GET/PUT | Circuit breaker state / per-agent enable-disable (owner-only) — see [Agent Configuration](../agents/agent-configuration.md) |
 | `/api/agents/{name}/circuit-breaker/reset` | POST | Reset both breakers to closed (admin-only) |
-| `/api/agents/{name}/operator-resume` | GET/PUT | Wake the agent when an ask it raised ends — answered, cancelled or expired (`{"enabled": true}`). GET for anyone with access; PUT is owner or admin, and an agent-scoped key gets `403` — see [Agent Configuration](../agents/agent-configuration.md#wake-when-an-ask-ends) |
+| `/api/agents/{name}/operator-resume` | GET/PUT | Wake the agent when an ask it raised ends — answered or cancelled — or when a run it delegated ends (`{"enabled": true}`, or `{"mode": "default" \| "on" \| "off"}`; on by default). GET for anyone with access; PUT is owner or admin, and an agent-scoped key gets `403` — see [Agent Configuration](../agents/agent-configuration.md#wake-when-an-ask-ends) |
 | `/api/agents/{name}/operator-queue/{request_id}` | GET | The agent's own operator-queue item by the id it chose, with the agent's own key only — how it stands and how it ended |
 | `/api/agents/{name}/resources` | GET/PUT | Memory and CPU limits (applied on the next recreate). A CPU limit above the Docker host's CPU count runs capped at the host's count; the stored value is kept |
 | `/api/agents/{name}/capabilities` | GET/PUT | `full_capabilities` — Docker default capabilities (`apt-get` works) vs the restricted secure default — see [Agent Configuration](../agents/agent-configuration.md) |

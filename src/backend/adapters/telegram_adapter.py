@@ -24,7 +24,7 @@ import httpx
 
 from database import db
 from adapters.base import ChannelAdapter, FileAttachment, NormalizedMessage, ChannelResponse
-from services import login_policy_gate
+from services import channel_login_limit, login_policy_gate
 from services.email_service import EmailService
 from services.telegram_group_context import fetch_can_read_all_group_messages
 
@@ -57,6 +57,45 @@ _PROGRESS_MAX_CONSECUTIVE_FAILURES = 2
 
 # Pending login TTL in seconds (matches code expiry)
 _PENDING_LOGIN_TTL = 600  # 10 minutes
+
+
+def merge_album_updates(updates: list) -> dict:
+    """Fold the updates of one album into ONE update (abilityai/trinity-enterprise#934).
+
+    Telegram sends an album as one `message` update per item, sharing a
+    `media_group_id`, with the caption on one item only. The transport buffers
+    them (adapters/transports/inbound_coalescer.py) and hands them here.
+
+    - Items are ordered by `message_id` — the order the user sent them. Arrival
+      order is not stable: Telegram delivers over parallel connections, and the
+      items land on two uvicorn workers.
+    - The base is the first item; it keeps the routing fields the transport
+      injected (`_bot_id`, `_agent_name`, …), its chat, sender and message_id.
+    - The caption (and its entities, which carry an @mention) comes from
+      whichever item has one; a reply-to and a forum topic from any item, so
+      the group trigger rules see the album as the user sent it.
+    - `message["_album"]` lists every item's message, in order, for
+      `_extract_files` / `_extract_media_context`.
+    """
+    ordered = sorted(updates, key=lambda u: int(u.get("message", {}).get("message_id", 0)))
+    messages = [u.get("message", {}) for u in ordered]
+    merged = dict(ordered[0])
+    base = dict(messages[0])
+    captioned = next((m for m in messages if m.get("caption")), None)
+    if captioned is not None:
+        base["caption"] = captioned["caption"]
+        if captioned.get("caption_entities"):
+            base["caption_entities"] = captioned["caption_entities"]
+        else:
+            base.pop("caption_entities", None)
+    for field in ("reply_to_message", "message_thread_id", "is_topic_message"):
+        if field not in base:
+            source = next((m for m in messages if field in m), None)
+            if source is not None:
+                base[field] = source[field]
+    base["_album"] = messages
+    merged["message"] = base
+    return merged
 
 
 def _get_pending_login_key(binding_id: int, user_id: str) -> str:
@@ -246,10 +285,6 @@ class TelegramAdapter(ChannelAdapter):
         # Extract text content
         text = message.get("text", "").strip()
 
-        # Strip @mention from text in groups for cleaner agent input
-        if is_group and bot_username and text:
-            text = re.sub(rf'@{re.escape(bot_username)}\b', '', text).strip()
-
         # Extract file attachments (photos, documents)
         files = self._extract_files(message)
 
@@ -257,6 +292,15 @@ class TelegramAdapter(ChannelAdapter):
         media_context = self._extract_media_context(message)
         if media_context:
             text = media_context if not text else f"{text}\n\n{media_context}"
+
+        # Strip @mention from text in groups for cleaner agent input — after the
+        # media context is in, so a tag in a caption is stripped too (ent#934).
+        if is_group and bot_username and text:
+            text = re.sub(rf'@{re.escape(bot_username)}\b', '', text).strip()
+            # A caption that was ONLY the tag leaves "[User sent a photo: ]".
+            # Linear on purpose: the caption is user text (CodeQL flagged an
+            # earlier backtracking pattern as polynomial).
+            text = re.sub(r': +\]', ']', text)
 
         # Allow messages with files even if no text
         if not text and not files:
@@ -274,8 +318,8 @@ class TelegramAdapter(ChannelAdapter):
             "is_group": is_group,
             "chat_type": chat_type,
             "chat_title": chat.get("title"),
-            "has_photo": "photo" in message,
-            "has_document": "document" in message,
+            "has_photo": any("photo" in m for m in message.get("_album", [message])),
+            "has_document": any("document" in m for m in message.get("_album", [message])),
             "raw_message": message,
             # ent#264: True for DMs, mention/reply-triggered group turns,
             # and `all`-trigger-mode groups; False for observe-mode
@@ -285,6 +329,8 @@ class TelegramAdapter(ChannelAdapter):
             "untagged": untagged,
             "observe_only": observe_only,
         }
+        if "_album" in message:
+            metadata["album_size"] = len(message["_album"])  # ent#934
         if is_group:
             # ent#600: speaker labels for attributed history replay (#903's
             # `_sender_label` reads these). Groups only — DM transcripts (and
@@ -365,6 +411,21 @@ class TelegramAdapter(ChannelAdapter):
         if not binding:
             return None
         return db.get_telegram_verified_email(binding["id"], message.sender_id)
+
+    def requester_identity(self, message: NormalizedMessage) -> dict:
+        """trinity-enterprise#737: the Telegram user id, @username and the
+        first/last name from the update itself (a DM carries no
+        ``sender_display_name``). A DM's chat id is the user id, so no chat."""
+        identity = super().requester_identity(message)
+        identity.pop("requester_thread_id", None)  # the message id, not a thread
+        meta = message.metadata or {}
+        sender = (meta.get("raw_message") or {}).get("from") or {}
+        name = " ".join(p for p in (sender.get("first_name"), sender.get("last_name")) if p).strip()
+        if name and not identity.get("requester_name"):
+            identity["requester_name"] = name
+        if meta.get("username") and not identity.get("requester_handle"):
+            identity["requester_handle"] = meta["username"]
+        return identity
 
     async def record_inbound_activity(
         self, message: NormalizedMessage, agent_name: str
@@ -674,19 +735,25 @@ class TelegramAdapter(ChannelAdapter):
 
     @staticmethod
     def _is_bot_mentioned(message: dict, bot_username: str) -> bool:
-        """Check if the bot is @mentioned in message entities."""
+        """Check if the bot is @mentioned in the message's entities.
+
+        A photo, document or album carries its text as `caption` with
+        `caption_entities` (ent#934): before this, a tag there was never seen,
+        so a mention-mode group silently observed "@bot what is this?" on a
+        photo instead of answering it.
+        """
         if not bot_username:
             return False
-        entities = message.get("entities", [])
-        text = message.get("text", "")
-        for entity in entities:
-            if entity.get("type") == "mention":
-                offset = entity.get("offset", 0)
-                length = entity.get("length", 0)
-                mention_text = text[offset:offset + length]
-                # Mention text is "@username"
-                if mention_text.lower() == f"@{bot_username.lower()}":
-                    return True
+        for text_field, entities_field in (("text", "entities"), ("caption", "caption_entities")):
+            text = message.get(text_field, "")
+            for entity in message.get(entities_field, []):
+                if entity.get("type") == "mention":
+                    offset = entity.get("offset", 0)
+                    length = entity.get("length", 0)
+                    mention_text = text[offset:offset + length]
+                    # Mention text is "@username"
+                    if mention_text.lower() == f"@{bot_username.lower()}":
+                        return True
         return False
 
     @staticmethod
@@ -972,7 +1039,13 @@ class TelegramAdapter(ChannelAdapter):
                 )
 
             try:
-                db.upsert_access_request(agent_name, pending_email, "telegram")
+                # trinity-enterprise#737: who asked, from the same /login message.
+                identity = None
+                try:
+                    identity = self.requester_identity(message)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"requester_identity failed: {type(e).__name__}")
+                db.upsert_access_request(agent_name, pending_email, "telegram", identity=identity)
             except Exception as e:
                 logger.error(
                     f"Failed to upsert access_request for {pending_email} on agent={agent_name}: {e}"
@@ -987,6 +1060,14 @@ class TelegramAdapter(ChannelAdapter):
         email = arg.lower()
         if "@" not in email or " " in email or len(email) > 254:
             return "That doesn't look like an email address. Try <code>/login you@example.com</code>."
+
+        # ent#1253: cap code requests per sender, address and bot before the
+        # ent#849 branch, so both paths are capped and the reply is the same
+        # for members and outsiders.
+        if not channel_login_limit.login_code_request_allowed(
+            "telegram", str(binding["id"]), str(message.sender_id), email
+        ):
+            return channel_login_limit.OVER_LIMIT_REPLY
 
         # ent#849: while the login policy refuses email codes, every address
         # takes the same background path: members get no code, and neither the
@@ -1491,6 +1572,8 @@ class TelegramAdapter(ChannelAdapter):
     @staticmethod
     def _extract_media_context(message: dict) -> Optional[str]:
         """Extract descriptive context from media messages."""
+        if "_album" in message:
+            return TelegramAdapter._album_context(message)
         parts = []
 
         if "photo" in message:
@@ -1525,6 +1608,34 @@ class TelegramAdapter(ChannelAdapter):
         return "\n".join(parts) if parts else None
 
     @staticmethod
+    def _album_context(message: dict) -> str:
+        """One line for a merged album (ent#934), e.g.
+        `[User sent an album of 3 photos: compare these]`."""
+        album = message["_album"]
+        kinds = [("photo", "photo"), ("document", "document"), ("video", "video"),
+                 ("audio", "audio file")]
+        counts = []
+        for key, noun in kinds:
+            n = sum(1 for m in album if key in m)
+            if n:
+                counts.append(f"{n} {noun}{'' if n == 1 else 's'}")
+        n_items = len(album)
+        caption = message.get("caption", "")
+        if len(counts) == 1 and counts[0].endswith(("photo", "photos")):
+            head = f"an album of {counts[0]}"
+        else:
+            detail = f" ({', '.join(counts)})" if counts else ""
+            head = f"an album of {n_items} items{detail}"
+        line = f"[User sent {head}{': ' + caption if caption else ''}]"
+        extra = []
+        documents = [m["document"].get("file_name", "unknown") for m in album if "document" in m]
+        if documents:
+            extra.append(f"[Documents: {', '.join(documents)}]")
+        if any("video" in m or "audio" in m for m in album):
+            extra.append("[The album's videos and audio files are not readable by the agent]")
+        return "\n".join([line] + extra)
+
+    @staticmethod
     def _extract_files(message: dict) -> list:
         """
         Extract FileAttachment objects from Telegram message photos/documents.
@@ -1532,6 +1643,9 @@ class TelegramAdapter(ChannelAdapter):
         Photos: Use the largest available size (last in array).
         Documents: Use file_id, file_name, mime_type, file_size.
         """
+        if "_album" in message:  # ent#934: every item's files, in album order
+            return [f for item in message["_album"] for f in TelegramAdapter._extract_files(item)]
+
         files = []
 
         # Handle photos — Telegram sends array of sizes, use largest (last)

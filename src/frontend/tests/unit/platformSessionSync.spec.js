@@ -412,6 +412,14 @@ describe('one credential source, one handler (source guards — wiring only)', (
     expect(MAIN).not.toContain("router.push('/login')\n}")
   })
 
+  it('#3444 — main.js hands the reaction the full page and pushes the location it builds', () => {
+    // Executed against the real router in loginReturnPath.spec.js; this pins
+    // the two lines that feed it.
+    expect(MAIN).toContain('returnPath: fullPathForVerdict(router, START_LOCATION, window.location),')
+    expect(MAIN).toContain('goToLogin: (location) => router.push(location),')
+    expect(MAIN).not.toContain("router.push('/login')")
+  })
+
   it('trinity-enterprise#837 — main.js and api.js wire the workspace_only reaction', () => {
     // The reaction itself is executed in workspaceOnly.spec.js; these pin the
     // hand-offs, which a node-env spec cannot drive (deleting one left the
@@ -421,6 +429,16 @@ describe('one credential source, one handler (source guards — wiring only)', (
     expect(MAIN).toContain('rescope: () => reconnectWebSocket(),')
     expect(MAIN).toContain('else notifyWorkspaceOnly(error)')
     expect(read('../../src/api.js')).toContain('else notifyWorkspaceOnly(error)')
+  })
+
+  it('trinity-enterprise#1054 — main.js, api.js and portalHttp wire the terms reaction', () => {
+    // The reaction and the api.js / portalHttp interceptors are executed in
+    // apiTermsRequiredInterceptor.spec.js; these pin the main.js hand-offs a
+    // node-env spec cannot drive.
+    expect(MAIN).toContain('setTermsRefusalHandler((error) => reactToTermsRefusal(error, {')
+    expect(MAIN).toContain('currentPath: () => fullPathForVerdict(router, START_LOCATION, window.location),')
+    expect(MAIN).toContain('push: (location) => router.push(location),')
+    expect(MAIN).toContain('    notifyTermsRefusal(error)\n')
   })
 
   it('#3406 — a 401 is judged against the address being loaded, not START_LOCATION', () => {

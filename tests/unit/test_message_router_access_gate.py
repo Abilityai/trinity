@@ -79,6 +79,7 @@ def _env(policy: dict, rate_ok: bool = True, container_status: str = "running"):
     """
     db = MagicMock()
     db.is_email_account_suspended.return_value = False  # ent#720: an active account
+    db.is_channel_client_blocked.return_value = False   # ent#21: not blocked
     db.get_access_policy.return_value = policy
     db.email_has_agent_access.return_value = False
     db.get_or_create_public_chat_session.return_value = {"id": "s1"}
@@ -283,3 +284,64 @@ def test_execution_failed_replies_error_and_skips_finalize():
     adapter.send_response.assert_awaited_once()        # error reply sent
     adapter.on_response_sent.assert_not_awaited()      # finalize NOT reached
     db.add_public_chat_message.assert_not_called()     # nothing persisted on failure
+
+
+# ------------------------------------------------- per-client block (ent#21)
+
+@pytest.mark.parametrize("is_group", [False, True])
+def test_a_blocked_sender_is_dropped_with_no_reply_and_no_charge(is_group):
+    """A client the owner blocked on this agent gets nothing back — no reply,
+    no auth prompt, no pending request, no typing indicator — and is not
+    charged a rate-limit slot. Open access does not let them through."""
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message(is_group)
+    adapter.resolve_verified_email = AsyncMock(return_value="a@b.com")
+    with _env({"require_email": False, "open_access": True, "group_auth_mode": "none"}) as (db, service), \
+         patch.object(_MR, "_check_rate_limit", return_value=True) as rate:
+        db.email_has_agent_access.return_value = True
+        db.is_channel_client_blocked.return_value = True
+        _run(router, adapter, message)
+    db.is_channel_client_blocked.assert_called_once_with("agent1", "telegram", "u1")
+    service.execute_task.assert_not_awaited()
+    adapter.send_response.assert_not_awaited()
+    adapter.prompt_auth.assert_not_awaited()
+    adapter.prompt_group_auth.assert_not_awaited()
+    adapter.indicate_processing.assert_not_awaited()
+    adapter.record_inbound_activity.assert_not_awaited()
+    db.upsert_access_request.assert_not_called()
+    rate.assert_not_called()
+
+
+def test_an_unblocked_sender_is_checked_and_admitted():
+    router, adapter, message = ChannelMessageRouter(), _make_adapter("whatsapp"), _make_message()
+    with _env({"require_email": False, "open_access": True, "group_auth_mode": "none"}) as (db, service):
+        _run(router, adapter, message)
+    db.is_channel_client_blocked.assert_called_once_with("agent1", "whatsapp", "u1")
+    service.execute_task.assert_awaited_once()
+
+
+def test_a_blocked_senders_observed_group_message_is_not_recorded():
+    """Review of #4177: an un-tagged (observe-only) group message returned
+    before the block check, so a blocked sender's words were recorded and
+    joined the history every later turn reads."""
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message(is_group=True)
+    message.metadata["observe_only"] = True
+    adapter.get_agent_name = AsyncMock(return_value="agent1")
+    adapter.note_untagged_seen = AsyncMock()
+    adapter.group_context_enabled = AsyncMock(return_value=True)
+    with _env({"require_email": False, "open_access": True, "group_auth_mode": "none"}) as (db, service):
+        db.is_channel_client_blocked.return_value = True
+        _run(router, adapter, message)
+    db.is_channel_client_blocked.assert_called_once_with("agent1", "telegram", "u1")
+    db.add_public_chat_message.assert_not_called()
+    service.execute_task.assert_not_awaited()
+
+
+def test_an_unblocked_senders_observed_group_message_is_recorded():
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message(is_group=True)
+    message.metadata["observe_only"] = True
+    adapter.get_agent_name = AsyncMock(return_value="agent1")
+    adapter.note_untagged_seen = AsyncMock()
+    adapter.group_context_enabled = AsyncMock(return_value=True)
+    with _env({"require_email": False, "open_access": True, "group_auth_mode": "none"}) as (db, service):
+        _run(router, adapter, message)
+    db.add_public_chat_message.assert_called_once()

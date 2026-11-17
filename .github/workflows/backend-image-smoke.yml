@@ -91,6 +91,7 @@ jobs:
             echo "ADMIN_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=\n')Aa1!"
             echo "REDIS_PASSWORD=$(openssl rand -hex 24)"
             echo "REDIS_BACKEND_PASSWORD=$(openssl rand -hex 24)"
+            echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)"
             echo "INTERNAL_API_SECRET=$(openssl rand -hex 24)"
             # Backend bind-mounts ${TRINITY_DATA_PATH:-./trinity-data}:/data.
             # Pin it explicitly so the chown step below targets the same dir.
@@ -172,6 +173,7 @@ jobs:
           docker run --rm \
             -e REDIS_URL='redis://smoke:smoke@localhost:6379/0' \
             -e SECRET_KEY='smoke' \
+            -e TRINITY_ALLOW_SQLITE=1 \
             "$IMG" \
             python -c "import redis_breaker_util; import services.agent_client; import main; print('IMPORT OK')"
 
@@ -183,7 +185,7 @@ jobs:
         # three (no cloudflared / scheduler / mcp-server needed for /health).
         run: |
           set -euo pipefail
-          docker compose -f docker-compose.prod.yml up -d redis vector backend
+          docker compose -f docker-compose.prod.yml up -d postgres redis vector backend
           for i in $(seq 1 60); do
             if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
               echo "backend healthy after ~$((i*2))s"; exit 0

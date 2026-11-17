@@ -24,7 +24,7 @@ function band({ denied, loaded = false }) {
   state.error.value = denied ? "You don't have access to this agent." : "Couldn't load this agent right now."
   return mount(PortalAgentBand, {
     props: { agentName: 'stranger' },
-    global: { stubs: { StackedBarChart: true, ScanlineReveal: { template: '<div><slot /></div>' } } },
+    global: { stubs: { ActivityWave: true } }, // the chart is stubbed: the numbers are under test, not the wave (ent#968)
   })
 }
 

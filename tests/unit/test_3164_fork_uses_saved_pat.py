@@ -45,9 +45,14 @@ def _config(pat=None):
     )
 
 
-def _user(agent_name=None):
+def _user(agent_name=None, mcp_scope=None):
+    """A resolved principal. The default is a signed-in session
+    (`mcp_scope=None`, `models.User`'s default); an agent key carries its
+    agent name and the `agent` scope."""
+    if agent_name and mcp_scope is None:
+        mcp_scope = "agent"
     return types.SimpleNamespace(id=1, username="alice", email="alice@example.com",
-                                 agent_name=agent_name)
+                                 agent_name=agent_name, mcp_scope=mcp_scope)
 
 
 @pytest.fixture
@@ -139,19 +144,41 @@ def test_a_failing_form_token_keeps_todays_message(monkeypatch, fork):
     assert "token_source" not in e.value.detail
 
 
-def test_an_agent_key_cannot_fork_with_its_owners_saved_token(fork):
-    """Review (D2): POST /api/agents is require_role("creator"), which an agent
-    key satisfies as its owner — so without this an agent could have a repo
-    created in its owner's GitHub account."""
+@pytest.mark.parametrize("user", [
+    _user(agent_name="bot"),
+    _user(mcp_scope="system"),
+    _user(mcp_scope="user"),
+    types.SimpleNamespace(id=1, username="alice", email="alice@example.com",
+                          agent_name=None),  # no `mcp_scope` at all: fails closed
+], ids=["agent-key", "system-key", "user-key", "no-scope"])
+def test_only_a_session_forks_with_the_saved_token(fork, user):
+    """Review (D2): POST /api/agents is require_role("creator"), which a key
+    satisfies as its owner — so without this a key could have a repo created in
+    its owner's GitHub account under the owner's saved token, and that token
+    would become the new agent's. Binding a credential is INTERACTIVE
+    (trinity-enterprise#719): a session only; a person's own `user` key too is
+    refused here."""
     with pytest.raises(HTTPException) as e:
-        _apply(_config(), pat=SAVED, tier="per_user", user=_user(agent_name="bot"))
+        _apply(_config(), pat=SAVED, tier="per_user", user=user)
     assert e.value.status_code == 400 and e.value.detail["code"] == "FORK_PAT_REQUIRED"
-    assert "agent" in e.value.detail["error"]
+    assert "signed-in session" in e.value.detail["error"]
     assert fork == []
 
 
-def test_an_agent_key_may_still_fork_with_a_token_it_carries(fork):
-    _apply(_config(FORM), pat=SAVED, tier="per_user", user=_user(agent_name="bot"))
+def test_a_vouched_loopback_session_cannot_fork_with_the_saved_token(fork):
+    user = _user()
+    user.vouched_source_agent = "bot"
+    with pytest.raises(HTTPException) as e:
+        _apply(_config(), pat=SAVED, tier="per_user", user=user)
+    assert e.value.detail["code"] == "FORK_PAT_REQUIRED"
+    assert fork == []
+
+
+@pytest.mark.parametrize("user", [
+    _user(agent_name="bot"), _user(mcp_scope="system"), _user(mcp_scope="user"),
+], ids=["agent-key", "system-key", "user-key"])
+def test_a_key_may_still_fork_with_a_token_it_carries(fork, user):
+    _apply(_config(FORM), pat=SAVED, tier="per_user", user=user)
     assert fork[0]["user_pat"] == FORM
 
 

@@ -39,6 +39,7 @@ import httpx
 
 from services.agent_auth import agent_httpx_client
 from services.docker_service import agent_container_state
+from services.skill_packaging import clean_description
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -123,8 +124,19 @@ async def fetch_live(agent_name: str) -> Any:
         raise SkillsListUnavailable(
             "agent_error", response.status_code, f"Agent returned error: {response.text}",
             agent_text=response.text)
-    body = response.json()
+    body = _clean_descriptions(response.json())
     remember(agent_name, body)
+    return body
+
+
+def _clean_descriptions(body: Any) -> Any:
+    """The listing with every skill's description through the one blank rule
+    (trinity-enterprise#584), in place. Anything that is not a listing is
+    returned untouched, for each caller to refuse as before."""
+    if isinstance(body, dict) and isinstance(body.get("skills"), list):
+        for skill in body["skills"]:
+            if isinstance(skill, dict) and "description" in skill:
+                skill["description"] = clean_description(skill["description"])
     return body
 
 
@@ -203,7 +215,9 @@ def recall(agent_name: str) -> Optional[Dict[str, Any]]:
             or not isinstance(record.get("skill_paths"), list)
             or not isinstance(record.get("captured_at"), str)):
         return None
-    return record
+    # A copy kept before trinity-enterprise#584 may still hold a blank; every
+    # reader of the copy (the last-known listing, the gate cards) gets it clean.
+    return _clean_descriptions(record)
 
 
 def forget(agent_name: str) -> None:

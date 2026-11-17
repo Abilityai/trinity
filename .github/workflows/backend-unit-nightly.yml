@@ -250,7 +250,7 @@ jobs:
         # still run here, under the trusted stashed script, rather than needing
         # a fourth job that downloads junit artifacts from an untrusted one.
         #
-        # -n auto --dist loadfile is #2461's change, for #2461's reasons —
+        # -n logical --dist loadfile is #2461's change (logical, not auto: #4096), for #2461's reasons —
         # see backend-unit-test.yml, where the flags, the loadfile rationale
         # (this suite manipulates sys.modules and pins env at module import,
         # so within-file ordering is load-bearing) and the measured
@@ -276,7 +276,7 @@ jobs:
           git switch --detach origin/dev
           ( cd tests && python -m pytest unit/ -m "not slow" \
               --timeout=300 --timeout-method=signal \
-              -n auto --dist loadfile \
+              -n logical --dist loadfile \
               -p randomly --randomly-seed=${{ matrix.seed }} \
               --junit-xml="$GITHUB_WORKSPACE/junit-base-pr${{ matrix.pr_number }}-${{ matrix.seed }}.xml" \
               --tb=no -q || true )
@@ -285,7 +285,7 @@ jobs:
           git switch --detach "$MERGE_SHA"
           ( cd tests && python -m pytest unit/ -m "not slow" \
               --timeout=300 --timeout-method=signal \
-              -n auto --dist loadfile \
+              -n logical --dist loadfile \
               -p randomly --randomly-seed=${{ matrix.seed }} \
               --junit-xml="$GITHUB_WORKSPACE/junit-head-pr${{ matrix.pr_number }}-${{ matrix.seed }}.xml" \
               --tb=no -q || true )

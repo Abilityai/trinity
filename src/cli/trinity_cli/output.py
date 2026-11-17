@@ -32,6 +32,7 @@ def _print_table(rows: list[dict]):
     # Use rich for nice tables
     from rich.console import Console
     from rich.table import Table
+    from rich.text import Text
 
     console = Console(file=sys.stdout)
     table = Table(show_header=True, header_style="bold")
@@ -40,8 +41,11 @@ def _print_table(rows: list[dict]):
     for key in keys:
         table.add_column(key)
 
+    # Cells are Text, never markup: values are server data (a library author's
+    # description or successor), and Rich parses `[...]` in a plain string, so
+    # `[/]` raised MarkupError and took the whole listing down (ent#736).
     for row in rows:
-        table.add_row(*[str(row.get(k, "")) for k in keys])
+        table.add_row(*[Text(str(row.get(k, ""))) for k in keys])
 
     console.print(table)
 
@@ -50,6 +54,7 @@ def _print_dict(data: dict):
     """Print a single dict as key-value pairs."""
     from rich.console import Console
     from rich.table import Table
+    from rich.text import Text
 
     console = Console(file=sys.stdout)
     table = Table(show_header=True, header_style="bold")
@@ -57,6 +62,6 @@ def _print_dict(data: dict):
     table.add_column("Value")
 
     for key, value in data.items():
-        table.add_row(str(key), str(value))
+        table.add_row(Text(str(key)), Text(str(value)))
 
     console.print(table)

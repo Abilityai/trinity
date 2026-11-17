@@ -144,11 +144,15 @@
                 </div>
               </div>
 
-              <div v-if="isAdmin && row.kind !== 'primary'" class="flex items-center gap-2 shrink-0 self-start">
+              <!-- #3663: below sm the strip spans the row and wraps. The select gives
+                   way from 9.5rem to a floor still wider than "Collaborator", and
+                   only then does Remove go under it, never off the card's edge.
+                   sm and up: today's row. -->
+              <div v-if="isAdmin && row.kind !== 'primary'" class="flex flex-wrap items-center gap-2 shrink-0 sm:flex-nowrap sm:self-start">
                 <BaseSelect
                   :model-value="row.kind"
                   size="sm"
-                  class="min-w-[9.5rem]"
+                  class="flex-1 min-w-[8.5rem] max-w-[9.5rem] sm:flex-none sm:min-w-[9.5rem] sm:max-w-none"
                   :aria-label="`Kind for ${row.display_name}`"
                   :disabled="busyId === row.id"
                   data-testid="assignment-kind"
@@ -207,7 +211,21 @@
         >
           <p class="text-sm font-medium text-gray-900 dark:text-gray-100">Replace the primary</p>
           <div class="grid gap-3 sm:grid-cols-3">
-            <BaseSelect v-model="replaceForm.userId" label="New primary" data-testid="replace-user">
+            <!-- ent#1154: a person picked from the scoped candidate read; the select
+                 over the users list is only the fallback when that read is down. -->
+            <BasePeopleInput
+              v-if="!pickerDown"
+              v-model="replaceForm.text"
+              v-model:picked="replaceForm.person"
+              mode="pick"
+              label="New primary"
+              placeholder="Name or email"
+              :fetch="(q) => assignments.fetchCandidates(agentName, q, 'primary')"
+              :no-match="inviteHint"
+              data-testid="replace-user"
+              @unavailable="pickerDown = true"
+            />
+            <BaseSelect v-else v-model="replaceForm.userId" label="New primary" data-testid="replace-user-select">
               <option value="" disabled>Pick a person</option>
               <option v-for="u in replaceCandidates" :key="u.id" :value="String(u.id)">{{ userLabel(u) }}</option>
             </BaseSelect>
@@ -219,20 +237,34 @@
           </div>
           <InlineError v-if="replaceError" :message="replaceError" @dismiss="replaceError = ''" />
           <div class="flex gap-2">
-            <BaseButton type="submit" size="sm" :disabled="!replaceForm.userId"
+            <BaseButton type="submit" size="sm" :disabled="!replaceUserId"
                         :loading="savingReplace" loading-label="Replacing…" data-testid="replace-confirm">Replace primary</BaseButton>
             <BaseButton variant="ghost" size="sm" :disabled="savingReplace" @click="replacing = false">Cancel</BaseButton>
           </div>
         </form>
 
         <!-- Add a person: an instance user picked by name, never a typed email. -->
+        <!-- Top-aligned (ent#1154): the person field may carry a line under it — who
+             was chosen, or why the text is nobody — and the row must not jump. -->
         <form
           v-if="isAdmin"
-          class="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1.5fr)_auto] sm:items-end"
+          class="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1.5fr)_auto] sm:items-start"
           data-testid="assignment-add-form"
           @submit.prevent="addPerson"
         >
-          <BaseSelect v-model="addForm.userId" label="Person" data-testid="add-user">
+          <BasePeopleInput
+            v-if="!pickerDown"
+            v-model="addForm.text"
+            v-model:picked="addForm.person"
+            mode="pick"
+            label="Person"
+            placeholder="Name or email"
+            :fetch="(q) => assignments.fetchCandidates(agentName, q, addForm.kind)"
+            :no-match="inviteHint"
+            data-testid="add-user"
+            @unavailable="pickerDown = true"
+          />
+          <BaseSelect v-else v-model="addForm.userId" label="Person" data-testid="add-user-select">
             <option value="" disabled>{{ assignments.usersLoaded ? 'Pick a person' : 'Loading people…' }}</option>
             <option v-for="u in assignments.users" :key="u.id" :value="String(u.id)">{{ userLabel(u) }}</option>
           </BaseSelect>
@@ -240,12 +272,16 @@
             <option v-for="k in addKinds" :key="k" :value="k">{{ kindLabel(k) }}</option>
           </BaseSelect>
           <BaseInput v-model="addForm.roleId" label="Seat (role id, optional)" :list="roleListId" data-testid="add-role" />
-          <!-- The fields' height (13.5px × 1.5 + py-2 + border), so the row reads as one line. -->
-          <BaseButton type="submit" class="h-[38px]" :disabled="!addForm.userId"
-                      :loading="savingAdd" loading-label="Adding…" data-testid="add-submit">Add</BaseButton>
+          <!-- The fields' height (13.5px × 1.5 + py-2 + border), so the row reads as one
+               line; the hidden label puts it level with the fields from sm up. -->
+          <div>
+            <span :class="[LABEL_CLASS, 'mb-1 hidden sm:block invisible']" aria-hidden="true">Add</span>
+            <BaseButton type="submit" class="h-[38px]" :disabled="!addUserId"
+                        :loading="savingAdd" loading-label="Adding…" data-testid="add-submit">Add</BaseButton>
+          </div>
         </form>
         <InlineError v-if="isAdmin && (addError || assignments.usersError)" :message="addError || assignments.usersError" @dismiss="addError = ''" />
-        <p v-if="isAdmin && shareNote" class="text-xs text-gray-600 dark:text-gray-300" role="status" data-testid="assignments-share-note">{{ shareNote }}</p>
+        <p v-if="isAdmin && shareNote" class="text-xs text-gray-600 dark:text-gray-300" role="status" data-testid="assignments-share-note">{{ shareNote.text }}</p>
         <p v-if="isAdmin" class="text-xs text-gray-600 dark:text-gray-300" data-testid="assignments-share-hint">
           Adding someone this agent isn't shared with also shares it with them, so they can use it in the
           Workspace (operators and above, in the operator UI too).
@@ -270,6 +306,8 @@ import { computed, ref, watch, onMounted } from 'vue'
 import BaseBadge from './base/BaseBadge.vue'
 import BaseButton from './base/BaseButton.vue'
 import BaseInput from './base/BaseInput.vue'
+import BasePeopleInput from './base/BasePeopleInput.vue'
+import { LABEL_CLASS } from './base/fieldClasses'
 import BaseSelect from './base/BaseSelect.vue'
 import InlineError from './InlineError.vue'
 import LoadFailed from './LoadFailed.vue'
@@ -346,7 +384,22 @@ function driftClass(row) {
 }
 
 // ---- add -------------------------------------------------------------------
-const addForm = ref({ userId: '', kind: 'approver', roleId: '' })
+// `text` + `person` drive the picker; `userId` is the fallback select's (ent#1154).
+const addForm = ref({ text: '', person: null, userId: '', kind: 'approver', roleId: '' })
+// The candidate read refused (403) or could not be reached: both fields fall
+// back to the select over the users list, so an admin is never left blank.
+const pickerDown = ref(false)
+const addUserId = computed(() => (pickerDown.value ? Number(addForm.value.userId) : addForm.value.person?.user_id) || 0)
+function inviteHint(text) {
+  return `No one on this instance matches “${text}”. Invite them with Add person on this tab; you can assign them once they have signed in.`
+}
+/** The person a write is about, for the share after it: the users list first, else the picked row. */
+function personFor(id, picked) {
+  return usersById.value.get(id)
+    || (picked && picked.user_id === id
+      ? { id, username: picked.username, email: picked.email, name: picked.label, role: picked.role }
+      : null)
+}
 const savingAdd = ref(false)
 const addError = ref('')
 
@@ -363,18 +416,20 @@ async function addPerson() {
   // Pinned before the first await: Agent Detail is kept alive, so the page can
   // move to another agent while this write is in flight (ent#837).
   const agent = props.agentName
-  const person = usersById.value.get(Number(addForm.value.userId))
+  const userId = addUserId.value
+  if (!userId) return
+  const person = personFor(userId, addForm.value.person)
   addError.value = ''
-  shareNote.value = ''
+  shareNote.value = null
   savingAdd.value = true
   try {
     await assignments.add(agent, withRole({
-      user_id: Number(addForm.value.userId),
+      user_id: userId,
       kind: addForm.value.kind,
     }, addForm.value.roleId))
     // The seat goes with the person: a seat left in the field would be given
     // to whoever is added next (ent#814 — each person holds their own).
-    addForm.value = { ...addForm.value, userId: '', roleId: '' }
+    addForm.value = { ...addForm.value, text: '', person: null, userId: '', roleId: '' }
     await shareAfterAssign(agent, person)
   } catch (err) {
     addError.value = writeError(err, "Couldn't add that person.")
@@ -484,25 +539,28 @@ async function clearHolder() {
 const replacing = ref(false)
 const savingReplace = ref(false)
 const replaceError = ref('')
-const replaceForm = ref({ userId: '', oldBecomes: 'viewer', roleId: '' })
+const replaceForm = ref({ text: '', person: null, userId: '', oldBecomes: 'viewer', roleId: '' })
+const replaceUserId = computed(() => (pickerDown.value ? Number(replaceForm.value.userId) : replaceForm.value.person?.user_id) || 0)
 const replaceCandidates = computed(() => assignments.users.filter((u) => u.id !== primary.value?.user_id))
 
 function startReplace() {
   replaceError.value = ''
   addError.value = ''
-  replaceForm.value = { userId: '', oldBecomes: 'viewer', roleId: primary.value?.role_id || '' }
+  replaceForm.value = { text: '', person: null, userId: '', oldBecomes: 'viewer', roleId: primary.value?.role_id || '' }
   replacing.value = true
 }
 
 async function confirmReplace() {
   const agent = props.agentName
-  const person = usersById.value.get(Number(replaceForm.value.userId))
+  const newUserId = replaceUserId.value
+  if (!newUserId) return
+  const person = personFor(newUserId, replaceForm.value.person)
   replaceError.value = ''
-  shareNote.value = ''
+  shareNote.value = null
   savingReplace.value = true
   try {
     await assignments.replacePrimary(agent, {
-      newUserId: Number(replaceForm.value.userId),
+      newUserId,
       oldBecomes: replaceForm.value.oldBecomes,
       roleId: replaceForm.value.roleId.trim(),
     })
@@ -531,9 +589,14 @@ const usersById = computed(() => new Map(assignments.users.map((u) => [u.id, u])
 const lower = (v) => String(v || '').trim().toLowerCase()
 const peopleByEmail = computed(() => new Map((props.people || []).map((p) => [lower(p.email), p])))
 
-/** A person's platform role: the users list (admins), else the people list. */
+/**
+ * A person's platform role: the people list first — it is re-read on every
+ * visit and after every change, and it is the list shown right below — else
+ * the users list (admins). The other way round, a role changed in Settings
+ * showed below but not on the row (#3664).
+ */
 function roleOf(row) {
-  return usersById.value.get(row.user_id)?.role || peopleByEmail.value.get(lower(row.user_email))?.role || null
+  return peopleByEmail.value.get(lower(row.user_email))?.role || usersById.value.get(row.user_id)?.role || null
 }
 
 // The people the picker cannot offer: shared, but with no account yet.
@@ -543,9 +606,24 @@ const notOffered = computed(() => {
   return `${pending.slice(0, 3).join(', ')} and ${pending.length - 3} more`
 })
 
-const shareNote = ref('')
+// The last share this section made: { userId, email, text }, or null.
+const shareNote = ref(null)
 const shareFail = ref({})   // user_id -> why the share after an assignment failed
 const sharingId = ref(null)
+
+// The note confirms a fact, so it goes when the fact does (#3664): that
+// person's row is removed, or the people list, re-read after an unshare below,
+// no longer has them.
+watch(rows, (now) => {
+  if (shareNote.value && !now.some((r) => r.user_id === shareNote.value.userId)) shareNote.value = null
+})
+watch(() => props.people, (now) => {
+  if (shareNote.value && now && !now.some((p) => lower(p.email) === shareNote.value.email)) shareNote.value = null
+})
+
+function noteShare(userId, email, name) {
+  shareNote.value = { userId, email: lower(email), text: `Shared with ${name} so they can use it in the Workspace.` }
+}
 
 /** No share for the owner, for yourself (the route refuses a self-share), or for an account with no address. */
 function reachesWithoutShare(u) {
@@ -571,7 +649,7 @@ async function shareAfterAssign(agent, person) {
   try {
     const outcome = await shareWith(agent, person)
     if (outcome !== 'shared' || agent !== props.agentName) return
-    shareNote.value = `Shared with ${person.name || person.username || person.email} so they can use it in the Workspace.`
+    noteShare(person.id, person.email, person.name || person.username || person.email)
     if (props.reloadPeople) await props.reloadPeople()
   } catch (err) {
     if (agent !== props.agentName) return
@@ -601,7 +679,7 @@ async function shareRow(row) {
     const { [row.user_id]: _done, ...rest } = shareFail.value
     shareFail.value = rest
     if (outcome === 'shared' && agent === props.agentName) {
-      shareNote.value = `Shared with ${row.display_name} so they can use it in the Workspace.`
+      noteShare(row.user_id, person.email, row.display_name)
     }
     if (props.reloadPeople) await props.reloadPeople()
   } catch (err) {
@@ -615,14 +693,17 @@ async function shareRow(row) {
 function reload() { return assignments.load(props.agentName) }
 
 async function start() {
-  shareNote.value = ''
+  shareNote.value = null
   shareFail.value = {}
   await enterprise.loadFeatureFlags()
   if (!entitled.value) return
   // The canon read is a container read; it never blocks the roster.
   assignments.loadCanonRoles(props.agentName)
   await reload()
-  if (isAdmin.value && !assignments.usersLoaded) await assignments.loadUsers()
+  // Re-read on every visit, not once a session: a role changed in Settings
+  // since then would stay stale on the rows and in the pickers (#3664). The
+  // list on screen stays until the new one lands.
+  if (isAdmin.value) await assignments.loadUsers()
 }
 
 onMounted(start)

@@ -25,7 +25,7 @@ vi.mock('axios', () => {
       if (syncFails) throw new Error('network down')
       return { data: syncPayload }
     }
-    if (url.includes('/operator-queue/')) return { data: { count: 0 } }
+    if (url === '/api/operator-queue') return { data: { items: [], count: 0, total: 0 } }
     if (url.includes('/notifications/count')) return { data: { pending_count: 0 } }
     return { data: null }
   })

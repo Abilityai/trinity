@@ -35,6 +35,8 @@
       </p>
     </template>
 
+    <!-- trinity-enterprise#1132: the withheld form, said where it would be. -->
+    <p v-if="withheld" class="text-xs text-gray-600 dark:text-gray-300" data-testid="project-log-withheld">{{ withheld }}</p>
     <form v-if="canContribute && !archived" class="space-y-2 rounded-lg border border-gray-200 dark:border-gray-750 p-3" data-testid="project-log-form" @submit.prevent="add">
       <div class="flex flex-wrap items-end gap-2">
         <BaseSelect id="log-kind" v-model="kind" label="Add an entry" class="w-44">
@@ -63,9 +65,10 @@ import PortalMarkdown from '@/components/portal/PortalMarkdown.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
-import { LOG_KINDS, LOG_KIND_BADGE, authorLabel, logKindLabel, projectErrorMessage } from './projectsUtils'
+import { LOG_KINDS, LOG_KIND_BADGE, authorLabel, logKindLabel, projectErrorMessage, withheldLine } from './projectsUtils'
 
 const props = defineProps({
+  project: { type: Object, default: null },   // trinity-enterprise#1132: for the withheld line
   projectId: { type: String, required: true },
   canContribute: { type: Boolean, default: false },
   archived: { type: Boolean, default: false },
@@ -73,6 +76,7 @@ const props = defineProps({
 })
 
 const store = useProjectsStore()
+const withheld = computed(() => withheldLine({ project: props.project, myEmail: props.myEmail, canContribute: props.canContribute, archived: props.archived }, 'log entries'))
 const kind = ref('decision')
 const body = ref('')
 const busy = ref(false)

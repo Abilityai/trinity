@@ -570,7 +570,7 @@ def test_the_event_stream_endpoint_scopes_an_agent_key(fleet, monkeypatch):
 
 def test_an_agent_key_slot_refreshes_its_reach_on_an_access_change():
     """A spawned child appears without a reconnect; a failed re-read keeps the
-    older, smaller roster; a non-access event reads nothing."""
+    previous roster; a non-access event reads nothing."""
     from services.event_bus import SCOPE_SCOPED, StreamDispatcher, _ClientSlot
 
     calls = []
@@ -776,15 +776,22 @@ _HELPER_ACCESSORS = {"get_accessible_agents", "accessible_agent_names", "visible
 #: (file, function) → why its principal is never an agent key, or why the admin
 #: branch selects no fleet. Shrink-only: `test_every_allowlist_entry_still_applies`.
 _ALLOW = {
-    ("routers/voice.py", "voice_websocket"):
-        "the voice socket is gated to its own session's user id; the compare is that owner check",
+    ("main.py", "_scope_matches_snapshot"):
+        "compares the `/ws` scope a person's ticket resolved with that account's snapshot; selects no fleet "
+        "(trinity-enterprise#863)",
     ("routers/system_agent.py", "system_agent_terminal"):
         "the system-agent terminal authenticates a person (JWT) and checks the user row's role",
     ("services/settings_service.py", "get_agent_quota_for_role"):
         "maps a role to an agent-creation quota; selects no roster",
+    ("services/access_candidate_service.py", "suggest"):
+        "the role compare only decides whether a row SHOWS its role; selects no fleet, and the route is require_interactive (ent#450)",
+    ("services/template_source_policy.py", "in_use"):
+        "trinity-enterprise#591 impact view: reached only via describe() from the two "
+        "/api/settings/agent-creation-allowlist routes (assert_admin / assert_interactive_admin, "
+        "both reject agent principals); returns template sources and counts, no agent names",
     ("services/ask_service.py", "may_end"):
         "an ask's ending is person-only at every route (reject_non_person_principal)",
-    ("services/person_mention_service.py", "_room_access"):
+    ("services/person_mention_service.py", "_room_access_row"):
         "decides about the PERSON row being mentioned (looked up by email), never a principal's fleet",
     ("services/ws_identity_service.py", "resolve_ws_identity"):
         "a /ws ticket subject is a person (the ticket route is require_person)",
@@ -802,6 +809,8 @@ _ALLOW = {
         "routers/ops.py gates it with assert_admin (ops scope opted in), which refuses agent keys",
     ("services/fleet_ops_service.py", "stop_fleet_impl"):
         "routers/ops.py gates it with assert_admin, which refuses agent keys",
+    ("services/agent_model_seed.py", "_live_agents"):
+        "startup: no principal; only fills blank model values (#4442)",
     ("services/git_service/token_scrub.py", "sweep_fleet_git_remote_tokens"):
         "background sweep: no principal",
     ("services/github_pat_propagation_service.py", "propagate_github_pat"):
@@ -814,6 +823,8 @@ _ALLOW = {
         "background cleanup loop: no principal",
     ("services/skills_sync_service.py", "_eligible_agents"):
         "background sweep, or the skills-library route behind require_admin + reject_agent_principal",
+    ("services/turn_tier_service.py", "_user_tier"):
+        "the role compared is the turn starter's user row (a person), never the caller's; selects no roster",
     ("services/ws_identity_service.py", "event_stream_identity"):
         "an agent key returns agent_reach_names as a non-admin slot before the role compare",
     ("services/ws_identity_service.py", "accessible_agents_for"):
@@ -1009,6 +1020,16 @@ _DB_EXEMPT = {
         "takes the deploying username; the deploy route is capability-fenced (agents.manage)",
     ("services/agent_service/crud.py", "reconcile_declared_schedules"):
         "takes the owner's username to seed template schedules at create/recreate",
+    ("services/system_service.py", "_run_op"):
+        "apply executor: creates a schedule as the member's OWNER only after read_apply_snapshot "
+        "classified the member manageable (can_user_share_agent + agent_may_reach(manage=True)); "
+        "the apply route is require_person (trinity-enterprise#695)",
+    ("services/system_service.py", "_apply_created_schedules"):
+        "apply executor: schedules of a member this same run created, as its creator; the apply "
+        "route is require_person, so no agent key reaches it (trinity-enterprise#695)",
+    ("services/client_roster_service.py", "revoke_client"):
+        "unshares a channel client as the owner; its only caller, POST /{agent_name}/clients/revoke, "
+        "is require_person + OwnedAgentByName (trinity-enterprise#21)",
 }
 
 

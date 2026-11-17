@@ -105,6 +105,12 @@ class ScheduleExecutionsMixin:
             open_canvas_id=row["open_canvas_id"] if "open_canvas_id" in row_keys else None,
             # Inter-agent chain depth (#2806); NULL = root.
             chain_depth=row["chain_depth"] if "chain_depth" in row_keys else None,
+            # Verified AAuth peer of an inbound A2A call (ent#862); NULL otherwise.
+            a2a_caller_identity=row["a2a_caller_identity"]
+                if "a2a_caller_identity" in row_keys else None,
+            # The platform-recorded turn this row continues (ent#1225).
+            continues_execution_id=row["continues_execution_id"]
+                if "continues_execution_id" in row_keys else None,
         )
 
     # =========================================================================
@@ -205,6 +211,62 @@ class ScheduleExecutionsMixin:
                 )
             ).scalar()
         return int(value or 0)
+
+    def get_deepest_running_chain_row(self, agent_name: str) -> Optional[Dict]:
+        """The RUNNING row of `agent_name` that `get_max_running_chain_depth` reads (#4357).
+
+        Read only when a hop is refused, so the refusal can name the execution
+        that exhausted the depth. Roots (NULL depth) are skipped — PostgreSQL
+        sorts NULLs first in DESC — and only the four columns the refusal
+        reports are read: never a person, a channel or message text. None when
+        no running row carries a depth.
+        """
+        c = schedule_executions.c
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(c.id, c.chain_depth, c.triggered_by, c.source_agent_name)
+                .where(
+                    and_(
+                        c.agent_name == agent_name,
+                        c.status == TaskExecutionStatus.RUNNING,
+                        c.chain_depth.is_not(None),
+                    )
+                )
+                .order_by(c.chain_depth.desc().nulls_last())
+                .limit(1)
+            ).first()
+        return dict(row._mapping) if row is not None else None
+
+    def get_running_turn_attribution(self, agent_name: str) -> List[Dict]:
+        """Who each of `agent_name`'s RUNNING turns is for (trinity-enterprise#926).
+
+        The columns `turn_tier_service` rates a turn by (its `LEDGER_COLUMNS`),
+        for every running row — a Workspace turn by its channel and email, a
+        delegated turn by the agent that dispatched it. Like the chain-depth
+        read, only `running` counts: every row is inserted RUNNING, so a turn
+        whose process could be making a request is always here.
+        """
+        stmt = (
+            select(
+                schedule_executions.c.id,
+                schedule_executions.c.agent_name,
+                schedule_executions.c.source_user_id,
+                schedule_executions.c.schedule_id,
+                schedule_executions.c.triggered_by,
+                schedule_executions.c.source_channel,
+                schedule_executions.c.source_user_email,
+                schedule_executions.c.source_agent_name,
+                schedule_executions.c.continues_execution_id,
+            )
+            .where(and_(
+                schedule_executions.c.agent_name == agent_name,
+                schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+            ))
+        )
+        # No LIMIT: a row cut off here would be a share turn missed, which
+        # fails open. `idx_executions_status` keeps the read small.
+        with get_engine().connect() as conn:
+            return [dict(row) for row in conn.execute(stmt).mappings()]
 
     def create_schedule_execution(
         self,
@@ -532,14 +594,27 @@ class ScheduleExecutionsMixin:
             )
             return result.rowcount > 0
 
-    def get_schedule_executions(self, schedule_id: str, limit: int = 50) -> List[ScheduleExecution]:
-        """Get execution history for a schedule."""
+    def get_schedule_executions(
+        self, schedule_id: str, limit: int = 50, *, source_user_id: Optional[int] = None,
+        include_unattributed: bool = False,
+    ) -> List[ScheduleExecution]:
+        """Get execution history for a schedule.
+
+        `source_user_id` (trinity-enterprise#875): only that user's runs, before
+        the LIMIT; a scheduled run carries no user and is not a share holder's —
+        unless `include_unattributed`, which the router sets only when that user
+        CREATED the schedule: its cron and webhook runs (no user) are theirs."""
         stmt = (
             select(schedule_executions)
             .where(schedule_executions.c.schedule_id == schedule_id)
             .order_by(schedule_executions.c.started_at.desc())
             .limit(limit)
         )
+        if source_user_id is not None:
+            mine = schedule_executions.c.source_user_id == source_user_id
+            if include_unattributed:
+                mine = or_(mine, schedule_executions.c.source_user_id.is_(None))
+            stmt = stmt.where(mine)
         with get_engine().connect() as conn:
             return [
                 self._row_to_schedule_execution(row)
@@ -618,8 +693,17 @@ class ScheduleExecutionsMixin:
         exclude_triggers: Optional[frozenset] = None,
         scope_to_viewer: bool = False,
         viewer_email: Optional[str] = None,
+        source_user_id: Optional[int] = None,
     ) -> List[Dict]:
         """Get execution summaries for list view - excludes large text fields.
+
+        `source_user_id` (trinity-enterprise#875) keeps only the executions that
+        user started: a share holder's own turns. Like the other filters it is
+        part of the WHERE, so it applies BEFORE the LIMIT and another person's
+        busy day cannot push the caller's own rows off the list. `=` against a
+        NULL `source_user_id` is never true, so scheduled, channel and legacy
+        rows with no user are hidden (fail closed) — never write this as an
+        IS NOT DISTINCT comparison.
 
         `scope_to_viewer` (#3139) keeps only what a Workspace client can account
         for — `query_helpers.viewer_scope(viewer_email)` — and, like
@@ -688,6 +772,8 @@ class ScheduleExecutionsMixin:
             ))
         if scope_to_viewer:
             stmt = stmt.where(viewer_scope(schedule_executions, viewer_email))
+        if source_user_id is not None:
+            stmt = stmt.where(schedule_executions.c.source_user_id == source_user_id)
         with get_engine().connect() as conn:
             rows = []
             for row in conn.execute(stmt).mappings():
@@ -716,7 +802,8 @@ class ScheduleExecutionsMixin:
     )
 
     def get_fan_out_executions(
-        self, agent_name: str, fan_out_id: str, limit: int = 200
+        self, agent_name: str, fan_out_id: str, limit: int = 200,
+        *, source_user_id: Optional[int] = None,
     ) -> List[dict]:
         """Every execution row of one fan-out batch, oldest first (#2670).
 
@@ -757,6 +844,10 @@ class ScheduleExecutionsMixin:
             .order_by(schedule_executions.c.started_at.asc())
             .limit(limit)
         )
+        # trinity-enterprise#875: a share holder reads back only the rows they
+        # dispatched (in the WHERE; the platform's own callers pass nothing).
+        if source_user_id is not None:
+            stmt = stmt.where(schedule_executions.c.source_user_id == source_user_id)
         with get_engine().connect() as conn:
             rows = []
             for row in conn.execute(stmt).mappings():
@@ -796,6 +887,20 @@ class ScheduleExecutionsMixin:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_schedule_execution(row) if row else None
 
+    def get_turn_attribution(self, execution_id: str) -> Optional[Dict]:
+        """One execution's rating columns (`turn_tier_service.LEDGER_COLUMNS`)
+        and its `status`, or None — the turn a continuation follows
+        (trinity-enterprise#1225), without the row's response and log."""
+        c = schedule_executions.c
+        stmt = select(
+            c.id, c.agent_name, c.source_user_id, c.schedule_id, c.triggered_by,
+            c.source_channel, c.source_user_email, c.source_agent_name,
+            c.continues_execution_id, c.status,
+        ).where(c.id == execution_id)
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return dict(row) if row else None
+
     def get_execution_gate_state(self, execution_id: str) -> Optional[tuple]:
         """`(agent_name, status)` of one execution, or None — the two columns
         the skill-gate hook's check needs (trinity-enterprise#752), without
@@ -806,6 +911,21 @@ class ScheduleExecutionsMixin:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).first()
         return (row.agent_name, row.status) if row else None
+
+    def get_execution_requester(self, execution_id: str) -> Optional[tuple]:
+        """`(agent_name, status, source_agent_name, source_mcp_key_id)` of one
+        execution, or None — who a run is for, as the platform wrote it, for
+        the skill-gate hook's peer check (abilityai/trinity-enterprise#925).
+        Four columns, never the row's response or log."""
+        c = schedule_executions.c
+        stmt = select(c.agent_name, c.status, c.source_agent_name, c.source_mcp_key_id).where(
+            c.id == execution_id
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).first()
+        if not row:
+            return None
+        return (row.agent_name, row.status, row.source_agent_name, row.source_mcp_key_id)
 
     def get_execution_failure_stamp(self, execution_id: str) -> Optional[tuple]:
         """`(status, error, completed_at)` of one execution, or None (#3245).
@@ -935,6 +1055,55 @@ class ScheduleExecutionsMixin:
                 .values(subscription_id=subscription_id)
             )
             return result.rowcount > 0
+
+    def set_execution_chat_session(self, execution_id: str, chat_session_id: str) -> bool:
+        """Name the /chat thread this turn answers (#3380).
+
+        Written once by `prepare_chat_execution`, right after the session is
+        resolved. The #2944 watchdog reads it back to write a claimed result's
+        reply into that thread. Returns whether a row was updated.
+        """
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(schedule_executions)
+                .where(schedule_executions.c.id == execution_id)
+                .values(chat_session_id=chat_session_id)
+            )
+            return result.rowcount > 0
+
+    def get_execution_chat_session_id(self, execution_id: str) -> Optional[str]:
+        """The /chat thread a turn answers, or None for any other turn (#3380)."""
+        with get_engine().connect() as conn:
+            return conn.execute(
+                select(schedule_executions.c.chat_session_id)
+                .where(schedule_executions.c.id == execution_id)
+            ).scalar()
+
+    def stamp_model_used_if_null(self, execution_id: str, model: Optional[str]) -> bool:
+        """Record the resolved model on a row created elsewhere (ent#1202).
+
+        ``model_used`` is written at INSERT, and the standalone scheduler
+        pre-creates reminder, schedule and loop rows before it dispatches with
+        ``execution_id`` — so ``execute_task``'s own stamp (inside
+        ``if not execution_id:``) never runs for them and a turn that named no
+        model left the row NULL while it ran on the resolved one.
+
+        Guarded on ``model_used IS NULL``: it only ever FILLS a blank. A row
+        stamped at creation with an explicit model is never rewritten. Returns
+        whether the stamp landed.
+        """
+        if not execution_id or not model:
+            return False
+        stmt = (
+            update(schedule_executions)
+            .where(and_(
+                schedule_executions.c.id == execution_id,
+                schedule_executions.c.model_used.is_(None),
+            ))
+            .values(model_used=model)
+        )
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount > 0
 
     def stamp_execution_channel_context(
         self,

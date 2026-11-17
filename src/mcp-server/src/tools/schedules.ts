@@ -229,7 +229,12 @@ export function createScheduleTools(
             "conversation with the agent (their pinned Main chat), as well as recording " +
             "the run. Must be someone the agent is already shared with or owned by — " +
             "an address that cannot reach the agent makes the run FAIL rather than " +
-            "silently deliver nowhere. Omit for today's behaviour (no delivery)."
+            "silently deliver nowhere. Omit for today's behaviour (no delivery). " +
+            "With the agent's own key, only the owner's address is accepted: pointing a " +
+            "schedule at anyone else is refused `agent_cannot_address_another_person` " +
+            "(that is the owner's decision), and so is changing, enabling, disabling, " +
+            "triggering, deleting or managing the webhook of a schedule that already delivers " +
+            "to someone else."
           ),
       }),
       execute: async (
@@ -421,7 +426,9 @@ export function createScheduleTools(
           .optional()
           .describe(
             "Deliver this schedule's output into that person's Workspace conversation " +
-            "with the agent. Pass null to stop delivering. If omitted, keeps current value."
+            "with the agent. Pass null to stop delivering. If omitted, keeps current value. " +
+            "With the agent's own key only the owner's address is accepted, and a schedule " +
+            "that delivers to someone else cannot be changed (`agent_cannot_address_another_person`)."
           ),
       }),
       execute: async (
@@ -563,7 +570,9 @@ export function createScheduleTools(
       description:
         "Enable or disable a schedule without deleting it. Disabled schedules won't run but preserve their configuration. " +
         "With an agent key, changing ANOTHER agent's schedule needs the schedule-management permission an instance admin grants; without it the call is refused with `schedule_management_not_permitted`. " +
-        "Access control: agents can toggle schedules on self or permitted agents.",
+        "Access control: agents can toggle schedules on self or permitted agents. An agent's own key " +
+        "cannot toggle a schedule that delivers to someone other than its owner " +
+        "(`agent_cannot_address_another_person`).",
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),
         schedule_id: z.string().describe("Schedule ID"),

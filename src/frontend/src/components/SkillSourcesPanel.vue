@@ -90,6 +90,15 @@
               <p v-if="s.last_error" class="mt-0.5 text-xs text-status-danger-600 dark:text-status-danger-400 break-words">
                 {{ s.last_error }}
               </p>
+              <!-- ent#529: the untouched bundled source moved to the platform's
+                   pin on upgrade. Only the latest follow; earlier ones are in
+                   the audit log. After the error line, so a failed sync's
+                   two red lines stay together. -->
+              <p
+                v-if="s.followed_from_ref && s.followed_at"
+                data-testid="skill-source-followed"
+                class="mt-0.5 text-xs text-gray-500 dark:text-gray-400"
+              >{{ followedLabel(s) }}</p>
             </div>
 
             <div class="shrink-0 flex items-center gap-2">
@@ -192,9 +201,16 @@ function statusLabel (s) {
 }
 
 function statusClass (s) {
-  if (s.last_sync_status === 'success') return 'text-gray-500 dark:text-gray-400'
-  if (s.last_sync_status === 'failed') return 'text-status-danger-600 dark:text-status-danger-400'
-  return 'text-gray-500 dark:text-gray-400'
+  return s.last_sync_status === 'failed'
+    ? 'text-status-danger-600 dark:text-status-danger-400'
+    : 'text-gray-500 dark:text-gray-400'
+}
+
+function followedLabel (s) {
+  const on = new Date(s.followed_at).toLocaleDateString(undefined, {
+    day: 'numeric', month: 'short', year: 'numeric',
+  })
+  return `Followed bundled pin ${s.followed_from_ref} → ${s.ref} on ${on}`
 }
 
 function cancelAdd () {

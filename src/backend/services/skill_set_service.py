@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from services import skill_packaging as pkg
 from services.skill_sets import SET_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,27 @@ def library_sets(*, refresh: bool = False) -> Dict[str, dict]:
     if fingerprint is not None:
         _cache = (fingerprint, out)
     return out
+
+
+def library_sets_with_lifecycle() -> List[dict]:
+    """The sets as the listing route shows them: each member gains ``deprecated``
+    (trinity-enterprise#736), read from the library listing (ent#672's field).
+
+    Added here, at display time, never inside ``library_sets``: that resolver
+    also feeds the start path (under the per-agent inject lock), the post-sync
+    sweep and the DB-write resolvers, and caches by fingerprint, so a listing
+    read there would put a cold library parse under the lock and could remember
+    a failed read as "not deprecated" until the next commit. These are COPIES;
+    the cached dicts are never touched. Best-effort: an unreadable listing reads
+    every member as not deprecated, and the next read that works says it.
+    """
+    lib = library_sets()
+    listing = _listing_by_name() if any(e["members"] for e in lib.values()) else {}
+    return [
+        {**entry, "members": [{**m, "deprecated": _is_deprecated(listing.get(m["name"]))}
+                              for m in entry["members"]]}
+        for entry in lib.values()
+    ]
 
 
 def held_sets(agent_name: str) -> Dict[str, Optional[str]]:
@@ -204,7 +226,10 @@ async def agent_set_status(agent_name: str, *, probe: bool = False) -> List[dict
 
     import asyncio
     lib = await asyncio.to_thread(library_sets)
-    skill_env = await asyncio.to_thread(_skill_env_map) if db.agent_skill_set_names(agent_name) else {}
+    # One listing read serves both the members' env prerequisites and their
+    # lifecycle (ent#736) — `{}` when the agent holds no set, or it is unreadable.
+    listing = await asyncio.to_thread(_listing_by_name) if db.agent_skill_set_names(agent_name) else {}
+    skill_env = _env_map(listing)
     rows = {s.skill_name: s for s in db.get_agent_skills(agent_name)}
     out = []
     running = None
@@ -228,8 +253,12 @@ async def agent_set_status(agent_name: str, *, probe: bool = False) -> List[dict
                 "not_assigned" if row is None else ("conflict" if row.delivery_status == "conflict" else "assigned"))
             if state != "assigned":
                 partial = True
+            skill = listing.get(m["name"])
             members.append({"name": m["name"], "state": state, "version": m["version"],
-                            "shadowed_source": m["shadowed_source"]})
+                            "shadowed_source": m["shadowed_source"],
+                            # ent#736: the badge, and the ent#672 code an assign note names.
+                            "deprecated": _is_deprecated(skill),
+                            "deprecation": pkg.deprecation_warning(skill) if skill else None})
         prerequisites = {"state": "unknown", "missing_env": []}
         env = sorted(set(entry["requires"]["env"]) | _member_env(entry, skill_env))
         if not env:
@@ -252,13 +281,22 @@ async def agent_set_status(agent_name: str, *, probe: bool = False) -> List[dict
     return out
 
 
-def _skill_env_map() -> Dict[str, List[str]]:
-    """``skill → its SKILL.md requires.env`` across the library (one listing)."""
+def _listing_by_name() -> Dict[str, dict]:
+    """The library listing keyed by skill name, or ``{}`` when it cannot be read."""
     try:
-        return {sk.get("name"): list((sk.get("requires") or {}).get("env") or [])
-                for sk in _skill_service().list_skills()}
-    except Exception:  # noqa: BLE001
+        return {sk.get("name"): sk for sk in _skill_service().list_skills()}
+    except Exception as e:  # noqa: BLE001 — display-only; never fails a read
+        logger.warning("[ent#736] could not read the skills listing for set members: %s", e)
         return {}
+
+
+def _env_map(listing: Dict[str, dict]) -> Dict[str, List[str]]:
+    """``skill → its SKILL.md requires.env``, from one listing read."""
+    return {name: list((sk.get("requires") or {}).get("env") or []) for name, sk in listing.items()}
+
+
+def _is_deprecated(skill: Optional[dict]) -> bool:
+    return bool(skill) and skill.get("deprecated") is True
 
 
 def _member_env(entry: dict, skill_env: Dict[str, List[str]]) -> set:

@@ -227,6 +227,7 @@ _PULL_STATUS_MAP = {
     429: "billing",
     422: "max_turns",
     500: "agent_error",
+    403: "turn_refused",  # ent#926 — the runtime refused the turn for who it is for
 }
 
 
@@ -291,6 +292,45 @@ def _failed_result_body(claim_token: Optional[str], error: str) -> Dict[str, Any
     }
 
 
+# #4257: status codes already reported from the claim loop (warn-once per
+# process). Module-level, so a pool of workers logs one line per code, not one
+# per worker.
+_NOTED_CLAIM_STATUS: set = set()
+
+# #4257: how long a worker stays in the delivery retry loop before persisting
+# the terminal and going back to polling. The loop used to retry until the
+# lease deadline (turn timeout + 300 s), which parks ONE OF N workers with no
+# runtime process running — three workers held this way is a pool that looks
+# alive to the backend and claims nothing, and a queue that does not move. The
+# envelope is already on disk by then (B6), so returning early loses nothing:
+# the resend tick below and the backend's lease reaper both finish it.
+_DELIVERY_IN_LOOP_SECONDS = float(os.getenv("PULL_DELIVERY_IN_LOOP_SECONDS", "90"))
+
+# #4257: the persisted-terminal sweep also runs periodically, not only at boot.
+# A bounded delivery that gives up needs something other than the next restart
+# to retry it.
+_RESEND_TICK_SECONDS = float(os.getenv("PULL_RESEND_TICK_SECONDS", "60"))
+
+
+def _delivery_deadline(deadline: float, *, persisted: bool,
+                       now: Optional[float] = None) -> float:
+    """When the in-loop delivery attempt must stop (#4257).
+
+    ``deadline`` is the lease deadline the caller is already bound by, on the
+    `time.monotonic()` clock. The cap only ever SHORTENS it: a lease shorter
+    than `_DELIVERY_IN_LOOP_SECONDS` still ends the attempt at the lease, and
+    a long lease is cut to the window so the worker goes back to claiming.
+
+    ``persisted`` is the gate. Without a safe execution id nothing is on disk,
+    so giving up early WOULD drop spent work — that case keeps the full lease
+    window and is deliberately not bounded.
+    """
+    if not persisted:
+        return deadline
+    started = time.monotonic() if now is None else now
+    return min(deadline, started + _DELIVERY_IN_LOOP_SECONDS)
+
+
 # ---------------------------------------------------------------------------
 # Claim (GET /api/internal/next-task) — §3.1 / §3.2
 # ---------------------------------------------------------------------------
@@ -309,7 +349,25 @@ async def _claim_once(
     if resp.status_code == 204:
         return None
     if resp.status_code >= 300:
-        logger.debug("[#1081] next-task for %s got %s", worker_id, resp.status_code)
+        # #4257: this branch is where a stall HIDES. Any non-200 is treated as
+        # "queue empty", so the worker sleeps and the rows stay queued — which
+        # is exactly what a 403 from a `PULL_MODE_PILOT_AGENTS` /
+        # `TRINITY_PULL_MODE` disagreement looks like from in here. At debug it
+        # left no trace in the logs the incident was investigated from. WARNING
+        # once per status code per process: the refusal repeats every poll, and
+        # a line each would bury it. Status code only, never the bearer.
+        if resp.status_code not in _NOTED_CLAIM_STATUS:
+            _NOTED_CLAIM_STATUS.add(resp.status_code)
+            logger.warning(
+                "[#4257] next-task for %s refused with %s — treating the queue "
+                "as empty and backing off. Queued rows will not move while this "
+                "persists; if it is 403, the backend's PULL_MODE_PILOT_AGENTS "
+                "and this container's TRINITY_PULL_MODE disagree "
+                "(logged once per status per process)",
+                worker_id, resp.status_code,
+            )
+        else:
+            logger.debug("[#1081] next-task for %s got %s", worker_id, resp.status_code)
         return None
     try:
         data = resp.json()
@@ -330,12 +388,17 @@ async def _deliver_result(
     backend_url: str,
     mcp_key: str,
     deadline_monotonic: float,
+    reply_sink: Optional[list] = None,
 ) -> bool:
     """POST the §3.3 terminal, retrying with capped decorrelated-jitter backoff
     until the lease deadline. Returns True on a 2xx (delivered) OR a permanent
     4xx (no point retrying); False only when the deadline passed — the backend
     lease reaper then re-queues (same ``execution_id``), so no work is lost.
-    Mirrors ``result_callback._deliver``."""
+    Mirrors ``result_callback._deliver``.
+
+    #3487: ``reply_sink`` receives the 2xx reply body — where a ``retry``
+    instruction comes back. One delivery function, so a caller (or a test) that
+    replaces it still replaces every delivery."""
     url = f"{backend_url}/api/internal/tasks/{execution_id}/result"
     headers = {"Authorization": f"Bearer {mcp_key}"}
     prev_sleep = _BACKOFF_BASE
@@ -345,6 +408,13 @@ async def _deliver_result(
             resp = await client.post(url, json=body, headers=headers)
             if resp.status_code < 300:
                 logger.info("[#1081] result for %s delivered (%s)", execution_id, resp.status_code)
+                if reply_sink is not None:
+                    try:
+                        reply = resp.json()
+                    except Exception:  # noqa: BLE001 — a 2xx with no JSON is still delivered
+                        reply = None
+                    if isinstance(reply, dict):
+                        reply_sink.append(reply)
                 return True
             if resp.status_code in _PERMANENT_STATUSES:
                 logger.warning(
@@ -388,6 +458,7 @@ async def _run_and_report(
     ``session_id`` IS present the worker resumes it (``resume_session_id`` +
     ``persist_session``), matching the SESSION_TAB ``--resume`` convention — the
     minimal reversible reading of the schema's "presence ⇒ persist/resume"."""
+    from ..services.execution_env import auto_memory_spawn_kwargs
     from ..services.runtime_adapter import get_runtime
     from .process_registry import get_process_registry
 
@@ -406,84 +477,179 @@ async def _run_and_report(
     if persist_session is None:
         persist_session = bool(session_id)
 
-    # #3114: a claimed turn is ACCEPTED-not-spawned until the runtime starts it.
-    # Registered as pending, `/api/executions/{id}/terminate` reaches it in that
-    # window (#2433): the cancel is recorded, the turn is skipped (or killed at
-    # spawn) and reported `cancelled` below.
-    registry = get_process_registry()
-    registry.register_pending(
-        execution_id, timeout_seconds=turn_timeout, metadata={"type": "pull"},
-    )
-    agent_state.record_task_start()
-    try:
-        if execution_id and registry.was_terminated(execution_id):
-            raise HTTPException(status_code=409, detail="Execution cancelled before it started")
-        response_text, raw_messages, metadata, ran_session_id = await get_runtime().execute_headless(
-            prompt=message,
-            model=overrides.get("model"),
-            allowed_tools=overrides.get("allowed_tools"),
-            system_prompt=overrides.get("system_prompt"),
-            timeout_seconds=turn_timeout,
-            max_turns=overrides.get("max_turns"),
-            execution_id=execution_id,
-            resume_session_id=session_id,
-            persist_session=bool(persist_session),
-            images=payload.get("images") or None,
-        )
-        body = _success_result_body(claim_token, response_text, raw_messages, metadata, ran_session_id)
-        finish_success: Optional[bool] = True
-    except asyncio.CancelledError:
-        # Shutdown mid-turn — record the finish, let cancellation propagate.
-        agent_state.record_task_finish(success=False)
-        raise
-    except HTTPException as exc:
-        finish_success = False
-        body = _failed_result_body_from_http(claim_token, exc)
-    except Exception as exc:  # noqa: BLE001 — any failure must still report a terminal
-        finish_success = False
-        body = _failed_result_body(claim_token, str(exc) or type(exc).__name__)
-    finally:
-        # #2433: promoted at spawn; dropped here if it never spawned.
-        registry.discard_pending(execution_id)
-
-    # #679 / #3114: a terminated turn reports `cancelled` (result_callback
-    # parity). Auth and rate-limit terminals keep their class so the breaker
-    # and SUB-003 still see them.
-    if (
-        execution_id
-        and registry.was_terminated(execution_id)
-        and body.get("error_code") not in ("auth", "billing")
-    ):
-        body = {
-            **body,
-            "status": "cancelled",
-            "error_code": None,
-            "error": "Execution terminated by user",
-        }
-        finish_success = None
-
-    agent_state.record_task_finish(success=finish_success)
-
-    # B6 fix (#1081): persist the completed terminal to disk BEFORE attempting
-    # delivery, so a shutdown/deploy mid-POST doesn't drop already-spent work
-    # (the row would stay `running` → the lease reaper re-runs the turn from
-    # scratch). If a CancelledError arrives inside _deliver_result below, it
-    # propagates before _delete_pull_result is reached, so the file survives and
-    # the startup resend delivers it. Gated on a safe execution_id so a hostile
-    # value can't escape _PENDING_PULL_DIR; an unsafe/absent id skips persistence
-    # (unchanged pre-B6 behaviour — never a path build from untrusted input).
-    persisted = _is_safe_execution_id(execution_id)
-    if persisted:
-        _persist_pull_result(execution_id, {"execution_id": execution_id, "body": body})
-
-    # Deadline = now + (turn timeout + buffer) = the slot-lease TTL window.
+    runtime = get_runtime()
+    # #3487: this worker can run a refused turn again on another credential —
+    # said on every result, so the backend walks the pool only for workers
+    # that will follow its retry instruction.
+    capable = _auth_override_capable(runtime)
+    # Delivery window = the slot-lease TTL, fixed at the claim: a retry runs
+    # under the SAME claim and lease, so it never extends it.
     # #2317: keyed to the POOL's budget, not the row's — honouring a short
     # per-task timeout must not also shrink the result-delivery retry window
     # (the backend lease derives from the agent's execution_timeout, not the row's).
     deadline = time.monotonic() + max(turn_timeout, _turn_timeout()) + _SLOT_TTL_BUFFER_SECONDS
-    delivered = await _deliver_result(client, execution_id, body, backend_url, mcp_key, deadline)
-    if delivered and persisted:
-        _delete_pull_result(execution_id)
+    override = None
+
+    registry = get_process_registry()
+    while True:
+        # #3114: a claimed turn is ACCEPTED-not-spawned until the runtime starts it.
+        # Registered as pending, `/api/executions/{id}/terminate` reaches it in that
+        # window (#2433): the cancel is recorded, the turn is skipped (or killed at
+        # spawn) and reported `cancelled` below.
+        registry.register_pending(
+            execution_id, timeout_seconds=turn_timeout, metadata={"type": "pull"},
+        )
+        agent_state.record_task_start()
+        # #4156: a turn serving someone other than the owner (Claude only).
+        spawn_kwargs: Dict[str, Any] = dict(auto_memory_spawn_kwargs(runtime, payload.get("disable_auto_memory")))
+        if override is not None:
+            spawn_kwargs["auth_override"] = override
+        try:
+            if execution_id and registry.was_terminated(execution_id):
+                raise HTTPException(status_code=409, detail="Execution cancelled before it started")
+            response_text, raw_messages, metadata, ran_session_id = await runtime.execute_headless(
+                prompt=message,
+                model=overrides.get("model"),
+                allowed_tools=overrides.get("allowed_tools"),
+                system_prompt=overrides.get("system_prompt"),
+                timeout_seconds=turn_timeout,
+                max_turns=overrides.get("max_turns"),
+                execution_id=execution_id,
+                resume_session_id=session_id,
+                persist_session=bool(persist_session),
+                images=payload.get("images") or None,
+                **spawn_kwargs,
+            )
+            body = _success_result_body(claim_token, response_text, raw_messages, metadata, ran_session_id)
+            finish_success: Optional[bool] = True
+        except asyncio.CancelledError:
+            # Shutdown mid-turn — record the finish, let cancellation propagate.
+            agent_state.record_task_finish(success=False)
+            raise
+        except HTTPException as exc:
+            finish_success = False
+            body = _failed_result_body_from_http(claim_token, exc)
+        except Exception as exc:  # noqa: BLE001 — any failure must still report a terminal
+            finish_success = False
+            body = _failed_result_body(claim_token, str(exc) or type(exc).__name__)
+        finally:
+            # #2433: promoted at spawn; dropped here if it never spawned.
+            registry.discard_pending(execution_id)
+
+        terminated = bool(execution_id and registry.was_terminated(execution_id))
+        # #679 / #3114: a terminated turn reports `cancelled` (result_callback
+        # parity). Auth and rate-limit terminals keep their class so the breaker
+        # and SUB-003 still see them. #3618: a failed body's `content` is the
+        # failure text, so it is replaced; a finished turn keeps its reply.
+        if terminated and body.get("error_code") not in ("auth", "billing"):
+            body = {**body, "status": "cancelled", "error_code": None}
+            if finish_success is not True:
+                body["content"] = "Execution terminated by user"
+            finish_success = None
+        body = _with_walk_metadata(body, capable=capable, override=override, terminated=terminated)
+
+        agent_state.record_task_finish(success=finish_success)
+
+        # B6 fix (#1081): persist the completed terminal to disk BEFORE attempting
+        # delivery, so a shutdown/deploy mid-POST doesn't drop already-spent work
+        # (the row would stay `running` → the lease reaper re-runs the turn from
+        # scratch). If a CancelledError arrives inside the delivery below, it
+        # propagates before _delete_pull_result is reached, so the file survives and
+        # the startup resend delivers it. Gated on a safe execution_id so a hostile
+        # value can't escape _PENDING_PULL_DIR; an unsafe/absent id skips persistence
+        # (unchanged pre-B6 behaviour — never a path build from untrusted input).
+        persisted = _is_safe_execution_id(execution_id)
+        if persisted:
+            _persist_pull_result(execution_id, {"execution_id": execution_id, "body": body})
+
+        # #3487: a refused attempt may be answered "run it again". While it is
+        # being reported there is no process and no pending entry, so a
+        # terminate would find nothing and the next attempt would spawn anyway.
+        # Hold the turn as pending across the report: a cancel landing here is
+        # recorded and the next attempt is skipped and reported `cancelled`.
+        hold = capable and not terminated and body.get("status") != "success"
+        if hold:
+            registry.register_pending(
+                execution_id, timeout_seconds=turn_timeout, metadata={"type": "pull"},
+            )
+        replies: list = []
+        try:
+            # #4257: bound the in-loop window to `_DELIVERY_IN_LOOP_SECONDS`,
+            # never past the lease deadline. Past it the terminal is already
+            # persisted (above), so the worker returns to claiming and the
+            # resend tick / lease reaper deliver it. `persisted` is the gate:
+            # without a safe execution id nothing is on disk, and giving up
+            # early there WOULD drop spent work — so that case keeps the full
+            # lease-deadline window.
+            delivery_deadline = _delivery_deadline(deadline, persisted=persisted)
+            delivered = await _deliver_result(
+                client, execution_id, body, backend_url, mcp_key, delivery_deadline,
+                reply_sink=replies,
+            )
+        except BaseException:
+            if hold:
+                registry.discard_pending(execution_id)
+            raise
+        if delivered and persisted:
+            _delete_pull_result(execution_id)
+
+        # #3487: the backend may answer a refused attempt with "run it again on
+        # this credential". Only a capable, un-terminated worker follows it.
+        retry = (replies[-1] if replies else {}).get("retry") if delivered else None
+        if not (capable and not terminated and isinstance(retry, dict) and retry.get("claim_token")):
+            if hold:
+                registry.discard_pending(execution_id)
+            return
+        claim_token = retry["claim_token"]
+        override = _build_auth_override(retry.get("auth_override"), runtime)
+        timeout = retry.get("timeout_seconds")
+        if isinstance(timeout, (int, float)) and timeout > 0:
+            # Never longer than the limit this claim was given.
+            turn_timeout = min(turn_timeout, int(timeout))
+        logger.warning(
+            "[#3487] %s: re-running pulled turn %s (attempt %s) on %s",
+            agent_name, execution_id, retry.get("attempt"),
+            override.kind() if override is not None else "the baseline credential",
+        )
+
+
+def _auth_override_capable(runtime) -> bool:
+    """True when this runtime can run one spawn on a per-spawn credential (#3487)."""
+    return bool(getattr(runtime, "supports_auth_override", False))
+
+
+def _build_auth_override(raw, runtime):
+    """The retry's credential as the runtime's `AuthOverride`, staged for log
+    redaction before anything can print it — exactly as `/api/task` does
+    (`routers.chat._accept_auth_override`). None for the baseline. Never logs it."""
+    if not isinstance(raw, dict) or not _auth_override_capable(runtime):
+        return None
+    from ..models import AuthOverride
+    from ..utils.credential_sanitizer import add_credential_value
+
+    try:
+        override = AuthOverride(**raw)
+    except Exception:  # noqa: BLE001 — a malformed instruction runs on the baseline
+        logger.warning("[#3487] malformed auth_override in a retry — running on the baseline")
+        return None
+    if override.kind() is None:
+        return None
+    add_credential_value(override.secret())
+    return override
+
+
+def _with_walk_metadata(body: Dict[str, Any], *, capable: bool, override, terminated: bool) -> Dict[str, Any]:
+    """Tell the backend what this attempt can do and what it ran on (#3487):
+    `auth_override_capable`, the credential kind it applied (the pull analogue
+    of the `X-Trinity-Auth-Override` header), and whether the user terminated
+    it. Failure bodies carry this too — a refusal is exactly where it matters."""
+    md = dict(body.get("metadata") or {})
+    md["auth_override_capable"] = capable
+    if override is not None:
+        md["auth_override"] = override.kind()
+    if terminated:
+        md["terminated"] = True
+    return {**body, "metadata": md}
 
 
 # ---------------------------------------------------------------------------
@@ -608,9 +774,18 @@ async def resend_pending_pull_results() -> None:
                 _delete_pull_result(execution_id)
                 continue
             deadline = time.monotonic() + _SWEEP_DEADLINE_SECONDS
+            # #3487: a restarted worker no longer holds the claim it would need
+            # to follow a retry instruction, so it must not ask for one.
+            body = {**body, "metadata": {**(body.get("metadata") or {}), "auth_override_capable": False}}
             delivered = await _deliver_result(client, execution_id, body, backend_url, mcp_key, deadline)
             if delivered:
                 _delete_pull_result(execution_id)
+
+
+# #4257: the periodic resend tasks this process owns, so shutdown can cancel
+# them (one per app; a list rather than a single slot so a test that wires two
+# apps does not leak the first).
+_RESEND_TASKS: list = []
 
 
 def schedule_pending_pull_result_resend(app) -> None:
@@ -630,3 +805,28 @@ def schedule_pending_pull_result_resend(app) -> None:
             await resend_pending_pull_results()
         except Exception:  # noqa: BLE001 — never block startup
             logger.debug("[#1081] startup pending pull-result resend failed", exc_info=True)
+
+        # #4257: and again every `_RESEND_TICK_SECONDS`, because the bounded
+        # in-loop delivery now gives up on purpose. Boot-only, a terminal the
+        # worker stopped retrying would wait for the next restart (or for the
+        # backend lease reaper to re-RUN the turn, paying for spent work
+        # twice). One task per process; it swallows everything and is
+        # cancelled with the app.
+        async def _resend_pull_periodically() -> None:
+            while True:
+                await asyncio.sleep(_RESEND_TICK_SECONDS)
+                try:
+                    await resend_pending_pull_results()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 — a blip never kills the tick
+                    logger.debug("[#4257] periodic pull-result resend failed",
+                                 exc_info=True)
+
+        task = asyncio.create_task(_resend_pull_periodically())
+        _RESEND_TASKS.append(task)
+
+    @app.on_event("shutdown")
+    async def _stop_pull_resend_tick() -> None:
+        while _RESEND_TASKS:
+            _RESEND_TASKS.pop().cancel()

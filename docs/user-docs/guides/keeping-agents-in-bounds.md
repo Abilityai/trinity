@@ -63,6 +63,8 @@ Trinity runs agents on three [runtimes](../agents/agent-runtimes.md). Everything
 | Credential redaction of output | Yes, inside the container | Yes, inside the container | No; only the platform's pattern-based scrub when results are stored |
 | Turn limit | Yes | No; the execution timeout bounds the run | No; the execution timeout bounds the run |
 | Per-agent disallowed tools | Yes | No | No |
+| Send tools removed by a [tool access profile](../agents/agent-guardrails.md#tool-access) (messages, notifications, calls, room posts, file links) | Yes, refused by the platform | Yes, refused by the platform | Yes, refused by the platform |
+| A shared person's turn held to their file paths, with no shell | Yes, through a hook | Turn refused before it runs | Turn refused before it runs |
 | Gated-skill check inside the agent (a request that names a gated skill is held by the platform on every runtime) | Yes | No | No |
 
 Guardrails are strongest on Claude Code. On Codex and Gemini CLI, rely on the platform boundary: what the agent holds, and the timeout.
@@ -70,7 +72,9 @@ Guardrails are strongest on Claude Code. On Codex and Gemini CLI, rely on the pl
 ## Honest limits
 
 - **The in-container hooks catch accidents, not a determined agent.** The agent user has passwordless `sudo` in its own container, so it could rewrite or get around them. That is why they are defence in depth, and why the boundary we rely on is outside the container.
+- **A nested coding-agent CLI is stopped on the ordinary path only.** A `claude` session an agent starts for itself is outside the gated-skill check inside the agent, so on an agent with gated skills the Bash guardrail refuses `claude`, `codex` and `gemini` started from the Bash tool. That covers Claude Code agents only. The guardrail matches the command text, so a script file, an interpreter such as `python -c`, `eval` or a wrapper it does not list can still start the CLI. Whether that CLI can sign in depends on how the agent authenticates, so don't rely on it either way. An agent can also act on a `SKILL.md` it read, and passwordless `sudo` stays out of scope. The refusal follows a marker the platform writes into the container, so it can lag a moment behind a recreate. A request that names a gated skill is still held by the platform before dispatch, on every runtime.
 - **Agents can reach the open internet today.** There is no outbound allow-list yet.
+- **An agent acts for whoever chats with it.** For a person the agent is shared with, Trinity holds the agent to that person's limits: their file paths, no shell, no standing work, and only their own executions ([Agent Sharing](../sharing-and-access/agent-sharing.md#what-the-agent-does-for-someone-you-share-it-with)). Channel and public-link visitors get the shell while the owner's **Channel and public visitors may run commands** switch is on, which is the default; turn it off for an agent whose visitors should not run commands.
 - **A raw credential plus a shell reaches past the skills.** An agent that holds a raw credential and a shell can act outside its skills. That is why "one key, one agent" is the boundary we rely on: give the payment key to the one agent that pays, and have every other agent ask it.
 
 ## See Also

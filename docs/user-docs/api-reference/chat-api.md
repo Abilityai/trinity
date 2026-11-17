@@ -18,7 +18,7 @@ API endpoints for agent chat, voice, streaming, and public chat access.
 | `/api/agents/{name}/chat/history` | GET | The agent's current `/chat` conversation |
 | `/api/agents/{name}/chat/history` | DELETE | Reset the `/chat` conversation so the next turn starts fresh (owner or admin) |
 | `/api/agents/{name}/chat/session` | GET | Current `/chat` session info, including context usage |
-| `/api/agents/{name}/model` | GET / PUT | Read or set the model the agent uses for subsequent messages. An agent's own refusal (for example `400` for an invalid model, naming the valid ones) reaches you with its status and detail; an unreachable agent or an agent error answers `503` |
+| `/api/agents/{name}/model` | GET / PUT | Read or set the model the agent uses for subsequent messages. On a Claude Code agent, PUT also saves the value as the agent's own model, which turns the platform starts run on; if the save fails after the agent accepted it, the answer is `500` `model_not_saved`. GET adds `default_model`, `backend_turn_model`, `default_model_source` and `default_model_refused` (see [Model Selection](../agents/agent-configuration.md#model-selection)). An agent's own refusal (for example `400` for an invalid model, naming the valid ones) reaches you with its status and detail; an unreachable agent or an agent error answers `503` |
 | `/api/agents/{name}/activity` | GET / DELETE | Session activity summary; clear it |
 | `/api/agents/{name}/activity/{tool_id}` | GET | Full detail of one tool call |
 
@@ -33,6 +33,7 @@ A turn whose run ends in an error is a failed execution, recorded with the run's
 Pull mode is an experimental, operator-only setting: agents named in `PULL_MODE_PILOT_AGENTS` take their work from Trinity's durable queue instead of having it pushed to them (see [Agent Network](../collaboration/agent-network.md)). On those agents only:
 
 - `POST /chat`, the Workspace, the session API, public links, Slack/Telegram/WhatsApp, rooms and paid chat all enqueue the turn and wait for a worker to claim it. A turn no worker claims within the agent's timeout fails as a capacity error (the session API answers `429`). A caller that disconnects while its turn is still queued cancels it.
+- An async `/task` always answers `queued`, idle or not; its `message` says the task is queued for the agent's worker pool.
 - `/chat` memory is per caller: each person (or key owner) gets their own conversation with the agent, resumed turn to turn, instead of the one conversation every caller shares. A second turn on the same conversation waits up to 30 seconds, then gets `429`; other callers' turns run in parallel.
 - `GET /chat/history` returns *your* conversation from the database. `DELETE /chat/history` makes every caller's next turn start fresh and closes the conversations `/chat` was using.
 
@@ -42,11 +43,11 @@ Agents not in the pilot are unchanged.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/enterprise/client-portal/agents/{name}/voice/start` | POST | Start a Workspace voice call bound to a chat (`portal_session_id`); 409 while a reply is in flight |
-| `/api/agents/{name}/voice/start` | POST | Start a per-agent voice session (retained for API clients; the UI starts calls in the Workspace) |
+| `/api/enterprise/client-portal/agents/{name}/voice/start` | POST | Start a Workspace voice call bound to a chat (`portal_session_id`); returns a single-use `websocket_ticket`; 409 while a reply is in flight |
+| `/api/agents/{name}/voice/start` | POST | Start a per-agent voice session (retained for API clients; the UI starts calls in the Workspace). Signed-in sessions only; returns a single-use `websocket_ticket` |
 | `/api/agents/{name}/voice/stop` | POST | Stop session |
 | `/api/agents/{name}/voice/status` | GET | Session status |
-| `/ws/voice/{session_id}` | WS | Audio WebSocket bridge (URL returned by `voice/start`) |
+| `/ws/voice/{session_id}` | WS | Audio WebSocket bridge (URL returned by `voice/start`). Send `{"type":"auth","ticket":...}` as the first frame and wait for `auth_ok`; no credential goes in the URL — see [Connecting the voice socket](../advanced/voice-chat.md#connecting-the-voice-socket) |
 
 The per-agent voice prompt, voice name and canvas panel routes are listed in [Voice Chat](../advanced/voice-chat.md#api-endpoints).
 
@@ -96,11 +97,15 @@ A sync `/task` that fails, times out, or is cancelled releases its `Idempotency-
 
 `POST /chat`, `POST /task`, and `POST /api/agents/{name}/sessions/{id}/message` (see [Agent Sessions](../agents/agent-session.md)) accept an optional `model`. The value is checked before anything is dispatched:
 
-- Empty, whitespace, or omitted means the agent's default model.
+- Empty, whitespace, or omitted means the agent's own model, else the platform default; the model the run used is recorded as `model_used`.
 - Otherwise it must start with a known model family, ignoring case: a short alias (`sonnet`, `opus`, `haiku`, `fable`) or a full id (`claude-…`, `gemini-…`, `gpt-…`, `codex…`). Suffixes such as `[1m]` are kept.
 - Anything else is refused with **422**, and the error names the value: `'<value>' is not a model id. Use a short alias (sonnet, opus, haiku, fable) or a full id such as '…'.`
 
 A refused request starts no execution. It does not use up its `Idempotency-Key`, and a refused session turn leaves no unanswered message in the session. The check is on the shape only: an id with a valid prefix that the provider does not serve still fails when the run starts.
+
+#### Per-task `max_turns`
+
+`POST /task` accepts an optional `max_turns` (1–500). It can only tighten the agent's `max_turns_task` guardrail, never raise it: the agent runs on the lower of the two, and a missing value leaves the guardrail in force. It applies to sync and async tasks, a queued task, and a task released by a skill approval. A task that stops at the cap fails with `422` and `X-Trinity-Error-Code: max_turns` (see [Agent Guardrails](../agents/agent-guardrails.md)). That failure is final for its `Idempotency-Key`: the same key replays the same `422` with `X-Idempotent-Replay: true` instead of running the task again. Claude Code agents only; Gemini and Codex log the value and rely on the timeout.
 
 #### Deprecated: per-task `timeout_seconds`
 

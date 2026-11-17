@@ -15,7 +15,7 @@ backend to agent-server, no new long-lived process.
 from __future__ import annotations
 
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
 from services.docker_service import (
     execute_command_in_container,
@@ -41,8 +41,20 @@ class AgentNotFound(Exception):
     """Raised when the target agent has no running container."""
 
 
-async def run_pre_check(agent_name: str) -> Dict:
+async def run_pre_check(
+    agent_name: str,
+    *,
+    schedule_id: Optional[str] = None,
+    schedule_name: Optional[str] = None,
+    schedule_message: Optional[str] = None,
+) -> Dict:
     """Run the agent's optional pre-check hook.
+
+    The schedule being gated (#3966) is exported to the hook as
+    ``TRINITY_SCHEDULE_ID`` / ``TRINITY_SCHEDULE_NAME`` /
+    ``TRINITY_SCHEDULE_MESSAGE`` — only the ones the caller passed, verbatim,
+    in the exec's environment (not argv). With none passed the hook runs with
+    no extra environment, exactly as before.
 
     Two-step exec:
       1. ``test -f`` (5s) — file presence check. Note ``-f``, not ``-x``:
@@ -78,10 +90,22 @@ async def run_pre_check(agent_name: str) -> Dict:
     if exists.get("exit_code") != 0:
         return {"hook_present": False}
 
+    # #3966: one hook gates every cron schedule on the agent; tell it which
+    # one is firing. Only the fields the caller passed are exported.
+    schedule_env = {
+        name: value
+        for name, value in {
+            "TRINITY_SCHEDULE_ID": schedule_id,
+            "TRINITY_SCHEDULE_NAME": schedule_name,
+            "TRINITY_SCHEDULE_MESSAGE": schedule_message,
+        }.items()
+        if value is not None
+    }
     result = await execute_command_in_container(
         container_name=container_name,
         command=HOOK_PATH,
         timeout=EXEC_TIMEOUT_S,
+        environment=schedule_env or None,
     )
     # `output` from container_exec_run is the combined stream — keep
     # `stdout`/`stderr` as separate fields for forward-compat.

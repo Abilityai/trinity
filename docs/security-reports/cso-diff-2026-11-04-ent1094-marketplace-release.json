@@ -1,0 +1,44 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-04",
+  "mode": "diff",
+  "scope": "trinity-enterprise#1094",
+  "phases_run": [
+    0,
+    1,
+    2,
+    5,
+    8,
+    12,
+    13,
+    14
+  ],
+  "stack_cve_quicklist": [],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_scripts": 4
+  },
+  "findings": [],
+  "hypotheses": [
+    {
+      "title": "accept-new trusts the first host key of a throwaway droplet",
+      "disposition": "accepted"
+    }
+  ],
+  "coverage_gaps": [
+    "phases 3,4,6,7,9,10,11: no diff overlap",
+    "mp-submit real PATCH and mp-build real build not run",
+    "skill commands run for Step 1 only"
+  ],
+  "supply_chain_summary": {
+    "scanner": "none: no dependency changes"
+  },
+  "filter_stats": {},
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "none"
+}

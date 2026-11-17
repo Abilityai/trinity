@@ -42,7 +42,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 import { readStoredToken } from './utils/platformSession'
@@ -58,7 +58,15 @@ const helpLauncherHidden = computed(() =>
   (route.meta.hideHelpLauncherOnTabs || []).includes(route.query.tab)
 )
 const themeStore = useThemeStore()
-const { connect } = useWebSocket()
+const { followToken } = useWebSocket()
+
+// #3445: the real-time socket follows the platform session, not the page load.
+// It used to connect once, here on mount, and only if a token was already
+// stored — so a sign-in without a reload left it (and the header dot)
+// disconnected, and a sign-out left the previous session's socket open. Every
+// sign-in path, a sibling tab's, a sign-out and a session ended elsewhere all
+// go through `authStore.token`.
+watch(() => authStore.token, (token) => followToken(token), { immediate: true })
 
 onMounted(async () => {
   // Initialize theme immediately to prevent flash
@@ -74,12 +82,11 @@ onMounted(async () => {
   // the life of the tab and the per-request interceptor in `main.js` was inert
   // on every boot with a token. Requests get their credential from
   // `applyRequestCredential` now; nothing writes the default.
+  // Setting the token here also opens the real-time socket (the watch above).
   const token = readStoredToken()
   if (token) {
     authStore.token = token
     authStore.isAuthenticated = true
-    // Connect to WebSocket for real-time updates
-    connect()
   }
 })
 </script>

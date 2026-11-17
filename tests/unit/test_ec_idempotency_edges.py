@@ -53,6 +53,7 @@ CREATE TABLE idempotency_keys (
     response_snapshot TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    claim_token TEXT,
     PRIMARY KEY (scope, idempotency_key)
 )
 """
@@ -132,7 +133,8 @@ def _seed(ops, scope, key, status, created_at, snapshot=None, execution_id=None)
     c = sqlite3.connect(ops._path)
     try:
         c.execute(
-            "INSERT INTO idempotency_keys VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO idempotency_keys (scope, idempotency_key, execution_id, status, "
+            "response_snapshot, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
             (scope, key, execution_id, status, snapshot, created_at, created_at),
         )
         c.commit()
@@ -604,14 +606,27 @@ class TestRoomsInFlightBoundary:
             posted.append(a)
             return {"seq": 1}
 
+        caller = object()
+        # Membership is decided before the claim (trinity-enterprise#719), so
+        # the caller here is a member; a non-member's answers are pinned in
+        # test_ent719_room_post_membership_first.py.
+        members = []
+
+        def _member(room_id, current_user):
+            members.append((room_id, current_user))
+            return {"id": room_id}
+
+        monkeypatch.setattr(rooms_router.service, "_require_membership", _member)
         monkeypatch.setattr(real_idem, "begin", lambda scope, key: decision)
         monkeypatch.setattr(rooms_router.service, "post_message", _post)
         from shared_sessions.models import RoomMessageCreate
-        out = asyncio.run(rooms_router.post_message(
-            "room-1", RoomMessageCreate(content="hello"),
-            idempotency_key="room-1:opt-1700000000000", current_user=object(),
-        ))
-        return out
+        try:
+            return asyncio.run(rooms_router.post_message(
+                "room-1", RoomMessageCreate(content="hello"),
+                idempotency_key="room-1:opt-1700000000000", current_user=caller,
+            ))
+        finally:
+            assert members == [("room-1", caller)]
 
     def test_completed_replay_returns_snapshot_without_posting(self, monkeypatch):
         import services.idempotency_service as real_idem

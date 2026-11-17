@@ -2,7 +2,9 @@
 VoIP telephony router (VOIP-001, #1056 — Phase 1, outbound).
 
 Surfaces:
-- Binding CRUD (owner-only): GET/PUT/DELETE /api/agents/{agent_name}/voip
+- Binding CRUD (owner-only): GET/PUT/DELETE /api/agents/{agent_name}/voip. The PUT
+  binds Twilio credentials and takes a signed-in session; DELETE and the enable
+  toggle take a person (trinity-enterprise#719). GET returns public fields only.
 - Outbound trigger (any agent-accessor): POST /api/agents/{agent_name}/voip/call
 - Media Streams WebSocket (Twilio, ticket-authed): WS /api/voip/voice/{call_id}
 
@@ -26,7 +28,14 @@ from fastapi import (
 )
 
 from database import db
-from dependencies import AuthorizedAgentByName, OwnedAgentByName, get_current_user
+from dependencies import (
+    AuthorizedAgentByName,
+    OwnedAgentByName,
+    get_current_user,
+    require_interactive,
+    require_person,
+)
+from services.tool_access_guard import assert_tool_allowed
 from models import User, VoipBindingResponse, VoipCallRequest, VoipConfigureRequest, VoipEnabledRequest
 from services import idempotency_service
 from services.settings_service import settings_service
@@ -53,7 +62,10 @@ async def _validate_twilio_credentials(account_sid: str, auth_token: str) -> dic
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(url, auth=(account_sid, auth_token))
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Could not reach Twilio API: {e}")
+        # #4284: the transport error goes to the log, never the body. The
+        # AuthToken travels as basic auth, never in the URL, so it is not in it.
+        logger.warning("Twilio credential check could not reach the Twilio API", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Could not reach Twilio API ({e.__class__.__name__} — details in backend logs)")
     if resp.status_code == 401:
         raise HTTPException(status_code=400, detail="Invalid Twilio credentials (AccountSid or AuthToken)")
     if resp.status_code != 200:
@@ -81,7 +93,11 @@ async def get_voip_binding(agent_name: OwnedAgentByName):
     )
 
 
-@auth_router.put("/{agent_name}/voip", response_model=VoipBindingResponse)
+@auth_router.put(
+    "/{agent_name}/voip",
+    response_model=VoipBindingResponse,
+    dependencies=[Depends(require_interactive)],
+)
 async def configure_voip_binding(
     agent_name: OwnedAgentByName,
     config: VoipConfigureRequest,
@@ -124,7 +140,11 @@ async def configure_voip_binding(
     )
 
 
-@auth_router.put("/{agent_name}/voip/enabled", response_model=VoipBindingResponse)
+@auth_router.put(
+    "/{agent_name}/voip/enabled",
+    response_model=VoipBindingResponse,
+    dependencies=[Depends(require_person)],
+)
 async def set_voip_enabled(
     agent_name: OwnedAgentByName,
     config: VoipEnabledRequest,
@@ -151,7 +171,7 @@ async def set_voip_enabled(
     )
 
 
-@auth_router.delete("/{agent_name}/voip")
+@auth_router.delete("/{agent_name}/voip", dependencies=[Depends(require_person)])
 async def delete_voip_binding(agent_name: OwnedAgentByName):
     """Remove the Twilio voice binding for an agent (owner-only)."""
     _require_enabled()
@@ -174,11 +194,14 @@ async def place_voip_call(
     Accepts an optional Idempotency-Key (Invariant #18) so a retried trigger
     doesn't place two calls.
     """
+    # trinity-enterprise#341: refused when this agent's tool access removes call_user.
+    assert_tool_allowed(current_user, "call_user", as_agent=agent_name)
     _require_enabled()
-    public_url = settings_service.get_setting("public_chat_url", "")
+    public_url = settings_service.get_public_chat_url_setting()
 
     # Idempotency gate (#525): a duplicate trigger must not double-dial.
-    scope = idempotency_service.make_agent_scope(agent_name)
+    # trinity-enterprise#830: a client-chosen key is scoped to its caller.
+    scope = idempotency_service.make_caller_scope(agent_name, current_user)
     idem = idempotency_service.begin(scope, idempotency_key)
     if idem.replay:
         if idem.in_flight:

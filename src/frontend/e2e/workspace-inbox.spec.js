@@ -42,11 +42,29 @@ async function firstRosterAgent(page) {
   })
 }
 
+async function accountHasNoEmail(page) {
+  return page.evaluate(async () => {
+    const res = await fetch('/api/enterprise/client-portal/my-agents', {
+      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+    })
+    return res.status === 403 && res.headers.get('x-trinity-error-code') === 'account_has_no_email'
+  })
+}
+
 test.describe('Workspace Inbox', () => {
   test('@smoke bare /workspace lands on the Inbox, with the pinned row in the sidebar', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 })
     await page.goto('/workspace')
     await page.waitForURL('**/workspace/inbox**', { timeout: 20000 })
+    // trinity#3894: an account with no email (CI's bootstrapped admin, see
+    // above) gets the "add an email" remedy instead of the shell, so the
+    // pinned row is asserted only where the Workspace can open at all.
+    if (await accountHasNoEmail(page)) {
+      await expect(page.getByTestId('workspace-account-has-no-email')).toBeVisible({ timeout: 20000 })
+      await expect(page.getByTestId('workspace-add-email')).toBeVisible()
+      await expect(page.getByTestId('sidebar-inbox')).toHaveCount(0)
+      return
+    }
     const row = page.getByTestId('sidebar-inbox')
     await expect(row).toBeVisible({ timeout: 20000 })
     await expect(row).toHaveAttribute('aria-current', 'page')

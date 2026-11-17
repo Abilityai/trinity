@@ -25,7 +25,8 @@ View, monitor, and manage task executions across all agents. Executions are crea
 | `room` | A turn inside a shared multi-agent room |
 | `a2a` | A task sent in by an external A2A orchestrator |
 | `operator_response` | An answer to a parked request waking the agent, on an agent with the ask-ending wake turned on (see [Approvals](../automation/approvals.md)) |
-| `operator_ending` | A parked request that was cancelled or expired waking the agent — one turn per agent per sweep or expiry, same switch |
+| `operator_ending` | A parked request that was cancelled or dismissed waking the agent — one turn per agent per sweep, same switch; an expiry wakes nobody |
+| `caller_wake` | A run this agent delegated to another agent ended, waking it for one turn (see [Agent Network → Wake on Ending](../collaboration/agent-network.md#concepts)) |
 | `validation` | The audit run that follows a scheduled run with post-run validation on (see [Scheduling](../automation/scheduling.md#post-run-validation)). Recorded and shown on the row, but not accepted as a `triggered_by` filter |
 | `skill_gate` | A request for a gated skill that waited for an operator's approval, run once it was approved (see [Approvals](../automation/approvals.md)) |
 
@@ -56,8 +57,8 @@ The fleet execution list lives on the **Executions** tab of the [Operations page
 1. Lists all executions across the fleet. Admins see every agent; other users see only agents they own or that are shared with them.
 2. Stat cards show Total, **Completion**, Failed, and Cost for the selected time window. Running and queued counts are always live, regardless of the window.
 3. Filter by agent, status, trigger type, time range (1h to 30d, or all time), and free-text search over task messages. The trigger drop-down offers the common triggers (schedule, manual, chat, session, agent, mcp, public, webhook, fan_out, loop); the API accepts the others too.
-4. The list loads 50 rows at a time; **Load more** appends the next page.
-5. A "N running now" strip appears whenever executions are in flight.
+4. The list loads 50 rows at a time; **Load more**, the last thing in the list, appends the next page. The list fills the window and scrolls inside its own region, so the header, tabs, stat cards and filters stay in view. A refresh keeps every row you loaded, and changing a filter returns the list to its first row.
+5. "N running now" appears in the "N shown" row whenever executions are in flight.
 6. A status dot shows **Live** when WebSocket updates are connected, or **Polling** (every 30s) as fallback.
 7. Click any execution row to open its detail page (`/agents/{name}/executions/{id}` — this route is unchanged).
 
@@ -69,10 +70,12 @@ Evaluations are written by the platform or by a human admin — never by the age
 
 An agent can read its own evaluations — seeing its own bad score is the feedback loop. Only humans with admin rights can write one.
 
+What a reader sees of **who graded** depends on who is reading. The agent's owner and admins — signed in, or using their own user-scoped MCP key — see the full grader, for example `admin:you@example.com`. Agents, other machine keys, and people the agent is only shared with see just the kind of grader: `admin`, `workspace` (a Workspace user's rating) or `operator` (an owner's preview rating), and never the person's name or email. The stored evaluation is not changed; only what each reader is shown.
+
 ### Execution Detail Page
 
 1. Displays agent name, status, timestamps, duration, cost, model used, and trigger source.
-2. Shows who or what initiated the run, including scheduler-triggered executions.
+2. Shows who or what initiated the run, including scheduler-triggered executions. A task sent in by an agent on another Trinity instance over AAuth shows its identity as **AAuth Caller** (`aauth:<agent>@<host>`, `a2a_caller_identity` on the API).
 3. Shows the full transcript/log of the execution.
 4. **Tool calls** are recorded as a summary — which tools ran and how often — not as a second copy of the transcript.
 5. For running executions, a green pulsing "Live" indicator streams output in real time.
@@ -86,7 +89,7 @@ Durations are always non-negative, and a run that ends through a recovery path (
 ![Agent Tasks tab showing execution history, success rate, total cost, and average duration](../../screenshots/agent-tasks.png)
 
 1. Open agent detail and click the **Tasks** tab.
-2. Enter a task message. Optionally select a model.
+2. Enter a task message. Optionally select a model. The **Timeout** options stop at the agent's execution timeout, which the label names; the cap itself is offered, and a remembered longer choice comes back if the cap is raised.
 3. Click **Send** to start the execution.
 4. View execution history with status and duration.
 5. A green pulsing "Live" badge links directly to the running execution.
@@ -97,6 +100,7 @@ Durations are always non-negative, and a run that ends through a recovery path (
 - Stop running executions via the **Stop** button on the detail page.
 - The system sends SIGINT first, then SIGKILL if the process does not exit.
 - Queue slots are released and activity is tracked.
+- A stopped run records *Execution terminated by user* as its error, including on an agent that takes work from the durable queue; any reply it had produced is kept as its response.
 
 ### Work in the Workspace
 

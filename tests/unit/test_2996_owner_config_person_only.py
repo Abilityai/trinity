@@ -87,6 +87,7 @@ _STOPPED = SimpleNamespace(status="exited", attrs={"Config": {"Labels": {}}})
 
 
 _READONLY_NAME = "services.agent_service.read_only"
+_TOOL_ACCESS_NAME = "services.agent_service.tool_access"
 
 
 def _stub_containers(monkeypatch):
@@ -111,6 +112,13 @@ def _stub_containers(monkeypatch):
         mod = importlib.import_module(_READONLY_NAME)
     monkeypatch.setitem(sys.modules, _READONLY_NAME, mod)
     monkeypatch.setattr(mod, "get_agent_container", stub)
+    # trinity-enterprise#341: the tool-access write looks its container up too.
+    ta = sys.modules.get(_TOOL_ACCESS_NAME)
+    if not (isinstance(ta, ModuleType) and (getattr(ta, "__file__", "") or "").endswith("tool_access.py")):
+        monkeypatch.delitem(sys.modules, _TOOL_ACCESS_NAME, raising=False)
+        ta = importlib.import_module(_TOOL_ACCESS_NAME)
+    monkeypatch.setitem(sys.modules, _TOOL_ACCESS_NAME, ta)
+    monkeypatch.setattr(ta, "get_agent_container", stub)
 
 
 @pytest.fixture
@@ -371,14 +379,23 @@ CONFIG_WRITES = {
         read=lambda: db.get_guardrails_config(AGENT),
         expected_after={"max_turns_chat": 42},
     ),
+    # trinity-enterprise#341: the profile composes read-only + guardrails, so it
+    # carries their gate (grantable on a sibling, person-only on itself).
+    "tool-access": _ConfigWrite(
+        "tool-access",
+        seed=lambda: db.set_guardrails_config(AGENT, {"max_turns_chat": 7}),
+        body={"profile": "workspace_only"},
+        read=lambda: (db.get_guardrails_config(AGENT).get("tool_access") or {}).get("profile"),
+        expected_after="workspace_only",
+    ),
 }
 
 WRITE_IDS = sorted(CONFIG_WRITES)
 # trinity-enterprise#164: these five are `agents.manage`-grantable — an agent
 # holding the grant may change them; one without it gets the NAMED refusal.
-GRANTABLE = {"read-only", "resources", "timeout", "public-channel-model", "guardrails"}
+GRANTABLE = {"read-only", "resources", "timeout", "public-channel-model", "guardrails", "tool-access"}
 # #3236 review: grantable on a sibling, person-only on the holder itself.
-SELF_PERSON_ONLY = {"read-only", "guardrails"}
+SELF_PERSON_ONLY = {"read-only", "guardrails", "tool-access"}
 
 
 def _is_capability_refusal(res) -> bool:
@@ -506,8 +523,8 @@ class TestConfigWritesEveryOtherPrincipal:
 
 
 def test_every_write_in_the_file_is_person_gated():
-    """The eight writes above plus autonomy are every PUT in agent_config.py —
-    a ninth would need a row here (and the route census names it too). The
+    """The nine writes above plus autonomy are every PUT in agent_config.py —
+    a tenth would need a row here (and the route census names it too). The
     ent#164 grant route is admin-and-interactive, pinned by its own suite."""
     puts = sorted(
         r.path.rsplit("/", 1)[-1]

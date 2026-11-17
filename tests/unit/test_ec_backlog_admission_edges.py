@@ -628,22 +628,30 @@ def test_d12_equal_queued_at_each_row_dequeued_exactly_once(ops):
     assert ops.claim_next_queued("alpha") is None
 
 
-def test_d13_released_claim_loses_its_head_position_characterisation(ops):
-    """D13 — UNSPECIFIED, pinned. ``release_claim_to_queued`` restores
-    ``queued_at`` from ``started_at``, but ``claim_next_queued`` overwrote
-    ``started_at`` with the claim time. So a row released by the drain's
-    re-acquire race re-enters BEHIND rows queued before that claim (and its 24h
-    TTL clock restarts). Whether that is intended (cf. ``requeue_expired_lease``
-    which sends a redelivery to the back on purpose) is a human decision; this
-    test makes any change to it visible."""
+def test_d13_released_claim_keeps_its_head_position(ops):
+    """D13 — SPECIFIED by #4257; this pinned the behaviour before the ruling.
+
+    It used to read the other way: ``claim_next_queued`` nulled ``queued_at``
+    and ``release_claim_to_queued`` rebuilt it from ``started_at`` (the claim
+    time), so a row released by the drain's re-acquire race re-entered BEHIND
+    rows queued after it, with its 24h TTL clock restarted. #4257 made the
+    call: a claim now PRESERVES ``queued_at``, and the release coalesces
+    instead of overwriting, so a released row keeps the admission instant it
+    was actually admitted at — its FIFO place and its TTL clock with it. The
+    deliberate contrast is ``requeue_expired_lease``, which still sends a
+    redelivery to the back on purpose; losing a place is a decision a path
+    makes, not an accident of which column the value was rebuilt from.
+    """
     now = datetime.now(timezone.utc)
-    _row("d13-a", status="queued", queued_at=_iso(now - timedelta(seconds=20)))
+    original = _iso(now - timedelta(seconds=20))
+    _row("d13-a", status="queued", queued_at=original)
     _row("d13-b", status="queued", queued_at=_iso(now - timedelta(seconds=10)))
     assert ops.claim_next_queued("alpha")["id"] == "d13-a"
     assert ops.release_claim_to_queued("d13-a") is True
     q = _hscalar("SELECT queued_at FROM schedule_executions WHERE id='d13-a'")
-    assert q > _iso(now - timedelta(seconds=20))  # original position not restored
-    assert ops.claim_next_queued("alpha")["id"] == "d13-b"
+    assert q == original  # the original admission instant, not the claim time
+    # So it is still the head: the row that waited longest is claimed first.
+    assert ops.claim_next_queued("alpha")["id"] == "d13-a"
 
 
 def test_d13b_release_of_a_non_running_row_is_a_noop(ops):
@@ -867,7 +875,8 @@ def test_a1_max_chain_depth_clamps_int_rows(stored, effective):
 
 @pytest.mark.parametrize("key", [None, ""], ids=["A13-none", "A13-empty"])
 def test_a13_begin_task_idempotency_no_key_is_no_replay(key):
-    idem, replay = _DISPATCH.begin_task_idempotency(name="agent1", idempotency_key=key)
+    idem, replay = _DISPATCH.begin_task_idempotency(
+        name="agent1", idempotency_key=key, current_user=types.SimpleNamespace(id=1, agent_name=None))
     assert replay is None and idem.enabled is False
 
 
@@ -875,7 +884,8 @@ def test_a13b_begin_task_idempotency_replay_carries_snapshot():
     isvc = MagicMock()
     isvc.begin.return_value = _idem(replay=True, in_flight=False)
     with patch.object(_DISPATCH, "idempotency_service", isvc):
-        idem, replay = _DISPATCH.begin_task_idempotency(name="agent1", idempotency_key="k")
+        idem, replay = _DISPATCH.begin_task_idempotency(
+            name="agent1", idempotency_key="k", current_user=types.SimpleNamespace(id=1, agent_name=None))
     assert replay.execution_id == "prior" and replay.snapshot == {"x": 1}
     assert replay.in_flight is False
 

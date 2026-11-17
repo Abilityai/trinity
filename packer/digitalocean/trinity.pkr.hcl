@@ -1,6 +1,6 @@
 # DigitalOcean Marketplace 1-Click snapshot for Trinity (#2281).
 #
-# Build:  packer build -var "do_token=$DIGITALOCEAN_TOKEN" -var "image_tag=v0.9.1" trinity.pkr.hcl
+# Build:  PKR_VAR_do_token=$DIGITALOCEAN_TOKEN packer build -var "image_tag=v0.9.1" trinity.pkr.hcl
 #
 # The snapshot is BUILT from prebuilt GHCR images (#2280) rather than from
 # source. A 1-Click that spends 5-10 minutes compiling the agent base image on
@@ -74,9 +74,15 @@ variable "ssh_private_key_file" {
   description = "Private key matching ssh_key_id. Required when ssh_key_id is set."
 }
 
+# scripts/mp-build.sh sets a per-run tag so a failed build deletes only its own droplet.
+variable "run_tag" {
+  type    = string
+  default = ""
+}
+
 variable "region" {
   type    = string
-  default = "nyc3"
+  default = "sfo2"
 }
 
 # The build droplet's CPU and RAM do NOT reach the snapshot — a snapshot is a
@@ -159,6 +165,8 @@ source "digitalocean" "trinity" {
   # back to importing a temporary key, which is the pre-existing behaviour.
   ssh_key_id           = var.ssh_key_id
   ssh_private_key_file = var.ssh_private_key_file
+
+  tags = var.run_tag == "" ? [] : [var.run_tag]
 }
 
 build {
@@ -213,22 +221,11 @@ build {
     scripts = ["scripts/90-cleanup-and-check.sh"]
   }
 
-  # Record the snapshot id, then offer it to the Vendor Portal. A `post-processors`
-  # (plural) block runs its members as a CHAIN, which is required here: shell-local
-  # reads the file manifest writes. Declaring two sibling `post-processor` blocks
-  # would run them in parallel and the submit would race the manifest.
-  #
-  # mp-submit.sh is a no-op unless TRINITY_DO_APP_ID is set, so a plain
-  # `packer build` still just builds. See the header of that script.
-  post-processors {
-    post-processor "manifest" {
-      output     = "manifest.json"
-      strip_path = true
-    }
-
-    post-processor "shell-local" {
-      environment_vars = ["TRINITY_IMAGE_TAG=${var.image_tag}"]
-      inline           = ["bash scripts/mp-submit.sh"]
-    }
+  # Records the snapshot id for scripts/mp-build.sh. A build never submits:
+  # scripts/boot-check.sh tests the snapshot first, then scripts/mp-submit.sh
+  # takes its id.
+  post-processor "manifest" {
+    output     = "manifest.json"
+    strip_path = true
   }
 }

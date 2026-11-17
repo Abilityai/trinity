@@ -178,3 +178,17 @@ export function filterGrants(grants, query) {
       String(g?.skill_name || '').toLowerCase().includes(needle)
   )
 }
+
+/**
+ * trinity-enterprise#736 — the Skill picker's options from the library
+ * listing. A native `<option>` cannot hold a badge, so a deprecated skill is
+ * marked in its text; the value stays the name, so the grant form's rules
+ * (`grantFormState`, `isDuplicateGrant`) see exactly what they saw before.
+ * Same order as the picker always had (code-unit sort).
+ */
+export function skillOptions(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter((s) => s && typeof s.name === 'string')
+    .map((s) => ({ name: s.name, label: s.deprecated === true ? `${s.name} (deprecated)` : s.name }))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+}

@@ -183,6 +183,8 @@ export function usePortalAgentPage(agentName, timeWindow) {
     ratings: computed(() => page.value?.ratings || { up: 0, down: 0, total: 0, unavailable: false }),
     header: computed(() => page.value?.header || null),
     capabilities: computed(() => page.value?.capabilities || []),
+    // trinity-enterprise#584: `unavailable` = the briefing never got an answer.
+    capabilitiesState: computed(() => page.value?.capabilities_state || 'ready'),
     recentWork: computed(() => page.value?.recent_work || []),
   }
 }

@@ -252,7 +252,7 @@ def test_the_route_is_under_the_portal_principal_and_refuses_a_portal_token_firs
     with pytest.raises(HTTPException) as exc:
         _run(router.portal_voice_start(
             AGENT, PortalVoiceStartRequest(portal_session_id=THREAD), request=MagicMock(),
-            principal=PortalPrincipal("client@example.com", False), token="t",
+            response=MagicMock(), principal=PortalPrincipal("client@example.com", False), token="t",
         ))
     assert exc.value.status_code == 404
     src = (_BACKEND / "client_portal" / "router.py").read_text()
@@ -663,8 +663,10 @@ def test_save_transcript_writes_once_and_skips_an_empty_session():
 def test_the_websocket_persists_a_workspace_call_through_the_portal_module_only():
     src = (_BACKEND / "routers" / "voice.py").read_text()
     ws = src[src.index("async def voice_websocket"):src.index("async def _get_voice_system_prompt")]
-    # JWT before the session lookup (no 4004-vs-4001 oracle).
-    assert ws.index("jwt.decode(token") < ws.index("voice_service.get_session(voice_session_id)")
+    # Authentication before the session lookup (no 4004-vs-4001 oracle); since
+    # trinity-enterprise#595 that is the first-frame ticket, not a URL JWT.
+    assert ws.index("authenticate_voice_socket(websocket, voice_session_id)") < ws.index("voice_service.get_session(voice_session_id)")
+    assert "jwt.decode(" not in ws
     # Turn-by-turn persistence is registered only for a portal-bound session…
     assert "from client_portal.voice import persist_voice_turn" in ws
     assert "on_turn=on_turn" in ws

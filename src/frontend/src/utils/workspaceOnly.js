@@ -43,9 +43,18 @@ export function isWorkspaceOnlyRole(role) {
   return role === 'user'
 }
 
-/** The pages a member may stay on: the Workspace, a shared canvas, a public chat. */
+/** The terms page (trinity-enterprise#1054): a member accepts there before the
+ *  Workspace answers, so the floor's redirect must leave them on it. */
+export const TERMS_PATH = '/terms'
+
+export function isTermsPath(path) {
+  return (path || '').split(/[?#]/)[0] === TERMS_PATH
+}
+
+/** The pages a member may stay on: the Workspace, a shared canvas, a public
+ *  chat, the terms page. */
 function isMemberPage(path) {
-  return isWorkspacePath(path) || isSharedCanvasPath(path) || isPublicChatPath(path)
+  return isWorkspacePath(path) || isSharedCanvasPath(path) || isPublicChatPath(path) || isTermsPath(path)
 }
 
 /** An operator URL's Workspace counterpart: an agent page opens that agent's
@@ -92,6 +101,8 @@ export function canvasReturnPath(raw) {
 export function operatorRouteRedirect(to, role) {
   if (!isWorkspaceOnlyRole(role)) return null
   if (!to?.meta?.requiresAuth && !to?.meta?.operatorSurface) return null
+  // The one signed-in page outside the Workspace a member must reach (ent#1054).
+  if (isTermsPath(to.path)) return null
   return workspaceLocationFor(to.path)
 }
 

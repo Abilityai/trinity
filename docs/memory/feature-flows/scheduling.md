@@ -463,9 +463,9 @@ executions?limit=100              AuthorizedAgent dependency         SELECT (spe
 | GET | `/api/agents/{name}/executions/{id}` | Get specific execution (full) | schedules.py:462 | AuthorizedAgent |
 | GET | `/api/agents/{name}/executions/{id}/log` | Get execution log | schedules.py:309 | AuthorizedAgent |
 | GET | `/api/agents/scheduler/status` | Scheduler status (admin) | schedules.py:354 | Admin only |
-| POST | `/api/agents/{name}/schedules/{id}/webhook` | Generate/rotate webhook token | schedules.py:474 | CurrentUser |
-| GET | `/api/agents/{name}/schedules/{id}/webhook` | Get webhook status and URL | schedules.py:511 | AuthorizedAgent |
-| DELETE | `/api/agents/{name}/schedules/{id}/webhook` | Revoke webhook token | schedules.py:537 | CurrentUser |
+| POST | `/api/agents/{name}/schedules/{id}/webhook` | Generate/rotate webhook token | schedules.py:694 | Person or `schedules.manage` holder, then AuthorizedAgent (trinity-enterprise#719) |
+| GET | `/api/agents/{name}/schedules/{id}/webhook` | Get webhook status and URL | schedules.py:746 | Person or `schedules.manage` holder, then AuthorizedAgent (trinity-enterprise#719) |
+| DELETE | `/api/agents/{name}/schedules/{id}/webhook` | Revoke webhook token | schedules.py:867 | Person or `schedules.manage` holder, then AuthorizedAgent (trinity-enterprise#719) |
 
 ### Access Control Pattern
 
@@ -725,7 +725,7 @@ stored-invalid rows — the backend 400 is no longer the first feedback (design-
 ## Dependencies
 
 **Python packages** (docker/backend/Dockerfile):
-- `apscheduler==3.11.0` - Async job scheduler. `docker/scheduler/requirements.txt` pins the SAME version (#1823): the backend validates by constructing the `CronTrigger` the scheduler will register, so a floor on one side lets validator and executor resolve different parsers
+- `apscheduler==3.11.3` - Async job scheduler (3.11.1+ fixes the DST fall-back bug, #3940). `docker/scheduler/requirements.txt` pins the SAME version (#1823): the backend validates by constructing the `CronTrigger` the scheduler will register, so a floor on one side lets validator and executor resolve different parsers
 - `croniter==5.0.1` - Cron expression parsing
 - `pytz==2024.2` - Timezone support. **Not the authoritative resolver** — pytz bundles its own complete tz database, while APScheduler's `astimezone()` re-resolves the zone through the stdlib `zoneinfo` (#1823)
 - `tzdata==2026.3` (+ the `tzdata-legacy` apt package) - The IANA database `zoneinfo` reads. `tzdata-legacy` carries the *backward-compatibility links* (`Europe/Kiev` → `Europe/Kyiv`), split out of `tzdata` in Debian trixie; without it every schedule stored under a legacy alias fails to register (#1823). Guarded by `tests/unit/test_1823_tz_capability_parity.py`

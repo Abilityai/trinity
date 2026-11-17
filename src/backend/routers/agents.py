@@ -10,6 +10,7 @@ Related routers (same /api/agents prefix):
 - agent_rename.py  — rename endpoint
 - agent_ssh.py     — SSH access
 """
+import asyncio
 import json
 import logging
 import random
@@ -36,7 +37,8 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, capability_fence
+from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence, ops_write_route, require_admin_allowing, assert_not_share_viewer, OPS_WRITE_SCOPE, require_admin, require_person
+from services.tool_access_guard import assert_tool_allowed
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -45,7 +47,9 @@ from services.docker_utils import (
     container_stop, container_remove,
 )
 from services import heartbeat_service
+from services import wake_policy
 from services import idempotency_service
+from services import template_source_policy
 from services.platform_audit_service import (
     platform_audit_service,
     AuditEventType,
@@ -75,7 +79,7 @@ from services.agent_service import (
     # Autonomy (global view)
     get_all_autonomy_status_logic,
 )
-from utils.helpers import utc_now_iso
+from utils.helpers import sanitize_agent_name, utc_now_iso
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -479,6 +483,8 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
             "template": None,
             "runtime": "claude-code",
             "base_image_version": None,
+            # trinity-enterprise#1007: no container, no `trinity.kind` label.
+            "kind": None,
             # Signal to the UI that this agent has no container yet —
             # recovered (or otherwise container-less). Drives a
             # "Start to bring online" affordance instead of the normal
@@ -502,10 +508,21 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
     # edit and the surfaces disagree (§1.3.1 FR-3). One extra read; not the list
     # path, so a per-agent call is fine here.
     agent_dict["display_label"] = db.get_display_label(agent_name)
+    # #3872: whether a repository is bound, known at first paint. The header
+    # reserves its GitHub row on this so the live git status (an exec into the
+    # running container, seconds later) cannot push the tab strip down when it
+    # lands. The template string cannot be the signal — an agent deployed
+    # locally and bound afterwards carries a `local:` label (or none, #1811) —
+    # but the persisted git config is exactly what `_reconstruct_template_id`
+    # already treats as "GitHub-backed". One read, like the label above.
+    agent_dict["git_configured"] = db.get_git_config(agent_name) is not None
     agent_dict["can_delete"] = db.can_user_delete_agent(current_user.username, agent_name)
     agent_dict["autonomy_enabled"] = db.get_autonomy_enabled(agent_name)
     read_only_data = db.get_read_only_mode(agent_name)
     agent_dict["read_only_enabled"] = read_only_data["enabled"]
+    # trinity-enterprise#341: the header's Read-only toggle is ON for Strict only.
+    from services.agent_service.tool_access import tool_access_profile_for
+    agent_dict["tool_access_profile"] = tool_access_profile_for(agent_name)
 
     # Avatar URL (AVATAR-001)
     identity = db.get_avatar_identity(agent_name)
@@ -542,8 +559,10 @@ async def _require_create_capability(request: Request, current_user, config) -> 
     if getattr(config, "ephemeral", None):
         return
     from dependencies import enforce_agent_capability
+    # The slug `create_agent_internal` will use, not the raw body: the audit row
+    # names an agent that can exist, and a raw name can carry what a row must not.
     await enforce_agent_capability(request, current_user, "agents.manage",
-                                   target=getattr(config, "name", None))
+                                   target=sanitize_agent_name(getattr(config, "name", None) or "") or None)
 
 
 @router.post("")
@@ -565,6 +584,10 @@ async def create_agent_endpoint(
     """
     # Before the idempotency claim: a refused create must not hold a key.
     await _require_create_capability(request, current_user, config)
+    # trinity-enterprise#591: the template-source bound, ghosts included. Again
+    # inside `create_agent_internal` (the choke point); here so a refused create
+    # holds no claim.
+    await template_source_policy.enforce(request, current_user, config)
     idem = None
     if idempotency_key:
         scope = f"agent_create:{current_user.id}"
@@ -665,6 +688,9 @@ async def deploy_local_agent(
     branch. The scope folds the caller (another user's identical key must
     never replay a foreign deploy response).
     """
+    # trinity-enterprise#591: an upload is never on the allowlist, so a bounded
+    # caller is refused before the claim and before the archive is extracted.
+    await template_source_policy.enforce(request, current_user, upload=True)
     idem = None
     if idempotency_key:
         scope = f"agent_deploy:{current_user.id}"
@@ -859,6 +885,7 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
         target_type="agent",
         target_id=agent_name,
         endpoint=request.scope["path"],
+        request_id=getattr(request.state, "request_id", None),
     )
 
     if manager:
@@ -876,13 +903,24 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
 # ============================================================================
 
 @router.post("/{agent_name}/start")
+@ops_write_route(
+    "#3180: starts one agent; the target policy refuses the system agent and "
+    "ephemeral agents, and a start that would mint the agent a key is refused"
+)
 async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request, current_user: CurrentUser):
     """Start an agent."""
     # trinity-enterprise#69 Part 2: agent-scoped callers manage only agents
     # they spawned (interim until #948 capability tokens).
     enforce_agent_spawn_scope(current_user, agent_name)
     try:
-        result = await start_agent_internal(agent_name)
+        # #3180: an ops_write key may not undo a person's containment, so its
+        # start never mints the agent a key (409 ops_write_would_mint_key).
+        # `getattr(..., None)` as in `enforce_agent_spawn_scope`: the default can
+        # only mean "not an ops_write key", and the resolver always sets it.
+        result = await start_agent_internal(
+            agent_name,
+            allow_key_mint=getattr(current_user, "mcp_scope", None) != OPS_WRITE_SCOPE,
+        )
         invalidate_context_stats_cache()  # PERF-269
         credentials_status = result.get("credentials_injection", "unknown")
         credentials_result = result.get("credentials_result", {})
@@ -965,6 +1003,10 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
 
 
 @router.post("/{agent_name}/stop")
+@ops_write_route(
+    "#3180: stops one agent; the target policy refuses the system agent and "
+    "ephemeral agents"
+)
 async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request, current_user: CurrentUser):
     """Stop an agent."""
     # trinity-enterprise#69 Part 2: agent-scoped callers manage only agents
@@ -1022,9 +1064,12 @@ async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reques
 async def get_agent_logs_endpoint(
     agent_name: AuthorizedAgentByName,
     request: Request,
+    current_user: CurrentUser,
     tail: int = 100
 ):
     """Get agent container logs."""
+    # ent#875: the container's raw output interleaves every user's turns.
+    assert_not_share_viewer(current_user, agent_name)
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -1100,8 +1145,13 @@ async def force_release_agent(
 
 
 @router.post("/{agent_name}/circuit-breaker/reset")
+@ops_write_route(
+    "#3180: re-closes one agent's breakers, which re-open on the next failure; "
+    "the admin gate still runs"
+)
 async def reset_circuit_breaker_endpoint(
     agent_name: AuthorizedAgentByName,
+    request: Request,
     # ent#293/ent#297: was `require_role("admin")` — the THIRD spelling of an
     # admin gate, and the one this PR's first pass missed. `require_role`
     # rejects connector principals but NOT agent ones, deliberately: agent
@@ -1115,7 +1165,10 @@ async def reset_circuit_breaker_endpoint(
     # ROLE_HIERARCHY, so ">= admin" is "== admin") and additionally rejects
     # agent principals. Swapping this ONE call site is the fix; adding the
     # rejection to `require_role` itself would break ghost spawning.
-    current_user: User = Depends(require_admin),
+    #
+    # #3180: `require_admin_allowing("ops_write")` is the same gate with that one
+    # bounded scope opted in (census ADMIN_WIDENED); `role == "admin"` still runs.
+    current_user: User = Depends(require_admin_allowing("ops_write")),
 ):
     """Force the agent's circuit breakers to closed (#921, #526).
 
@@ -1132,6 +1185,26 @@ async def reset_circuit_breaker_endpoint(
     prior_dispatch = DispatchBreaker(agent_name).to_dict().get("state", "closed")
     reset_circuit(agent_name)
     reset_dispatch(agent_name)
+    # #3180: the most-run operator write had no audit row. Written only once
+    # both resets have returned, for every principal that reaches this route;
+    # `log` derives the key fields from the principal (#2389), so a key's reset
+    # names the key. Not conditional on DISPATCH_BREAKER_ENABLED or the
+    # per-agent toggle: the transport breaker trips with both off. Both resets
+    # are fail-open (when Redis refuses they log and return), so the row
+    # records the request, not a confirmed reset.
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="circuit_breaker_reset",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        details={
+            "prior_transport_state": prior_transport,
+            "prior_dispatch_state": prior_dispatch,
+        },
+    )
     return {
         "agent_name": agent_name,
         "prior_state": prior_transport,  # back-compat field (transport breaker)
@@ -1158,7 +1231,7 @@ async def get_circuit_breaker_endpoint(
     return {"agent_name": agent_name, **build_circuit_breaker_block(agent_name)}
 
 
-@router.put("/{agent_name}/circuit-breaker")
+@router.put("/{agent_name}/circuit-breaker", dependencies=[Depends(require_person)])
 async def set_circuit_breaker_endpoint(
     agent_name: OwnedAgentByName,
     body: CircuitBreakerConfigUpdate,
@@ -1224,7 +1297,7 @@ async def get_agent_label_endpoint(
     }
 
 
-@router.put("/{agent_name}/label")
+@router.put("/{agent_name}/label", dependencies=[Depends(require_person)])
 async def set_agent_label_endpoint(
     agent_name: OwnedAgentByName,
     body: AgentLabelUpdate,
@@ -1310,7 +1383,7 @@ async def get_mcp_exposed_endpoint(
     }
 
 
-@router.put("/{agent_name}/mcp-exposed")
+@router.put("/{agent_name}/mcp-exposed", dependencies=[Depends(require_person)])
 async def set_mcp_exposed_endpoint(
     agent_name: OwnedAgentByName,
     body: McpExposedUpdate,
@@ -1359,17 +1432,29 @@ async def get_operator_resume_endpoint(
 ):
     """Whether an operator answer re-triggers this agent (ent#329).
 
-    Default OFF. When off, an answer still reaches the agent's queue file — it is
-    simply processed at the agent's next turn, which is the behaviour every agent
-    had before this flag existed.
+    Default ON since abilityai/trinity-enterprise#1108 (an untouched agent reads
+    `enabled: true`). When an owner switches it off, an answer still reaches
+    the agent's queue file — it is simply processed at the agent's next turn.
     """
+    verdict = wake_policy.resolve(agent_name)
+    override = db.get_wake_on_ending(agent_name)
+    if not isinstance(override, bool):
+        override = None  # NULL, or no live row — neither is an owner's voice
     return {
         "agent_name": agent_name,
+        # ent#329's field, unchanged for every existing client.
         "enabled": db.get_operator_resume_enabled(agent_name),
+        # ent#1102: the tri-state the control renders, plus what it resolves to.
+        # `mode` is the owner's own voice ("default" when they have not spoken);
+        # `effective`/`source` are the answer and the layer that produced it, so
+        # a UI can say "On (instance default)" rather than inventing a reason.
+        "mode": "default" if override is None else ("on" if override else "off"),
+        "effective": verdict.enabled,
+        "source": verdict.source,
     }
 
 
-@router.put("/{agent_name}/operator-resume")
+@router.put("/{agent_name}/operator-resume", dependencies=[Depends(require_person)])
 async def set_operator_resume_endpoint(
     agent_name: OwnedAgentByName,
     body: OperatorResumeUpdate,
@@ -1385,9 +1470,20 @@ async def set_operator_resume_endpoint(
     the ent#223 consent toggle — the GET (a use) stays agent-reachable.
     """
     reject_agent_principal(current_user)
-    if not db.set_operator_resume_enabled(agent_name, body.enabled):
+    # ent#1102: the tri-state column is the switch both wake paths read, so it
+    # is written on every request — including a legacy `enabled`, because a
+    # person who moved the switch has expressed an opinion either way and the
+    # instance default must stop overriding them. The ent#329 column is written
+    # in step on every body too (it is tri-state since ent#1108, so `default`
+    # clears it to NULL): the resolver reads it as the owner's voice when the
+    # wider column is NULL, and a `mode` that left a stale 0 or 1 behind would
+    # let an older answer outvote the newer one.
+    if not db.set_wake_on_ending(agent_name, body.wake_override):
         raise HTTPException(status_code=404, detail="Agent not found")
+    db.set_operator_resume_enabled(agent_name, body.wake_override)
 
+    verdict = wake_policy.resolve(agent_name)
+    mode = body.mode if body.mode is not None else ("on" if body.enabled else "off")
     await platform_audit_service.log(
         event_type=AuditEventType.CONFIGURATION,
         event_action="operator_resume_config",
@@ -1395,9 +1491,15 @@ async def set_operator_resume_endpoint(
         actor_user=current_user,
         target_type="agent",
         target_id=agent_name,
-        details={"enabled": body.enabled},
+        details={"mode": mode, "enabled": body.enabled, "effective": verdict.enabled},
     )
-    return {"agent_name": agent_name, "enabled": body.enabled}
+    return {
+        "agent_name": agent_name,
+        "enabled": verdict.enabled,
+        "mode": mode,
+        "effective": verdict.enabled,
+        "source": verdict.source,
+    }
 
 
 # ============================================================================
@@ -1434,7 +1536,7 @@ async def get_voice_replies_endpoint(
     }
 
 
-@router.put("/{agent_name}/voice-replies")
+@router.put("/{agent_name}/voice-replies", dependencies=[Depends(require_person)])
 async def set_voice_replies_endpoint(
     agent_name: OwnedAgentByName,
     body: VoiceRepliesUpdate,
@@ -1503,17 +1605,64 @@ async def send_voice_reply_endpoint(
     misses return ``{delivered: false, reason}`` (HTTP 200) so the agent falls back
     to text; an in-flight duplicate for the same turn returns 409.
     """
+    # Self-gate (mirrors reports / heartbeat): an agent-scoped key can only speak
+    # as itself; a user-scoped key already passed AuthorizedAgentByName.
+    assert_own_agent(current_user, agent_name, detail="Agent-scoped key may only speak as itself")
     import config as app_config
     from services import voice_reply_service, idempotency_service
 
-    # Self-gate (mirrors reports / heartbeat): an agent-scoped key can only speak
-    # as itself; a user-scoped key already passed AuthorizedAgentByName.
-    if current_user.agent_name and current_user.agent_name != agent_name:
-        raise HTTPException(status_code=403, detail="Agent-scoped key may only speak as itself")
-
+    # trinity-enterprise#341: refused when this agent's tool access removes send_voice_reply.
+    assert_tool_allowed(current_user, "send_voice_reply")
     execution = db.get_execution(body.execution_id)
     if not execution or execution.agent_name != agent_name:
         return {"delivered": False, "reason": "execution_not_found"}
+    # trinity-enterprise#1062: a voice note goes to the conversation of the turn
+    # the agent is IN. A run that is not running is never that turn, so nothing
+    # is sent; the agent answers in text, which reaches the right conversation.
+    if (getattr(execution, "status", None) or "").lower() != TaskExecutionStatus.RUNNING.value:
+        return {"delivered": False, "reason": "turn_not_live",
+                "guidance": "That run is not running, so no voice note was sent. Reply in text."}
+
+    # ent#700: an explicit address is the proactive path — any trigger (a
+    # schedule, a loop, a delegated child) may use it, because the service puts
+    # it through the proactive-text gates (consent, rate limit, audit). It is
+    # decided before the conversation-based branches below, which exist only
+    # because the in-session route has no consent check of its own.
+    if body.recipient_email or body.to:
+        from services import role_addressing
+
+        try:
+            recipient = role_addressing.resolve_single_recipient(
+                agent_name,
+                to=body.to,
+                recipient_email=str(body.recipient_email) if body.recipient_email else None,
+                noun="voice note",
+                surface="voice",
+                by_agent_key=bool(current_user.agent_name),
+            )
+        except role_addressing.RecipientRefused as e:
+            # Fail-soft like every other voice refusal; names the role, never a person.
+            return {
+                "delivered": False,
+                "channel": body.channel,
+                "reason": e.detail["code"],
+                "role": e.detail.get("role"),
+                "guidance": e.detail["message"] + " No voice note was sent; reply with text.",
+            }
+        try:
+            result = await voice_reply_service.send_proactive_voice(
+                agent_name,
+                recipient,
+                body.channel,
+                body.text,
+                execution_id=body.execution_id,
+                dedup_label=body.dedup_label or "",
+                idempotency_key=body.idempotency_key,
+                idempotency_ttl=body.idempotency_ttl,
+            )
+        except idempotency_service.EffectInProgressError:
+            raise HTTPException(status_code=409, detail="A voice note to this recipient is already being sent")
+        return _voice_result(result)
 
     # Only user-facing channel turns have a deliverable voice destination.
     channel = execution.source_channel or execution.triggered_by
@@ -1567,9 +1716,29 @@ async def send_voice_reply_endpoint(
             ),
         }
     if channel not in ("telegram", "slack", "whatsapp"):
-        return {"delivered": False, "channel": channel, "reason": "not_a_channel_turn"}
+        # trinity#2999 AC 3: name the constraint and the way out, not just the trigger.
+        return {
+            "delivered": False,
+            "channel": channel,
+            "reason": "not_a_channel_turn",
+            "guidance": (
+                "This turn has no Telegram, Slack or WhatsApp conversation to reply into, "
+                "so the voice note has nowhere to go. To speak to a person, call "
+                "send_voice_reply again with `to` (a role, usually `primary`, the person "
+                "you serve) and channel (telegram or whatsapp), or with recipient_email in "
+                "place of `to`; they must have opted in to proactive messages from you. "
+                "Otherwise reply with text."
+            ),
+        }
     if not execution.source_channel_chat_id:
         return {"delivered": False, "channel": channel, "reason": "no_destination"}
+    # The other half of the ledger rule (ent#926): while another live turn on
+    # this agent would speak into a different conversation, nothing tells the
+    # two apart, so no voice note is sent and the agent answers in text.
+    if await asyncio.to_thread(voice_reply_service.another_live_destination, agent_name, execution):
+        return {"delivered": False, "channel": channel, "reason": "turn_ambiguous",
+                "guidance": ("Another conversation on this agent is live right now, so this voice note could "
+                             "not be matched to yours and was not sent. Reply in text.")}
 
     try:
         result = await voice_reply_service.send_voice_reply(
@@ -1584,7 +1753,22 @@ async def send_voice_reply_endpoint(
     except idempotency_service.EffectInProgressError:
         raise HTTPException(status_code=409, detail="A voice note for this turn is already being sent")
 
-    return {"delivered": result.delivered, "channel": result.channel, "reason": result.reason}
+    return _voice_result(result)
+
+
+def _voice_result(result) -> dict:
+    """The voice-reply wire shape: ``{delivered, channel, reason}`` plus
+    ``guidance`` / ``max_chars`` and the ent#665 fields only when the service set them."""
+    out = {"delivered": result.delivered, "channel": result.channel, "reason": result.reason}
+    if getattr(result, "guidance", None):
+        out["guidance"] = result.guidance
+    if getattr(result, "max_chars", None):
+        out["max_chars"] = result.max_chars
+    # ent#665: present only when the request carried an idempotency_key.
+    for k in ("sent", "suppressed_by", "first_sent_at", "first_execution_id"):
+        if getattr(result, k, None) is not None:
+            out[k] = getattr(result, k)
+    return out
 
 
 # ============================================================================
@@ -1661,6 +1845,32 @@ def _jittered_retry_after(base_seconds: int) -> int:
     backoff edge and re-storm in lockstep when the hint elapses. Floored at 1."""
     base = max(1, int(base_seconds))
     return max(1, int(random.uniform(base * 0.5, base * 1.5)))
+
+
+@router.get("/{agent_name}/executions/{execution_id}/turn-tier")
+async def agent_execution_turn_tier(agent_name: str, execution_id: str, request: Request):
+    """Which tier a running turn acts for (trinity-enterprise#926).
+
+    Asked by the guard hook inside the agent container before a file tool
+    reaches a path the shared policy keeps at owner tier or a shell command
+    runs, and by the Gemini/Codex runtimes before a turn starts. Same auth as the
+    heartbeat: the agent's OWN agent-scoped MCP key, nothing else. A turn that
+    is not found, or belongs to another agent, answers 404.
+    """
+    from services import turn_tier_service
+
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=403, detail="Turn tier requires the agent's own MCP key")
+    res = db.validate_mcp_api_key(auth_header[7:], track_usage=False)
+    if not heartbeat_service.authorize_heartbeat(res, agent_name):
+        raise HTTPException(status_code=403, detail="Turn tier requires the agent's own MCP key")
+    tier, kind, _ = turn_tier_service.turn_actor(db, agent_name, execution_id)
+    if tier == turn_tier_service.UNKNOWN:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    # `shell` also answers whether a Gemini/Codex runtime may run the turn.
+    # The person's identity is not part of the answer: the hook needs none.
+    return {"tier": tier, "kind": kind, "shell": turn_tier_service.shell_allowed(db, agent_name, tier, kind)}
 
 
 @router.post("/{agent_name}/executions/{execution_id}/result")

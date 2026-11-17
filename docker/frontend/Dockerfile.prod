@@ -43,9 +43,26 @@ USER root
 # Remove default nginx config
 RUN rm /etc/nginx/conf.d/default.conf
 
-# Copy custom nginx config and security headers include
-COPY --from=builder /app/nginx.conf /etc/nginx/conf.d/default.conf
+# nginx config (trinity-enterprise#873). nginx.conf is a TEMPLATE with one
+# substitution, the bridge gateway the PROXY-protocol listener trusts;
+# render-nginx.sh fills it at start and writes the result to
+# /etc/nginx/generated — the only nginx CONFIGURATION directory the
+# unprivileged runtime user can write (the template, the shared server body and
+# conf.d stay root-owned). conf.d/default.conf is a one-line include of it.
+# nginx-server.conf is the server body both listeners share.
+COPY --from=builder /app/nginx.conf /etc/nginx/trinity/nginx.conf.template
+COPY --from=builder /app/nginx-server.conf /etc/nginx/nginx-server.conf
 COPY --from=builder /app/security-headers.conf /etc/nginx/security-headers.conf
+COPY --from=builder /app/render-nginx.sh /usr/local/bin/render-nginx.sh
+# The base image leaves /etc/nginx owned by the runtime user (for its envsubst
+# templates, which this image does not use); take that back so the generated
+# directory is the only configuration the running nginx could rewrite.
+RUN chmod 0755 /usr/local/bin/render-nginx.sh \
+    && printf 'include /etc/nginx/generated/default.conf;\n' > /etc/nginx/conf.d/default.conf \
+    && chown -R root:root /etc/nginx \
+    && chmod -R go-w /etc/nginx \
+    && mkdir -p /etc/nginx/generated \
+    && chown nginx:nginx /etc/nginx/generated
 
 # Copy built assets from builder stage
 COPY --from=builder /app/dist /usr/share/nginx/html
@@ -56,8 +73,12 @@ RUN apk add --no-cache curl
 USER nginx
 
 # Unprivileged nginx binds 8080 (≥1024 needs no NET_BIND_SERVICE).
-# Host-side port 80 mapping lives in docker-compose.prod.yml.
-EXPOSE 8080
+# Host-side port 80 mapping lives in docker-compose.prod.yml. 8082 is the
+# PROXY-protocol listener (trinity-enterprise#873), published on loopback only.
+EXPOSE 8080 8082
 
-# Run nginx in foreground
-CMD ["nginx", "-g", "daemon off;"]
+# The gateway of the default ingress network; compose passes the real one.
+ENV TRINITY_PROXY_GATEWAY=172.30.0.1
+
+# Render the one-variable template, then run nginx in the foreground.
+CMD ["render-nginx.sh", "nginx", "-g", "daemon off;"]

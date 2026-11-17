@@ -42,6 +42,8 @@ a drift verdict later.
 
 ## The seam — `src/backend/services/assignment_provider.py`
 
+> **A seat change moves pending asks (trinity-enterprise#1095).** An ask's audience is stored at raise (`resolved_to`), so a provider that changes who fills a role calls `ask_service.readdress_role(agent, role, reason=ask_service.ASSIGNMENT_CHANGED)` after its write — fail-soft, through `getattr`, so an older public build without it leaves the asks as they were. Details: `workspace-inbox.md` → "A role-addressed row follows the role".
+
 `mfa_gate` / `a2a_gate` in shape: a `typing.Protocol`, a module-level
 `_provider`, `register_provider` / `get_provider` / `clear_provider`, and one
 resolve function.

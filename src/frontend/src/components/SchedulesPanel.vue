@@ -580,8 +580,12 @@
           {{ expandedSchedule === schedule.id ? 'Hide' : 'Show' }} execution history
         </button>
 
-        <!-- ent#77: Webhook configuration toggle -->
+        <!-- ent#77: Webhook configuration toggle. ent#875: a webhook URL is a bearer
+             credential, held by the schedule's creator or the agent owner; the
+             server says whether THIS viewer is one (`can_manage_webhook`) and
+             refuses the routes otherwise, so the controls are not rendered. -->
         <button
+          v-if="canManageWebhook(schedule)"
           @click="toggleWebhook(schedule)"
           class="mt-3 ml-4 text-xs text-action-primary-600 dark:text-action-primary-400 hover:text-action-primary-800 dark:hover:text-action-primary-300 inline-flex items-center"
         >
@@ -595,7 +599,7 @@
         </button>
 
         <!-- ent#77: Webhook configuration panel -->
-        <div v-if="webhookOpen === schedule.id" class="mt-3 border-t border-gray-100 dark:border-gray-700 pt-3 space-y-3 text-sm">
+        <div v-if="webhookOpen === schedule.id && canManageWebhook(schedule)" class="mt-3 border-t border-gray-100 dark:border-gray-700 pt-3 space-y-3 text-sm">
           <div v-if="wh(schedule).loading" class="py-3 space-y-2" aria-busy="true">
             <div class="h-3 w-2/3 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
             <div class="h-3 w-1/2 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
@@ -1073,7 +1077,12 @@ async function copyText(text, key) {
   }
 }
 
+// ent#875: undefined (an older backend that does not send the field) keeps the
+// controls, since the server gate is the real boundary and refuses either way.
+const canManageWebhook = (schedule) => schedule?.can_manage_webhook !== false
+
 async function toggleWebhook(schedule) {
+  if (!canManageWebhook(schedule)) return
   if (webhookOpen.value === schedule.id) { webhookOpen.value = null; return }
   webhookOpen.value = schedule.id
   if (!webhookState[schedule.id]) {

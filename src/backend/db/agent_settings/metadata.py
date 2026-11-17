@@ -4,6 +4,7 @@ Agent metadata batch queries and rename operations.
 Handles N+1 query optimization and cross-table agent rename.
 """
 
+import json
 from typing import List, Dict
 
 from sqlalchemy import select, update, text
@@ -16,6 +17,17 @@ from ..tables import (
     agent_permissions,
     agent_git_config,
 )
+
+
+def _parse_json_object(raw) -> dict:
+    """A stored JSON object column as a dict; {} when unset or malformed."""
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 class MetadataMixin:
@@ -293,6 +305,7 @@ class MetadataMixin:
                 COALESCE(ao.is_system, 0) as is_system,
                 COALESCE(ao.autonomy_enabled, 0) as autonomy_enabled,
                 COALESCE(ao.read_only_mode, 0) as read_only_enabled,
+                ao.guardrails_config,
                 COALESCE(ao.use_platform_api_key, 1) as use_platform_api_key,
                 COALESCE(ao.mcp_exposed, 0) as mcp_exposed,
                 COALESCE(ao.a2a_exposed, 0) as a2a_exposed,
@@ -325,6 +338,8 @@ class MetadataMixin:
                     "is_system": bool(row["is_system"]),
                     "autonomy_enabled": bool(row["autonomy_enabled"]),
                     "read_only_enabled": bool(row["read_only_enabled"]),
+                    # trinity-enterprise#341: the profile the list toggle reads
+                    "guardrails_config": _parse_json_object(row["guardrails_config"]),
                     "use_platform_api_key": bool(row["use_platform_api_key"]),
                     "mcp_exposed": bool(row["mcp_exposed"]),
                     "a2a_exposed": bool(row["a2a_exposed"]),

@@ -82,18 +82,20 @@ def _bin(tmp_path: Path) -> Path:
 
 
 def _run(tmp_path: Path, body: str, funcs: list[str], env: dict[str, str] | None = None,
-         state: Path | None = None) -> subprocess.CompletedProcess:
+         state: Path | None = None, lock: Path | None = None) -> subprocess.CompletedProcess:
     state = state or (tmp_path / "etc-trinity")
     units = tmp_path / "units"
     units.mkdir(exist_ok=True)
     src = "\n".join(_extract(f) for f in funcs)
     src = src.replace("/etc/trinity", str(state)).replace("/etc/systemd/system", str(units))
+    src = src.replace("/run/trinity-provision.lock", str(lock or tmp_path / "provision.lock"))
     script = "\n".join([
         "set -e",
         f". '{_ENV_FILE_SH}'",
         _extract("env_value"),
         'provision_die() { echo "DIE: $1" >&2; exit 1; }',
         'provision_caddyfile() { echo "caddyfile $1 $2" >> "$CALL_LOG"; }',
+        'provision_caddyfile_writable() { return 0; }',
         src,
         body,
     ])
@@ -484,9 +486,12 @@ def _main(tmp_path, phase="refresh", held=False, pending=False, old="198.51.100.
         holder = subprocess.Popen(["flock", str(lock), "sleep", "3" if held == "briefly" else "30"])
         time.sleep(0.5)
     try:
+        # ent#873 extracted the lock into `provision_lock` (shared with the
+        # managed-host upgrade path); its path is redirected like the block's.
         r = _run(tmp_path, body, _IMDS + ["provision_on_cloud", "provision_refresh_target",
                                           "provision_refresh_apply", "provision_apply_ip",
-                                          "provision_default_provenance"], env, state)
+                                          "provision_default_provenance", "provision_lock"],
+                 env, state, lock=lock)
     finally:
         if holder:
             holder.kill()
@@ -555,6 +560,23 @@ def test_the_refresh_skips_the_banner() -> None:
 # Clients that send no SNI get the IP certificate
 # ---------------------------------------------------------------------------
 
+# The apt package's own /etc/caddy/Caddyfile, as a first boot finds it (#4149).
+_PACKAGED_DEFAULT = """# The Caddyfile is an easy way to configure your Caddy web server.
+#
+# Unless the file starts with a global options block, the first
+# uncommented line is always the address of your site.
+:80 {
+	# Set this path to your site's directory.
+	root * /usr/share/caddy
+
+	# Enable the static file server.
+	file_server
+
+	# Another common task is to set up a reverse proxy:
+	# reverse_proxy localhost:8080
+}
+"""
+
 _DOMAIN_SITE = "https://*.*, https://*.*.*, https://*.*.*.*, https://*.*.*.*.*, https://*.*.*.*.*.* {"
 
 
@@ -579,12 +601,14 @@ def _render_twice(tmp_path, active_rc: int) -> list[str]:
     cidr_fn = _extract("provision_private_cidrs")
     caddy_fn = src[src.index("provision_caddyfile() {"): src.index("\nprovision_site() {")]
     out = tmp_path / "Caddyfile"
-    out.write_text("package default\n")
+    out.write_text(_PACKAGED_DEFAULT)
     log = tmp_path / "sys.log"
     harness = (
         (cidr_fn + "\n" + caddy_fn).replace("/etc/caddy/Caddyfile", str(out))
         + "\nenv_value() { :; }\ncaddy() { :; }\n"
         + f'systemctl() {{ echo "$*" >> "{log}"; [ "$1" = is-active ] && return {active_rc}; return 0; }}\n'
+        # First boot over the apt package's default, then a re-render of the
+        # file it wrote (#4149: both read as replaceable off the file itself).
         + 'provision_caddyfile "203.0.113.10" "aws-marketplace"\necho ---- >> "' + str(log) + '"\n'
         + 'provision_caddyfile "203.0.113.10" "aws-marketplace"\n'
     )

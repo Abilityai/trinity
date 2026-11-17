@@ -16,8 +16,11 @@ Rule: every call site of ``create_operator_queue_item`` (any receiver spelling �
 facade-bypass spelling) must be listed in ``_ALLOWED_CALLERS`` keyed by
 ``(relative path, enclosing qualname)`` with a one-line justification —
 either "platform-only" (with the cadence bound that makes it so) or the
-budget seam itself. An agent-influenceable emitter must instead route through
-``operator_queue_service.create_bounded_alert``.
+budget seam itself. An agent-influenceable emitter must instead report through
+``services.platform_alerts.observe`` with a kind whose ``budgeted_type`` is
+registered (#3254: the seam composes the #1677 budget; ``create_bounded_alert``
+is a thin delegate kept for compatibility, and the #3246 ratchet counts a new
+call to it as off the seam).
 
 Scope: the OSS tree only. ``src/backend/enterprise/**`` (a private submodule,
 unmounted on public CI and differing per clone) is deliberately excluded —
@@ -53,12 +56,10 @@ _EXCLUDE_DIRS = ("enterprise/",)
 # ---------------------------------------------------------------------------
 # The classified caller inventory. Adding a create call site REQUIRES an entry
 # here (platform-only, with the cadence bound that justifies it) OR routing the
-# emitter through create_bounded_alert. This dict is also the living caller
+# emitter through platform_alerts.observe (#3254). This dict is also the living caller
 # inventory the operating-room feature flow points at.
 # ---------------------------------------------------------------------------
 _ALLOWED_CALLERS = {
-    ("client_portal/service.py", "_alert_collided_inbox"):
-        "platform-only: idempotent id per portal client's legacy dir (ent#308)",
     ("database.py", "DatabaseManager.create_operator_queue_item"):
         "the facade delegation itself (the _operator_queue_ops.create_item spelling)",
     ("database.py", "DatabaseManager.create_operator_queue_item_with_outcome"):
@@ -71,56 +72,8 @@ _ALLOWED_CALLERS = {
         "NOT platform-only — bounded instead by the #1632 depth cap, enforced ATOMICALLY "
         "per agent inside create_native_item, and by the SAME per-agent + fleet rate "
         "buckets as the file seam; every field validated at the call",
-    ("services/archive_storage.py", "_alarm_unwritable_archive_dir"):
-        "platform-only: raised from probe_archive_writability() at the start of an "
-        "archival RUN (daily maintenance cadence), and the id is bucketed per path "
-        "per UTC day — with on_conflict_do_nothing that is <=1 row/path/day even in "
-        "a restart loop; no agent input reaches it (#2205, mirrors #2216)",
-    ("services/db_backup_service.py", "DBBackupService._emit_alarm"):
-        "platform-only: edge-triggered on the durable prior-status transition "
-        "(ok->failed), plus a staleness re-alarm throttled to weekly; volume is "
-        "bound by the daily job cadence and no agent input reaches it (#2216)",
-    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_refused"):
-        "platform-only: the ent#615 sweep refused to strip a credential URL it "
-        "could not replace. Raised from a start hook / boot one-shot, so the "
-        "cadence is the platform's, and the id is bucketed per agent per UTC "
-        "day so a restart loop is <=1 row/agent/day; no agent input reaches it",
-    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_unreadable"):
-        "platform-only: the ent#615 sweep could not READ the tree it swept, so "
-        "its all-zero report is not evidence of a clean agent. Same emitters as "
-        "its refusal sibling (start hook / boot one-shot), same per-agent-per-UTC-"
-        "day bucketed id, no agent input reaches it — a SEPARATE id family "
-        "because the two need different operator action and sharing one would "
-        "let whichever fired first suppress the other all day",
-    ("services/lease_reaper_service.py", "_create_park_item"):
-        "platform-only + LOAD-BEARING: #1402 poison-park parks ONLY on a successful "
-        "create — must never be throttled (the reason a db-sink bound was rejected)",
-    ("services/operator_queue_service.py", "OperatorQueueSyncService._sync_agent"):
+    ("services/operator_queue_service/ingest.py", "IngestMixin._sync_agent"):
         "the #1632-capped agent-file ingestion seam itself (depth+rate+clamp)",
-    ("services/operator_queue_service.py", "create_bounded_alert_outcome"):
-        "the #1677 budget helper's own admit-path create (the seam itself)",
-    ("services/operator_queue_service.py", "_maybe_emit_alert_budget_episode"):
-        "the #1677 budget episode alert: cooldown-gated, bucketed reserved id",
-    ("services/retention_guard.py", "announce_refusal"):
-        "platform-only: edge-gated (fresh) + idempotent id (#1644)",
-    ("services/skill_service.py", "SkillService._announce_reconcile_refusal"):
-        "platform-only: assignment-driven, quasi-idempotent id (ent#236)",
-    ("services/skills_sync_service.py",
-     "SkillsLibrarySyncService._announce_fleet_failures"):
-        "platform-only: leader-locked, one per sync run (ent#236)",
-    ("services/sync_health_service.py", "SyncHealthService._emit_sync_failing_alert"):
-        "platform-only: edge-triggered once per failure series (2→3 crossing, #389)",
-    ("services/sync_health_service.py", "SyncHealthService._emit_git_bloat_alert"):
-        "platform-only: edge-triggered per threshold crossing (#1595)",
-    ("services/sync_health_service.py", "SyncHealthService._emit_sync_diverged_alert"):
-        "platform-only: deterministic per-episode id (sync-diverged-{agent}-"
-        "{diverged_since}), and an episode must last > 24 h before it can raise "
-        "one, so at most one per agent per day (trinity-enterprise#706)",
-    ("services/system_seed_service.py", "SystemSeedService._notify_operator"):
-        "platform-only: deterministic id ⇒ ≤1 open row per seed kind (ent#124)",
-    ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
-        "platform-only: fires only for schedules the operator enabled validation "
-        "on; cadence operator-bound (#1632 classification)",
 }
 
 
@@ -231,9 +184,9 @@ def test_every_emitter_call_site_is_classified():
         "_ALLOWED_CALLERS with a one-line platform-only justification (the "
         "emitter's volume must be platform-cadence-bound: edge-triggered, "
         "idempotent id, leader-locked, or operator-driven), OR — if an agent "
-        "can drive its volume — route it through "
-        "operator_queue_service.create_bounded_alert and register its type in "
-        "_BUDGETED_ALERT_TYPES:\n  "
+        "can drive its volume — report it through "
+        "services.platform_alerts.observe with a kind whose budgeted_type is "
+        "registered (and in _BUDGETED_ALERT_TYPES):\n  "
         + "\n  ".join(f"{p} :: {q}" for p, q in sorted(unlisted))
     )
 
@@ -253,13 +206,27 @@ def test_no_stale_allowlist_entries():
 
 def test_skill_not_found_emitter_is_routed_not_allowlisted():
     """The #1677 target must never regress to a direct create: the routed
-    emitter is absent from the allowlist by design, and its module must call
-    the budget helper."""
+    emitter is absent from the allowlist by design, and its module must report
+    through the budgeted seam.
+
+    #3254 re-pin: the seam that composes the budget is now
+    ``platform_alerts.observe`` itself, so the module must CALL it with the
+    ``"skill_not_found"`` kind — an AST call, never a mention in prose."""
     assert not any(
         p == "services/task_execution_service.py" for (p, _q) in _ALLOWED_CALLERS
-    ), "task_execution_service must route through create_bounded_alert, not be allowlisted"
-    text = (_BACKEND / "services/task_execution_service.py").read_text(encoding="utf-8")
-    assert "create_bounded_alert" in text
+    ), "task_execution_service must report through the seam, not be allowlisted"
+    tree = ast.parse((_BACKEND / "services/task_execution_service.py").read_text(encoding="utf-8"))
+    kinds = [
+        node.args[1].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "observe"
+        and _receiver_names(node.func.value) == ["platform_alerts"]
+        and len(node.args) > 1
+        and isinstance(node.args[1], ast.Constant)
+    ]
+    assert "skill_not_found" in kinds
 
 
 # ---------------------------------------------------------------------------

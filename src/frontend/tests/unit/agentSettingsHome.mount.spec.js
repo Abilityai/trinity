@@ -78,9 +78,9 @@ describe('the rail moves between panes through the URL', () => {
     expect(wrapper.get('[data-testid="pane"]').text()).toBe('general')
   })
 
-  it('lands an old ?tab=info link on General and ?tab=credentials on Storage', async () => {
+  it('lands an old ?tab=credentials link on its own Credentials pane (ent#951)', async () => {
     await mountHome('/agents/atlas?tab=credentials')
-    expect(wrapper.get('[data-testid="pane"]').text()).toBe('storage')
+    expect(wrapper.get('[data-testid="pane"]').text()).toBe('credentials')
   })
 
   it('a rail click pushes ?section= so Back returns to the previous pane', async () => {

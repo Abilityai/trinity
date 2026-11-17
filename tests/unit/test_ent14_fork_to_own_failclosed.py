@@ -156,6 +156,8 @@ def test_a_successful_read_of_a_required_template_still_refuses_without_a_fork_b
                source_metadata={"fork_to_own": "required"}, source_reason=None)
     assert exc.value.status_code == 400
     assert exc.value.detail["code"] == "FORK_TO_OWN_REQUIRED"
+    # A refusal an MCP caller can act on: its schema has no `github_pat` (ent#1007).
+    assert "MCP tools never carry a token" in exc.value.detail["error"]
 
 
 # ---------------------------------------------------------------------------

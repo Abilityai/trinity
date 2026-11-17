@@ -10,6 +10,7 @@
 - **Status**: ✅ Implemented
 - **Description**: Create agents from templates (GitHub or local) or from scratch
 - **Key Features**: Web UI, REST API, GitHub templates (`github:Org/repo`), local templates, credential schema auto-detection
+- **Name prefill from the source (trinity-enterprise#964)**: picking a GitHub source prefills the dialog's Name, and so the permanent ID it derives, with the name that source already carries: a repository's own name without the owner (`Abilityai/trinity-pm` → `trinity-pm`), or the agent name a GitHub template declares (template.yaml `name:`, exposed as the catalog entry's `agent_name`), else its repository name. A Name the person typed is never replaced; a Name still equal to the previous prefill follows the new source; an ID override is kept. Blank and local templates start empty as before. The create payload is unchanged and the backend remains the authority on sanitization.
 
 ### 1.2 Agent Start/Stop Toggle
 - **Status**: ✅ Implemented (Updated 2026-01-26)
@@ -99,6 +100,11 @@
 - **Description**: Delete agents and cleanup resources
 - **Key Features**: Container cleanup, network cleanup, cascade delete sharing records
 
+#### 1.4.1 Immediate purge primitive (abilityai/trinity-enterprise#1055)
+- **Status**: ✅ Implemented (primitive; no route of its own)
+- **Description**: A delete is a soft delete (#834) whose rows, volumes and key are kept for the retention window. Where an agent must not outlive the decision to remove it — an invited member is removed, or a half-created agent is rolled back — `services/agent_service/purge.py::purge_agent_now(agent_name, *, actor)` hard-purges it at once: container, queued and in-flight work, per-agent Redis state, every row the #816 cascade covers (sharing, permissions in both directions, the agent's MCP key), and the data volumes under both identities of a renamed agent (#1664), never a base another agent still claims.
+- **Acceptance**: the `agent_lifecycle:purge` audit row is written while the agent still exists and survives the purge; if it cannot be written nothing is destroyed (503). A person caller must pass `assert_admin` (an agent key carrying an admin owner's role is refused); `actor=None` is the platform acting on its own behalf. System agents (403) and ephemeral agents (409, they have their own discard) are refused. A Docker fault never stops the row purge; a residual volume is reclaimed by the orphan sweep (#1581). An agent with no row is a no-op. Edition-agnostic enforcement primitive: an entitled module or a later admin surface calls it. Test: `tests/unit/test_ent1055_purge_agent_now.py`.
+
 ### 1.5 Agent Logs Viewing
 - **Status**: ✅ Implemented
 - **Description**: View container logs for debugging
@@ -109,14 +115,14 @@
 - **Description**: Real-time container metrics on the agent's Overview tab (moved from the header by trinity-enterprise#887)
 - **Key Features**: CPU/memory usage, network I/O, uptime display, auto-refresh every 10 seconds
 
-### 1.7 Agent Settings home (trinity#966; trinity-enterprise#887, #888, #890, #891, #353)
-- **Status**: 🚧 In Dev — General, Guardrails, People, Storage panes built; Channels and Integrations hold only the cards the old flat Settings list carried, and point at the Sharing / Permissions / A2A / Payments tabs until their steps land
+### 1.7 Agent Settings home (trinity#966; trinity-enterprise#887, #888, #890, #891, #353, #951)
+- **Status**: 🚧 In Dev — General, Credentials, Guardrails, People, Storage panes built; Channels and Integrations hold only the cards the old flat Settings list carried, and point at the Sharing / Permissions / A2A / Payments tabs until their steps land
 - **Description**: The agent page splits into a working strip and ONE Settings home: Settings is the last tab, pinned outside the overflow menu, with a left rail of panes, each answering one question. The header keeps identity (avatar, name, id, description), running state, the autonomy chip, the Brain door and Start/Stop; trinity-enterprise#950 amended it to also show the bound GitHub repository (linked, with branch and changed / ahead / behind counts, from the live git status — nothing when no repo is bound or the agent is stopped), the tags (two chips and a counted "+N"; owners add and remove them in a dialog that reuses the Settings › General tag editor) and a small context-window chart for a running agent ("—" until there is a reading, never a 0% ring), and to drop the Workspace and Talk doors (the Workspace is in the nav; the voice call lives in its composer). trinity-enterprise#955 (operator, 2026-10-19) brought two in-place edits back to the header for owners: a pencil beside the name that edits the **display label** inline (pre-filled with the label, never the slug; Enter/blur save, Esc cancels, empty clears), and the hover overlay on the avatar (camera when there is none; change-prompt + next-emotion when one exists with an identity prompt) — the same `set-label` / `open-avatar-modal` / `cycle-emotion` events Settings › General's Identity rows emit, so the page keeps one handler per verb. The id rename stays in Settings only. The same ruling restored the pre-#3798 rows: the funding badge doubling as the subscription switcher (row 1), the autonomy and read-only toggles with the tags and the live CPU / MEM sparklines (row 2), the 7-day spend row (row 3), and the GitHub line — repo, branch, commit, changed / ahead / behind — only when a repository is connected and **without** Pull / Push / Refresh (row 4; the Git tab keeps the verbs). `AgentLiveStrip` is deleted and Overview no longer shows a strip. Nothing else.
-- **FR-1 — URL**: `?tab=settings&section=<pane>`; Back steps between panes. Legacy `?tab=` values resolve: `info → general`, `guardrails → guardrails`, `credentials`/`folders → storage`, `access → people`. A pane this viewer cannot see falls back to the first visible pane, never a blank one.
-- **FR-2 — One home per control**: no control exists in two places. General owns label/id/avatar/description/tags, runtime/model/funding, execution timeout, parallel capacity, read-only, memory/CPU, template details and the Danger zone (reset to main — only with a bound repository — and delete). Guardrails owns guardrail rules, self-change permissions (ent#756), a count of approval-gated skills linking to Skills, autonomy (read-only until the dial, PR #2984, merges), cross-model validation (entitled only) and reliability. People is the former Access tab, unchanged. Storage owns repository binding, the GitHub token, git sync, credentials, shared folders and file sharing (moved from Sharing › Distribution). The Info, Credentials, Folders and Access tabs are removed; the Git tab keeps status, changes, commits, pull and push.
+- **FR-1 — URL**: `?tab=settings&section=<pane>`; Back steps between panes. Legacy `?tab=` values resolve: `info → general`, `guardrails → guardrails`, `credentials → credentials` (trinity-enterprise#951), `folders → storage`, `access → people`. A pane this viewer cannot see falls back to the first visible pane, never a blank one.
+- **FR-2 — One home per control**: no control exists in two places. General owns label/id/avatar/description/tags, runtime/model/funding, execution timeout, parallel capacity, read-only, memory/CPU, template details and the Danger zone (reset to main — only with a bound repository — and delete). Guardrails owns guardrail rules, self-change permissions (ent#756), a count of approval-gated skills linking to Skills, autonomy (read-only until the dial, PR #2984, merges), cross-model validation (entitled only) and reliability. Credentials (trinity-enterprise#951, directly after General) is the former Credentials tab — guided setup, credential files, Quick Inject, upload, export/import; its file list never reports "not present" for an agent it could not read (stopped, or a failed read), and an agent with no `.env` gets a next action. People is the former Access tab, unchanged. Storage owns repository binding, the GitHub token, git sync, shared folders and file sharing (moved from Sharing › Distribution). The Info, Credentials, Folders and Access tabs are removed; the Git tab keeps status, changes, commits, pull and push.
 - **FR-3 — One restart banner**: every change waiting for a restart (file sharing, shared folders, memory/CPU, guardrail rules, GitHub token, funding) is named in ONE banner at the top of Settings with one Restart (or Start, when stopped) button. It keeps its footprint when nothing waits. Memory/CPU is saved and applied on the next restart — no longer an immediate restart.
 - **FR-4 — Execution timeout (ent#353)**: minutes, 1–120, default 60; out-of-range input gets a named error before any request; #929's `agent_timeout_below_active_schedules` refusal is rendered as a sentence naming the longest schedule and an "Open Schedules" button.
-- **FR-5 — Who sees what**: Settings stays owner-only (`can_share`). The system agent gets General, Guardrails and Integrations. At phone width the rail becomes a pane select; no horizontal page scroll.
+- **FR-5 — Who sees what**: Settings stays owner-only (`can_share`). The system agent gets General, Credentials, Guardrails and Integrations (Credentials since trinity-enterprise#951 — it always had the Credentials tab). At phone width the rail becomes a pane select; no horizontal page scroll.
 - **Open decision**: ent#891 asks that People hide when user management is unentitled. It is shown to every owner for now, because the pane holds OSS sharing (adding a person by email) that the Access tab offered to every owner; its entitled sections gate themselves.
 
 ---
@@ -175,6 +181,7 @@
 ### 4.2 GitHub Templates
 - **Status**: ✅ Implemented
 - **Description**: Clone via `github:Org/repo` format with PAT authentication
+- **Ref pinning (trinity#4165)**: `github:owner/repo@ref` takes the ref whole — a branch or a tag, dots included (`v1.2.0`, `releases/v1.2.0`) — and pins the clone to it. The ref is interpolated into startup.sh's eval-built clone command, so the charset stays a shell-safety barrier (`[A-Za-z0-9_./-]`) and the git ref-format shapes a dotted ref cannot take (`..`, a component starting with `.`, a trailing `.` or `.lock`) are refused, as is a leading `-` (a value at every live site today, an option to `git checkout` one shell edit away). An unusable ref is a named 400, never a silent fall-back to `main`. The three ref-existence checks the create runs before the clone accept a branch or a tag alike — the anonymous `ls-remote` (`refs/heads/<ref>` and `refs/tags/<ref>`, never `--heads`), the REST branch check (a 404 there is answered by the tag ref before the ref is called missing), and the tokened `ls-remote` re-check after a REST 403 — with the ref always a value after the URL, never an option; a branch wins over a same-named tag, as in `git clone -b`, and an annotated tag resolves to its peeled commit. A ref that is neither is 400 "Branch or tag '…' not found". A tag never pulls; re-pinning is a recreate. That holds for both pull paths: the automatic cycle records a named skip, and a manual Pull (`POST /api/agents/{name}/git/pull`, the Git tab and the `git_pull` MCP tool) is refused 400 with the reason, for every strategy including `force_reset`, before anything is fetched (trinity#4470 — the manual route used to read the detached HEAD as a branch named `HEAD` and pull the remote's default branch). Tests: `tests/unit/test_4165_github_ref_tag.py` (parser), `tests/unit/test_4165_ref_existence_checks.py` (the three checks, driven through `_validate_github_access`), `tests/unit/test_4165_pull_cycle_pinned_tag.py` (the automatic cycle), `tests/unit/test_4470_manual_pull_pinned_tag.py` (the manual route).
 
 ### 4.2.1 Admin-Configurable GitHub Templates (TMPL-001)
 - **Status**: ✅ Implemented
@@ -262,7 +269,8 @@
   - `upstream` remote auto-added in the agent workspace (credential-less, public templates) so `git pull upstream main` adopts template improvements; `GIT_UPSTREAM_REPO` env var baked at creation.
   - Fork-to-own agents are pinned to source mode (origin main = the brain) with the 15-min auto-sync heartbeat enabled (pushing to your own main is the point).
   - Create Agent modal renders templates carrying `fork_to_own` as **featured cards** (tagline surfaced from template.yaml) with destination/PAT/visibility fields.
-- **Out of scope (v1)**: MCP `create_agent` tool does not accept `fork_to_own` (tool args are audit-logged — a PAT arg would persist in plaintext); PAT expiry/rotation UX (sync-health alerts detect push failures); upstream-update UI affordance.
+- **MCP (since #4126)**: `create_agent` accepts the `fork_to_own` block minus `github_pat` (tool args land in transcripts — a PAT arg would persist there in plaintext); the backend spends the caller's saved personal token only for a signed-in session (trinity-enterprise#719), so every MCP key is refused `FORK_PAT_REQUIRED`.
+- **Out of scope (v1)**: PAT expiry/rotation UX (sync-health alerts detect push failures); upstream-update UI affordance.
 
 ### 4.5 Library Page (trinity-enterprise#263)
 - **Status**: ✅ Implemented (2026-07-31)
@@ -509,8 +517,11 @@
   use, so a single cap would be spent by activity the user cannot undo, making
   the 409's "unstar some first" advice false. Unstarring a chat that carries no
   read cursor deletes its row.
-- **Known gap**: rooms report `unread: 0`. A room keeps its own seq cursor, and
-  reconciling the two cursor models is follow-up work; stars work for both kinds.
+- **Rooms (trinity-enterprise#959)**: a room's unread is counted on the same per-viewer
+  timestamp cursor (`chat_kind = 'room'`, written when the person opens the room) and the
+  ent#557 baseline — agent messages only, and only for a room the viewer is an active
+  participant of in the identity space their credential acts in (§5.40 *Rooms*). Stars work
+  for both kinds.
 - **Not this issue**: opening an agent's own **page** (a destination with its own
   content rather than a chat) is abilityai/trinity-enterprise#360.
 - **Flow**: `docs/memory/feature-flows/workspace-sidebar-ia.md`
@@ -912,11 +923,16 @@ box; the words are recorded either way and handed to the agent's
   `unavailable` so it cannot render as a real zero.
 - **FR-5 — The rated agent reads tallies, never the words** (the issue's open
   grooming question, decided): `_redact_for_agent_principal` strips `comment` for
-  an agent-scoped caller and sets `comment_withheld`, so a reader can tell "no
-  comment" from "not yours to read". Two reasons: a score an agent can read is a
-  loop it may optimise for, and the comment is untrusted text written by an
-  annoyed stranger — handing it verbatim to the agent being criticised is a
-  prompt-injection path into it. Operator surfaces see the text.
+  every machine principal (the rated agent's key, the system scope, a connector
+  key) and for a human who is not an operator of the agent (a person it is merely
+  shared with), and sets `comment_withheld`, so a reader can tell "no comment"
+  from "not yours to read". Two reasons: a score an agent can read is a loop it
+  may optimise for, and the comment is untrusted text written by an annoyed
+  stranger — handing it verbatim to the agent being criticised is a
+  prompt-injection path into it. Operator surfaces (a human owner or admin) see
+  the text. The same readers see the rater only as its kind (`workspace` /
+  `operator`), never the address; that grader rule is canonical in
+  lifecycle-observability §46 FR-3 (ent#781).
 - **FR-6 — Degrades without the skill**: the rating and comment are durable
   **before** anything is dispatched. With the skill, a background turn runs
   `capture-feedback` with the client's words **fenced as data** (the
@@ -2062,6 +2078,79 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   writes (steps ride the poll while running).
 - **Flow**: `docs/memory/feature-flows/workspace-work.md`
 
+## Retrieval Memory (MEM-002, trinity-enterprise#1022)
+
+- **Status**: ✅ Implemented (default OFF)
+- **Description**: Everything an agent does leaves extracted, deduplicated
+  facts in the platform DB (`agent_memory_facts`); the facts most relevant to
+  the incoming request are recalled into the system prompt inside the ent#419
+  envelope as a third section. Runtime-agnostic: backend seams, no harness
+  hooks, nothing in the agent container.
+- **Switch**: `trinity_memory_enabled` (system setting, default `false`,
+  Settings → General); per-agent opt-out `agent_ownership.memory_opt_out`.
+  Fail-open everywhere: off / unavailable / error ⇒ the prompt is unchanged.
+- **Scopes**: `(agent_name, user_email)`; `''` is the agent scope, which the
+  agent's owner shares (an owner's turns resolve to it). Every other person has
+  their own scope; recall never crosses scopes. The subject is read off the
+  execution row by `services/memory_subject.resolve` — the agent never names
+  the person; the agent scope is an explicit trigger allowlist, and anonymous
+  public, group-channel, voice, paid, room and judge runs are skipped.
+- **Capture**: one seam — `event_dispatch_service.spawn_task_terminal_event`
+  (every CAS-won terminal). Credentials are redacted before extraction and
+  before storage; every fact passes `user_memory_guard.prepare_summary`.
+  Brakes: a credential to extract with (below), a per-agent daily budget
+  (`trinity_memory_daily_retain_limit`, default 200), a per-scope Redis lease,
+  a per-process semaphore, a 2,000-fact scope cap, and a partial unique index
+  on the live `text_hash`.
+- **Which credential** (trinity-enterprise#1027): every platform model call —
+  extraction and reconcile here, the MEM-001 summarizer, Workspace thread
+  titles, the compatibility AI checks — goes through the backend's one model
+  door, `services/model_gateway`. The credential follows the agent: a job
+  attributed to an agent on a Claude subscription runs on that agent's own
+  setup token (same bill as its chat), an agent on API-key auth or a job with
+  no agent behind it runs on the platform key, an unreadable token never
+  borrows the key. The model follows the credential: Haiku 4.5 on a
+  subscription (the one model the gateway serves plainly on a setup token),
+  Haiku 5.5 on the key; the backend never claims to be Claude Code. Knob
+  `trinity_model_credential` (Settings → General): `auto` (default, the only
+  mode that falls back), `subscription`, `platform_key`. Both status cards say
+  who would answer; the owner can run one exchange through the real path with
+  `POST …/retrieval-memory/extract-preview`, nothing stored.
+
+- **Search** (trinity-enterprise#1028): the same store and ranking on demand,
+  past the injected tail — the owner through `GET …/retrieval-memory/search`
+  (person-only, scope by email), the agent through MCP `search_memory` →
+  `POST …/retrieval-memory/search`, the scope read off the execution it names
+  by the whose-memory rule (a person's turn → their scope; a headless run → the
+  agent scope; anonymous / group → refused with the reason) — a run that must be
+  the agent's live turn and the only live scope on the agent (a finished run or
+  a concurrent other-scope turn is refused by name), an agent key only
+  for its own agent and no human at all (403 `agent_only` — a shared-with user
+  must not read a person's scope by naming their run; the owner has the GET door). Up to 50 hits, each with the rendered line, relevance and
+  score; every hit journaled as a `search` row carrying the query. Off or
+  unavailable is a named refusal, never an empty answer.
+- **Recall**: async, off the event loop; relevance gates (cosine ≥ 0.30),
+  recency re-orders (`cosine × (0.6 + 0.4 × 0.5^(age/half-life))` over
+  `updated_at`, half-life `trinity_memory_recency_half_life_days`, default 30,
+  `0` = off); top 5 within 1,500 chars; hits bump usage counters. Each recalled
+  line carries its revision date and the kind of run it came from
+  (`(2026-10-21, scheduled run) …`), never an execution id. Local ONNX
+  embeddings (`fastembed`, multilingual MiniLM, baked into the backend image,
+  offline at runtime).
+- **Provenance**: every fact keeps the execution it was born in and the last
+  one that rewrote or retired it; `agent_memory_fact_events` journals every
+  add / update / delete / none / screened / prune / recall / forget with the
+  execution, the proposed candidate, the replaced text and the neighbours
+  shown — the lineage behind each fact and the corpus the extraction prompt
+  is tuned against (90-day retention per agent).
+- **Owner view**: `GET/DELETE /api/agents/{name}/retrieval-memory/facts…` and
+  `GET …/retrieval-memory/events` (owner + human-only); forget is a recorded
+  soft delete. A person's facts are browsed per person in Agent Settings →
+  Person memory (trinity-enterprise#962, MEM-001's owner view): their live
+  facts, each fact's journal (`events?fact_id=`), Forget behind a confirm, and
+  the owner search scoped to that person (`user_email`).
+- **Flow**: `docs/memory/feature-flows/retrieval-memory.md`
+
 ## 6. Activity Monitoring
 
 ### 6.1 Unified Activity Panel
@@ -2097,9 +2186,25 @@ bounding the table. OSS-core (Workspace rule above). Flow:
 - **Depth semantics**: every execution row carries `schedule_executions.chain_depth` (INTEGER, NULL read as 0). A call made by a **non-agent principal** (human JWT, user-scoped key, connector, portal delegate, event loopback) is a root: its child row is depth 0 and stored NULL. A call made by an **agent principal** (an agent-scoped key, keyed on `current_user.agent_name`; a `scope=system` key counts as caller `trinity-system`) stamps its child `1 + MAX(chain_depth)` over the **calling agent's `status='running'` rows** (0 when it has none). The raw `X-Source-Agent` header and the model-typed `parent_execution_id` play no part, so an agent cannot strip the guard by omitting either. Taking the max fails toward over-refusal, never under-refusal.
 - **Limit**: ops setting `inter_agent_max_chain_depth`, **default 8, validated 1–32**, resolved `system_settings` row → env `INTER_AGENT_MAX_CHAIN_DEPTH` → default, and changed with `PUT /api/settings/ops/config` (API + env only; no Settings UI field). A child at depth ≤ max runs; **max + 1 is the first refused**. The floor of 1 means no value can refuse a direct agent→agent call. The value is read per call and clamped to [1, 32] on use; an unreadable or non-integer stored value falls back to 8 with a warning and never fails the dispatch.
 - **Covered paths**: `POST /api/agents/{name}/chat` (MCP `chat_with_agent` sequential and every `chat_with_<slug>` tool), `POST /api/agents/{name}/task` (parallel, self-task and the #946 pull-routed sequential path), `POST /api/agents/{name}/fan-out`, and raw REST on those three routes with an agent-scoped key. Fan-out subtasks carry the depth captured at request time.
-- **Refusal contract**: HTTP **403**, `detail = {"error": "inter_agent_depth_exceeded", "depth", "max_depth", "caller", "target", "message"}`, header `X-Trinity-Error-Code: inter_agent_depth_exceeded`. The check runs **after** the uniform-404 target-access dependency (so it never discloses whether a target exists, Invariant #8) and **before** the idempotency claim, capacity acquire and row insert (Invariant #18), so a refused hop burns no key, holds no slot, starts no model work and **creates no execution row**. The message tells the calling model not to retry or re-route.
-- **Recording**: a platform audit row (`event_type=execution`, `event_action=inter_agent_depth_exceeded`) and an `agent_collaboration` activity on the **caller**, opened and closed FAILED with the code. Both are best-effort; the refusal is raised whether or not they are written.
-- **MCP**: `chat_with_agent` (all branches) and `fan_out` return a structured `{"status": "inter_agent_depth_exceeded", "retryable": false, ...}` result instead of throwing `API error (403)` (see `requirements/mcp.md`).
+- **Refusal contract**: HTTP **403**, `detail = {"error": "inter_agent_depth_exceeded", "depth", "max_depth", "caller", "target", "exhausted_by", "resets", "message"}`, header `X-Trinity-Error-Code: inter_agent_depth_exceeded`. The check runs **after** the uniform-404 target-access dependency (so it never discloses whether a target exists, Invariant #8) and **before** the idempotency claim, capacity acquire and row insert (Invariant #18), so a refused hop burns no key, holds no slot, starts no model work and **creates no execution row**. The message tells the calling model not to retry or re-route ("Do not retry this call or route it through another agent", kept verbatim).
+- **The refusal names the hop (#4357)**: `exhausted_by` is the hop that set the depth — the caller's **deepest running execution** (`execution_id`, `chain_depth`, `triggered_by`, `source_agent`; the caller's own row, no person or channel data), or `{"kind": "event_claim", "chain_depth"}` when the signed event loopback claim set it (a tie goes to the row), or `null` when it could not be read (the refusal is raised either way). It is read by `db.get_deepest_running_chain_row` **on the refusal path only**, so admission pays nothing. `resets` is one fixed sentence saying what lowers the depth: it falls when that execution finishes, because every call counts from the deepest of the caller's executions still running. The `message` names the same execution in plain words.
+- **Recording**: a platform audit row (`event_type=execution`, `event_action=inter_agent_depth_exceeded`) and an `agent_collaboration` activity on the **caller**, opened and closed FAILED with the code; both carry `exhausted_by`. Both are best-effort; the refusal is raised whether or not they are written.
+- **MCP**: `chat_with_agent` (all branches) and `fan_out` return a structured `{"status": "inter_agent_depth_exceeded", "retryable": false, "exhausted_by", "resets", ...}` result instead of throwing `API error (403)` (see `requirements/mcp.md`).
+- **What a turn stands at (#4357)**: a turn's own row depth is one thing; every delegation it makes is still `1 + MAX(chain_depth)` over **all** the agent's running rows, whoever started them. So no turn kind "resets the chain" while a deeper execution of the same agent is still running — that execution has to finish first.
+
+  | Turn kind | Its own row is stamped | Why |
+  |---|---|---|
+  | Delegated call (`/chat`, `/task`, `/fan-out`, session turn by an agent key) | `1 + MAX(running caller)` | a genuine hop |
+  | **Wake when a delegated run ends** (`caller_wake`) | `max(callee − 1, MAX(running caller), 0)`, NULL counted as 0 | it continues the delegator's own work, so it stands where the delegator stood when it delegated — never one hop more. The callee row was stamped `1 + MAX(running caller)`, so `callee − 1` is that standing; the live MAX keeps a wake from standing below a deeper turn still running. A wake is at most `max − 1` unless a turn of the delegator that is still running stands deeper; it can make one hop whenever the delegator's own turns allow one |
+  | Wake on an answered or ended ask (`operator_response`, `operator_ending`) | root (NULL) | a person acted |
+  | Reminder | root (NULL) | the setter's standing is not persisted yet (#3116) |
+  | Turn a person starts (chat, Workspace, channel) | root (NULL) | non-agent principal |
+  | Loop iteration, manual schedule trigger | the depth computed at start | see "New roots" below |
+  | `agent.task.*` event dispatch | the finished row's depth + 1 | unchanged; still a hop |
+
+  Before #4357 a wake was stamped one hop deeper than the run that ended, and its next delegation counted that wake row, so every delegate→wake round added two and an orchestrator working through wakes was refused after about four rounds. A chain of hops from turns that are still running grows by one per hop and is refused at `max + 1` exactly as before.
+- **Wake budget (#4357)**: depth no longer bounds how many wakes follow one another, so a per-pair hourly budget does. Ops setting `caller_wake_max_per_hour` (**default 120**, validated 0–10000, `0` or less = unlimited; resolved `system_settings` row → env `CALLER_WAKE_MAX_PER_HOUR` → default) caps the wakes one callee's ended runs may send one delegator per one-hour window (Redis `INCR` + `EXPIRE NX`, key `trinity:wake_fires:{callee}:{caller}`, the event-budget shape below). Only a wake about to be dispatched spends a unit; a wake collapsed into the 15-second per-caller window spends nothing. A wake past the budget is skipped and audited `skipped_budget`, the delegator gets one notification per window, and the ending stays readable through `get_execution_result`. Fails open when Redis is unavailable. The budget is per pair, so it does not bound a chain spread across many callees; the window below bounds a sweep.
+- **Window collisions are parked, never dropped (#4536)**: the 15-second per-caller window (`caller_wake:{caller}:{bucket}`) is held while its wake runs and **released when the wake ends**, so an ending after a finished wake wakes at once. An ending that ended at or before the claim of the wake still running collapses into it (that wake's `list_recent_executions` shows it), so a cleanup sweep inside one window is one wake. An ending after the claim that lands while the wake still runs is parked in Redis (`trinity:wake_missed:{caller}`, latest wins, 24 h TTL, audited `parked` once per ending) and delivered once when that wake ends, on the follow-on key `caller_wake:{caller}:after:{wake_id}`, which is released when the follow-on ends. Two drains claim that key: the wake row's own terminal (reached by every terminal writer, so a restart mid-turn still drains) and the holder after it returns or raises. A holder cancelled by a backend stop, or closed with its loop, leaves the marker for the wake row's terminal. Bound: one running wake plus one pending per caller. Redis trouble on the park does not raise and is audited `skipped_window`. Residual: a backend restart mid-wake plus an ending parked in the seconds after that wake's terminal drained is delivered by the caller's next wake end, or not at all if none comes within 24 h.
 - **Named residuals** (the guarantee holds for a call made with an agent-scoped credential while the calling agent has a running execution): **(a)** a non-agent credential held by an agent (a hand-pasted user-scoped key, detected by #1854) resolves to the human owner and counts as a root; **(b)** agent-key calls with no running row (a web-terminal session, a spawned background process, an orphan after its row went terminal) count as depth 1, or max+1 over any other running rows. An exact parent link needs a platform-injected execution id (#2392).
 - **New roots closed (#2973)**: four agent-initiated paths inherit the caller's depth instead of starting at 0, each refused at the max with the same 403 contract (mapped by an app-level exception handler, `error_handlers.inter_agent_depth_exceeded`):
   - **Loops** — `POST /api/agents/{name}/loops` computes the depth at start and persists it on `agent_loops.chain_depth`; every iteration row carries it, because later iterations run after the starter's turn has ended.
@@ -2107,8 +2212,8 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   - **Chat-session turns** — `POST /api/agents/{name}/sessions/{id}/message` runs the guard before the user message is persisted and passes the depth through `run_resumable_turn` to `execute_task`, which stamps the row it creates (both the first attempt and the cold retry).
   - **Events** — `POST /api/events` and `POST /api/agents/{name}/emit-event` by an agent principal with at least one matching subscription compute the emitter's depth (an emit nobody listens to is never refused). The depth rides the EVT-001 loopback JWT as a signed `chain_depth` claim, minted whether or not the source is vouched, so an emit on another agent's behalf cannot launder it. A system `agent.task.*` terminal event carries the finished row's depth + 1 (the max when the row is unreadable). The loopback `/task` stamps the claim; a vouched loopback without a claim counts the vouched agent's running rows.
 - **Event dispatch budget (#2973, CSO Finding 3)**: Chain depth bounds how deep an event chain runs; this bounds how often one source agent can wake one subscriber (fan-out breadth, and loops re-entering through a #3116 root). Every EVT-001 dispatch spends one unit of the **source → subscriber pair's** hourly budget (Redis `INCR` + `EXPIRE NX` in one transaction, key `trinity:evt_fires:{source}:{subscriber}`, shared by every subscription between the two, since an agent key can subscribe itself; keyed per pair so one noisy source cannot starve a subscriber's other sources); past the ops setting `event_dispatch_max_fires_per_hour` (default 120, 1–10000) the dispatch is skipped and logged, and the first skip in a window raises one high-priority notification on the subscriber naming the source (a flag key, so a cap lowered mid-window still alerts once). `agent_events.subscriptions_triggered` counts matched subscriptions, including skipped ones. Fails open when Redis is unavailable.
-- **Deferred**: webhook tokens, agent-created cron schedules and self-reminders still start a new root (#3116). A2A cross-instance chains are the peer's to bound.
-- **Tests**: `tests/unit/test_2806_inter_agent_depth.py`, `tests/unit/test_2973_depth_new_roots.py`, `tests/unit/test_2973_event_dispatch_budget.py`, `src/mcp-server/src/tools/depth-refusal.test.ts`; keyed end-to-end `tests/journeys/test_j10_agent_calls_agent_journey.py::test_two_agents_cannot_bounce_a_call_between_each_other_forever`; invariant IA-04 in `docs/testing/orchestration-invariant-catalog.md`.
+- **Deferred**: webhook tokens, agent-created cron schedules and self-reminders still start a new root (#3116); when a reminder persists its setter's depth it must stamp the setter's **standing**, with no + 1, or it repeats the wake defect above. Running rows that are stale but not yet swept still count toward the MAX. A2A cross-instance chains are the peer's to bound.
+- **Tests**: `tests/unit/test_2806_inter_agent_depth.py`, `tests/unit/test_2973_depth_new_roots.py`, `tests/unit/test_2973_event_dispatch_budget.py`, `tests/unit/test_4357_wake_chain_depth.py`, `tests/unit/test_ent1102_caller_wake.py`, `src/mcp-server/src/chat-depth.test.ts`, `src/mcp-server/src/tools/depth-refusal.test.ts`; keyed end-to-end `tests/journeys/test_j10_agent_calls_agent_journey.py::test_two_agents_cannot_bounce_a_call_between_each_other_forever`; invariant IA-04 in `docs/testing/orchestration-invariant-catalog.md`.
 
 ### 9.2 Agent Permissions
 - **Status**: ✅ Implemented (2025-12-10, Updated 2026-02-19)
@@ -2648,26 +2753,26 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
 - **Routed through the budget, never allowlisted** (#1677). The volume here is
   driven by a *client* clicking, so this is an agent-influenceable emitter by
   the classification rule and goes through
-  `operator_queue_service.create_bounded_alert` with its own registered type
+  `platform_alerts.observe` (which applies the #1677 budget) with its own registered type
   `workspace_problem_report` and reserved id prefix `workspace-problem-`. A
   direct `create_operator_queue_item` would fail the CI emitter guard, and
   reusing the generic `alert` type would have made five unrelated alerts on that
   agent silence every problem report.
-- **One item per person per target per UTC day, by construction.** The id is
-  derived from the evaluator, the target and the day, so a re-rate hits
-  `create_item`'s `ON CONFLICT DO NOTHING`.
+- **One item per person per target per UTC day, by construction.** The subject's
+  key is a digest of the evaluator, the target and the day, so a re-rate updates
+  that day's pending item in place through `platform_alerts.observe` (#3254).
 - **A comment sent after the rating reaches the item** (trinity#3521). The
   Workspace records the thumbs-down on the click and sends the comment as a
   second request, so the click has usually raised the item already. A request
   that carries words rewrites the item's `question` and `context.has_comment`
-  through `db.update_pending_problem_report` — pending items of this type only,
+  through `platform_alerts.observe` (`keep_text=False`; a bare click passes `keep_text=True`) — pending items only,
   so an item a person already ended is never rewritten or reopened. Only words
   ever write text: a bare re-rate cannot erase a comment. The update adds no row,
-  so it spends no budget. Both requests run in the background, so the service
-  attaches once more after its own create (the click's create can land in
-  between). **Stated residual**: a comment sent after the operator ended that
+  so it spends no budget. Both requests run in the background, and which one
+  writes is decided inside the per-agent create lock, so either order keeps the
+  words. **Stated residual**: a comment sent after the operator ended that
   day's item does not reach it; the next day's item carries the next report.
-- **Emitted off the response path.** `create_bounded_alert` is async and the
+- **Emitted off the response path.** `raise_problem_report` is async and the
   rating route is a sync `def`, so the emit rides `BackgroundTasks` beside the
   existing `capture-feedback` dispatch. A rating is recorded whether or not the
   alert is raised: the client's action must never fail because the operator's
@@ -3831,7 +3936,7 @@ to localStorage in the clear.
 
 ### 5.40 Workspace Inbox — what needs you and what came back, across your agents (trinity-enterprise#610)
 - **Status**: 🚧 In progress (PR A: landing, Unread, All, the reading pane; PR B: role-addressed
-  Action after abilityai/trinity#3028; PR C: rooms in Unread)
+  Action after abilityai/trinity#3028; rooms in Unread and All: trinity-enterprise#959)
 - **Requirement ID**: WORKSPACE_INBOX
 - **GitHub Issue**: abilityai/trinity-enterprise#610 (preceded by the asks-honesty fix, §26.8)
 - **Description**: The Workspace opens on an **Inbox**: one place that answers "what needs me"
@@ -3849,8 +3954,8 @@ to localStorage in the clear.
   | Tab | Membership | Source |
   |---|---|---|
   | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked; **Newest first by default** (raised time, newest first; ties on id), **Urgency on the sort control** — expiring within 24h first (soonest first), then priority (critical > high > medium > low), then the longest-waiting (§3g C1, unchanged); see *Action's sort* below (trinity-enterprise#856) | the ONE asks list (`openAsks`) |
-  | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included | the sidebar's `threads` + `GET /chat-state?previews=true` |
-  | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed; rooms wait for PR C), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule, the 200-ask read cap when hit, and — to a viewer with rooms — that rooms are not here yet (§3g D-4) | the same two lists |
+  | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included; **rooms I am in count as chats** (one row per room, trinity-enterprise#959) | the sidebar's `threads` + `GET /chat-state?previews=true` |
+  | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed), **the rooms I am a member of** (trinity-enterprise#959), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule and the 200-ask read cap when hit (§3g D-4) | the same two lists |
 - **One unread model (AC 6)**: the unit of Unread is a **chat**, read through the existing
   #557 cursor (`POST /chat-state/thread/{id}/read`); there is no second cursor and no per-item
   read row. An arrival is an assistant message in my chat **or** a report addressed to me that
@@ -3894,13 +3999,49 @@ to localStorage in the clear.
   confirm), one chat is read directly. Success is a toast ("Marked 28 chats read") and a new
   tab visit; a partial failure names how many failed and those chats keep their count (the S4
   rollback) (§3g A9).
+- **Rooms (trinity-enterprise#959, the rest of AC 2)**: a room — a chat with more than one
+  agent — is a chat row in Unread and All, named by its agents ("Ada, Bo") and its title.
+  - *What is new*: an **agent's** message in the room after my read cursor (`POST
+    /chat-state/room/{id}/read`), or after my account baseline for a room I have never opened
+    — the chat rule (`role = 'assistant'`) in a room's terms. My own messages and the room's
+    system lines never count.
+  - *Who sees it*: membership is the grant. The count, the preview excerpt and the row exist
+    only for a room where the viewer has an active participant row in the identity space
+    their credential acts in — `workspace_user` + email for a Workspace session, `user` +
+    username for a platform session (ent#362) — so a non-member never gets a room's row, id,
+    name or count, even holding a cursor row for its id: stored room rows are filtered through
+    the reader's active memberships. The read write moves a room cursor only for an active
+    participant (an unknown or unauthorized id gets the same 204 and nothing is written). A
+    participant who left is not a member: the rooms API no longer lists or serves the room to
+    them. The rooms list marks each room `member` (an admin lists every room); the Inbox draws
+    a room only when `member` is true, and a deep link to another room resolves to nothing. A
+    platform admin keeps their own starred rows for rooms they are not in, at a count of 0.
+  - *Read only what I saw (trinity-enterprise#1010, chats too)*: marking a chat or room read
+    covers what the client actually held — its last fetch, or the newest message on screen —
+    never the server's current time, so a message that lands while I am opening it still
+    counts as new. Existing cursors and the ent#557 baseline keep their meaning.
+  - *Each identity reads separately (trinity-enterprise#1011)*: the same email seated in a
+    room as a platform account and as a Workspace identity keeps two read states; reading
+    as one leaves the other's count alone.
+  - *Reading it*: opening a room row shows its new messages in the pane (the room's own
+    membership-scoped read), then reads it — after the render, like a chat; **Open in chat**
+    opens the room. The room on screen reads itself on open and whenever an agent message
+    lands in it, so the sidebar never badges the room being read. Either way a room is read
+    only once the transcript on screen reaches the room's whole message count; a room too long
+    for the pane stays unread and says so, and a failed open reads nothing. Mark all read reads
+    a room as a room.
+  - *Counts*: the room's count rides the same `sidebarThreads` projection, so the sidebar,
+    the agent rows (a room credits every agent in it), the tab title and the Inbox still read
+    one number (Σ "N new" == came).
+  - No new table, store or migration: the room cursor is a `enterprise_portal_chat_state`
+    row of the existing `room` kind.
 - **Where an ask lives (the 2026-09-30 ruling as amended, PR A2 on ent#734's data)**: an ask
   raised during a chat turn is a tile in THAT chat's thread, placed by server time among the
   messages and answerable in place; once ended — at once when answered there, the confirmation
   in the row, announced, focus on the row (team ruling on #3101, 2026-10-01) — it is one muted row
   (kind · title · ending with who · when) that stays in that chat's history for the queue's own retention — the chat reads
   its own chat-turn asks (`GET …/asks?chat_id=`, no 7-day window). A background ask (schedule,
-  loop, gate) is in no chat, only the Inbox; its `chat_id` (Main) is the reply target. Nothing
+  loop, gate) is in no chat, only the Inbox; its `chat_id` (Main) is the reply target. Exception (ent#1171): a reminder-wake ask addressed to the same person the reminder was set for renders as a tile in that person's Main conversation. Nothing
   sits between the thread and the composer (principle 30). Every door — Work for platform
   users, Info for everyone — carries one "N ask(s) waiting on you · Open in Inbox" line to
   Action `?from=<agent>`, and each agent row's "needs you" mark counts from the same feed as the
@@ -4020,6 +4161,28 @@ to localStorage in the clear.
     (`db/operator_queue.py::list_items`) while both clients show the **longest-waiting
     first**, so a page truncated at the read cap drops the oldest — a public bug listed in the
     PR's handoffs, not fixed here (no endpoint change).
+- **Asks the platform addresses to a person reach them by address (trinity-enterprise#981)**:
+  a gate-raised ask in the reserved `gate-addressee-only-reach-` family is in its addressee's
+  Action (list, count, answer, context) even when its agent is on no roster of theirs; nobody
+  else sees it, and the rest of the addressee-only family keeps its roster fence. Such an ask
+  opens no chat, and carries a `project` field (`{id, task_id, event}`) read only from
+  platform-written context keys an agent cannot set.
+- **Who an ask reaches when nobody is primary, and `to: project` (trinity-enterprise#1134)**:
+  with nobody assigned as primary, a `primary` ask goes to the agent's owner (the one owner
+  stand-in asks, proposals, messages and voice share; the skill gate still refuses
+  `role_unassigned`). Only with no owner or an owner with no email does it fall to the
+  operators; then, if it was raised during a Workspace chat turn, that chat shows one muted,
+  content-free line where it was asked — kind, *went to the operators*, why, and that an admin
+  can assign a primary contact in the agent's Access tab — never its title, question or
+  options, and never for an ask addressed to `operator` on purpose (the room's line is
+  trinity-enterprise#1135). An ask addressed `to: project` reaches ONE person resolved from the
+  turn's own chat or room project — the steward when a reachable person, else the creator —
+  even off the agent's roster (listed, counted and answered by address; Discuss is refused
+  `not_discussable` off the roster); only they answer it (an admin may cancel), its card says
+  *To you as this project's steward* (or *creator*), and a steward change moves it and
+  re-stamps the seat. It never
+  falls through: `project_unavailable`, `not_in_project_turn` or `project_unreachable` refuse
+  it with nothing filed.
 - **Known properties (stated, not bugs)**:
   - A viewer who has never read anything has no baseline, so nothing counts for them — a first
     deliverable included (the inherited #557 rule).
@@ -4029,10 +4192,111 @@ to localStorage in the clear.
   - Archived chats stay in Unread; Σ "N new" equals the "came back" count.
   - Counts for the viewer's own chats with agents no longer on their roster are in the
     chat-state payload (since ent#359/#557) but nothing renders them.
-  - Rooms are not in Unread until PR C (no human room read cursor exists).
+  - Rooms are in Unread and All for their members since trinity-enterprise#959 (*Rooms* above).
 - **Not in scope**: the editable "What would be sent" (09-20 ruling); #609; the `people_for`
   provider; `may_end` (rides #164); run pills with step labels (need a message→execution link).
 - **Flow**: `docs/memory/feature-flows/workspace-inbox.md`
+### 5.44 Workspace — the autonomy dial: what a companion may do unprompted (trinity-enterprise#641)
+- **Status**: ✅ Implemented (2026-09-23). OSS-core (Workspace).
+- **Requirement ID**: WORKSPACE_AUTONOMY_DIAL
+- **GitHub Issue**: abilityai/trinity-enterprise#641 (canon `tandem-06-operations.md` §2.3, ruling P12; consumes §5.37's evidence)
+- **Description**: Autonomy was one boolean per agent — scheduled runs on or off.
+  The dial adds the two scopes the operating model actually needs. **Above**: one
+  instance LEVEL (`L0` Continuity · `L1` Companion · `L2` Delegated classes ·
+  `L3` Load-bearing judgment), the ceiling on the whole fleet. **Below**: a state
+  per (seat, `ask_class`) — `on_request` or `graduated` — earned from the seat's own
+  decision record. Nothing between them is new: a graduated class means the
+  companion acts and reports; everything else it asks first.
+- **Promotion is earned, and there is no promote control.** A class graduates when
+  §5.37's evidence says `stable` for it — **≥3 non-expired records, ONE normalized
+  criterion, no reversal in the window** — AND the seat has no negative rating in the
+  last 30 days AND the guard metric for the class is not `capped`. A person can only
+  move it DOWN (`hold`, any reader for their own seat) or let it back up
+  (`release`, the agent OWNER only — holding is a refusal, releasing is a grant).
+- **Evidence is counted per CONVERSATION, not per record.** The companion writes
+  its own records (MCP `record_decision` stores the seat as `decided_by_person` and
+  its execution as `source_execution_id`), so three `record()` calls inside one
+  execution must not graduate a class it just invented. The qualifying records must
+  come from **at least `STABLE_MIN_COUNT` (3) distinct sources**: each distinct
+  non-null `source_execution_id` is one source, and every person-written record (the
+  Workspace path, `source_execution_id IS NULL`) is its own source. The count is
+  carried as `evidence.sources`; short of it the class is blocked
+  `too_few_conversations` ("the decisions for this kind of ask come from fewer than
+  three separate conversations"). Every other conjunct is unchanged.
+- **Agent-written evidence is held to the running turn and to days (#2984 review,
+  option b).** `POST /api/agents/{name}/decisions` from an **agent** key records only
+  for the turn it is running: the body's `execution_id` must equal the
+  platform-stamped `X-Trinity-Execution-Id` (#2392, which MCP `record_decision`
+  forwards and the model cannot set; `manual` or absent is refused) — else 422
+  `not_this_turn` — and that execution must be `running`, else 422
+  `decision_turn_not_live` (trinity-enterprise#1062, which also made these doors the
+  agent's own: a person is refused `agent_only` and decides through the client-portal
+  routes). And when **every** record
+  in a class's window is agent-written (no person-written record), the evidence must
+  span **`STABLE_MIN_DAYS` (3) distinct days** of `created_at`, else the class is
+  blocked `agent_only_evidence_too_recent`, so one burst of turns (or self-tasks)
+  cannot graduate a class nobody asked about. **Residual, accepted:** a seat's daily
+  scheduled run is a running turn, so agent-only evidence can still graduate over
+  three days with no person in the loop — slower, not closed; option (a), counting
+  only person-written or person-confirmed records, is what would close it.
+- **Reversals are counted over the WINDOW, not over all history** — `effective_status`
+  returns `reversed` unconditionally, so a reversed record never expires; counted
+  over history, one reversal ever would block a class forever and `on_request` would
+  be the only reachable steady state. A reversed record leaves the window at its own
+  `review_by`, like any other.
+- **The verdict is stored earned-state × three read-time conjuncts** — the instance
+  level (`≥L2` for anything unprompted), the agent's `autonomy_enabled`, and
+  `now <= evidence_expires_at` (the EARLIEST `review_by` of the window). Written
+  instead of read, each fails silently: records lapse at UTC midnight with no event to
+  hook, so a materialised verdict outlives its evidence; and re-evaluating the fleet
+  inside a level change is an unbounded fan-out. As conjuncts a level drop needs zero
+  writes and restores exactly what each class had earned when it goes back up. Reads
+  persist NOTHING; writes happen only on a real event (a decision recorded or acted
+  on, a rating by the seat, a hold/release) and are CAS'd on an evidence hash, so an
+  unchanged verdict writes no row and emits no event.
+- **Every block is NAMED, never a bare boolean**: `level_below_l2` ·
+  `agent_autonomy_off` · `evidence_expired` · `too_few_records` ·
+  `too_few_conversations` · `criterion_not_stable` · `reversal_in_window` · `negative_rating_in_window` ·
+  `guard_metric_capped` · `held_by_operator`, each with the sentence the panel and the
+  companion both show.
+- **The rating query's three shapes are each a defect first**: it matches
+  `operator:<email>` as well as `workspace:<email>` (on a single-operator install the
+  seat person IS the platform principal, so their thumbs-down lands under the other
+  prefix and the class could never demote); it reads `COALESCE(updated_at, created_at)`
+  (flipping a rating up→down touches only `updated_at`, and that flip is exactly a
+  demotion); and the window is a FIXED 30 days, not "since the oldest surviving
+  record" — otherwise a blocking rating falls out as records expire, which is
+  promotion by the clock and R25 forbids it.
+- **The level has a control, not just an endpoint**: `AutonomyDialPanel.vue` on
+  Settings → Retention, beside the two panels that already bound what an
+  engagement does on its own. It renders one option per level with the single
+  fact that changes behaviour said on the row (`unprompted possible` /
+  `always asks first`), and it states the two things an admin otherwise fears:
+  raising the level promotes nothing, lowering it destroys nothing. Shown in
+  every edition — the level is in force whether or not anyone has set it.
+- **The level is a grant, not a preference**: `GET/PUT /api/settings/autonomy-dial`,
+  `require_admin` **and** interactive-principal only (an agent's own MCP key can read
+  the dial but can never raise it — the ent#297 line), validated against the four
+  levels, audited as `autonomy_dial_change`, and blocked on the generic
+  `PUT /api/settings/{key}` catch-all so the one door that addresses any key cannot
+  set it.
+- **The companion is told, in the same words**: `autonomy_dial_service.prompt_lines`
+  rides the seat's shared memory block, so the model reads which classes it may act on
+  unprompted and, for every other class, the named reason it must ask first.
+- **Three surfaces, one seat rule**: MCP `get_autonomy` (seat from `execution_id`,
+  never a parameter; no email in the answer) → `GET /api/agents/{name}/seat-autonomy`
+  (`/autonomy` is the agent-level toggle, registered first — a second route on it
+  is silently never reached);
+  the person reads and holds/releases in Agent details (`PortalAgentAutonomy.vue`,
+  `GET /api/enterprise/client-portal/agents/{name}/autonomy`, `…/autonomy/actions`,
+  `…/autonomy/guard`); admins set the level in Settings.
+- **Storage**: `seat_ask_class_state` (both tracks; Alembic `0108` ← `0107`; cleanup
+  CASCADE) holds ONLY the earned half + the hold + the guard metric. The level is one
+  validated `system_settings` key (`autonomy_dial_level:instance`), not a table.
+- **Not in scope**: per-agent or per-seat levels (the instance level is the ceiling in
+  v1); auto-feeding `guard_metric` from the §49 metric registry (set explicitly by the
+  owner for now — DEBT_INBOX 2026-09-23).
+- **Flow**: `docs/memory/feature-flows/workspace-autonomy-dial.md`
 
 ### 5.41 Workspace — close a chat from its tab, the tab's unread count, and a star that sticks (trinity-enterprise#841, abilityai/trinity#3356)
 - **Status**: ✅ Implemented (2026-10-08)
@@ -4157,7 +4421,10 @@ to localStorage in the clear.
   keeps it.
 - **AC-2 — the strip holds still**: while the snapshot names the agent on stage,
   the tabs are drawn in its order. A reply, a send, or a poll that re-sorts the
-  thread list changes a badge only. A chat born mid-visit sits directly after Main
+  thread list changes a badge only — with one exception (#4349): a chat that goes
+  from read to unread while you are on the agent moves to directly after Main, so a
+  reply under "N more" is never invisible; the open chat keeps its exact slot, and a
+  further reply to an already-unread chat moves nothing. A chat born mid-visit sits directly after Main
   (the provisional tab's slot), born chats among themselves by creation time. A
   closed chat drops out and the gap closes; Undo returns it to its own slot. A
   deep-linked archived chat is drawn at its arrival slot. The switch-chat keys and
@@ -4179,3 +4446,124 @@ to localStorage in the clear.
   (pure); `portalChatCycle.mount.spec.js`, `portalAgentLandingStage.mount.spec.js`,
   `portalAgentLandingRemount.mount.spec.js` (mounted). Flow:
   `feature-flows/workspace-chat-tabs-and-titles.md` § *The strip holds still*.
+### 5.44 People in a room — a read floor, leaving, and who is speaking (trinity-enterprise#701)
+- **Status**: ✅ Implemented (2026-10-26)
+- **Requirement ID**: WORKSPACE_ROOM_PEOPLE
+- **GitHub Issue**: abilityai/trinity-enterprise#701
+- **Description**: The edition-agnostic half of a room holding more than one
+  person. A room ("room" means many participants; a "chat" is one person and one
+  agent — the Workspace uses the two words by that rule) can hold several people,
+  each a `user` or `workspace_user` participant row.
+- **FR-1 — A person reads from their join point.** `enterprise_room_participants.visible_from_seq`
+  is the first message seq that person may read (0 = everything: the creator, every row
+  that predates this). `GET /api/rooms/{id}` leaves earlier messages out for that
+  person and reports `history_from_seq`. Moving the floor to 0 is a recorded backscroll
+  grant. Dual-track: SQLite migration `room_participant_visible_from` + Alembic
+  `0114_room_participant_visible_from`.
+- **FR-2 — Leaving ends access.** `POST /api/rooms/{id}/leave` (people only — an agent is
+  removed by the moderator, never by itself). A person who left, or was removed, gets the
+  room's uniform 404 and the room drops out of their list; the row keeps `left_at`, so the
+  roster shows who left and their messages stay attributed. A person can be seated again
+  (`db.seat_person` is an upsert that clears `left_at`; agents keep their own rule). A
+  moderator cannot leave while other people are seated without another moderator — they
+  remove them or close the room first.
+- **FR-3 — The room payload names the reader and the people.** `you` (`kind`, `identity`)
+  so the Workspace tells the caller's messages from another person's, `people` (present
+  first, then who left, with role and whether they see the earlier messages), and
+  `can_seat_people` — a capability for the UI, offered only to a platform moderator of an
+  open room when the install provides seating through the entitlement seam; never the
+  authorization.
+- **FR-4 — The agent is told who is present.** With two or more people present, the turn
+  prompt names each and what they may decide (a collaborator reads and talks but cannot
+  approve, spend or reassign; approvals and spending go to the agent's primary). Every
+  transcript line already names its sender.
+- **FR-5 — Mentioning a seated person reaches them.** An `@username` of a person seated in
+  the room becomes a tag (one Unread item in their Inbox), never a wake; a mention that
+  cannot be delivered stays plain text rather than failing the message.
+- **FR-6 — A colleague keeps the room internal.** A seated platform person is kind `user`,
+  which `room_is_user_facing` counts as internal (#363).
+- **FR-7 — "New room" is its own door.** The sidebar's one conversation-start action
+  (#4353 removed the sidebar New chat button that sat beside it: a roster row and the
+  header's New chat already start a chat, and the picker's chat mode is single-select
+  so no door labelled "chat" can start a room); it opens the agent picker in room words
+  and always creates a room, even with one agent.
+- **What a collaborator reads**: the room payload and list drop `cost`, `max_cost_usd`, each message's `execution_id`, and other participants' session and cursor fields. A moderator, an admin and an agent keep them. A collaborator keeps their own cursor.
+- **A reply outlives its waker**: an engine reply lands even if the person who woke it has since left or been removed. That person still cannot read the room.
+
+### 5.45 A paused mention chain says so, and a person can continue it (abilityai/trinity#4302)
+- **Status**: ✅ Implemented (2026-11-07)
+- **Requirement ID**: ROOM_CHAIN_CONTINUE
+- **GitHub Issue**: abilityai/trinity#4302
+- **Description**: The room's chain cap (`ROOM_MAX_CHAIN_DEPTH = 8` hand-offs from one
+  human message) stays, and still protects spend. What changes is the dead end: the stop
+  says, in plain words, that the agents are waiting for a person and who was next, and a
+  person can carry on with one control instead of discovering that a new message restarts
+  the count. The cap is not raised and not made configurable.
+- **FR-1 — The pause is a typed row.** At the cap the engine writes a system row with
+  `kind = "chain_paused"`, `mentions` = the agents that were next, and content that states
+  facts only: *"The agents paused after 8 hand-offs and are waiting for a person. {a} was
+  next."* (*"{a} and {b} were next."*). Agents read every system row as `System:` text on
+  their next wake, so no UI verb is stored; the how-to-carry-on wording is the Workspace's
+  to render beside the control. `kind` is free text on both tracks — no migration.
+- **FR-2 — The payload names the live offer.** `GET /api/rooms/{id}` carries
+  `paused_chain: {seq, next}` while the room is open, the newest pause's offer stands and at
+  least one agent it named is still seated; otherwise `null`. Derived from the transcript at
+  read time, never stored, and present for every reader (collaborators included, above the
+  read floor too). It is a UI capability; the route decides who may act.
+- **FR-3 — The offer stands until the conversation moves on.** A conversational row (any
+  non-system sender) or a later `chain_paused` / `chain_continued` row after the pause ends
+  it; bookkeeping lines (joined, left, still busy) keep it. One SQL predicate
+  (`_MOVED_ON_SQL`) is shared by the read (`offer_stands`) and the write.
+- **FR-4 — `POST /api/rooms/{id}/continue` `{seq}`, people only.** Order: membership
+  (uniform 404) → a person (403 `not_a_person` — agent and system keys are refused; an
+  agent-callable Continue would let the bounded thing lift its own bound) → budgets (410
+  `room_closed` with `stop_reason` and a sentence saying why) → the offer at `seq` stands
+  (409 `room_moved_on`) → someone named is still seated (409 `no_one_to_wake`) → the person
+  still reaches at least one of them (403 `agent_not_accessible`, nothing consumed) → the
+  receipt → the wake cap → the wakes at a fresh depth (depth 1, as a human post's).
+- **FR-5 — Once per stop, durably.** The receipt is a `chain_continued` system row
+  (*"{person} asked {a} to carry on."*) inserted by `append_continue_receipt` under the
+  FR-3 predicate inside the seq-allocation transaction, so a double click, two tabs, two
+  workers or a retry after a restart wake the agents once. The optional `Idempotency-Key`
+  header (Invariant #18) lives under the route's own scope `room-continue:{room_id}`; it is
+  never the once-per-stop guard, and the Workspace sends none.
+- **FR-6 — Budgets still apply.** The receipt is a system row and spends no message budget;
+  the turns it wakes are costed and counted as any other.
+- **FR-7 — The Workspace control.** One Continue block after the transcript, from
+  `paused_chain`, only while the room is open: *"Continue lets {a} carry on, or send a
+  message."* and a secondary **Continue** button. Its state follows the payload, not the
+  held request: a network failure and `room_moved_on` / `request_in_progress` are silent
+  (the reload shows what happened); any other coded refusal shows the server's sentence in
+  an `InlineError` while the offer stands. Readable in light and dark, stacks on a phone.
+- **Out of scope**: an MCP `continue_room` tool (Workspace first; a person's user-scoped key
+  can call the REST route); consolidating the unused `components/rooms/*` (#2136); the
+  router's `# mcp:` header (#3367).
+### 5.46 Rooms — the answer to an ask raised in a room comes back to that room (trinity-enterprise#1135)
+- **Status**: ✅ Implemented (2026-11-07)
+- **Requirement ID**: WORKSPACE_ROOM_ASK_RETURN
+- **GitHub Issue**: abilityai/trinity-enterprise#1135
+- **Description**: An agent that raises an ask (`ask_operator`) from inside a room turn
+  gets the answer back IN that room, as a room turn, with the room's context — not as an
+  owner-only continuation nobody in the room sees. The ask records the room it came from
+  (`context.workspace_room_id`, platform-written only, beside the Main attachment, which is
+  kept), the room shows one line while the ask is open and one line when it ends (every
+  disposition, whether or not a wake runs), and the continuation runs through the room
+  engine with the room's unread delta, gate-hold filter, user-facing prompt, transcript
+  budget, wake cap, cursor advance and mention cascade. Over budget, closed, departed or
+  busy, the room says so in one clause and the agent is answered outside the room (today's
+  wake) — the answer is never lost. The room's lines carry the agent, the title, the
+  disposition and a coarse *who*; never the answer, the free text, the cancel reason or a
+  non-member's email. Credential asks never attach to a room. The security requirement
+  (§26.12 "Raised in a room → the room" and §26.9 "A room-raised ask returns to its room";
+  restart survival under §26.9) is the normative text; this section is the Workspace pointer.
+- **Out of scope**: ent#1134 (`to: project`, owner fallback), ent#442 (schedule / system
+  poster into rooms — this is a bounded engine-side `Waker` for ONE participant-scoped case,
+  the seam ent#442 can build on), a room-side ask card, any new MCP tool, a `room_id` on the
+  Workspace ask projection (an existence bit), frontend changes (system lines already render).
+- **Files**: `src/backend/shared_sessions/service.py` (`room_for_execution`,
+  `post_ask_raised_line`, `on_ask_ending`, `return_ask_to_room`, `Waker`),
+  `src/backend/services/ask_service.py`, `src/backend/services/operator_resume_service.py`,
+  `src/backend/services/operator_queue_service/{__init__,poller}.py`,
+  `src/backend/db/operator_queue.py`, `src/backend/main.py`
+- **Tests**: `tests/unit/test_ent1135_ask_room_attachment.py`,
+  `tests/unit/test_ent1135_ask_room_return.py`, `tests/unit/test_ent1135_wake_restart_survival.py`

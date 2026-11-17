@@ -388,7 +388,8 @@ class AgentClient:
         self,
         message: str,
         timeout: float = None,
-        execution_id: Optional[str] = None
+        execution_id: Optional[str] = None,
+        disable_auto_memory: bool = False,
     ) -> AgentChatResponse:
         """
         Execute a stateless task on the agent (no conversation context).
@@ -404,6 +405,9 @@ class AgentClient:
             message: Task prompt to execute
             timeout: Request timeout (default: 15 minutes)
             execution_id: Optional execution ID for process registry (enables termination and live streaming)
+            disable_auto_memory: #4156 — spawn with Claude Code's shared auto-memory
+                off. For a caller serving a person with no execution row to judge
+                (a voice tool call); sent only when True.
 
         Returns:
             AgentChatResponse with parsed metrics and raw execution log
@@ -415,6 +419,8 @@ class AgentClient:
         timeout = timeout or self.CHAT_TIMEOUT
 
         payload = {"message": message, "timeout_seconds": int(timeout)}
+        if disable_auto_memory:
+            payload["disable_auto_memory"] = True
         if execution_id:
             payload["execution_id"] = execution_id
 

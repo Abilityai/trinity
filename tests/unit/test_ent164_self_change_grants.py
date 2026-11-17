@@ -135,27 +135,39 @@ def test_every_schedule_write_takes_the_schedules_fence_and_trigger_does_not():
         ("/api/agents/{name}/schedules/{schedule_id}", "DELETE"),
         ("/api/agents/{name}/schedules/{schedule_id}/enable", "POST"),
         ("/api/agents/{name}/schedules/{schedule_id}/disable", "POST"),
+    ]
+    # trinity-enterprise#719: a webhook takes a person or the grant — the
+    # own-agent exemption covers the schedule, not its webhook — and the read
+    # takes the same gate as the writes.
+    webhooks = [
         ("/api/agents/{name}/schedules/{schedule_id}/webhook", "POST"),
+        ("/api/agents/{name}/schedules/{schedule_id}/webhook", "GET"),
         ("/api/agents/{name}/schedules/{schedule_id}/webhook", "DELETE"),
         ("/api/agents/{name}/schedules/{schedule_id}/webhook/secret", "POST"),
         ("/api/agents/{name}/schedules/{schedule_id}/webhook/secret", "DELETE"),
     ]
     for key in fenced:
         assert "capability_fence_schedules_manage" in _calls(table[key]), key
+    for key in webhooks:
+        calls = _calls(table[key])
+        assert "require_person_or_schedules_manage" in calls, key
+        assert "capability_fence_schedules_manage" not in calls, key
     trigger = table[("/api/agents/{name}/schedules/{schedule_id}/trigger", "POST")]
     assert "capability_fence_schedules_manage" not in _calls(trigger)
     # Derived from the router, not only the literal above (#3236 validation):
-    # every schedule WRITE is either fenced or `trigger`, so a write route added
-    # tomorrow without the fence fails here instead of staying green.
+    # every schedule WRITE is either fenced, a webhook route or `trigger`, so a
+    # write route added tomorrow without a gate fails here instead of staying green.
     writes = {k for k in table if k[1] in {"POST", "PUT", "DELETE", "PATCH"}
               and k[0].startswith("/api/agents/{name}/schedules")}
-    assert writes == set(fenced) | {("/api/agents/{name}/schedules/{schedule_id}/trigger", "POST")}
+    assert writes == (set(fenced) | {k for k in webhooks if k[1] != "GET"}
+                      | {("/api/agents/{name}/schedules/{schedule_id}/trigger", "POST")})
 
 
 def test_every_reconfigure_route_admits_only_a_person_or_a_holder():
     from routers import agent_config
     table = _routes(agent_config)
-    for path in ("/read-only", "/resources", "/timeout", "/public-channel-model", "/guardrails"):
+    for path in ("/read-only", "/resources", "/timeout", "/public-channel-model", "/guardrails",
+                 "/tool-access"):  # trinity-enterprise#341
         route = table[(f"/api/agents/{{agent_name}}{path}", "PUT")]
         calls = _calls(route)
         assert "require_person_or_agents_manage" in calls, path

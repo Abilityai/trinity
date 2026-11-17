@@ -1,0 +1,98 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-29",
+  "mode": "diff-daily",
+  "scope": "all (diff-constrained)",
+  "branch": "feature/1001-protect-endpoint-env",
+  "issue": "abilityai/trinity-enterprise#1001",
+  "base": "af193c822",
+  "commits": [],
+  "audited": "uncommitted working tree vs merge-base",
+  "counts_as_full_run": false,
+  "phases_run": [
+    0,
+    1,
+    2,
+    5,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_not_applicable": [
+    3,
+    4,
+    6
+  ],
+  "stack_cve_quicklist": [
+    {
+      "component": "Claude Code in the base image",
+      "verdict": "patched (pin 2.1.281); ANTHROPIC_BASE_URL route from agent-writable settings/.env now closed by this diff"
+    }
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_root_exec_at_boot": 1,
+    "new_file_writers": 2,
+    "agent_context_ingress_changed": 0
+  },
+  "checks": [
+    "secret prefixes",
+    "concealed unicode",
+    "root exec at boot",
+    ".env routing names",
+    "Claude settings env pins",
+    "Codex config.toml pins",
+    "Codex $CODEX_HOME/.env strip (fail closed)",
+    "Gemini settings + own .env loader",
+    "AGENT_RUNTIME flip",
+    "credential in logs",
+    "Invariant #17",
+    "A10 failure direction"
+  ],
+  "findings": [],
+  "hypotheses": [
+    {
+      "title": "Gemini's own .env loader refills execution-class protected names when the workspace is trusted",
+      "confidence": 5,
+      "evidence": "HYPOTHESIS",
+      "category": "env-protection-bypass",
+      "asi": "ASI05",
+      "pre_existing": true
+    }
+  ],
+  "considered_and_dismissed": [
+    "proxy userinfo in world-readable drop-in (same values already in container env)",
+    "sudo rewrite of drop-in (stated GUARD-002 limit)",
+    "concurrent-turn race on $CODEX_HOME/.env (exclusion 6)",
+    "Claude provider switches (owner decision)",
+    "unknown runtime family (get_runtime refuses to start)"
+  ],
+  "coverage_gaps": [
+    "no image build / agent run: CLI behaviours read from pinned source, not exercised",
+    "Phase 3 n/a (no dependency change)",
+    "independent verifier not run (no findings)"
+  ],
+  "supply_chain_summary": {
+    "scanner": "n/a (no dependency change in diff)"
+  },
+  "filter_stats": {
+    "candidates": 1,
+    "fixed_before_report": 1,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "extends": "cso-diff-2026-10-06-ent787-guardrail-exec-form"
+  },
+  "remediation": []
+}

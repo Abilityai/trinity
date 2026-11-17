@@ -116,7 +116,7 @@
         ref="fileInputRef"
         type="file"
         multiple
-        accept="image/*,text/*,application/json,application/csv,.csv,.txt,.json,.py,.js,.ts,.md,.yaml,.yml"
+        accept="image/*,text/*,application/json,application/csv,.csv,.txt,.json,.py,.js,.ts,.md,.yaml,.yml,.zip,application/zip"
         class="hidden"
         @change="onFileInputChange"
       />

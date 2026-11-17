@@ -8,6 +8,7 @@ import base64
 import difflib
 import json
 import logging
+import os
 import re
 import subprocess
 import shutil
@@ -1246,6 +1247,11 @@ def _catalog_credential_metadata(data, template_id: str, source_trust: str):
     return requirements, errors
 
 
+# trinity-enterprise#964: the cap on a catalog entry's `agent_name`. Bounds an
+# untrusted value in every catalog payload; a real agent name is far shorter.
+_AGENT_NAME_MAX_LEN = 128
+
+
 def _build_template(
     repo: str,
     metadata: dict,
@@ -1298,6 +1304,16 @@ def _build_template(
         or metadata.get("description", "")
     )
 
+    # trinity-enterprise#964: the agent name the template declares, for the
+    # Create Agent dialog to prefill. Not `display_name`, which is the admin's
+    # or the template's catalog title. `name:` is untrusted (#1900): anything
+    # but a non-blank string is None, and the dialog falls back to the repo.
+    _declared = metadata.get("name")
+    agent_name = (
+        _declared.strip()[:_AGENT_NAME_MAX_LEN] or None
+        if isinstance(_declared, str) else None
+    )
+
     # S4 (#383): import lazily to avoid any circular-import risk with
     # git_service, which imports database/docker modules at module load.
     from services.git_service import DEFAULT_PERSISTENT_STATE
@@ -1334,6 +1350,7 @@ def _build_template(
     return {
         "id": f"github:{repo}",
         "display_name": display_name,
+        "agent_name": agent_name,
         "description": description,
         "github_repo": repo,
         "github_credential_id": GITHUB_PAT_CREDENTIAL_ID,
@@ -1456,7 +1473,7 @@ def _local_templates_dir() -> Path:
 #:   * template_service → crud would close an import cycle (crud imports this
 #:     module).
 #: `tests/unit/test_1759_template_root_parity.py` pins the two patterns equal.
-_LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+_LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*\Z")
 
 
 def contained_template_dir(name, root: Path) -> Optional[Path]:
@@ -1468,13 +1485,14 @@ def contained_template_dir(name, root: Path) -> Optional[Path]:
 
     1. **Name allowlist.** Rejects `..`, `/`, `\\`, a leading dot, an absolute
        path, an empty string and a non-string outright — before any path math.
-       This is also what CodeQL recognises as a `py/path-injection` barrier;
-       resolve + `is_relative_to` ALONE was flagged high-severity twice on this
-       codebase (crud.py:206-210).
-    2. **Containment.** `resolve()` BOTH sides, then `is_relative_to`. A plain
-       `str(candidate).startswith(str(root))` is NOT equivalent — it passes the
-       sibling escape `<root>-evil`. Resolving also closes the symlink escape,
-       which step 1 cannot see.
+    2. **Containment.** First in the UNRESOLVED space, in the shape CodeQL's
+       `py/path-injection` query recognises as a barrier (neither the allowlist
+       nor resolve + `is_relative_to` is one, which is why this function's
+       callers were flagged): the root is normalised and given a trailing
+       separator, so the sibling `<root>-evil` is outside it and a `./` or `//`
+       spelling of the root still matches; the joined path is normalised and
+       must start with it. Then `resolve()` BOTH sides and `is_relative_to`,
+       which closes the symlink escape no string check can see.
 
     Both sides are resolved because a mismatched pair is wrong in *both*
     directions: an unresolved root with a resolved candidate rejects every
@@ -1497,9 +1515,13 @@ def contained_template_dir(name, root: Path) -> Optional[Path]:
         return None
     if not _LOCAL_TEMPLATE_NAME_RE.match(name):
         return None
-    root = root.resolve()
-    candidate = (root / name).resolve()
-    if not candidate.is_relative_to(root):
+    base = os.path.join(os.path.normpath(str(root)), "")
+    fullpath = os.path.normpath(os.path.join(base, name))
+    if not fullpath.startswith(base):
+        return None
+    resolved_root = Path(base).resolve()
+    candidate = Path(fullpath).resolve()
+    if not candidate.is_relative_to(resolved_root):
         return None
     return candidate
 

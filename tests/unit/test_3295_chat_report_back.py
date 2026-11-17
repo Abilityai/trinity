@@ -399,7 +399,10 @@ class TestDelivery:
 
         _run(go())
         assert len(sent) == 1
-        assert "agent crashed" in sent[0]["text"]
+        # #4482: a failure reports the person-safe sentence; the raw error stays on the row.
+        from services.channel_completion_report import GENERIC_FAILURE
+        assert GENERIC_FAILURE in sent[0]["text"]
+        assert "agent crashed" not in sent[0]["text"]
 
     def test_report_completion_reads_the_row_fresh(self, telegram_world):
         """The property that makes arm-vs-terminal safe without a RETURNING

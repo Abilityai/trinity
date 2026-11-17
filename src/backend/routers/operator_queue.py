@@ -1,4 +1,4 @@
-# mcp: operator_queue.ts (list_operator_queue, get_operator_queue_item, respond_to_operator_queue — a person-scoped key only; ask_operator → agent_router's raise; get_my_ask → agent_router's self-readback; withdraw_ask → agent_router's self-withdraw, trinity-enterprise#901)
+# mcp: operator_queue.ts (list_operator_queue, get_operator_queue_item, respond_to_operator_queue — a person-scoped key only; ask_operator → agent_router's raise; get_my_ask → agent_router's self-readback; withdraw_ask → agent_router's self-withdraw, trinity-enterprise#901); readdress → none, a human-only admin verb (ent#1096)
 """
 Operator Queue API Router (OPS-001).
 
@@ -13,7 +13,7 @@ gate and map errors. Only a person ends an ask (`reject_non_person_principal`).
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, NamedTuple, Optional, Set
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from models import (
     BulkCancelRequest,
@@ -21,6 +21,7 @@ from models import (
     OperatorAskCreate,
     OperatorAskWithdraw,
     OperatorCancel,
+    OperatorReaddress,
     OperatorResponse,
 )
 
@@ -31,11 +32,14 @@ from dependencies import (
     is_person_principal,
     principal_reach,
     reject_non_person_principal,
+    require_admin,
+    require_person,
 )
 from db_models import User
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.operator_queue_choices import ReservedAnswerError, ResponseNotOfferedError
 from services import ask_service, operator_queue_service, skill_gate_service
+from services import credential_ask_policy, credential_destination, credential_sink
 
 logger = logging.getLogger(__name__)
 
@@ -80,32 +84,62 @@ def _accessible_set(current_user: User) -> Optional[Set[str]]:
     return set(db.get_accessible_agent_names(current_user.email or "", is_admin=False))
 
 
-def _owned_set(current_user: User) -> Optional[Set[str]]:
-    """The agents this caller OWNS, for the owner-only rows
-    (trinity-enterprise#866), or None when that rule does not apply: an admin
-    sees every row. A machine key never reaches an owner-only row at all — it is
-    about a person (#715) — so its set is irrelevant and it gets None too."""
+class _Fence(NamedTuple):
+    """Who this caller is, for the rows readable by only some of the people who
+    can use the agent: `owned`, the agents they OWN (a client's complaint,
+    trinity-enterprise#866), and `email`, for the rows addressed to them alone
+    (a steward's proposal, trinity-enterprise#980)."""
+    owned: Set[str]
+    email: str
+
+
+def _fence(current_user: User) -> Optional[_Fence]:
+    """This caller's `_Fence`, or None when neither rule applies: an admin sees
+    every row. A machine key never reaches such a row at all — both are about a
+    person (#715) — so it gets None too."""
     if current_user.role == "admin" or not is_person_principal(current_user):
         return None
-    return set(db.get_agents_by_owner(current_user.username))
+    return _Fence(set(db.get_agents_by_owner(current_user.username)),
+                  (current_user.email or "").strip().lower())
 
 
-def _hidden_from(item: Dict[str, Any], owned: Optional[Set[str]]) -> bool:
+def _fenced(item: Dict[str, Any]) -> bool:
+    return (operator_queue_service.is_owner_only(item)
+            or operator_queue_service.is_addressee_only(item))
+
+
+def _hidden_from(item: Dict[str, Any], fence: Optional[_Fence]) -> bool:
     """An owner-only row (a client's complaint) on an agent this caller does not
-    own (trinity-enterprise#866). To them it reads like a row that is not there."""
-    return (owned is not None and operator_queue_service.is_owner_only(item)
-            and item.get("agent_name") not in owned)
+    own (trinity-enterprise#866), or an addressee-only row (a steward's proposal)
+    not addressed to them (trinity-enterprise#980). To them it reads like a row
+    that is not there."""
+    if fence is None:
+        return False
+    if operator_queue_service.is_owner_only(item) and item.get("agent_name") not in fence.owned:
+        return True
+    return (operator_queue_service.is_addressee_only(item)
+            and not operator_queue_service.is_addressed_to(item, fence.email))
 
 
-def _drop_hidden(items: List[Dict[str, Any]], owned: Optional[Set[str]]) -> List[Dict[str, Any]]:
-    return [item for item in items if not _hidden_from(item, owned)]
+def _drop_hidden(items: List[Dict[str, Any]], fence: Optional[_Fence]) -> List[Dict[str, Any]]:
+    return [item for item in items if not _hidden_from(item, fence)]
 
 
 def _hidden_for(item: Dict[str, Any], current_user: User) -> bool:
     """`_hidden_from` for one row, resolving the caller's agents only when the
-    row is owner-only — every other row costs no lookup."""
-    return (operator_queue_service.is_owner_only(item)
-            and _hidden_from(item, _owned_set(current_user)))
+    row is fenced — every other row costs no lookup."""
+    return _fenced(item) and _hidden_from(item, _fence(current_user))
+
+
+def _fence_filters(fence: Optional[_Fence]) -> Dict[str, Any]:
+    """The SQL twin of `_hidden_from`, for `list_operator_queue_items` — before
+    the limit, so a fenced row never empties a page and `total` stays exact."""
+    if fence is None:
+        return {}
+    return dict(owner_only_request_id_prefixes=operator_queue_service.OWNER_ONLY_ID_PREFIXES,
+                owner_agent_names=fence.owned,
+                addressee_only_request_id_prefixes=operator_queue_service.ADDRESSEE_ONLY_ID_PREFIXES,
+                addressee_email=fence.email)
 
 
 def _assert_agent_accessible(agent_name: str, accessible: Optional[Set[str]]) -> None:
@@ -137,6 +171,7 @@ _MACHINE_ROW_FIELDS = (
     "replaces", "replaced_by",  # #3247 — uuids; the readback maps them to request_ids
     "aging", "aged_since",
     "subject", "last_seen_at",  # #3246: a platform alert's condition key + latest reading
+    "wake_state",  # ent#1108 AC #4, ent#1135: pending (not woken) | owed (being delivered) | woken
 )
 
 
@@ -154,7 +189,11 @@ def _for_principal(items: List[Dict[str, Any]], current_user: User) -> List[Dict
                      run_viewer=current_user.username, name_approvers=True),
                  # trinity-enterprise#901: which ending the agent authored
                  # (replaced | withdrawn | None), derived once server-side.
-                 "agent_ending": ask_service.agent_ending_kind(item)}
+                 "agent_ending": ask_service.agent_ending_kind(item),
+                 # trinity-enterprise#980: a gate approval addressed to someone
+                 # else reads as theirs, with no controls — not as a refusal.
+                 "addressed": ask_service.addressed_view(
+                     item, ask_service.Actor(email=current_user.email or "", user=current_user))}
                 for item in items]
     # #715: the platform's heads-ups ABOUT a person (a client's complaint, the
     # client addresses behind a shared inbox) are the operator's, not a machine's.
@@ -176,6 +215,7 @@ _READBACK_FIELDS = (
     "disposition", "disposed_at", "disposed_by", "disposition_reason",
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
     "replaces", "replaced_by",  # #3247 — mapped to request_ids below
+    "wake_state",  # abilityai/trinity-enterprise#1108 AC #4
 )
 
 
@@ -226,21 +266,23 @@ async def list_queue_items(
     agent-scoped key is narrowed to `{self} ∪ permitted` before the cut;
     `agent_names` narrows any caller further.
     """
-    owned = _owned_set(current_user)
+    fence = _fence(current_user)
     try:
         return operator_queue_service.list_for_principal(
             current_user,
             accessible=_accessible_set(current_user),
             exclude_about_a_person=not is_person_principal(current_user),
             # trinity-enterprise#866: a client's complaint is the agent owner's.
-            owned_agents=owned,
+            owned_agents=None if fence is None else fence.owned,
+            # trinity-enterprise#980: a steward's proposal is its addressee's.
+            addressee_email=None if fence is None else fence.email,
             # #2915: aging is computed once, here, from the operator's bound —
             # the frontend renders `aging`/`aged_since`, it never recomputes
             # them. The two flag counts are the visible escalation (undelivered
             # answers, items the agent closed on its side) the Operations header
             # shows instead of minting queue items about queue items.
             project=lambda rows: _for_principal(
-                operator_queue_service.annotate_aging(_drop_hidden(rows, owned)), current_user),
+                operator_queue_service.annotate_aging(_drop_hidden(rows, fence)), current_user),
             filters=dict(status=status, type=type, priority=priority,
                          agent_name=agent_name, since=since),
             limit=limit,
@@ -287,7 +329,10 @@ async def bulk_cancel_queue_items(
         cancellable, accessible, actor=_actor(current_user, request), reason=body.reason,
     )
     cancelled = len(ending.rows)
-    return {"cancelled": cancelled, "skipped": len(ids) - cancelled, "batch_id": ending.batch_id}
+    # trinity-enterprise#1096 (R6): of the skipped, the fenced cards the actor
+    # is not on — ended one at a time, with a reason.
+    return {"cancelled": cancelled, "skipped": len(ids) - cancelled, "batch_id": ending.batch_id,
+            "skipped_fenced": ending.skipped_fenced}
 
 
 @router.post("/clear-resolved")
@@ -447,19 +492,34 @@ async def respond_to_queue_item(
         # #3242: the reserved "(something else)" decision — named so the caller
         # can act: `instruction_required`, `reserved_value` or `not_off_menu`.
         raise HTTPException(status_code=422, detail={"code": e.code, "message": str(e)})
+    except ask_service.CredentialAnswerRefused as e:
+        # trinity-enterprise#1066: a credential ask is answered only through
+        # the secret field in the person's Workspace; the respond box would put
+        # the value into the row and the agent's wake. Nothing was written.
+        raise HTTPException(status_code=422, detail={
+            "code": e.code,
+            "message": "This ask is answered in the person's Workspace through the secret "
+                       "field it opened; a typed response cannot answer it.",
+        })
     except ask_service.AskNotFound:
         raise HTTPException(status_code=404, detail="Queue item not found")
-    except ask_service.AskNotAddressee:
+    except ask_service.AskNotAddressee as e:
         # trinity-enterprise#751: a gated-skill approval is decided only by a
-        # person it was addressed to.
-        raise HTTPException(status_code=403, detail={
-            "code": "not_addressee",
-            "message": "This approval was addressed to someone else; only they can decide it.",
-        })
+        # person it was addressed to; #1042: an ask to a canon role only by a
+        # person seated in it — named by the role's label, never a person.
+        # trinity-enterprise#1096: `waiting_on` + `seat` on every refusal; a
+        # gate approval's message names the person, and an admin is told the
+        # two verbs (re-address, or end with a reason).
+        raise HTTPException(status_code=403, detail=e.detail(
+            admin_verbs=ask_service._gate_admin(current_user)))
     except ask_service.AskConflict as conflict:
         # The response was NOT recorded — surfaced instead of a silent 200
         # (#1017). `expired`: still pending but past its deadline (#611) — the
         # poller has not swept it yet, and an approval must not land after it.
+        if conflict.code == "readdressed":
+            # trinity-enterprise#1096 (R5): moved after this caller read it.
+            raise HTTPException(status_code=409,
+                                detail=ask_service.readdressed_detail(conflict.item))
         if conflict.code == "expired":
             raise HTTPException(
                 status_code=409,
@@ -512,19 +572,60 @@ async def cancel_queue_item(
         )
     except ask_service.AskNotFound:
         raise HTTPException(status_code=404, detail="Queue item not found")
-    except ask_service.AskNotAddressee:
+    except ask_service.AskNotAddressee as e:
         # trinity-enterprise#751: only its addressee or an admin cancels a
-        # gated-skill approval.
-        raise HTTPException(status_code=403, detail={
-            "code": "not_addressee",
-            "message": "This approval was addressed to someone else; only they or an admin can cancel it.",
+        # gated-skill approval (#1042: named by its role when it has one;
+        # trinity-enterprise#1096: who it waits for, structured).
+        raise HTTPException(status_code=403, detail=e.detail(cancelling=True))
+    except ask_service.AskReasonRequired:
+        # trinity-enterprise#1096: an admin ending someone else's decision.
+        raise HTTPException(status_code=422, detail={
+            "code": "reason_required",
+            "message": "This card waits for someone else's decision; give a reason to end it.",
         })
     except ask_service.AskConflict as conflict:
+        if conflict.code == "readdressed":
+            raise HTTPException(status_code=409,
+                                detail=ask_service.readdressed_detail(conflict.item))
         raise HTTPException(
             status_code=409,
             detail=f"Item is no longer pending (now '{conflict.item['status']}') — it was not cancelled"
         )
     return ending.rows[0]
+
+
+@router.post("/{item_id}/readdress")
+async def readdress_queue_item(
+    item_id: str,
+    body: OperatorReaddress,
+    request: Request,
+    current_user: User = Depends(require_admin),
+    _person: User = Depends(require_person),
+):
+    """An instance admin moves one pending card (trinity-enterprise#1096):
+    `to: rule` re-runs the rule that raised it, `to: admin` takes a
+    registered family's card to the admin seat. No person picker; the reason
+    is required and only its presence is audited.
+
+    Human-only and admin-only (`require_admin` + `require_person`): changing
+    who decides is a grant, never an agent's call — the `# mcp:` header says
+    so. The row's visibility is the same as the read's: a row the admin cannot
+    see is the uniform 404.
+    """
+    existing = db.get_operator_queue_item(item_id)
+    if not existing or operator_queue_service.is_person_tag(existing):
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    _assert_agent_accessible(existing["agent_name"], _accessible_set(current_user))
+    if _hidden_for(existing, current_user):
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    try:
+        return ask_service.admin_readdress(
+            item_id, to=body.to, reason=body.reason, actor=_actor(current_user, request))
+    except ask_service.AskNotFound:
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    except ask_service.ReaddressRefused as e:
+        raise HTTPException(status_code=e.status,
+                            detail={"code": e.code, "message": e.message, **e.data})
 
 
 @router.get("/agents/{agent_name}")
@@ -537,10 +638,7 @@ async def get_agent_queue_items(
     """Get queue items for a specific agent."""
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(agent_name, accessible)
-    owned = _owned_set(current_user)
-    owner_only = ({} if owned is None else
-                  dict(owner_only_request_id_prefixes=operator_queue_service.OWNER_ONLY_ID_PREFIXES,
-                       owner_agent_names=owned))
+    fence = _fence(current_user)
     items = db.list_operator_queue_items(
         agent_name=agent_name,
         status=status,
@@ -550,10 +648,11 @@ async def get_agent_queue_items(
         exclude_request_id_prefixes=(
             None if is_person_principal(current_user)
             else operator_queue_service.ABOUT_A_PERSON_ID_PREFIXES),
-        **owner_only,  # trinity-enterprise#866: before the limit, like the line above
+        # trinity-enterprise#866/#980: before the limit, like the line above
+        **_fence_filters(fence),
     )
     items = _for_principal(
-        operator_queue_service.annotate_aging(_drop_hidden(items, owned)), current_user)
+        operator_queue_service.annotate_aging(_drop_hidden(items, fence)), current_user)
     return {"agent_name": agent_name, "items": items, "count": len(items)}
 
 
@@ -577,16 +676,26 @@ async def raise_my_ask(
     FIRST ask's receipt (`status: "replayed"`) when this `request_id` was
     already raised, so a retry is a no-op. Refusals carry named codes — 422
     for a malformed ask, 429 for the caps.
+
+    A credential ask whose destination names `key_env` has that variable read
+    from this agent's own `.env` first (trinity-enterprise#1158 §2), so a
+    missing or unusable key is refused before a person types anything. The
+    sink decides whether the result applies; an unreadable file decides nothing.
     """
+    ask = body.model_dump(exclude_none=True)
+    key_env = _destination_key_env(ask)
+    key_state = (await credential_sink.key_env_state(name, key_env)
+                 if key_env is not None else None)
     try:
         receipt = ask_service.raise_ask(
             name,
-            body.model_dump(exclude_none=True),
+            ask,
             raised_by="agent",
             channel="mcp",
             actor_user=current_user,
             # ent#661 v3: the raising turn as the platform saw it (#2392).
             platform_execution_id=x_trinity_execution_id,
+            destination_key_state=key_state,
         )
     except ask_service.AskRejected as e:
         raise HTTPException(
@@ -595,6 +704,21 @@ async def raise_my_ask(
         )
     response.status_code = 201 if receipt["status"] == "created" else 200
     return receipt
+
+
+def _destination_key_env(ask: Dict[str, Any]) -> Optional[str]:
+    """The `key_env` a credential ask's destination names, when it names a
+    valid variable (trinity-enterprise#1158 §2); None for every other ask, an
+    `instance` destination, or a shape `raise_ask` will refuse anyway."""
+    if ask.get("type") != "credential":
+        return None
+    destination = (ask.get("context") or {}).get(credential_destination.CONTEXT_KEY)
+    if not isinstance(destination, dict) or "instance" in destination:
+        return None
+    key_env = destination.get("key_env")
+    if credential_ask_policy.credential_name_problem(key_env) is not None:
+        return None
+    return key_env
 
 
 @agent_router.get("/{name}/operator-queue/{request_id}")

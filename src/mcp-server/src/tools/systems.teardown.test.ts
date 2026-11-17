@@ -249,8 +249,9 @@ describe("teardown_system — what the description promises the model", () => {
     assert.match(
       tools.teardownSystem.parameters.shape.system_name.description ?? "",
       /list_systems/,
-      "GET /api/systems groups by the last hyphen and can report a name that is "
-        + "not a real system — feeding it here would target nothing, or worse"
+      "list_systems lists by system tag, but teardown also matches '<name>-*' "
+        + "when nothing carries the tag — the description must steer the name to a "
+        + "deploy/apply result or the detail route, not a bare list read"
     );
   });
 });

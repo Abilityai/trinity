@@ -7,6 +7,7 @@
 // would close one.
 import { draftedLandingFor } from './portalDrafts'
 import { capCount } from '@/utils/tabTitle'
+import { describeSkill } from '@/utils/skillDescription'
 
 // ent#621: the key map is the single declaration of every Workspace chord, so
 // the two hotkey helpers below delegate to it rather than keeping a second
@@ -67,8 +68,9 @@ export function partitionStarred(threads) {
 //
 // A room contributes to every agent in it, because there is no single agent the
 // conversation is "with" — if three agents are in a room you are behind on, all
-// three rows should say so. Rooms report `unread: 0` today (the backend counts
-// threads only), so this is the shape being right ahead of the data.
+// three rows should say so. Since trinity-enterprise#959 the backend counts a
+// room's unread for its members (an agent's messages after the reader's room
+// cursor), so a room's count arrives here like a chat's.
 export function unreadByAgent(threads) {
   const out = {}
   for (const t of Array.isArray(threads) ? threads : []) {
@@ -521,6 +523,72 @@ export function agentChatTabs(threads, agentName, { activeId = null, draft = fal
   return tabs
 }
 
+// The one exception to the ent#856 hold: a chat that goes from read to unread
+// while you are on the agent comes to the front, right after Main. Without it a
+// reply in a chat parked under "N more" lights a badge inside a closed menu —
+// the notification says there is a new message and the strip shows nowhere.
+//
+// The chat you have OPEN keeps its exact slot: the strip is `fixed-width`, so
+// the same index is the same place on screen, and a promotion can never push
+// the open chat into the overflow (or out from under the pointer). Only the
+// read→unread transition promotes; a second reply to an already-unread chat
+// moves nothing. The result is a new snapshot, so the hold continues from it.
+//
+// Rows the strip does not draw (archived ones) stay right after the tab they
+// followed, so an Undo-close still returns a chat beside its old neighbour.
+export function promoteChatInOrder(order, threads, id, activeId = null) {
+  if (!order || !Array.isArray(order.ids) || !id || id === activeId) return order
+  const seq = agentChatTabs(threads, order.agent, { activeId, order })
+    .filter((t) => t.thread && !t.pinned)
+    .map((t) => t.id)
+  if (!seq.includes(id)) return order
+  const at = activeId ? seq.indexOf(activeId) : -1
+  const drawn = seq.filter((x) => x !== id && x !== activeId)
+  drawn.unshift(id)
+  if (at >= 0) drawn.splice(at, 0, activeId)
+  const visible = new Set(seq)
+  const head = []
+  const after = new Map()
+  let anchor = null
+  for (const x of order.ids) {
+    if (visible.has(x)) { anchor = x; continue }
+    if (anchor === null) head.push(x)
+    else after.set(anchor, [...(after.get(anchor) || []), x])
+  }
+  const ids = [...head]
+  for (const x of drawn) ids.push(x, ...(after.get(x) || []))
+  // Nothing moved (the chat was already in front): keep the snapshot object, so
+  // "held" stays checkable by identity and no watcher re-fires for nothing.
+  if (ids.length === order.ids.length && ids.every((x, i) => x === order.ids[i])) return order
+  return { agent: order.agent, ids }
+}
+
+// Per-chat unread counts of one agent's non-room rows — what `newlyUnreadIds`
+// compares against to find the read→unread transition.
+export function unreadSnapshot(threads, agentName) {
+  const seen = new Map()
+  if (!agentName) return seen
+  for (const t of Array.isArray(threads) ? threads : []) {
+    if (t && !t.is_room && t.agent_name === agentName) seen.set(tabKey(t), Number(t.unread) || 0)
+  }
+  return seen
+}
+
+// The chats that went from read to unread since `seen`. A chat `seen` has never
+// counted (the list was still loading, or it was born this visit) is not a
+// transition: arriving already sorted it by recency, and a born chat already
+// sits beside Main. The open chat is read by definition and never promotes.
+export function newlyUnreadIds(seen, threads, agentName, activeId = null) {
+  if (!agentName || !seen) return []
+  return (Array.isArray(threads) ? threads : [])
+    .filter((t) => t && !t.is_room && t.agent_name === agentName)
+    .filter((t) => {
+      const id = tabKey(t)
+      return id !== activeId && seen.get(id) === 0 && (Number(t.unread) || 0) > 0
+    })
+    .map(tabKey)
+}
+
 // #2579: does this agent already have a Main chat on screen? The shell asks
 // before spending a per-agent round trip to mint one (the batch deliberately
 // never mints, so a pair whose chats predate ent#523 has no Main in the list).
@@ -652,10 +720,14 @@ export function titleGenerationNotice(health) {
   if (!health || typeof health !== 'object') return null
   const when = health.last_failure_at ? ` Last attempt: ${health.last_failure_at}.` : ''
   if (health.state === 'no_credential') {
+    // The health record quotes the model gateway's reason (an unreadable
+    // subscription token, no platform key the agent may use…), so the remedy
+    // is named by the cause rather than always "add a key".
+    const why = health.last_failure ? ` (${health.last_failure})` : ''
     return {
       level: 'warning',
       title: "Workspace chat titles aren't being generated",
-      body: `No Anthropic API key and no subscription token was available for the agent, so new chats keep a title taken from their first message. Add an API key under Credentials, or assign the agent a subscription.${when}`,
+      body: `No credential could answer for the agent${why}, so new chats keep a title taken from their first message. Assign the agent a Claude subscription the platform can read, or let it use the platform API key under Credentials.${when}`,
     }
   }
   if (health.state === 'failing') {
@@ -1056,6 +1128,42 @@ export function starterFor(p) {
   return String(p?.starter_prompt ?? '').trim() || String(p?.title ?? '')
 }
 
+// ---------------------------------------------------------------------------
+// trinity-enterprise#584 — what an agent can do, and what you can ask it
+// ---------------------------------------------------------------------------
+//
+// The briefing's hints are one of two things, and say which (`kind`): a
+// `playbook` is a capability, described by its SKILL.md `description:`, and
+// shows "No description yet" without one; a `use_case` is a prompt from the
+// agent's template, shown under "What you can ask" and never as a capability
+// with a missing description. A payload from before `kind` reads as playbooks.
+
+const isUseCase = (h) => h?.kind === 'use_case'
+
+// The Workspace rail's Info tab. The ladder never mixes tiers (an exposed
+// playbook set wins outright), so one item decides the heading.
+export function capabilitySection(capabilities) {
+  const list = Array.isArray(capabilities) ? capabilities.filter(Boolean) : []
+  const tier = list.length && list.every(isUseCase) ? 'use_cases' : 'playbooks'
+  return {
+    tier,
+    items: list.map((c) => {
+      const line = tier === 'use_cases' ? null : describeSkill(c.description)
+      return {
+        title: c.title,
+        line: line ? line.text : null,
+        missing: line ? line.missing : false,
+        starter: c.starter_prompt,
+      }
+    }),
+  }
+}
+
+// A new-chat hint card's second line: `{ text, missing }`, or null for a use case.
+export function hintLine(h) {
+  return isUseCase(h) ? null : describeSkill(h?.description)
+}
+
 // Empty-state copy. Exported so a test pins WHICH condition selects which line,
 // and phrased so it never claims what the client cannot observe: `_agent_briefing`
 // returns `[]` for a stopped or slow agent exactly as it does for one with no
@@ -1079,6 +1187,51 @@ export const AVAILABILITY_STOPPED = 'stopped'
 export const AVAILABILITY_UNAVAILABLE = 'unavailable'
 export const AVAILABILITY_UNKNOWN = 'unknown'
 
+// ent#1201 — the member tier. A person on an agent shared to them as a member
+// (`is_member_agent && !owned`, the same reading `PortalBriefing` uses) is
+// keyed on the CARD, not on the session kind, so a platform login and a portal
+// token get the same copy.
+export const MEMBER_RESTARTING_NOTICE = 'Your assistant is restarting.'
+
+export function viewerIsMemberTier(agent) {
+  return !!agent?.is_member_agent && !agent?.owned
+}
+
+// True while the member's assistant is being started: its progress record's
+// `assistant_ready` step is `in_progress`. `done`, `failed`, no step and no
+// record are all "not starting" — a missing card must never hide a real stop.
+export function assistantStarting(progress) {
+  const steps = Array.isArray(progress?.steps) ? progress.steps : []
+  return steps.some((s) => s?.key === 'assistant_ready' && s.state === 'in_progress')
+}
+
+// The set-up landing's one line, said the same way on the stage and in the
+// sidebar; past the ceiling both say it is taking longer.
+export const SETUP_PENDING_LINE = 'Your assistant is being set up'
+export const SETUP_OVERDUE_LINE = "This is taking longer than usual — we're looking into it."
+
+// The set-up landing's poll (ent#1201). While the roster says the viewer's
+// agent is being set up, the shell re-reads it every few seconds, for at most
+// three minutes; past that it stops and says so rather than polling forever.
+// 'poll' | 'overdue' | 'idle' — idle once the flag clears, whatever the clock.
+export const SETUP_POLL_CEILING_MS = 3 * 60 * 1000
+
+export function setupPollVerdict({ pending, elapsedMs, ceilingMs = SETUP_POLL_CEILING_MS } = {}) {
+  if (!pending) return 'idle'
+  return elapsedMs >= ceilingMs ? 'overdue' : 'poll'
+}
+
+// A turn refused because the agent is not running (the server's 502 whose copy
+// ends "…its owner needs to start it."), re-said for a member-tier viewer in
+// words that name no one. Null for any other viewer or any other refusal, so
+// the caller keeps the server's own words.
+export function memberTierRefusal(err, agent) {
+  if (!viewerIsMemberTier(agent)) return null
+  if (err?.response?.status !== 502) return null
+  const detail = err.response.data?.detail
+  return typeof detail === 'string' && /needs to start it/i.test(detail) ? MEMBER_RESTARTING_NOTICE : null
+}
+
 /**
  * The chip for one roster card, or `null` when nothing should be rendered.
  *
@@ -1098,9 +1251,19 @@ export const AVAILABILITY_UNKNOWN = 'unknown'
  * Nothing here is derived from a Docker string: `availability` is one of four
  * server-chosen constants, and an unrecognised value renders nothing.
  */
-export function availabilityChip(agent, { detailed = false } = {}) {
+export function availabilityChip(agent, { detailed = false, memberTier = viewerIsMemberTier(agent), starting = false } = {}) {
   const state = String(agent?.availability ?? '')
+  // ent#1201: while a member's assistant is being started the progress card
+  // speaks ("Your assistant is starting") and the row reads like a ready agent.
+  if (memberTier && starting) return null
   if (state !== AVAILABILITY_STOPPED && state !== AVAILABILITY_UNAVAILABLE) return null
+
+  // ent#1201: a member-tier viewer cannot start the agent and has nobody to
+  // ask — the card's owner is a platform account they have never heard of — so
+  // the copy names no one, and `detailed` does not apply.
+  if (memberTier) {
+    return { state, label: 'Restarting', variant: 'warning', title: MEMBER_RESTARTING_NOTICE }
+  }
 
   const owner = String(agent?.owner ?? '').trim()
   // The card already carries the owner, so naming them costs nothing and is far
@@ -2092,8 +2255,8 @@ export function agentPreview(threads, agentName) {
 // why it will not go yet. The server's 502 stays the real refusal — this only
 // sets the expectation before they hit Enter. Returns null while the agent can
 // run, including on `unknown`, which is not evidence of anything.
-export function composerAvailabilityNotice(agent) {
-  const chip = availabilityChip(agent, { detailed: true })
+export function composerAvailabilityNotice(agent, { memberTier = viewerIsMemberTier(agent), starting = false } = {}) {
+  const chip = availabilityChip(agent, { detailed: true, memberTier, starting })
   if (!chip) return null
   return { state: chip.state, message: chip.title }
 }
@@ -2271,20 +2434,22 @@ export function assistantRow({ content = '', id = null, my_rating = null,
 // would never grow, the poll would idle out, and a turn that answered would
 // be reported as "check shortly". The baseline is the id of the newest TYPED
 // assistant row (`replyBaseline`); a reply is new when that id changed. A
-// spoken reply (`source === 'voice'`) is never this turn's answer. The count
+// row with any `source` — spoken (`voice`), a completion report, a message the
+// agent sent between turns (`proactive`, ent#1221) — is never this turn's
+// answer: typed is `!source`, the backend's `_TYPED = "source IS NULL"`. The count
 // survives only as the fallback for a row with no id (the best-effort write).
 export function latestTypedReply(messages) {
   const rows = Array.isArray(messages) ? messages : []
   for (let i = rows.length - 1; i >= 0; i--) {
     const m = rows[i]
-    if (m && m.role === 'assistant' && m.source !== 'voice') return m
+    if (m && m.role === 'assistant' && !m.source) return m
   }
   return null
 }
 
 function typedReplyCount(messages) {
   return (Array.isArray(messages) ? messages : [])
-    .filter((m) => m && m.role === 'assistant' && m.source !== 'voice').length
+    .filter((m) => m && m.role === 'assistant' && !m.source).length
 }
 
 // What a reply must differ from: taken BEFORE dispatch, from the same rows the

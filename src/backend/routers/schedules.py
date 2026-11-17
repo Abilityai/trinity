@@ -28,7 +28,14 @@ from models import (
 )
 from dependencies import (
     agent_may_reach,
+    agent_principal_name,
     capability_fence,
+    person_or_capability_admits,
+    require_person_or_capability,
+    agent_viewer_tier,
+    VIEWER_SHARE,
+    row_is_viewers,
+    viewer_row_scope,
     get_current_user,
     get_authorized_agent,
     AuthorizedAgent,
@@ -40,6 +47,7 @@ from dependencies import (
 )
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
 from services import dispatch_admission_service, skill_gate_map_service
+from services import execution_attribution  # ent#1105
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from utils.public_url import public_base_url
 from services.schedule_validation import (
@@ -132,11 +140,94 @@ def _enforce_timeout_below_agent_cap(agent_name: str, requested_seconds: int) ->
         )
 
 
+def _can_manage_webhook(schedule, agent_name: str, current_user: User) -> bool:
+    """The share-tier half of who may mint, rotate, revoke or read a schedule's
+    webhook (ent#875).
+
+    A webhook URL is a bearer credential that triggers the schedule with the
+    agent's own authority, so it is held by the schedule's creator or the agent
+    owner (an admin included) — not by everyone the agent is merely shared with.
+    This check passes the owner, admin and key tiers; the principal half is the
+    routes' decorator, `require_person_or_capability("schedules.manage")`
+    (trinity-enterprise#719: a person, or an agent key holding the grant on an
+    agent its owner owns; the system key is refused). A share holder needs to
+    be the creator (`agent_schedules.owner_id`). A schedule with no recorded
+    creator is the owner's alone."""
+    if _is_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None)):
+        return False
+    if agent_viewer_tier(current_user, agent_name) != VIEWER_SHARE:
+        return True
+    uid = getattr(current_user, "id", None)
+    owner_id = getattr(schedule, "owner_id", None)
+    return isinstance(uid, int) and owner_id is not None and owner_id == uid
+
+
+# One sentence for every webhook route a non-creator share holder is refused on.
+_WEBHOOK_FORBIDDEN_DETAIL = {
+    "code": "webhook_owner_or_creator",
+    "message": "Only the schedule's creator or the agent's owner can manage its webhook.",
+}
+
+
+def _assert_can_manage_webhook(schedule, agent_name: str, current_user: User) -> None:
+    # ent#1063: first, so an agent holding `schedules.manage` gets the named refusal.
+    _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
+    if not _can_manage_webhook(schedule, agent_name, current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(_WEBHOOK_FORBIDDEN_DETAIL))
+
+
+def _schedule_response(schedule, agent_name: str, current_user: User) -> ScheduleResponse:
+    """The response, with `can_manage_webhook` computed by both checks the
+    webhook routes enforce — the decorator's principal rule and the share-tier
+    rule — so it is true exactly when this caller's webhook call would pass
+    (ent#875, trinity-enterprise#719). The client has no numeric user id to compare."""
+    return ScheduleResponse(
+        **schedule.model_dump(),
+        can_manage_webhook=(
+            person_or_capability_admits(current_user, "schedules.manage", agent_name)
+            and _can_manage_webhook(schedule, agent_name, current_user)
+        ),
+    )
+
+
 @router.get("/{name}/schedules", response_model=List[ScheduleResponse])
-async def list_agent_schedules(name: AuthorizedAgent):
+async def list_agent_schedules(name: AuthorizedAgent, current_user: User = Depends(get_current_user)):
     """List all schedules for an agent."""
     schedules = db.list_agent_schedules(name)
-    return [ScheduleResponse(**s.model_dump()) for s in schedules]
+    return [_schedule_response(s, name, current_user) for s in schedules]
+
+
+_AGENT_THIRD_PARTY = {
+    "error": ("An agent can deliver a schedule only to its owner's Workspace. Pointing a schedule at "
+              "someone else, or changing or running one that is, is the owner's decision: ask them."),
+    "code": "agent_cannot_address_another_person",
+}
+
+
+def _is_agent_third_party(current_user, email) -> bool:
+    """An agent's own key, and an address other than its owner's."""
+    if not agent_principal_name(current_user):
+        return False
+    target = (email or "").strip().lower()
+    return bool(target) and target != (getattr(current_user, "email", "") or "").strip().lower()
+
+
+def _refuse_agent_third_party(current_user, email) -> None:
+    """trinity-enterprise#1063: an agent's own key never addresses, edits or fires
+    a schedule delivered to someone other than its owner.
+
+    A schedule addressed to a person makes its runs that person's seat runs
+    (`schedule_seat_memory`): they serve that person, write their notes and
+    read as that person's turns. `_enforce_delivery_target_authority` lets the
+    agent's OWNER address anyone, and an agent key resolves to its owner, so
+    without this an agent could mint a live turn in a colleague's seat — create
+    or retarget a schedule to them, rewrite one the owner made for them, or fire
+    it on demand. That is a grant, not a use (Invariant #8): the owner decides
+    who the agent speaks to unprompted. Addressing the owner stays open (the
+    key's email IS the owner's), and the system key is the platform's own.
+    """
+    if _is_agent_third_party(current_user, email):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_AGENT_THIRD_PARTY)
 
 
 def _enforce_delivery_target_authority(current_user, name: str, email) -> None:
@@ -239,6 +330,7 @@ async def create_schedule(
     if schedule_data.timeout_seconds is not None:
         _enforce_timeout_below_agent_cap(name, schedule_data.timeout_seconds)
 
+    _refuse_agent_third_party(current_user, schedule_data.deliver_to_workspace_email)
     _enforce_delivery_target_authority(
         current_user, name, schedule_data.deliver_to_workspace_email)
 
@@ -252,7 +344,7 @@ async def create_schedule(
     # Dedicated scheduler syncs from database automatically
     # No need to notify it directly - it will pick up new schedules on next sync cycle
 
-    return ScheduleResponse(**schedule.model_dump())
+    return _schedule_response(schedule, name, current_user)
 
 
 @router.get(
@@ -337,7 +429,8 @@ async def get_agent_schedules_summary(
 @router.get("/{name}/schedules/{schedule_id}", response_model=ScheduleResponse)
 async def get_schedule(
     name: AuthorizedAgent,
-    schedule_id: str
+    schedule_id: str,
+    current_user: User = Depends(get_current_user),
 ):
     """Get a specific schedule."""
     schedule = db.get_schedule(schedule_id)
@@ -347,7 +440,7 @@ async def get_schedule(
             detail="Schedule not found"
         )
 
-    return ScheduleResponse(**schedule.model_dump())
+    return _schedule_response(schedule, name, current_user)
 
 
 @router.put("/{name}/schedules/{schedule_id}", response_model=ScheduleResponse, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
@@ -364,6 +457,7 @@ async def update_schedule(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Schedule not found"
         )
+    _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
 
     # #1472: validate cron + timezone with the scheduler's parser (see
     # create_schedule). Cron-field validity is timezone-independent, so a cron
@@ -423,6 +517,7 @@ async def update_schedule(
     # nulling PUT (stop delivering) is always allowed.
     update_dict = updates.model_dump(exclude_unset=True)
     if update_dict.get("deliver_to_workspace_email"):
+        _refuse_agent_third_party(current_user, update_dict["deliver_to_workspace_email"])
         _enforce_delivery_target_authority(
             current_user, name, update_dict["deliver_to_workspace_email"])
 
@@ -436,7 +531,7 @@ async def update_schedule(
     # Dedicated scheduler syncs from database automatically
     # It will detect the update on next sync cycle
 
-    return ScheduleResponse(**updated_schedule.model_dump())
+    return _schedule_response(updated_schedule, name, current_user)
 
 
 @router.delete("/{name}/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
@@ -452,6 +547,7 @@ async def delete_schedule(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Schedule not found"
         )
+    _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
 
     # Dedicated scheduler syncs from database automatically
     # It will detect the deletion on next sync cycle
@@ -472,7 +568,8 @@ async def enable_schedule(
     # OwnedAgentByName reads `agent_name`, so FastAPI could never satisfy it
     # and rejected every request with 422 before the handler ran (#2094).
     name: OwnedAgent,
-    schedule_id: str
+    schedule_id: str,
+    current_user: User = Depends(get_current_user),
 ):
     """Enable a schedule."""
     schedule = db.get_schedule(schedule_id)
@@ -481,6 +578,7 @@ async def enable_schedule(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Schedule not found"
         )
+    _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
 
     # Update database - dedicated scheduler syncs automatically
     db.set_schedule_enabled(schedule_id, True)
@@ -495,7 +593,8 @@ async def disable_schedule(
     # OwnedAgentByName reads `agent_name`, so FastAPI could never satisfy it
     # and rejected every request with 422 before the handler ran (#2094).
     name: OwnedAgent,
-    schedule_id: str
+    schedule_id: str,
+    current_user: User = Depends(get_current_user),
 ):
     """Disable a schedule."""
     schedule = db.get_schedule(schedule_id)
@@ -504,6 +603,7 @@ async def disable_schedule(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Schedule not found"
         )
+    _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
 
     # Update database - dedicated scheduler syncs automatically
     db.set_schedule_enabled(schedule_id, False)
@@ -537,6 +637,7 @@ async def trigger_schedule(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Schedule not found"
         )
+    _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
 
     # #1970: the authenticated caller is in scope HERE and nowhere downstream —
     # the scheduler hop carried only the schedule id, so every manually
@@ -670,6 +771,13 @@ async def trigger_schedule(
 
 
 # Webhook Management Endpoints (WEBHOOK-001, #291)
+#
+# Every webhook route, the read included, takes a person or an agent holding
+# `schedules.manage` (trinity-enterprise#719). The schedule writes above keep
+# the own-agent exemption, whose reason is that autonomy bounds the agent's own
+# schedules; a webhook run is not gated by autonomy, so the exemption stops at
+# the schedule. The read returns the URL with its token, so it takes the same
+# gate as the writes.
 
 
 def _build_webhook_url(request: Request, token: str) -> Optional[str]:
@@ -683,7 +791,7 @@ def _build_webhook_url(request: Request, token: str) -> Optional[str]:
     return f"{base}/api/webhooks/{token}" if base else None
 
 
-@router.post("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
+@router.post("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse, dependencies=[Depends(require_person_or_capability("schedules.manage"))])
 async def generate_webhook(
     name: AuthorizedAgent,
     schedule_id: str,
@@ -702,6 +810,8 @@ async def generate_webhook(
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+
+    _assert_can_manage_webhook(schedule, name, current_user)
 
     # #1445: defense-in-depth — never mint a token for a schedule whose agent
     # has no live ownership row (that token would 404 at trigger time). Runs
@@ -735,11 +845,12 @@ async def generate_webhook(
     )
 
 
-@router.get("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse)
+@router.get("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse, dependencies=[Depends(require_person_or_capability("schedules.manage"))])
 async def get_webhook_status(
     name: AuthorizedAgent,
     schedule_id: str,
     request: Request,
+    current_user: User = Depends(get_current_user),
 ):
     """Get webhook configuration for a schedule.
 
@@ -749,6 +860,8 @@ async def get_webhook_status(
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    # ent#875: this read returns the live token URL, a bearer credential.
+    _assert_can_manage_webhook(schedule, name, current_user)
 
     status_data = db.get_webhook_status(schedule_id)
     if status_data is None:
@@ -771,7 +884,7 @@ async def get_webhook_status(
 @router.post(
     "/{name}/schedules/{schedule_id}/webhook/secret",
     response_model=WebhookStatusResponse,
-    dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))],
+    dependencies=[Depends(require_person_or_capability("schedules.manage"))],
 )
 async def generate_webhook_secret(
     name: AuthorizedAgent,
@@ -793,6 +906,7 @@ async def generate_webhook_secret(
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    _assert_can_manage_webhook(schedule, name, current_user)
 
     if not schedule.webhook_token:
         raise HTTPException(
@@ -826,7 +940,7 @@ async def generate_webhook_secret(
 @router.delete(
     "/{name}/schedules/{schedule_id}/webhook/secret",
     response_model=WebhookStatusResponse,
-    dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))],
+    dependencies=[Depends(require_person_or_capability("schedules.manage"))],
 )
 async def disable_webhook_secret(
     name: AuthorizedAgent,
@@ -839,6 +953,7 @@ async def disable_webhook_secret(
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    _assert_can_manage_webhook(schedule, name, current_user)
 
     db.clear_webhook_secret(schedule_id)
     logger.info(
@@ -856,7 +971,7 @@ async def disable_webhook_secret(
     )
 
 
-@router.delete("/{name}/schedules/{schedule_id}/webhook", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
+@router.delete("/{name}/schedules/{schedule_id}/webhook", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_person_or_capability("schedules.manage"))])
 async def revoke_webhook(
     name: AuthorizedAgent,
     schedule_id: str,
@@ -870,6 +985,7 @@ async def revoke_webhook(
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    _assert_can_manage_webhook(schedule, name, current_user)
 
     db.revoke_webhook_token(schedule_id)
     logger.info(f"Webhook token revoked for schedule {schedule_id} by {current_user.username}")
@@ -881,9 +997,14 @@ async def revoke_webhook(
 async def get_schedule_executions(
     name: AuthorizedAgent,
     schedule_id: str,
-    limit: int = 50
+    limit: int = 50,
+    current_user: User = Depends(get_current_user),
 ):
-    """Get execution history for a schedule."""
+    """Get execution history for a schedule.
+
+    A share holder sees only the runs they started (trinity-enterprise#875),
+    plus — on a schedule they created — its cron and webhook runs, which carry
+    no user; the owner, an admin and agent keys see every run."""
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(
@@ -891,7 +1012,13 @@ async def get_schedule_executions(
             detail="Schedule not found"
         )
 
-    executions = db.get_schedule_executions(schedule_id, limit=limit)
+    scope = viewer_row_scope(current_user, name)
+    if scope is None:
+        executions = db.get_schedule_executions(schedule_id, limit=limit)
+    else:
+        executions = db.get_schedule_executions(
+            schedule_id, limit=limit, source_user_id=scope,
+            include_unattributed=getattr(schedule, "owner_id", None) == scope)
     return [ExecutionResponse(**e.model_dump()) for e in executions]
 
 
@@ -915,7 +1042,14 @@ async def get_agent_executions(
     Note: The AuthorizedAgent dependency validates both agent existence (via db.get_agent_owner)
     and user access. This returns 404 if agent not found, 403 if no access, or execution list.
     """
-    executions = db.get_agent_executions_summary(name, limit=limit)
+    # trinity-enterprise#875: a share holder's list is their own executions,
+    # filtered in SQL before the LIMIT. The kwarg is passed only when it applies,
+    # so the owner's and an agent key's call is byte-for-byte the old one.
+    scope = viewer_row_scope(current_user, name)
+    if scope is None:
+        executions = db.get_agent_executions_summary(name, limit=limit)
+    else:
+        executions = db.get_agent_executions_summary(name, limit=limit, source_user_id=scope)
     # trinity-enterprise#754: "ran without approval" — one batch read for the page.
     flags = skill_gate_map_service.self_approved_flags(
         name, [e.get("id") for e in executions], current_user)
@@ -932,7 +1066,13 @@ async def get_execution(
 ):
     """Get details of a specific execution."""
     execution = db.get_execution(execution_id)
-    if not execution or execution.agent_name != name:
+    if (
+        not execution
+        or execution.agent_name != name
+        # ent#875: a row that is not the share holder's answers the same 404 as
+        # an id that does not exist, so it cannot be told apart from one.
+        or not row_is_viewers(viewer_row_scope(current_user, name), execution.source_user_id)
+    ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Execution not found"
@@ -941,14 +1081,19 @@ async def get_execution(
     # trinity-enterprise#754: "ran without approval", as on the list.
     self_approved, by_viewer = skill_gate_map_service.self_approved_flags(
         name, [execution_id], current_user).get(execution_id, (False, False))
+    # ent#1105: the project an edition attributed it to, when this reader may
+    # see that project. Fails open to absent; the read always answers 200.
+    project_id = execution_attribution.annotate(execution, current_user).get("project_id")
     return ExecutionResponse(**execution.model_dump(), gate_self_approved=self_approved,
-                             gate_self_approved_by_viewer=by_viewer)
+                             gate_self_approved_by_viewer=by_viewer,
+                             project_id=project_id)
 
 
 @router.get("/{name}/executions/{execution_id}/log")
 async def get_execution_log(
     name: AuthorizedAgent,
-    execution_id: str
+    execution_id: str,
+    current_user: User = Depends(get_current_user),
 ):
     """
     Get the full execution log for a specific execution.
@@ -957,7 +1102,11 @@ async def get_execution_log(
     This includes all tool calls, thinking, and responses.
     """
     execution = db.get_execution(execution_id)
-    if not execution or execution.agent_name != name:
+    if (
+        not execution
+        or execution.agent_name != name
+        or not row_is_viewers(viewer_row_scope(current_user, name), execution.source_user_id)
+    ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Execution not found"

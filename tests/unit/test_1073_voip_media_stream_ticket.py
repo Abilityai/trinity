@@ -148,7 +148,7 @@ def _load_media_stream_module() -> types.ModuleType:
     voip_svc_mod.intent_key = lambda call_id: f"voip_intent:{call_id}"
 
     ws_ticket_mod = types.ModuleType("services.ws_ticket_service")
-    ws_ticket_mod.consume_ticket = lambda t: None
+    ws_ticket_mod.consume_ticket = lambda t, *, scope, raise_on_unavailable=False: None
 
     path = _BACKEND / "adapters" / "transports" / "twilio_media_stream.py"
     spec = importlib.util.spec_from_file_location(
@@ -266,15 +266,27 @@ def _start_frame(ticket=None, stream_sid="MZ_streamsid"):
     return {"event": "start", "start": start, "streamSid": stream_sid}
 
 
+class _ConsumeCalls(list):
+    """The tickets the handler consumed, plus the scope it named for each."""
+
+    def __init__(self):
+        super().__init__()
+        self.scopes = []
+
+
 def _wire(monkeypatch, *, ticket_scope, redis_intent):
     """Patch the loaded module's globals with cooperative fakes.
 
     Returns (fake_voice, fake_redis, consume_calls).
     """
-    consume_calls = []
+    consume_calls = _ConsumeCalls()
 
-    def _consume(t):
+    # trinity-enterprise#595: the real consumer requires the expected scope;
+    # this fake records what the handler passed (None if it passed nothing)
+    # so the call-bound value is asserted, not assumed.
+    def _consume(t, scope=None, raise_on_unavailable=False):
         consume_calls.append(t)
+        consume_calls.scopes.append(scope)
         return {"sub": "voip", "scope": ticket_scope} if ticket_scope else None
 
     fake_voice = _FakeVoiceService()
@@ -346,6 +358,7 @@ class TestHandleMediaStreamTicketFromStartFrame:
 
         assert ws.accepted is True
         assert consume_calls == ["TKT_good"]                  # ticket read from <Parameter>
+        assert consume_calls.scopes == [f"voip:{call_id}"]    # consumed for THIS call only (ent#595)
         assert len(fake_voice.create_calls) == 1              # session created
         assert fake_voice.create_calls[0]["agent_name"] == "cornelius-m"
         assert fake_redis.getdel_keys == [f"voip_intent:{call_id}"]
@@ -384,6 +397,7 @@ class TestHandleMediaStreamTicketFromStartFrame:
         asyncio.run(MS.handle_media_stream(ws, call_id, None))
 
         assert consume_calls == ["TKT_other"]
+        assert consume_calls.scopes == [f"voip:{call_id}"]
         assert ws.closed is not None and ws.closed[0] == 4001
         assert fake_voice.create_calls == []
 
@@ -416,5 +430,6 @@ class TestHandleMediaStreamTicketFromStartFrame:
 
         assert ws.accepted is True
         assert consume_calls == ["QS_TICKET"]          # query-string ticket honored
+        assert consume_calls.scopes == [f"voip:{call_id}"]
         assert len(fake_voice.create_calls) == 1
         assert fake_redis.getdel_keys == [f"voip_intent:{call_id}"]

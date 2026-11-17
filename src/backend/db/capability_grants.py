@@ -36,7 +36,7 @@ CAPABILITY_SCHEDULES_MANAGE = "schedules.manage"
 #: `.claude/skills/**`, which stays `skills.manage`), and git reset-to-main.
 CAPABILITY_INSTRUCTIONS_MANAGE = "instructions.manage"
 #: Create (non-ephemeral) / delete / deploy agents and systems, and reconfigure
-#: them (resources, timeout, guardrails, read-only, models, rename). Autonomy is
+#: them (resources, timeout, guardrails, read-only, tool access, models, rename). Autonomy is
 #: NOT in it: raising autonomy stays person-only and is never granted.
 CAPABILITY_AGENTS_MANAGE = "agents.manage"
 #: trinity-enterprise#588 (ent#661's planned agent right): create a Workspace

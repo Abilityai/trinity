@@ -146,6 +146,10 @@ PROVISION=0
 PROVISION_PHASE=both
 PROVISION_CLOUD=""
 PROVISION_PROVENANCE=""
+# #4149: replace a Caddyfile this script did not write (see
+# provision_caddyfile_is_ours), and print the render instead of writing it.
+CADDY_OVERWRITE="${TRINITY_CADDY_OVERWRITE:-0}"
+CADDY_DRY_RUN=0
 _pargs=("$@")
 _pi=0
 while [ "$_pi" -lt "${#_pargs[@]}" ]; do
@@ -155,6 +159,8 @@ while [ "$_pi" -lt "${#_pargs[@]}" ]; do
         --site-only)    PROVISION_PHASE=site ;;
         --caddy-only)   PROVISION_PHASE=caddy ;;
         --refresh-ip)   PROVISION_PHASE=refresh ;;
+        --caddy-overwrite) CADDY_OVERWRITE=1 ;;
+        --dry-run)      CADDY_DRY_RUN=1 ;;
         --cloud)        _pi=$((_pi + 1)); PROVISION_CLOUD="${_pargs[$_pi]:-}" ;;
         --cloud=*)      PROVISION_CLOUD="${_pargs[$_pi]#*=}" ;;
         --provenance)   _pi=$((_pi + 1)); PROVISION_PROVENANCE="${_pargs[$_pi]:-}" ;;
@@ -162,6 +168,13 @@ while [ "$_pi" -lt "${#_pargs[@]}" ]; do
     esac
     _pi=$((_pi + 1))
 done
+# #4149 review: only the Caddy-only render honours --dry-run. Anywhere else it
+# would be silently ignored and the run would pull, `compose up` or rewrite .env
+# for real, so it is refused instead.
+if [ "$CADDY_DRY_RUN" = "1" ] && { [ "$PROVISION" != "1" ] || [ "$PROVISION_PHASE" != "caddy" ]; }; then
+    echo "❌ --dry-run is supported only with --provision --caddy-only (it previews the Caddyfile; nothing else is simulated)." >&2
+    exit 1
+fi
 
 # Caddy is PINNED and the floor is load-bearing rather than hygiene: the whole
 # no-domain HTTPS story rests on a Let's Encrypt certificate for a BARE IP, and
@@ -381,8 +394,26 @@ provision_private_cidrs() {
 # phase also rewrites FRONTEND_URL and TRINITY_INSTALL_SOURCE, so re-running it
 # to pick up one variable would silently re-stamp a marketplace droplet's
 # provenance as a doc-driven install.
+#
+# The file is Trinity's, rewritten on every upgrade (#4149). An operator's own
+# sites go in /etc/caddy/Caddyfile.d/*.caddy, which the render imports and never
+# touches. A live Caddyfile someone else edited is never replaced without
+# --caddy-overwrite (provision_caddyfile_is_ours, which also recognises the
+# apt package's unedited default, so first boot replaces it). Whether a file is
+# replaceable is read off the FILE, never off which caller is rendering.
 provision_caddyfile() {
-    local ip="$1" provenance="$2" _do_header="" _private="" _private_block=""
+    local ip="$1" provenance="$2" _do_header="" _private="" _private_block="" _auto_https=""
+    local _target _t_port _t_proxy=0 _rp_site _rp_private
+
+    # Which web listener Caddy proxies to (trinity-enterprise#873). Chosen by a
+    # LIVE probe on every render — first boot, --caddy-only, the IP refresh and
+    # the post-upgrade re-render alike — so a checkout ahead of the running web
+    # image can never point Caddy at a listener that is not there.
+    _target="$(provision_caddy_target)"
+    _t_port="${_target% *}"
+    [ "${_target#* }" = "proxy" ] && _t_proxy=1
+    _rp_site="$(provision_reverse_proxy_block '    ' "$_t_port" "$_t_proxy")"
+    _rp_private="$(provision_reverse_proxy_block '        ' "$_t_port" "$_t_proxy")"
 
     # Rule 10 of DigitalOcean's 1-Click build standard specifies this header on
     # the reverse-proxy block, and their own catalog apps ship it (openclaw's
@@ -406,15 +437,21 @@ provision_caddyfile() {
     @private remote_ip ${_private}
     handle @private {
         encode gzip
-        reverse_proxy 127.0.0.1:8081 {
-            flush_interval -1
-        }
+        ${_rp_private}
     }
     handle {
-        redir https://{host}{uri} permanent
+        redir https://{host}{uri} 308
     }
 PRIVATE
 )"
+        # Caddy's automatic redirects for the on-demand wildcard are routed by
+        # host pattern and run ahead of this block, and `*.*.*.*` matches a
+        # dotted IP, so they would redirect `http://<private-ip>` before
+        # @private sees it. With them off this block is the only route on :80;
+        # its fallback keeps their 308. Caddy answers ACME HTTP challenges
+        # ahead of every route regardless. The leading newline keeps the unset
+        # render byte-identical, so the unchanged-file check below still holds.
+        _auto_https=$'\n    auto_https disable_redirects'
         echo "→ Caddy: serving plain HTTP to ${_private} (private network)."
     else
         _private_block="    redir https://{host}{uri} permanent"
@@ -435,12 +472,14 @@ PRIVATE
     # ponytail: domains deeper than 6 labels get no on-demand certificate; add
     # another `*.` pattern if one ever needs it.
     cat > /etc/caddy/Caddyfile.new <<CADDY
+# Written by Trinity's start.sh and rewritten on every upgrade: edits here are
+# lost. Put your own sites in /etc/caddy/Caddyfile.d/<name>.caddy instead.
 {
     acme_ca https://acme-v02.api.letsencrypt.org/directory
     default_sni ${ip}
     on_demand_tls {
         ask http://127.0.0.1:8000/api/public/tls-allowed
-    }
+    }${_auto_https}
 }
 
 https://${ip} {
@@ -453,9 +492,7 @@ https://${ip} {
 
     # Streaming endpoints must not be buffered: the Workspace reads execution
     # logs over SSE (GET /api/executions/{id}/stream).
-    reverse_proxy 127.0.0.1:8081 {
-        flush_interval -1
-    }
+    ${_rp_site}
     ${_do_header}
 }
 
@@ -464,14 +501,14 @@ https://*.*, https://*.*.*, https://*.*.*.*, https://*.*.*.*.*, https://*.*.*.*.
         on_demand
     }
     encode gzip
-    reverse_proxy 127.0.0.1:8081 {
-        flush_interval -1
-    }
+    ${_rp_site}
 }
 
 http:// {
 ${_private_block}
 }
+
+import /etc/caddy/Caddyfile.d/*.caddy
 CADDY
 
     # Validate before reloading. A malformed Caddyfile does not degrade the web
@@ -487,17 +524,258 @@ CADDY
     # 077: a 0600 root file the `caddy` service user cannot read, so the restart
     # fails and the droplet never serves. It holds no secrets.
     chmod 0644 /etc/caddy/Caddyfile.new
+    if [ "$CADDY_DRY_RUN" = "1" ]; then
+        echo "--- /etc/caddy/Caddyfile as it would be written (dry run, nothing changed) ---"
+        cat /etc/caddy/Caddyfile.new
+        echo "--- end ---"
+        if ! provision_caddyfile_is_ours; then
+            echo "Would REFUSE: the live /etc/caddy/Caddyfile has been edited since Trinity wrote it. Move your own"
+            echo "sites to /etc/caddy/Caddyfile.d/<name>.caddy, then re-run with --caddy-overwrite."
+        fi
+        provision_caddy_dropins_readable || echo "Would REFUSE: see the unreadable Caddyfile.d entries above."
+        rm -f /etc/caddy/Caddyfile.new
+        return 0
+    fi
+    # Someone else's file: say so and keep it serving (#4149). An upgrade that
+    # silently dropped an operator's site took their hostname down.
+    if ! provision_caddyfile_writable; then
+        rm -f /etc/caddy/Caddyfile.new
+        return 1
+    fi
+    if ! provision_caddyfile_is_ours; then
+        # --caddy-overwrite (provision_caddyfile_writable refused without it).
+        if ! cp -p /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.bak-$(date +%Y%m%d-%H%M%S)"; then
+            rm -f /etc/caddy/Caddyfile.new
+            echo "❌ Could not back up the edited /etc/caddy/Caddyfile, so it was NOT replaced." >&2
+            return 1
+        fi
+        echo "→ Caddy: replacing an edited Caddyfile (--caddy-overwrite); the old one is kept beside it as Caddyfile.bak-*."
+    fi
+    # The operators' directory: an empty glob is valid, but its home should
+    # exist — explicitly 0755, since a first boot under umask 077 would make a
+    # directory the `caddy` user cannot traverse.
+    [ -d /etc/caddy/Caddyfile.d ] || install -d -m 0755 /etc/caddy/Caddyfile.d
     # Unchanged and already running: leave Caddy alone. A refresh that keeps
     # failing at the backend step re-renders the same file every five minutes,
     # and a restart drops every live connection, SSE streams included. A
     # stopped Caddy (the machine phase stops it) is still started.
     if cmp -s /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile && systemctl is-active --quiet caddy; then
         rm -f /etc/caddy/Caddyfile.new
+        provision_caddyfile_record
+        # The file is the same, but an operator's drop-in may be new or edited:
+        # the import is read only when Caddy loads its config, so reload (no
+        # dropped connections) rather than leave it unloaded (#4149 review).
+        if [ "$(provision_caddy_dropins_digest)" != "$(cat /etc/caddy/Caddyfile.d.trinity-sha256 2>/dev/null)" ]; then
+            systemctl reload caddy
+            echo "→ Caddy: reloaded for a changed /etc/caddy/Caddyfile.d."
+        fi
+        provision_caddy_dropins_record
         return 0
     fi
     mv -f /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
+    provision_caddyfile_record
+    provision_caddy_dropins_record
     systemctl enable caddy
     systemctl restart caddy
+}
+
+# May this render replace the live Caddyfile? Says why on stderr when not.
+# Checked by provision_caddyfile before it writes, and by provision_apply_ip
+# BEFORE it touches .env, so a refusal never half-applies a new address.
+provision_caddyfile_writable() {
+    if ! provision_caddyfile_is_ours && [ "$CADDY_OVERWRITE" != "1" ]; then
+        {
+            echo "❌ /etc/caddy/Caddyfile has been edited since Trinity wrote it, so it was NOT replaced:"
+            echo "   replacing it would drop whatever was added. The running config is untouched."
+            echo "   Move your own site blocks to /etc/caddy/Caddyfile.d/<name>.caddy (imported, never"
+            echo "   rewritten), then re-run with --caddy-overwrite; the current file is kept as a backup."
+            echo "   Preview the new file first: ./scripts/deploy/start.sh --provision --cloud <cloud> --caddy-only --dry-run"
+        } >&2
+        return 1
+    fi
+    provision_caddy_dropins_readable
+}
+
+# The operators' directory, and whether the `caddy` service user can read what
+# is in it. root's `caddy validate` reads anything, so an unreadable drop-in
+# passes validation and then fails the restart as `caddy` — the site down. The
+# 1-Click first boot runs under umask 077, which made a `mkdir`ed directory 0700.
+provision_caddy_dropins_readable() {
+    local d=/etc/caddy/Caddyfile.d f bad=""
+    [ -d "$d" ] || return 0   # created 0755 by provision_caddyfile, after this check
+    for f in "$d" "$d"/*.caddy; do
+        [ -e "$f" ] || continue
+        if [ "$(id -u)" = "0" ] && id caddy >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1; then
+            if [ -d "$f" ]; then runuser -u caddy -- test -x "$f" -a -r "$f"; else runuser -u caddy -- test -r "$f"; fi \
+                || bad="${bad} ${f}"
+        elif [ -d "$f" ]; then
+            [ -n "$(find "$f" -maxdepth 0 -perm -0005)" ] || bad="${bad} ${f}"
+        else
+            [ -n "$(find "$f" -maxdepth 0 -perm -0004)" ] || bad="${bad} ${f}"
+        fi
+    done
+    [ -z "$bad" ] && return 0
+    {
+        echo "❌ The caddy service user cannot read:${bad}"
+        echo "   Caddy would fail to start with them, so nothing was changed. Fix with:"
+        echo "   chmod 0755 ${d}; chmod 0644 ${d}/*.caddy"
+    } >&2
+    return 1
+}
+
+provision_caddy_dropins_digest() {
+    local d=/etc/caddy/Caddyfile.d f
+    for f in "$d"/*.caddy; do
+        [ -e "$f" ] || continue
+        printf '%s\n' "$f"
+        cat "$f"
+    done | sha256sum | cut -d' ' -f1
+}
+
+provision_caddy_dropins_record() {
+    provision_caddy_dropins_digest > /etc/caddy/Caddyfile.d.trinity-sha256
+}
+
+# The checksum of the Caddyfile this script last wrote, so the next render can
+# tell its own file from one an operator has since edited (#4149).
+provision_caddyfile_record() {
+    sha256sum /etc/caddy/Caddyfile | cut -d' ' -f1 > /etc/caddy/Caddyfile.trinity-sha256
+}
+
+# Is the live Caddyfile replaceable? No file: yes. A recorded checksum (written
+# since #4149): it must match. No record: it must be either the apt package's
+# unedited default (first boot) or a file made ONLY of lines Trinity has ever
+# rendered (every pre-#4149 install), in Trinity's top-level shape. Any other
+# line — a hostname site, an `http://<ip>` block, a matcher inside Trinity's
+# own `http://` block, a global option such as `email` — is an operator's, and
+# replacing the file would drop it.
+provision_caddyfile_is_ours() {
+    local live=/etc/caddy/Caddyfile record=/etc/caddy/Caddyfile.trinity-sha256
+    [ -e "$live" ] || return 0
+    if [ -s "$record" ]; then
+        [ "$(sha256sum "$live" | cut -d' ' -f1)" = "$(cat "$record")" ]
+        return
+    fi
+    provision_caddyfile_is_packaged_default "$live" && return 0
+    awk '
+        BEGIN {
+            ip   = "[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"
+            cidr = "[0-9.:/a-fA-F]+"
+            n = 0
+            # Every line the render (and its reverse-proxy and private blocks)
+            # has produced, comments and indentation stripped.
+            ok[n++] = "\\{"; ok[n++] = "\\}"
+            ok[n++] = "acme_ca https://acme-v02\\.api\\.letsencrypt\\.org/directory"
+            ok[n++] = "default_sni " ip
+            ok[n++] = "on_demand_tls \\{"
+            ok[n++] = "ask http://127\\.0\\.0\\.1:8000/api/public/tls-allowed"
+            ok[n++] = "auto_https disable_redirects"
+            ok[n++] = "https://" ip " \\{"
+            ok[n++] = "https:// \\{"
+            ok[n++] = "http:// \\{"
+            ok[n++] = "https://\\*\\.\\*(, https://(\\*\\.)+\\*)* \\{"
+            ok[n++] = "tls \\{"; ok[n++] = "issuer acme \\{"; ok[n++] = "profile shortlived"
+            ok[n++] = "on_demand"; ok[n++] = "encode gzip"
+            ok[n++] = "reverse_proxy 127\\.0\\.0\\.1:[0-9]+ \\{"; ok[n++] = "flush_interval -1"
+            ok[n++] = "transport http \\{"; ok[n++] = "proxy_protocol v2"
+            ok[n++] = "keepalive off"; ok[n++] = "versions 1\\.1"
+            ok[n++] = "header X-DO-MARKETPLACE \"trinity\""
+            ok[n++] = "@private remote_ip " cidr "( " cidr ")*"
+            ok[n++] = "handle @private \\{"; ok[n++] = "handle \\{"
+            ok[n++] = "redir https://\\{host\\}\\{uri\\} (permanent|308)"
+            ok[n++] = "import [^ ]*Caddyfile\\.d/\\*\\.caddy"
+        }
+        { line = $0; sub(/#.*/, "", line); gsub(/^[ \t]+|[ \t]+$/, "", line) }
+        line == "" { next }
+        {
+            known = 0
+            for (i = 0; i < n; i++) if (line ~ ("^" ok[i] "$")) { known = 1; break }
+            if (!known) foreign = 1
+        }
+        depth == 0 && line != "}" {
+            if (line !~ ("^(\\{|https://(" ip ")? \\{|http:// \\{|https://\\*\\.\\*(, https://(\\*\\.)+\\*)* \\{|import [^ ]*Caddyfile\\.d/\\*\\.caddy)$")) foreign = 1
+        }
+        { o = gsub(/\{/, "{", line); c = gsub(/\}/, "}", line); depth += o - c }
+        END { exit foreign }
+    ' "$live"
+}
+
+# The apt package's own /etc/caddy/Caddyfile, unedited: a `:80` file_server of
+# /usr/share/caddy and nothing else (its comments aside). First boot replaces it.
+provision_caddyfile_is_packaged_default() {
+    [ "$(sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' "$1" | tr '\n' '|')" \
+        = ':80 {|root * /usr/share/caddy|file_server|}|' ]
+}
+
+# The protected web listener's loopback port (trinity-enterprise#873): shell
+# over .env, as compose resolves it; 18082 by default. Empty when invalid.
+provision_proxy_port() {
+    local port="${CADDY_PROXY_PORT:-$(env_value CADDY_PROXY_PORT)}"
+    port="${port:-18082}"
+    case "$port" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] && printf '%s' "$port"
+    return 0
+}
+
+# Does the RUNNING web container publish its PROXY-protocol listener on this
+# loopback port, and does that listener answer? Both, live: an older web image
+# has no such listener, and pointing Caddy at it would take the site down.
+provision_proxy_listener_ready() {
+    local port="$1"
+    docker port trinity-frontend 8082/tcp 2>/dev/null | grep -qx "127.0.0.1:${port}" || return 1
+    ./scripts/deploy/probe-proxy-listener.sh "$port" >/dev/null 2>&1
+}
+
+# Wait up to $2 seconds (default 90) for the protected listener on port $1, the
+# same budget the ordinary listener gets. A recreated web container publishes
+# 8081 before its PROXY listener answers, so a short grace loses that race and
+# Caddy stays on the plain listener until the next start.sh run (#4541).
+provision_wait_for_proxy_listener() {
+    local port="$1" deadline=$(( $(date +%s) + ${2:-90} ))
+    [ -n "$port" ] || return 1
+    until provision_proxy_listener_ready "$port"; do
+        [ "$(date +%s)" -lt "$deadline" ] || return 1
+        sleep 2
+    done
+}
+
+# Prints "<port> proxy" when Caddy should pass client addresses over PROXY
+# protocol to the protected listener, else "8081 plain" — the ordinary listener,
+# exactly as every install before trinity-enterprise#873 rendered it.
+provision_caddy_target() {
+    local port
+    port="$(provision_proxy_port)"
+    if [ -n "$port" ] && provision_proxy_listener_ready "$port"; then
+        printf '%s proxy' "$port"
+        return 0
+    fi
+    {
+        echo "⚠️  Caddy: the web container's PROXY-protocol listener (127.0.0.1:${port:-<invalid CADDY_PROXY_PORT>}) is not"
+        echo "    answering, so Caddy uses the ordinary listener (127.0.0.1:8081). Trinity is served"
+        echo "    normally, but visitors' addresses are NOT yet passed through: audit entries and"
+        echo "    per-client limits record the proxy's address instead. On first boot this is"
+        echo "    expected — start.sh switches over once the stack is up. Otherwise the web image is"
+        echo "    older than this checkout: set TRINITY_IMAGE_TAG to this release and re-run"
+        echo "    ./scripts/deploy/start.sh --hosted, which switches automatically when it answers."
+    } >&2
+    printf '8081 plain'
+}
+
+# One `reverse_proxy` block. `pad` is the indentation of the block's own line;
+# the PROXY transport is added only for the protected listener. keepalive off:
+# a PROXY header describes a CONNECTION, so a reused upstream connection would
+# attribute one client's requests to another.
+provision_reverse_proxy_block() {
+    local pad="$1" port="$2" proxy="$3"
+    printf 'reverse_proxy 127.0.0.1:%s {\n%s    flush_interval -1\n' "$port" "$pad"
+    if [ "$proxy" = "1" ]; then
+        printf '%s    transport http {\n' "$pad"
+        printf '%s        proxy_protocol v2\n' "$pad"
+        printf '%s        keepalive off\n' "$pad"
+        printf '%s        versions 1.1\n' "$pad"
+        printf '%s    }\n' "$pad"
+    fi
+    printf '%s}' "$pad"
 }
 
 provision_site() {
@@ -511,6 +789,14 @@ provision_site() {
     provenance="${PROVISION_PROVENANCE:-$(provision_default_provenance)}"
     # FRONTEND_PORT moves the SPA off :80 so Caddy can own 80/443 in front of it.
     set_env_key FRONTEND_PORT 8081
+    # ...and only Caddy, on this host, needs to reach it (trinity-enterprise#873).
+    set_env_key FRONTEND_BIND_ADDRESS 127.0.0.1
+    # The MCP server's raw :8080 likewise: off-box MCP clients use the web
+    # door's /mcp (trinity-enterprise#1101). A --hosted upgrade never moves it.
+    set_env_key MCP_BIND_ADDRESS 127.0.0.1
+    # Agent SSH ports likewise: the provisioned firewall already drops off-box
+    # traffic to them, and the binding says so honestly (trinity-enterprise#1168).
+    set_env_key AGENT_SSH_BIND_ADDRESS 127.0.0.1
     set_env_key TRINITY_INSTALL_SOURCE "$provenance"
     if [ -n "${TRINITY_IMAGE_TAG:-}" ]; then
         set_env_key TRINITY_IMAGE_TAG "$TRINITY_IMAGE_TAG"
@@ -542,11 +828,16 @@ provision_site() {
 #
 # With a third argument (the previous address), FRONTEND_URL is rewritten only
 # while it still points at that address: an operator who set it to a domain
-# keeps it. The Caddyfile needs no such care — it holds no operator content. The
+# keeps it. The Caddyfile is Trinity's alone (operators' sites live in
+# Caddyfile.d), and an edited one is refused rather than overwritten. The
 # domain step (PROV-015) is served by its on-demand `https://` site, which does
 # not name the IP, and PRIVATE_NETWORK_CIDRS is re-read from .env on every render.
 provision_apply_ip() {
     local ip="$1" provenance="$2" old="${3:-}" _tls
+    # Before .env: a refused Caddyfile must leave the whole address change
+    # unapplied, never FRONTEND_URL on the new IP with Caddy on the old one. The
+    # address is not recorded, so the refresh says so again on its next tick.
+    provision_caddyfile_writable || provision_die "the new address ${ip} was NOT applied (.env and Caddy are unchanged)."
     if [ -z "$old" ] || [ "$(env_value FRONTEND_URL)" = "https://${old}" ]; then
         set_env_key FRONTEND_URL "https://${ip}"
     else
@@ -555,7 +846,8 @@ provision_apply_ip() {
     chmod 0600 .env
     echo "→ .env: FRONTEND_URL=$(env_value FRONTEND_URL), TRINITY_INSTALL_SOURCE=${provenance}"
 
-    provision_caddyfile "$ip" "$provenance" || provision_die "could not write the Caddy configuration."
+    provision_caddyfile "$ip" "$provenance" \
+        || provision_die "could not write the Caddy configuration."
 
     # Verify the certificate was actually ISSUED. Without this the failure is
     # silent and worse than silent: Caddy serves a TLS error, this script exits
@@ -714,6 +1006,33 @@ UNIT
         || echo "⚠️  trinity-ip-refresh.timer not enabled — a changed public IP will need: $0 --provision --cloud ${PROVISION_CLOUD} --refresh-ip" >&2
 }
 
+# One provisioning run at a time, shared by every writer of the host's web
+# configuration: --provision (and its refresh timer) and, on a host Trinity
+# provisioned, an ordinary `start.sh --hosted` upgrade (trinity-enterprise#873).
+# Held until this script exits. Idempotent within one run. With `nonblocking`
+# it fails instead of waiting — the refresh timer never queues behind a run.
+_PROVISION_LOCK_HELD=0
+provision_lock() {
+    [ "$_PROVISION_LOCK_HELD" = "1" ] && return 0
+    exec 9>/run/trinity-provision.lock
+    if [ "${1:-}" = "nonblocking" ]; then
+        flock -n 9 || return 1
+    elif ! flock -n 9; then
+        echo "Waiting for another provisioning run to finish (/run/trinity-provision.lock)..."
+        flock 9
+    fi
+    _PROVISION_LOCK_HELD=1
+}
+
+# Is this a host whose Caddy Trinity provisioned? The site phase records the
+# public address and the machine phase installs the caddy unit; both together,
+# and nothing that needs the metadata service or a re-run of --provision.
+provision_managed_caddy() {
+    [ "$(id -u)" = "0" ] || return 1
+    [ -s /etc/trinity/public-ip ] || return 1
+    command -v systemctl >/dev/null 2>&1 && systemctl cat caddy.service >/dev/null 2>&1
+}
+
 if [ "$PROVISION" = "1" ]; then
     [ "$(uname -s)" = "Linux" ] || provision_die "only runs on Linux — it installs system packages, resets the firewall and claims :80/:443."
     [ "$(id -u)" = "0" ] || provision_die "must run as root."
@@ -731,13 +1050,11 @@ if [ "$PROVISION" = "1" ]; then
     # One provisioning run at a time: the refresh timer (provision_refresh_units)
     # fires during first boot, and two runs would each restart Caddy and bring
     # the stack up. The lock is held until this script exits, install included.
-    exec 9>/run/trinity-provision.lock
     if [ "$PROVISION_PHASE" = "refresh" ]; then
         # Never queue behind another run: the next tick checks again.
-        flock -n 9 || exit 0
-    elif ! flock -n 9; then
-        echo "Waiting for another provisioning run to finish (/run/trinity-provision.lock)..."
-        flock 9
+        provision_lock nonblocking || exit 0
+    else
+        provision_lock
     fi
 
     if [ "$PROVISION_PHASE" = "refresh" ]; then
@@ -767,7 +1084,7 @@ if [ "$PROVISION" = "1" ]; then
         [ -f .env ] || provision_die "no .env here — run this from the Trinity install directory."
         provision_caddyfile "$_caddy_ip" "$(env_value TRINITY_INSTALL_SOURCE)" \
             || provision_die "could not write the Caddy configuration."
-        echo "Caddy reconfigured."
+        [ "$CADDY_DRY_RUN" = "1" ] || echo "Caddy configuration applied (restarted or reloaded only if it changed)."
         exit 0
     fi
     [ "$PROVISION_PHASE" = "site" ]    || provision_machine
@@ -776,6 +1093,26 @@ if [ "$PROVISION" = "1" ]; then
     if [ "$PROVISION_PHASE" = "machine" ]; then
         echo "Host provisioned (machine phase) — Trinity itself is NOT installed by this phase."
         exit 0
+    fi
+fi
+# -----------------------------------------------------------------------------
+
+# --- Upgrading a host Trinity provisioned (trinity-enterprise#873) ------------
+# A re-run of `start.sh --hosted` is the documented upgrade, and on a host whose
+# Caddy Trinity provisioned it now also re-renders Caddy once the new stack is
+# healthy (see the end of this script). From here to exit it holds the same lock
+# the IP-refresh timer takes, so a refresh cannot rewrite the Caddyfile or
+# recreate a service in the middle of the upgrade. The ordinary web listener
+# moves to loopback first, as a fresh provision would publish it: only Caddy,
+# on this host, needs it. A non-empty FRONTEND_BIND_ADDRESS (shell or .env) is
+# the operator's choice and is kept.
+MANAGED_CADDY=0
+if [ "$HOSTED" = "1" ] && provision_managed_caddy; then
+    MANAGED_CADDY=1
+    provision_lock
+    if [ -z "${FRONTEND_BIND_ADDRESS:-}" ] && [ -z "$(env_value FRONTEND_BIND_ADDRESS)" ]; then
+        set_env_key FRONTEND_BIND_ADDRESS 127.0.0.1
+        echo "→ .env: FRONTEND_BIND_ADDRESS=127.0.0.1 (the web listener is reached only through Caddy)."
     fi
 fi
 # -----------------------------------------------------------------------------
@@ -811,7 +1148,14 @@ _busy_ports=()
 # read yet, so the default is 80, which is what will be bound.
 _preflight_frontend_port="${FRONTEND_PORT:-$(env_value FRONTEND_PORT)}"
 _preflight_frontend_port="${_preflight_frontend_port:-80}"
-for _pp in "$_preflight_frontend_port" 8000 8080 6379; do _port_busy "$_pp" && _busy_ports+=("$_pp"); done
+_preflight_ports=("$_preflight_frontend_port" 8000 8080 6379)
+# trinity-enterprise#873: hosted also publishes the PROXY-protocol listener on
+# 127.0.0.1:${CADDY_PROXY_PORT:-18082}.
+if [ "$HOSTED" = "1" ]; then
+    _preflight_caddy_port="$(provision_proxy_port)"
+    _preflight_ports+=("${_preflight_caddy_port:-18082}")
+fi
+for _pp in "${_preflight_ports[@]}"; do _port_busy "$_pp" && _busy_ports+=("$_pp"); done
 if [ ${#_busy_ports[@]} -gt 0 ]; then
     echo "ℹ️  Ports already in use: ${_busy_ports[*]}."
     echo "    If this is a re-run, that's expected — they're Trinity's own containers."
@@ -876,8 +1220,8 @@ fi
 # generate a strong one and surface it in the final summary so an agent-run
 # install never hard-stops on a TTY.
 #
-# One deliberate exception (ent#580): ADMIN_PASSWORD_SOURCE=browser, which only
-# a marketplace first boot sets. There the blank IS the point — no admin is
+# One deliberate exception (ent#580): ADMIN_PASSWORD_SOURCE=browser, which a
+# marketplace first boot and the DigitalOcean script install (#3799) set. There the blank IS the point — no admin is
 # provisioned, and the first person to open the instance creates it at /setup,
 # no terminal involved. The marker is persisted to `.env` because this script is
 # also the documented UPDATE path (`start.sh --hosted`, often --unattended): a
@@ -1171,7 +1515,24 @@ docker volume inspect "${_project}_trinity-data" >/dev/null 2>&1 && _dev_volume=
 _hosted_db=0
 [ -f "${_data_path}/trinity.db" ] && _hosted_db=1
 
-if [ "$HOSTED" = "1" ] && [ "$_hosted_db" = "0" ] && [ "$_dev_volume" = "1" ]; then
+# #4175: the dev `trinity-data` volume always exists, and stays empty on PostgreSQL.
+dev_volume_has_db() {
+    local volume
+    volume="$(compose_project_name)_trinity-data"
+    docker volume inspect "$volume" >/dev/null 2>&1 || return 1
+    docker run --rm -v "${volume}:/v:ro" alpine test -s /v/trinity.db >/dev/null 2>&1
+}
+
+# db.sqlite_to_postgres leaves the marker beside the file it copied.
+dev_volume_needs_copy() {
+    local volume
+    volume="$(compose_project_name)_trinity-data"
+    docker volume inspect "$volume" >/dev/null 2>&1 || return 1
+    docker run --rm -v "${volume}:/v:ro" alpine \
+        sh -c 'test -s /v/trinity.db && test ! -e /v/trinity.db.copied-to-postgres' >/dev/null 2>&1
+}
+
+if [ "$HOSTED" = "1" ] && [ "$_hosted_db" = "0" ] && [ "$_dev_volume" = "1" ] && dev_volume_has_db; then
     echo "❌ Refusing to start: this checkout has a dev-stack database that --hosted cannot see." >&2
     echo "" >&2
     echo "   Found: docker volume '${_project}_trinity-data' (written by docker-compose.yml)" >&2
@@ -1217,9 +1578,13 @@ if [ "$HOSTED" != "1" ] && [ "$_hosted_db" = "1" ] && [ "$_dev_volume" = "0" ]; 
     echo "   one stays in ${_data_abs} — and Redis is shared between the two stacks, so you" >&2
     echo "   would get a half-migrated install rather than a clean one." >&2
     echo "" >&2
-    echo "   This is a production or hosted install. Bring it up with the file set it" >&2
-    echo "   was installed with:" >&2
+    echo "   This is a production or hosted install. To UPDATE it, use the update command —" >&2
+    echo "   it detects which file set this host runs (enterprise overlay included) (#3007):" >&2
+    echo "       ./scripts/deploy/update.sh            # or: ./scripts/deploy/update.sh --check" >&2
+    echo "   To just bring it up, use the file set it was installed with:" >&2
     echo "       docker compose -f docker-compose.prod.yml up -d    # source-built production" >&2
+    echo "       docker compose -f docker-compose.prod.yml -f docker-compose.prod.enterprise.yml up -d" >&2
+    echo "                                                          # ... with the enterprise submodule" >&2
     echo "       ./scripts/deploy/start.sh --hosted                  # prebuilt GHCR images" >&2
     echo "   (docker-compose.prod.yml is a complete standalone file — never stack it on" >&2
     echo "    docker-compose.yml with two -f flags; the merge does not validate.)" >&2
@@ -1356,19 +1721,15 @@ if [ "$_log_src" = "file" ]; then
 fi
 # -----------------------------------------------------------------------------
 
-# --- Hosted database: bundled PostgreSQL (#3159, HOST-022) ------------------
-# SQLite reached end-of-support on 2026-09-01 (#1278). A fresh hosted install
-# gets the bundled `postgres` service; an install that already has
-# /data/trinity.db stays on SQLite, pinned by an explicit empty DATABASE_URL
-# (the hosted compose default treats unset and empty differently). An existing
-# DATABASE_URL line, or one in the shell, is a decision already made and is
-# never touched. POSTGRES_PASSWORD is generated either way because the hosted
-# compose file does not render without it; on a SQLite install the postgres
-# container runs idle. Called after the data-switch guard so a refused run
-# writes nothing, and before `compose pull`, which renders the file.
-ensure_hosted_database() {
-    [ "$HOSTED" = "1" ] || return 0
-    local data_path
+# --- Database: bundled PostgreSQL (#3159, #4175, HOST-022, HOST-023) ---------
+# Every compose file runs PostgreSQL by default. An install whose store holds a
+# SQLite database is refused before `compose pull`, because the compose default
+# would otherwise point it at an empty server; the backend refuses that state
+# too, for every path that does not run this script. POSTGRES_PASSWORD is written
+# first, even on a refusal: the copy command needs the file to render. An existing
+# non-empty DATABASE_URL is a decision already made and is never touched.
+ensure_database() {
+    local data_path url_set=0 url="" allow has_sqlite=0 password
     data_path="${TRINITY_DATA_PATH:-$(env_value TRINITY_DATA_PATH)}"
     data_path="${data_path:-./trinity-data}"
 
@@ -1376,32 +1737,144 @@ ensure_hosted_database() {
         # The postgres image applies the password only when it initialises an
         # empty volume, so a new one would lock the backend out of its data.
         if docker volume inspect "$(compose_project_name)_postgres-data" >/dev/null 2>&1; then
-            echo "ERROR: the PostgreSQL volume already exists but POSTGRES_PASSWORD is missing from .env." >&2
-            echo "       Restore the original password to .env; a new one cannot open the existing data." >&2
-            return 1
-        fi
-        set_env_key POSTGRES_PASSWORD "$(openssl rand -hex 24)"
-        echo "Auto-generated POSTGRES_PASSWORD"
-    fi
-
-    if [ -z "${DATABASE_URL+x}" ] \
-        && ! grep -qE '^[[:space:]]*(export[[:space:]]+)?DATABASE_URL=' .env 2>/dev/null; then
-        if [ -f "${data_path}/trinity.db" ]; then
-            set_env_key DATABASE_URL ""
+            if [ "$HOSTED" = "1" ]; then
+                echo "ERROR: the PostgreSQL volume already exists but POSTGRES_PASSWORD is missing from .env." >&2
+                echo "       Restore the original password to .env; a new one cannot open the existing data." >&2
+                return 1
+            fi
+            # Dev compose used this default before #4175.
+            set_env_key POSTGRES_PASSWORD trinity
+            echo "Existing dev PostgreSQL volume: POSTGRES_PASSWORD set to its previous default in .env."
         else
-            set_env_key DATABASE_URL "postgresql://trinity:$(env_value POSTGRES_PASSWORD)@postgres:5432/trinity"
-            echo "Fresh install: database is the bundled PostgreSQL (DATABASE_URL written to .env)."
+            set_env_key POSTGRES_PASSWORD "$(openssl rand -hex 24)"
+            echo "Auto-generated POSTGRES_PASSWORD"
         fi
     fi
 
-    if [ -z "${DATABASE_URL-$(env_value DATABASE_URL)}" ] && [ -f "${data_path}/trinity.db" ]; then
-        echo "⚠️  This install runs on SQLite (${data_path}/trinity.db), which reached end-of-support"
-        echo "    on 2026-09-01. It stays on SQLite. To move to PostgreSQL, see"
-        echo "    docs/migrations/SQLITE_TO_POSTGRES.md"
+    if [ -n "${DATABASE_URL+x}" ]; then
+        url_set=1
+        url="$DATABASE_URL"
+    elif grep -qE '^[[:space:]]*(export[[:space:]]+)?DATABASE_URL=' .env 2>/dev/null; then
+        url_set=1
+        url="$(env_value DATABASE_URL)"
     fi
+    [ -z "$url" ] || return 0
+
+    allow="${TRINITY_ALLOW_SQLITE:-$(env_value TRINITY_ALLOW_SQLITE)}"
+    if [ "$HOSTED" = "1" ]; then
+        [ -s "${data_path}/trinity.db" ] && [ ! -e "${data_path}/trinity.db.copied-to-postgres" ] && has_sqlite=1
+    else
+        dev_volume_needs_copy && has_sqlite=1
+    fi
+
+    if [ "$url_set" = "1" ] && [ "$allow" = "1" ]; then
+        echo "⚠️  This install runs on SQLite, which reached end-of-support on 2026-09-01 and"
+        echo "    leaves Trinity in a later release. Move it: docs/migrations/SQLITE_TO_POSTGRES.md"
+        return 0
+    fi
+    if [ "$url_set" = "1" ] || [ "$has_sqlite" = "1" ]; then
+        echo "❌ Refusing to start: SQLite reached end-of-support on 2026-09-01." >&2
+        if [ "$has_sqlite" = "1" ]; then
+            echo "" >&2
+            if [ "$url_set" = "1" ]; then
+                echo "   This install has a SQLite database. Remove the DATABASE_URL= line from .env (an" >&2
+                echo "   empty value selects SQLite), get this release's image, then copy it to PostgreSQL:" >&2
+            else
+                echo "   This install has a SQLite database. Get this release's image, then copy it to PostgreSQL:" >&2
+            fi
+            if [ "$HOSTED" = "1" ]; then
+                echo "       docker compose ${COMPOSE_FILES[*]:-} pull backend" >&2
+            else
+                echo "       docker compose ${COMPOSE_FILES[*]:-} build backend frontend mcp-server scheduler" >&2
+            fi
+            echo "       docker compose ${COMPOSE_FILES[*]:-} run --rm backend python -m db.sqlite_to_postgres" >&2
+            echo "   then re-run this script. Details: docs/migrations/SQLITE_TO_POSTGRES.md" >&2
+            echo "" >&2
+            echo "   To stay on SQLite for this release only, set both DATABASE_URL= (empty) and" >&2
+            echo "   TRINITY_ALLOW_SQLITE=1 in .env." >&2
+        else
+            echo "   DATABASE_URL is empty in .env, which selects SQLite. Remove that line to use" >&2
+            echo "   the bundled PostgreSQL, or set a postgresql:// URL." >&2
+        fi
+        return 1
+    fi
+
+    local user=trinity db=trinity
+    if [ "$HOSTED" != "1" ]; then
+        user="$(env_value POSTGRES_USER)"; user="${user:-trinity}"
+        db="$(env_value POSTGRES_DB)"; db="${db:-trinity}"
+    fi
+    set_env_key DATABASE_URL "postgresql://${user}:$(env_value POSTGRES_PASSWORD)@postgres:5432/${db}"
+    echo "Database is the bundled PostgreSQL (DATABASE_URL written to .env)."
 }
 
-ensure_hosted_database
+ensure_database
+
+# --- The ingress network's subnet is free (trinity-enterprise#873) ------------
+# Hosted adds a third Docker network, trinity-proxy-network, on
+# ${TRINITY_PROXY_PREFIX:-172.30.0}.0/24. On a host where another network
+# already holds that range, `compose up` fails half-way with a bare "Pool
+# overlaps" — after the old containers are already gone. Check first and say
+# which network is in the way. The network this install already owns, with the
+# same address plan, is fine (a re-run). Existing agent/platform networks are
+# never touched, and no other prefix is picked silently: the reserved addresses
+# the backend trusts are derived from it.
+_ip4_int() {
+    local a b c d
+    IFS=. read -r a b c d <<<"$1"
+    printf '%s' "$(( (a << 24) | (b << 16) | (c << 8) | d ))"
+}
+_cidr_range() {
+    local addr="${1%/*}" len="${1#*/}" base size
+    case "$1" in */*) ;; *) len=32 ;; esac
+    base=$(_ip4_int "$addr")
+    size=$(( 1 << (32 - len) ))
+    base=$(( base & ~(size - 1) & 0xFFFFFFFF ))
+    printf '%s %s' "$base" "$(( base + size - 1 ))"
+}
+preflight_proxy_network() {
+    [ "$HOSTED" = "1" ] || return 0
+    local prefix want lo hi line name subnet gw range s_lo s_hi problems=()
+    prefix="${TRINITY_PROXY_PREFIX:-$(env_value TRINITY_PROXY_PREFIX)}"
+    prefix="${prefix:-172.30.0}"
+    if ! [[ "$prefix" =~ ^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){2}$ ]]; then
+        echo "ERROR: TRINITY_PROXY_PREFIX='${prefix}' must be three decimal octets, e.g. 172.30.0." >&2
+        return 1
+    fi
+    want="${prefix}.0/24"
+    read -r lo hi <<<"$(_cidr_range "$want")"
+    while IFS='|' read -r name subnet gw range; do
+        case "$subnet" in *.*/*) ;; *) continue ;; esac
+        # Newer engines print an unset gateway/range as "invalid IP/Prefix".
+        case "$gw" in invalid*) gw="" ;; esac
+        case "$range" in invalid*) range="" ;; esac
+        read -r s_lo s_hi <<<"$(_cidr_range "$subnet")"
+        [ "$s_lo" -le "$hi" ] && [ "$lo" -le "$s_hi" ] || continue
+        if [ "$name" = "trinity-proxy-network" ]; then
+            [ "$subnet" = "$want" ] && [ "$gw" = "${prefix}.1" ] && [ "$range" = "${prefix}.128/25" ] && continue
+            problems+=("trinity-proxy-network exists with subnet ${subnet}, gateway ${gw:-none}, range ${range:-none}; this install expects ${want}, gateway ${prefix}.1, range ${prefix}.128/25")
+        else
+            problems+=("Docker network '${name}' already uses ${subnet}, which overlaps ${want}")
+        fi
+    done < <(docker network ls -q | xargs -r docker network inspect \
+                -f '{{.Name}}{{range .IPAM.Config}}|{{.Subnet}}|{{.Gateway}}|{{.IPRange}}{{end}}' 2>/dev/null \
+             | awk -F'|' '{ for (i = 2; i + 2 <= NF; i += 3) print $1 "|" $i "|" $(i+1) "|" $(i+2) }')
+    # Same name, but no IPv4 range overlapping ours at all: a stale network
+    # from another address plan.
+    if [ ${#problems[@]} -eq 0 ] && docker network inspect trinity-proxy-network >/dev/null 2>&1 \
+        && ! docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' trinity-proxy-network 2>/dev/null \
+             | tr ' ' '\n' | grep -qx "$want"; then
+        problems+=("trinity-proxy-network exists with a different subnet; this install expects ${want}")
+    fi
+    if [ ${#problems[@]} -gt 0 ]; then
+        echo "ERROR: the ingress network (trinity-enterprise#873) cannot be created:" >&2
+        for _p in "${problems[@]}"; do echo "   • ${_p}" >&2; done
+        echo "   Choose a free /24 with TRINITY_PROXY_PREFIX in .env (e.g. TRINITY_PROXY_PREFIX=172.31.250)," >&2
+        echo "   or remove the conflicting network if nothing uses it, then re-run. Nothing was changed." >&2
+        return 1
+    fi
+}
+preflight_proxy_network || exit 1
 
 if [ "$HOSTED" = "1" ]; then
     echo "Pulling platform images (tag: ${TRINITY_IMAGE_TAG})..."
@@ -1454,6 +1927,40 @@ while [ "$(date +%s)" -lt "$_deadline" ]; do
 done
 echo ""
 
+# --- Re-render Caddy after a healthy upgrade (trinity-enterprise#873) ---------
+# On a host whose Caddy Trinity provisioned, the new web image's PROXY-protocol
+# listener is what lets Caddy hand nginx each visitor's own address. Switch to
+# it here, automatically — no `--caddy-only` step — once the backend is healthy
+# and the web listener answers, using the address and provenance the site phase
+# recorded. provision_caddyfile probes the listener itself: an older web image
+# keeps the ordinary listener with a warning, and an unchanged config never
+# restarts Caddy. Still under the provisioning lock taken above.
+if [ "$MANAGED_CADDY" = "1" ]; then
+    if [ "$SERVING_OK" = "1" ]; then
+        _web_ready=0
+        _deadline=$(( $(date +%s) + 90 ))
+        while [ "$(date +%s)" -lt "$_deadline" ]; do
+            if curl -fsS -m 3 -o /dev/null "http://127.0.0.1:${FRONTEND_PORT}/" 2>/dev/null; then
+                _web_ready=1
+                break
+            fi
+            sleep 3
+        done
+        if [ "$_web_ready" = "1" ]; then
+            # Give the protected listener the same grace the ordinary one had.
+            provision_wait_for_proxy_listener "$(provision_proxy_port)" || true
+            echo "Reconfiguring Caddy for this release..."
+            provision_caddyfile "$(cat /etc/trinity/public-ip)" "$(env_value TRINITY_INSTALL_SOURCE)" \
+                || echo "⚠️  Caddy was not reconfigured (see above); the previous configuration is still serving." >&2
+        else
+            echo "⚠️  The web container did not answer on 127.0.0.1:${FRONTEND_PORT} — Caddy left as it was." >&2
+            echo "    Re-run ./scripts/deploy/start.sh --hosted once it is up." >&2
+        fi
+    else
+        echo "⚠️  The stack is not healthy yet — Caddy left as it was. Re-run start.sh --hosted once it is." >&2
+    fi
+fi
+
 echo ""
 echo "====================================="
 if [ "$SERVING_OK" = "1" ]; then
@@ -1485,7 +1992,23 @@ fi
 echo "Access points:"
 echo "  - Web UI:       ${WEB_UI_URL}"
 echo "  - Backend API:  http://localhost:8000/docs"
-echo "  - MCP Server:   http://localhost:8080/mcp"
+# trinity-enterprise#1101: where an MCP client connects depends on the raw
+# port's bind (shell over .env, as compose resolves it). Loopback means the
+# web door's /mcp is the way in, and only once External MCP access is on.
+_mcp_bind="${MCP_BIND_ADDRESS:-$(env_value MCP_BIND_ADDRESS)}"
+case "$_mcp_bind" in
+    127.0.0.1|::1|localhost)
+        echo "  - MCP Server:   ${WEB_UI_URL}/mcp once an admin turns on External MCP access (Settings → MCP Keys); the container port is published on ${_mcp_bind} only" ;;
+    ""|0.0.0.0|::)
+        echo "  - MCP Server:   http://localhost:8080/mcp"
+        echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
+    *:*)
+        echo "  - MCP Server:   http://[${_mcp_bind}]:8080/mcp"
+        echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
+    *)
+        echo "  - MCP Server:   http://${_mcp_bind}:8080/mcp"
+        echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
+esac
 echo ""
 
 # --- Next steps card (#39) ----------------------------------------------------

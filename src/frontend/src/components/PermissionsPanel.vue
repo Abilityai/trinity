@@ -94,6 +94,11 @@
         <!-- abilityai/trinity-enterprise#662: what each edge exposes. Reads the
              SAVED edges, so it refreshes after a save. -->
         <PeerSkillGrants ref="peerSkillGrants" :agent-name="agentName" />
+        <!-- abilityai/trinity-enterprise#925: INBOUND — whether peer skill
+             grants hold inside THIS agent when other agents call it (the list
+             above is outbound: grants enforced inside its targets). Its copy
+             names the inbound callers; manager-only, nothing otherwise. -->
+        <PeerSkillEnforcementLine :agent-name="agentName" :agent-status="agentStatus" />
       </div>
 
       <!-- No Other Agents -->
@@ -110,6 +115,7 @@
 
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
+import PeerSkillEnforcementLine from './PeerSkillEnforcementLine.vue'
 import PeerSkillGrants from './PeerSkillGrants.vue'
 import { useAgentsStore } from '../stores/agents'
 import { agentDisplayName, agentNameTooltip, hasDistinctLabel } from '../utils/agentName'

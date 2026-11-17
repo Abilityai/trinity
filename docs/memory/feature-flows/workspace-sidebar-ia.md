@@ -253,7 +253,8 @@ this row can never disagree.
 
 A room credits its unread to **every** agent in it — there is no single agent a
 room is "with", so if three agents share a room you are behind on, all three
-rows should say so. (Rooms report 0 today; see Known Limitations.)
+rows should say so. Since trinity-enterprise#959 a room's count is real for its members
+(see [workspace-inbox.md](workspace-inbox.md) → *Rooms*).
 
 ### 3b. Availability on the agent row (#2196)
 
@@ -480,7 +481,18 @@ The Projects link is the one arrival left unheld, by operator ruling. Its capabi
 rides the roster and most installs (every OSS one) are not entitled to it, so a held
 slot appeared and then vanished there — a new shift on every load to spare a late
 pop-in on the few entitled installs. Those accept the pop-in; nothing renders between
-**New chat** and the search box before the roster answers.
+the Inbox row and the search box before the roster answers.
+
+**The sidebar has no New chat button (#4353).** A roster row already lands on a new
+chat with that agent (ent#784) and the conversation header carries **New chat** with
+its ⌘J / Ctrl+J hotkey (ent#451), so the sidebar button was a slower route to both —
+and its picker multi-selected, so a second tick started a *room* from a door labelled
+"chat", the thing **New room** owns (ent#701: a chat is one-to-one, a room has many
+participants). The one action left in the top block is **New room**, rendered only
+where the roster says rooms exist. The picker's chat mode — reached now only by ⌘J
+with nothing on stage — is single-select whatever the capability bit says
+(`PortalAgentPicker.vue::multiSelect`). Tests: `portalSidebarTopOrder.mount.spec.js`,
+`portalRoomPeople.mount.spec.js` (picker).
 
 Tests: `portalSidebarCalmLoad.mount.spec.js`.
 
@@ -501,7 +513,7 @@ Tests: `portalSidebarCalmLoad.mount.spec.js`.
 
 | Limitation | Detail |
 |---|---|
-| **Rooms report `unread: 0`** | A room already has its own seq cursor (`since`), which is a different model from a timestamp cursor. Stars work for rooms; unread does not, so a room never badges. Reconciling the two is follow-up work. |
+| ~~**Rooms report `unread: 0`**~~ | **Fixed by trinity-enterprise#959.** A room's unread is counted on the same per-viewer timestamp cursor (`chat_kind = 'room'`), for its members only; the room's `last_read_seq` stays the agents' delta cursor. |
 | ~~**Unread needs one open first**~~ | **Fixed by ent#557.** A never-opened thread now counts agent messages newer than the viewer's stored account baseline. What remains is narrower and deliberate: a viewer who has never read *anything* has no baseline and sees no badge, and a chat that predates their baseline and was never opened still reports nothing. |
 | **The agent badge counts arrivals, not questions** | "Waiting on the user" is read here as "something came back and you haven't read it" — an agent message or, since ent#610, a deliverable addressed to you. An agent blocked on an operator-queue approval is a different signal and is not surfaced here — that queue belongs to operators, and a Workspace viewer may be an external client with no standing in it. |
 | **Optimistic star, no cross-tab sync** | A star toggled in one tab does not appear in another until its next `refreshThreads`. |

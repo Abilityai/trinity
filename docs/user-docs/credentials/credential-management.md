@@ -7,14 +7,14 @@ Add, edit, and hot-reload credentials on agents without restarting them.
 - **Credential Injection** -- Direct file injection system. Credentials are written as `.env` (KEY=VALUE) and other allow-listed credential files directly to the agent container. `.mcp.json` is rendered from `.mcp.json.template` when the agent starts.
 - **Credential Vault** -- A platform-level store of named, encrypted credentials that an admin grants to agents, so an agent can fetch a shared secret by name at runtime instead of carrying its own injected copy. Additive to file injection. The vault itself is an enterprise capability; the MCP tools and the transcript scrub described below ship in every build.
 - **Credential Declaration** -- A template says which credentials its agent needs in `template.yaml`: `credentials:` lists the variable **names**, and the optional sibling `credential_setup:` describes each one.
-- **Setup Checklist** -- The per-variable view under Settings › Storage: what this agent needs, which are already set, and where to get the missing ones.
+- **Setup Checklist** -- The per-variable view under Settings › Credentials: what this agent needs, which are already set, and where to get the missing ones.
 - **Encrypted Storage** -- Credentials can be exported to `.credentials.enc` files (AES-256-GCM encryption) for backup and import.
 
 ## How It Works
 
 ### The Setup Checklist
 
-Open the agent detail page, click the **Settings** tab and pick **Storage** in the rail (`?tab=settings&section=storage`; an old `?tab=credentials` link lands there too). The **Credentials** section holds the checklist, which answers three questions per credential:
+Open the agent detail page, click the **Settings** tab and pick **Credentials** in the rail, directly under General (`?tab=settings&section=credentials`; an old `?tab=credentials` link lands there too). The pane holds the checklist, which answers three questions per credential:
 
 | Column | Where it comes from |
 |--------|---------------------|
@@ -61,18 +61,50 @@ The full contract is published at [`docs/schemas/trinity-agent-credentials.schem
 
 ### Adding credentials
 
-Add credentials using one of four methods in the **Credentials** section of **Settings › Storage**:
+Add credentials using one of four methods in **Settings › Credentials**:
 
 - **Setup checklist** -- Per-variable inputs, with descriptions and setup links.
 - **Quick Inject** -- Paste `.env`-style KEY=VALUE pairs; they are merged into the agent's `.env`.
 - **Upload Credential File** -- Upload one file to a destination path (service-account JSON, TLS certs and keys, kubeconfig, SSH keys — see [Which Files Can Be Injected](#which-files-can-be-injected)).
 - **Import from Git** -- Decrypt and inject the `.credentials.enc` backup in the agent's workspace; **Export to Git** writes it.
 
+The credential file list says what it could actually read. On a stopped agent it says the agent is stopped instead of listing files as *Not present*; a failed first read shows the error with a retry; and an agent with no `.env` yet offers **Quick Inject** or **Add .env** as the next step. If the agent's `.env` is not plain UTF-8 text, the pane will not open it for editing and refuses to save over it, because every save rewrites the whole file and would replace every credential already in it.
+
+Values are stored exactly as you type them, including quotes and backslashes (a Windows path such as `C:\path\new` survives later saves of other credentials unchanged), and an MCP server rendered from `.mcp.json.template` receives the same value the agent's runs see.
+
 **Hot-reload:** paste or edit credentials on a running agent. The `.env` file is updated and the agent's next run sees the new values. No restart needed.
 
 **Restarts keep what you injected.** The `.env` generated from the template at creation is only a seed: on each start the container copies it into the workspace **only if no `.env` is there yet**. Values you added or changed later — and an `.env` you deliberately emptied — are left as they are.
 
 MCP server configuration is different. An `.env` injection does not rewrite `.mcp.json`; to change an MCP server's credential on a running agent, inject an updated `.mcp.json` directly (it is structurally validated first).
+
+### A credential an agent asks for in the chat
+
+Someone who works with an agent only in the Workspace has no Credentials section. When the agent needs a key, it asks for it **by name** with `ask_for_credential`, and the ask appears in the conversation (and in the Inbox) as a **secret field**: the variable's name, a masked input with **Show**/**Hide**, and **Send**.
+
+- Type or paste the value and press **Send**. The field empties at once; the value is stored in the agent's `.env` under that name and the agent's next turn reads it from its environment. No restart is needed.
+- The conversation then shows **NAME provided**. The value does not appear in the chat, in the ask's answer, in the agent's wake or in the audit log, which records only the name.
+- If the agent is stopped, nothing is stored: start it, then send again. Other refusals say what happened in the card.
+- The field opens for one person: the agent's primary contact when the agent is in their Workspace (shared with them, or their own), otherwise the agent's owner. If neither can open the agent, the agent's request is refused and nothing waits unseen; an admin shares the agent with its primary contact and the agent asks again.
+- **A credential for an agent on another Trinity.** An agent can ask for a key that belongs to another agent on a different Trinity instance. The field then says where the value goes — *for the agent `<name>` on the Trinity at `<host>`* — and **Send** delivers it straight there: it is merged into that agent's `.env` on the other instance, and nothing is kept on this one. The asking agent is told only that it was delivered. See [Delivering to another Trinity](#delivering-a-credential-to-another-trinity) below.
+- A credential ask can only be answered through this field. The Operations page shows it without a reply box, and **Dismiss** still ends it without giving the value.
+- **Do not paste a secret into the chat as a message.** The Workspace refuses a message that looks like a key or token (*That looks like a secret. Nothing was stored.*), keeps no copy of it — not in the conversation, not as a draft — and points you to the secret field. Ask the agent to request the credential so the field opens.
+
+### Delivering a credential to another Trinity
+
+`ask_for_credential` takes an optional `destination` naming an agent on another Trinity instance. The recommended form names an instance an admin has registered:
+
+```
+ask_for_credential(name="OP_SERVICE_ACCOUNT_TOKEN", why="...",
+                   destination={"instance": "partner-trinity", "agent_name": "billing-agent"})
+```
+
+- `instance` is the **name** of an entry in **Settings → Integrations → Outbound A2A endpoints** (see [A2A Protocol → Outbound endpoints](../integrations/a2a-protocol.md#outbound-endpoints)). Outbound A2A must be switched on, and the entry must hold a bearer credential: the platform delivers under that stored key, and the asking agent never sees it.
+- **The stored key needs inject rights on the receiving instance.** Delivery calls that instance's `POST /api/agents/{agent}/credentials/inject` with `mode: "merge"`, which is owner-only there, so the key must be a user-scoped key of that agent's owner (or an admin) on the other instance. A key without that right refuses every delivery with `destination_key_refused`.
+- **Whoever holds the entry reaches with its key.** Any agent on this instance that may use the registered entry can ask for a credential to be delivered under it, so register only Trinity instances you trust, with a key no broader than the job needs.
+- An older form, `{instance_url, agent_name, key_env}`, names a variable in the asking agent's own `.env` that holds its key to the other instance. It still works; use the registered-instance form for new agents.
+
+Refusals when the ask is raised come back to the agent as a `422` naming the reason: `destination_invalid` (both forms or neither), `destination_outbound_disabled`, `destination_not_approved` (no registered instance by that name), `destination_instance_no_credential` (the entry has no stored key), and for the older form `destination_key_env_missing` / `destination_key_invalid`. Refusals at delivery are shown to the person in the card, and nothing is stored: `destination_not_approved` with the reason `instance_moved` (the entry now points somewhere else — the agent should ask again), `destination_key_refused`, `destination_agent_missing`, and `destination_unreachable` or `destination_unconfirmed` when the other instance did not answer clearly. Each delivery is written to the audit log with the credential's name, the destination host and agent, and the outcome — never the value.
 
 ### Who can read credential files
 
@@ -114,7 +146,7 @@ Injection accepts a curated set of credential file types, not just `.env`. Anyth
 
 - **Export** creates an encrypted `.credentials.enc` file for backup. It captures the **full injected credential set** — every allow-listed credential file present in the agent (discovered live), text and binary alike — not just `.env` and `.mcp.json`.
 - **Import** decrypts and injects credentials from an encrypted file. The archive is re-validated against the same path policy on the way in.
-- **A committed `.credentials.enc` is imported by the platform, not by the agent's startup script.** The platform decrypts it once the agent is ready. It does not do so on installs with no encryption key; then the startup log says "Found .credentials.enc but no .env: this script does not decrypt it." and the owner imports it once with **Import from Git** under Settings › Storage (or the `import_credentials` MCP tool). The credentials persist from then on.
+- **A committed `.credentials.enc` is imported by the platform, not by the agent's startup script.** The platform decrypts it once the agent is ready. It does not do so on installs with no encryption key; then the startup log says "Found .credentials.enc but no .env: this script does not decrypt it." An operator first sets `CREDENTIAL_ENCRYPTION_KEY` to the key the archive was written with and restarts the backend; the platform then imports it at the agent's next start, or the owner, signed in, imports it at once with **Import from Git** under Settings › Credentials. The credentials persist from then on.
 
 ### Rotating the Encryption Key
 
@@ -156,6 +188,8 @@ Encryption protects the database going forward only. Backups taken before the up
 
 Credential values are never logged. All operations use structured logging with values masked.
 
+The agent's output sanitizer also removes the values of its own credential variables from replies, logs and execution records. Plain configuration values are left visible: a variable whose name ends in a non-secret suffix (`_HOST`, `_DOMAIN`, `_PORT`, `_REPO`, `_BRANCH`, `_ORG`, `_WORKSPACE`, `_REGION`, `_PROJECT`, `_URL`, `_URI`, `_ENDPOINT` and similar) is not redacted when its value is a plain hostname, name or URL, so a link the agent writes keeps its host. A name that also contains a secret word (`KEY`, `TOKEN`, `SECRET`, `PASS`, `AUTH`, `HOOK`, …), such as `SLACK_WEBHOOK_URL`, is still redacted, and so is a value carrying credentials or a token-shaped path.
+
 ## For Agents
 
 ### API Endpoints
@@ -164,7 +198,7 @@ Credential values are never logged. All operations use structured logging with v
 |----------|--------|-------------|
 | `/api/agents/{name}/credential-requirements` | GET | Per-variable checklist: declaration joined against live set/missing status. Owner-only and human-only; rate-limited. Returns a degraded body (not an error) for a stopped agent. |
 | `/api/agents/{name}/credentials/status` | GET | Check credential files |
-| `/api/agents/{name}/credentials/inject` | POST | Inject files directly |
+| `/api/agents/{name}/credentials/inject` | POST | Inject files directly. `mode: "merge"` with `env: {NAME: value}` instead sets just those `.env` variables and keeps every other line |
 | `/api/agents/{name}/credentials/export` | POST | Export to `.credentials.enc` |
 | `/api/agents/{name}/credentials/import` | POST | Import from encrypted file |
 | `/api/agents/{name}/credentials/env-drift` | GET | Per-variable drift between the agent's `.env` and the environment its running process actually has (variable names only). Owner-only and human-only; a stopped agent returns `agent_not_running` rather than an error. |
@@ -175,13 +209,14 @@ The inject, export, import, checklist, and drift routes are owner-only **and hum
 ### MCP Tools
 
 - `get_credential_status(name)` -- Check credential file status.
-- `inject_credentials(name, credentials)` -- Inject credentials into the agent.
-- `export_credentials(name)` -- Export credentials to encrypted file. The agent's owner or an admin only, with a user-scoped or system-scoped key.
-- `import_credentials(name)` -- Import credentials from encrypted file. The agent's owner or an admin only, with a user-scoped or system-scoped key.
+- `inject_credentials(name, credentials)` -- Inject credentials into the agent. The agent's owner or an admin only, signed in or with their own user-scoped key; an agent's own key and the system key are refused.
+- `export_credentials(name)` -- Export credentials to encrypted file. The agent's owner or an admin only, signed in or with their own user-scoped key.
+- `import_credentials(name)` -- Import credentials from encrypted file. Importing takes a signed-in session, so an MCP API key is refused: use **Import from Git** under Settings › Credentials.
 - `get_credential_encryption_key()` -- Retrieve the encryption key. An administrator only, with a user-scoped or system-scoped key.
 - `list_available_credentials()` / `fetch_credential(name)` -- Read a granted vault credential at runtime (see [Credential Vault](#credential-vault)).
+- `ask_for_credential(name, why, destination?)` -- The calling agent asks the person it is chatting with for a secret by name; they fill a masked field in their Workspace (see [A credential an agent asks for in the chat](#a-credential-an-agent-asks-for-in-the-chat)). With `destination`, the value is delivered to an agent on another Trinity instead (see [Delivering a credential to another Trinity](#delivering-a-credential-to-another-trinity)).
 
-`export_credentials`, `import_credentials` and `get_credential_encryption_key` are human-only: an agent-scoped key can never call them, so they are not listed in an agent's MCP session at all. If one of them is refused, the tool returns `{"success": false, "error": "…"}` with `human_only`, `admin_only` or `not_authorized` set, rather than an error string.
+The credential tools are human-only, and each is listed only to the key scopes its route admits: `inject_credentials` and `export_credentials` to your own user-scoped key, `get_credential_encryption_key` to a user-scoped or system-scoped key (the backend then admits an administrator only), and `import_credentials` to no key, because it takes a signed-in session. An agent-scoped key is shown none of them. If one of them is refused, the tool returns `{"success": false, "error": "…"}` with `human_only`, `admin_only` or `not_authorized` set, rather than an error string.
 
 ## See Also
 

@@ -381,7 +381,7 @@ class GitHubService:
 | 29 | `MAX_INSTANCE_ID_RETRIES` | Max reservation retries before `RuntimeError` (5) — S7 Layer 0 |
 | 32-40 | `generate_instance_id()` | Raw 8-char UUID prefix. Kept for the reserve helper; new callers MUST use `reserve_and_generate_instance_id` |
 | 43-45 | `generate_working_branch()` | Generate branch name `trinity/{name}/{id}` |
-| 48-112 | `check_remote_branch_exists()` | `git ls-remote --heads --exit-code` probe (S7 Layer 1) — fails-open on network/timeout because Layer 2 is the real guarantee |
+| 48-112 | `check_remote_branch_exists()` | `git ls-remote --exit-code <url> refs/heads/<ref> refs/tags/<ref>` probe (S7 Layer 1; a tag answers too, trinity#4165) — fails-open on network/timeout because Layer 2 is the real guarantee |
 | 115-206 | `reserve_and_generate_instance_id()` | **S7 Layer 0 single entry point**: UUID + remote probe + DB insert under partial UNIQUE index. Retries `MAX_INSTANCE_ID_RETRIES` times then raises `RuntimeError` |
 | 209-238 | `create_git_config_for_agent()` | Legacy create-without-reserve helper (still used in tests/non-S7 paths) |
 | 430-436 | `GitInitResult` dataclass | Result of git init in container |
@@ -672,7 +672,9 @@ async def initialize_github_sync(
     except GitHubError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to initialize GitHub sync: {str(e)}")
+        # The PAT is masked out of the logged traceback (utils.log_masking).
+        _log_redacted_failure("GitHub sync initialize", agent_name, e, github_pat)
+        raise HTTPException(status_code=500, detail=f"Failed to initialize GitHub sync ({e.__class__.__name__} — details in backend logs)")
 ```
 
 ### Docker Service - Command Execution
@@ -737,7 +739,9 @@ initializeGithubSync: {
     "commits the current state, pushes to GitHub, and creates a working branch for sync. " +
     "Requires GitHub Personal Access Token (PAT) to be configured in system settings with 'repo' scope. " +
     "Note: Agents created from GitHub templates already have git sync enabled in source mode (pull-only). " +
-    "Agent must be running.",
+    "Agent must be running. " +
+    HUMAN_ONLY_WHO_MAY_CALL.person,
+  canAccess: humanOnlyToolAccess("person"),  // listed to user keys only (trinity-enterprise#719)
   parameters: z.object({
     agent_name: z.string().describe("The name of the agent to initialize GitHub sync for"),
     repo_owner: z.string().describe("GitHub username or organization name (e.g., 'your-username')"),
@@ -967,9 +971,10 @@ None - this is a one-time configuration operation
 | Invalid PAT format | 400 | "Invalid token format" | Use PAT starting with ghp_ or github_pat_ |
 | Owner not found | 400 | "Owner '{owner}' not found on GitHub" | Check owner name |
 | Repo creation failed | 400 | "Failed to create repository: {message}" | Check PAT permissions |
-| Git command failed | 500 | "Git initialization failed: {error}" | Check container logs |
-| Git verification failed | 500 | "Git initialization verification failed" | Check container state |
+| Git command failed | 400 | "Git initialization failed: {error}" | Check container logs |
+| Git verification failed | 400 | "Git initialization failed: Git initialization verification failed" | Check container state |
 | GitHubError | 400 | Exception message | Check PAT and permissions |
+| Unexpected failure | 500 | "Failed to initialize GitHub sync ({ExceptionClass} — details in backend logs)"; the traceback is logged with the PAT masked | Check backend logs |
 
 ---
 

@@ -62,7 +62,7 @@ No dedicated UI components. This feature is consumed entirely through the MCP to
 | PUT | `/api/event-subscriptions/{id}` | `update_event_subscription()` | 298 | `get_current_user` + owner check |
 | DELETE | `/api/event-subscriptions/{id}` | `delete_event_subscription()` | 335 | `get_current_user` + owner check |
 | POST | `/api/events` | `emit_event()` | 366 | `get_current_user` |
-| POST | `/api/agents/{name}/emit-event` | `emit_event_for_agent()` | 418 | `AuthorizedAgent` |
+| POST | `/api/agents/{name}/emit-event` | `emit_event_for_agent()` | 433 | `AuthorizedAgent` + `assert_own_agent` first (an agent key emits only as itself, the system key only as `trinity-system`), then an allowlist that admits only those two keys and a person; every other principal gets 403 (trinity-enterprise#719) |
 | GET | `/api/agents/{name}/events` | `list_agent_events()` | 441 | `AuthorizedAgent` |
 | GET | `/api/events` | `list_all_events()` | 452 | `get_current_user` + accessible-agent filter (`db.get_accessible_agent_names`, the `/ws` roster); `?source_agent=` → `assert_agent_access` + roster membership (one uniform 403) |
 
@@ -93,7 +93,7 @@ No dedicated UI components. This feature is consumed entirely through the MCP to
 1. Determine source agent from `current_user.agent_name` (MCP key) or `current_user.username`
 2. Validate `event_type` format: `^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)*$`; `EmitEventRequest` rejects a payload over `EVENT_PAYLOAD_MAX_BYTES` (64 KiB UTF-8 JSON) with 422 (#3104)
 3. Find matching enabled subscriptions via `db.find_matching_event_subscriptions(source_agent, event_type)`
-3a. **Chain depth (#2973)**: an agent principal with at least one match runs `enforce_inter_agent_depth` (target `event:<type>`) — past `inter_agent_max_chain_depth` the emit is refused with 403 `inter_agent_depth_exceeded` before anything is persisted; otherwise the depth is passed to each dispatch. `emit_event_for_agent` computes the EMITTER's depth, whichever agent `{name}` names.
+3a. **Chain depth (#2973)**: an agent principal with at least one match runs `enforce_inter_agent_depth` (target `event:<type>`) — past `inter_agent_max_chain_depth` the emit is refused with 403 `inter_agent_depth_exceeded` before anything is persisted; otherwise the depth is passed to each dispatch. `emit_event_for_agent` computes the EMITTER's depth; an agent key may name only its own agent and the system key only `trinity-system` (the self-gate), a person any agent they can access, and no other principal may emit there.
 4. Persist event to `agent_events` table
 5. Fire-and-forget `asyncio.create_task(_trigger_subscription(...))` for each match
 6. Broadcast event via WebSocket
@@ -122,8 +122,10 @@ No dedicated UI components. This feature is consumed entirely through the MCP to
    username — dispatching it as an agent would attribute the subscriber's execution to
    a phantom agent and forge a collaboration activity. A human-emitted event therefore
    carries neither the header nor the claim, and the subscriber's task is an ordinary
-   MCP-triggered execution. `emit_event_for_agent` passes `True` by its own contract
-   (any accessor of `{name}` may emit as it — a stated residual).
+   MCP-triggered execution. `emit_event_for_agent` vouches only when the emitter IS
+   the agent (`current_user.agent_name == name`); since trinity-enterprise#719 an agent
+   key can name no other agent there, and a person's emit for an agent is never vouched
+   (nor is the system key's own, which carries no `agent_name`).
 
 ### Template Interpolation (lines 55-76)
 - Pattern: `{{payload.field}}` or `{{payload.nested.field}}`

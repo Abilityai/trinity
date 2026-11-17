@@ -33,6 +33,7 @@ from .agent_settings import (
     DisplayLabelMixin,
     McpExposureMixin,
     OperatorResumeMixin,
+    MemoryOptOutMixin,
     A2AExposureMixin,
     TtsMixin,
     EphemeralMixin,
@@ -71,6 +72,7 @@ class AgentOperations(
     DisplayLabelMixin,
     McpExposureMixin,
     OperatorResumeMixin,
+    MemoryOptOutMixin,
     A2AExposureMixin,
     TtsMixin,
     EphemeralMixin,
@@ -145,6 +147,12 @@ class AgentOperations(
                 is_system=1 if is_system else 0,
                 execution_timeout_seconds=3600,
                 require_email=1 if require_email else 0,
+                # abilityai/trinity-enterprise#1108: same reasoning again —
+                # the column is tri-state (NULL = platform default ON, 0 =
+                # the owner's OFF) and an upgraded SQLite instance keeps the
+                # ent#329 ``DEFAULT 0`` baked into the column, so an OMITTED
+                # column would stamp every new agent as an explicit OFF.
+                operator_resume_enabled=None,
             )
             if is_ephemeral:
                 values.update(
@@ -472,6 +480,17 @@ class AgentOperations(
         with get_engine().connect() as conn:
             return [row[0] for row in conn.execute(stmt)]
 
+    def list_agent_created_agent_names(self) -> List[str]:
+        """Live agents another agent created (`spawned_by_agent` set) — durable
+        and ephemeral alike. The template-source bound's impact read
+        (trinity-enterprise#591): which templates would a new allowlist refuse."""
+        stmt = select(agent_ownership.c.agent_name).where(
+            agent_ownership.c.spawned_by_agent.isnot(None),
+            agent_ownership.c.deleted_at.is_(None),
+        )
+        with get_engine().connect() as conn:
+            return [row[0] for row in conn.execute(stmt)]
+
     def delete_agent_ownership(self, agent_name: str) -> bool:
         """Soft-delete the agent ownership row (Issue #834 Phase 1a).
 
@@ -782,6 +801,70 @@ class AgentOperations(
                 update(agent_ownership)
                 .where(agent_ownership.c.agent_name == agent_name)
                 .values(public_channel_model=model or None)
+            )
+            return result.rowcount > 0
+
+    # =========================================================================
+    # The agent's own model (ent#1202)
+    # What a turn that names no model runs on, ahead of the platform default.
+    # Stored as written; `services/agent_model_service.py` decides on read
+    # whether this instance can run it.
+    # =========================================================================
+
+    DEFAULT_MODEL_MAX_LEN = 128
+
+    def get_default_model_raw(self, agent_name: str) -> Optional[str]:
+        """The stored ``default_model``, unvalidated (live rows only)."""
+        stmt = select(agent_ownership.c.default_model).where(
+            agent_ownership.c.agent_name == agent_name,
+            agent_ownership.c.deleted_at.is_(None),
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return (row["default_model"] or None) if row else None
+
+    def get_default_models_raw(self, agent_names) -> dict:
+        """``{agent_name: stored default_model}`` for live rows, in one query."""
+        names = [n for n in (agent_names or []) if n]
+        if not names:
+            return {}
+        stmt = select(agent_ownership.c.agent_name, agent_ownership.c.default_model).where(
+            agent_ownership.c.agent_name.in_(names),
+            agent_ownership.c.deleted_at.is_(None),
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return {r["agent_name"]: (r["default_model"] or None) for r in rows}
+
+    def set_default_model(self, agent_name: str, model: Optional[str]) -> bool:
+        """Set/clear the agent's own model (None or blank clears it).
+
+        Stripped and bounded at ``DEFAULT_MODEL_MAX_LEN``; never validated here,
+        so a value this instance cannot run yet is kept and named on read.
+        """
+        value = (model or "").strip()[: self.DEFAULT_MODEL_MAX_LEN] or None
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_ownership)
+                .where(agent_ownership.c.agent_name == agent_name)
+                .values(default_model=value)
+            )
+            return result.rowcount > 0
+
+    def set_default_model_if(self, agent_name: str, expected: Optional[str],
+                             model: Optional[str]) -> bool:
+        """``set_default_model``, but only while the column still holds
+        ``expected`` (None = NULL). True when this call changed the row, so of
+        several writers that read the same old value exactly one sees True."""
+        value = (model or "").strip()[: self.DEFAULT_MODEL_MAX_LEN] or None
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_ownership)
+                .where(
+                    agent_ownership.c.agent_name == agent_name,
+                    agent_ownership.c.default_model.is_not_distinct_from(expected),
+                )
+                .values(default_model=value)
             )
             return result.rowcount > 0
 

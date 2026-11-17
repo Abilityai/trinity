@@ -17,7 +17,7 @@ coverage debt is queryable rather than rediscovered.
 | **J04** | My agents keep working when several things run at once, and nothing silently stalls. | operator | local | soak | **no** | — | S-01, S-02, S-03, E-01, E-02, B-01, B-02, R-01 | #2343 |
 | **J05** | I can schedule work, walk away, and find out what happened. | user | local | live-stack | **no** | — | E-01, E-05 | #2344 |
 | **J06** | I can give an agent a credential and it can use the tools that credential unlocks. | user | local | live-stack | **no** | — | L-06, G-04 | #2345 |
-| **J07** | A skill I add shows up in the agent's head and it uses it. | user | local | live-stack | **no** | — | SK-01, SK-02, SK-03 | #2346 |
+| **J07** | A skill I add shows up in the agent's head and it uses it. | user | local | live-stack | **no** | — | SK-01, SK-02, SK-03, SK-04 | #2346 |
 | **J08** | I can install a marketplace plugin and the agent can use it. | user | local | live-stack | **no** | — | PLG-01 | #2347 |
 | **J09** | I can point Trinity at my repo and get a working agent from it. | user | local | live-stack | **no** | — | RD-01, RD-02, RD-03 | #2348 |
 | **J10** | My agents can call each other, and I can see what they said. | user | local | journey-smoke | **no** | `tests/journeys/test_j10_agent_calls_agent_journey.py` | P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03, IA-04 | #2349 |
@@ -34,8 +34,9 @@ coverage debt is queryable rather than rediscovered.
 | **J21** | A business action my agent asks another agent for runs only after the right person approves it, exactly once, and my agent is told how it ended. | user | local | live-stack | **no** | `tests/system_chains/test_j21_approval_chain.py` | — | abilityai/trinity-enterprise#795 |
 | **J22** | A project is worked by agents and people from open to close: an agent cannot close its own task, a person verifies it, and anyone on the project can read who did what. | user | local | live-stack | **no** | `tests/system_chains/test_j22_project_chain.py` | — | abilityai/trinity-enterprise#795 |
 | **J23** | My project's record shows an action approved inside it: who approved it and how it ended. | user | local | live-stack | **no** | `tests/system_chains/test_j23_approved_action_in_project_chain.py` | — | abilityai/trinity-enterprise#795 |
+| **J24** | My fresh install does not serve MCP to clients outside the machine until I turn it on, and a refused client is told why. | operator | local | journey-smoke | yes | `tests/journeys/test_j24_external_mcp_access_journey.py` | — | abilityai/trinity-enterprise#1101 |
 
-**0 of 23 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
+**1 of 24 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
 
 _Harnesses not present in `tests/registry.json`: J20, J21, J22, J23._
 

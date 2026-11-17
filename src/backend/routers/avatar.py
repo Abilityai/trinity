@@ -7,7 +7,6 @@ REST endpoints for AI-generated agent avatars and emotion variants.
 
 import asyncio
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -21,32 +20,33 @@ from models import AvatarGenerateRequest, User
 from services.agent_auth import agent_httpx_client
 from services.image_generation_prompts import AVATAR_EMOTIONS, AVATAR_EMOTION_PROMPTS
 from services.image_generation_service import get_image_generation_service
+from utils import avatar_paths
 from utils.image_optimize import optimize_avatar
 
 router = APIRouter(prefix="/api/agents", tags=["avatars"])
 logger = logging.getLogger(__name__)
 
-AVATAR_DIR = Path("/data/avatars")
+# Every path under the avatar store is built by `utils.avatar_paths` (one
+# directory, one barrier). The leaf answers `None` for a name it refuses; the
+# HTTP answer to that is this router's (Invariant #1).
 
 
-def _avatar_path(agent_name: str, suffix: str) -> Path:
-    """Build a path under AVATAR_DIR from the URL-derived ``agent_name``, proven
-    contained within the root before use.
+def _avatar_path(agent_name: str, suffix: str, *, detail: str = "Agent not found") -> Path:
+    """The checked path for `<agent_name><suffix>`, or a 404 carrying `detail`.
 
-    The mutating handlers authorize via the ``OwnedAgentByName`` dependency (#186)
-    rather than an inline ``db.get_agent_owner`` check; that dependency guarantees
-    the agent exists and is owned (and agent names are charset-restricted at
-    creation), so traversal is not reachable in practice — but the constraint now
-    lives in a callee that CodeQL's ``py/path-injection`` taint tracking can't
-    follow. This restores an explicit, statically-recognized barrier: normalize
-    with ``os.path.normpath`` then require the result stay under ``AVATAR_DIR``
-    (CodeQL SafeAccessCheck). Defense-in-depth at runtime; a uniform 404 on escape
-    preserves #186's no-existence-oracle contract."""
-    base = str(AVATAR_DIR)
-    fullpath = os.path.normpath(os.path.join(base, f"{agent_name}{suffix}"))
-    if not fullpath.startswith(base):
-        raise HTTPException(status_code=404, detail="Agent not found")
-    return Path(fullpath)
+    The default text keeps the #186 uniform-404 contract of the owner routes; a
+    read route passes its own not-found text, so a refused name answers exactly
+    like a missing file and the refusal is not an oracle.
+    """
+    path = avatar_paths.avatar_path_or_none(agent_name, suffix)
+    if path is None:
+        raise HTTPException(status_code=404, detail=detail)
+    return path
+
+
+def _avatar_exists(agent_name: str, suffix: str) -> bool:
+    path = avatar_paths.avatar_path_or_none(agent_name, suffix)
+    return path is not None and path.exists()
 
 
 # #957: Map image-generation error_kind → (HTTP status, user-facing detail).
@@ -182,7 +182,7 @@ async def generate_default_avatars(
     errors = []
     skipped = 0
 
-    AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+    avatar_paths.ensure_avatar_store()
 
     for agent_name in sorted(agent_names_needing):
         # Skip agents that don't exist in Docker
@@ -220,7 +220,7 @@ async def generate_default_avatars(
                 continue
 
             # Save optimized WebP (no reference image, no emotion variants for defaults)
-            avatar_path = AVATAR_DIR / f"{agent_name}.webp"
+            avatar_path = _avatar_path(agent_name, ".webp")
             avatar_path.write_bytes(optimize_avatar(result.image_data))
 
             now = datetime.now(timezone.utc).isoformat()
@@ -233,8 +233,17 @@ async def generate_default_avatars(
             )
 
         except Exception as e:
-            errors.append({"agent": agent_name, "error": str(e)})
-            logger.warning(f"[AVATAR-003] Default avatar error for {agent_name}: {e}")
+            # py/stack-trace-exposure (#28, the #1917 pattern): this arm sees
+            # post-processing failures (PIL, the file write, the DB), whose text
+            # names server paths and internals. The log keeps it; the caller gets
+            # the class name.
+            errors.append({
+                "agent": agent_name,
+                "error": f"{e.__class__.__name__} — details in backend logs",
+            })
+            logger.warning(
+                f"[AVATAR-003] Default avatar error for {agent_name}: {e}", exc_info=True
+            )
 
     return {
         "generated": len(generated),
@@ -251,8 +260,8 @@ async def generate_default_avatars(
 @router.get("/{agent_name}/avatar")
 async def get_avatar(agent_name: str):
     """Serve cached avatar for an agent. No auth required — avatars are public assets."""
-    webp_path = AVATAR_DIR / f"{agent_name}.webp"
-    png_path = AVATAR_DIR / f"{agent_name}.png"
+    webp_path = _avatar_path(agent_name, ".webp", detail="No avatar found")
+    png_path = _avatar_path(agent_name, ".png", detail="No avatar found")
 
     if webp_path.exists():
         return FileResponse(
@@ -273,7 +282,9 @@ async def get_avatar(agent_name: str):
 @router.get("/{agent_name}/avatar/reference")
 async def get_avatar_reference(agent_name: str):
     """Serve reference avatar PNG for an agent. No auth required — avatars are public assets."""
-    ref_path = AVATAR_DIR / f"{agent_name}_ref.png"
+    ref_path = _avatar_path(
+        agent_name, "_ref.png", detail="No reference image found"
+    )
     if not ref_path.exists():
         raise HTTPException(status_code=404, detail="No reference image found")
 
@@ -293,8 +304,8 @@ async def get_avatar_identity(
     assert_agent_access(current_user, agent_name)
 
     identity = db.get_avatar_identity(agent_name)
-    has_avatar = (AVATAR_DIR / f"{agent_name}.webp").exists() or (AVATAR_DIR / f"{agent_name}.png").exists()
-    has_reference = (AVATAR_DIR / f"{agent_name}_ref.png").exists()
+    has_avatar = _avatar_exists(agent_name, ".webp") or _avatar_exists(agent_name, ".png")
+    has_reference = _avatar_exists(agent_name, "_ref.png")
 
     return {
         "agent_name": agent_name,
@@ -388,9 +399,11 @@ async def get_avatar_emotions(agent_name: str):
     available = []
     newest = 0.0
     for emotion in AVATAR_EMOTIONS:
-        for path in (AVATAR_DIR / f"{agent_name}_emotion_{emotion}.webp",
-                     AVATAR_DIR / f"{agent_name}_emotion_{emotion}.png"):
-            if not path.exists():
+        for path in (avatar_paths.avatar_path_or_none(agent_name, f"_emotion_{emotion}.webp"),
+                     avatar_paths.avatar_path_or_none(agent_name, f"_emotion_{emotion}.png")):
+            # A refused name lists no variants, the same answer as an agent
+            # that has none.
+            if path is None or not path.exists():
                 continue
             available.append(emotion)
             try:
@@ -417,8 +430,12 @@ async def get_avatar_emotion(agent_name: str, emotion: str):
             detail=f"Invalid emotion. Must be one of: {AVATAR_EMOTIONS}",
         )
 
-    webp_path = AVATAR_DIR / f"{agent_name}_emotion_{emotion}.webp"
-    png_path = AVATAR_DIR / f"{agent_name}_emotion_{emotion}.png"
+    webp_path = _avatar_path(
+        agent_name, f"_emotion_{emotion}.webp", detail="Emotion variant not found"
+    )
+    png_path = _avatar_path(
+        agent_name, f"_emotion_{emotion}.png", detail="Emotion variant not found"
+    )
 
     if webp_path.exists():
         return FileResponse(
@@ -471,7 +488,7 @@ async def generate_avatar(
         raise HTTPException(status_code=status, detail=detail)
 
     # Save optimized display avatar (.webp) and full-quality reference (.png)
-    AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+    avatar_paths.ensure_avatar_store()
     avatar_path = _avatar_path(agent_name, ".webp")
     ref_path = _avatar_path(agent_name, "_ref.png")
     avatar_path.write_bytes(optimize_avatar(result.image_data))

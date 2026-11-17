@@ -3,6 +3,7 @@ import { setBaseTitle } from '@/utils/tabTitle'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { isWorkspaceOnlyRole, landingAfterSignIn, operatorRouteRedirect } from '../utils/workspaceOnly'
+import { loginLocation } from '../utils/platformSession'
 import { useSessionsStore } from '../stores/sessions'
 import { useAgentsStore } from '../stores/agents'
 
@@ -42,6 +43,17 @@ export const routes = [
     name: 'PublicChat',
     component: () => import('../views/PublicChat.vue'),
     meta: { requiresAuth: false, title: 'Chat' }
+  },
+  {
+    // trinity-enterprise#1054 — the terms a Workspace-only person accepts once.
+    // Signed in (a person is accepting), standalone (no help widget over the
+    // accept action), and a member page, so the operator-floor redirect leaves
+    // a Workspace-only person here rather than sending them to a Workspace
+    // whose every call the terms gate refuses.
+    path: '/terms',
+    name: 'TermsAcceptance',
+    component: () => import('../views/TermsAcceptance.vue'),
+    meta: { requiresAuth: true, title: 'Terms', hideHelpWidget: true }
   },
   {
     path: '/',
@@ -483,13 +495,14 @@ router.beforeEach(async (to, from) => {
       }
       return true
     } else {
-      // User is not authenticated, redirect to login
-      return '/login'
+      // Not signed in: to the login page, carrying the page asked for (#3444)
+      return loginLocation(to.fullPath)
     }
   } else if (to.path === '/login' && authStore.isAuthenticated) {
-    // User is authenticated but trying to access login page
-    // Redirect to dashboard — the Workspace for a Workspace-only member (ent#837)
-    return landingAfterSignIn(undefined, await confirmedRole(authStore))
+    // Already signed in: where the sign-in would have gone — `?redirect=` when
+    // it names an in-app page (#3444), else the dashboard; the Workspace for a
+    // Workspace-only member (ent#837)
+    return landingAfterSignIn(to.query.redirect, await confirmedRole(authStore))
   } else {
     // Public route, allow access
     return true

@@ -14,6 +14,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import api from '../api'
 import { permissionRequests } from '../utils/capabilityGrants'
+import { readPendingQueue } from '../utils/operatorQueueRead'
 
 function refusalText (err, fallback) {
   const detail = err?.response?.data?.detail
@@ -74,13 +75,15 @@ export const useCapabilityGrantsStore = defineStore('capabilityGrants', () => {
     // the toggles usable and says so in place.
     const [autonomy, queue] = await Promise.allSettled([
       api.get(`/api/agents/${enc}/autonomy`),
-      api.get('/api/operator-queue', { params: { agent_name: name, status: 'pending', limit: 200 } }),
+      // #3302: every pending ask of the agent — a request filed before 200
+      // newer asks sat past the old 200-row page and was never linked.
+      readPendingQueue((params) => api.get('/api/operator-queue', { params }), { params: { agent_name: name } }),
     ])
     if (gen !== generation) return
     autonomyEnabled.value = autonomy.status === 'fulfilled'
       ? Boolean(autonomy.value.data?.autonomy_enabled) : null
     if (queue.status === 'fulfilled') {
-      requests.value = permissionRequests(queue.value.data?.items)
+      requests.value = permissionRequests(queue.value.items)
       requestsError.value = ''
     } else {
       requestsError.value = refusalText(queue.reason, 'Could not check for open permission requests.')

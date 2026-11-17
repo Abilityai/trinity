@@ -89,7 +89,7 @@ jobs:
 
       - name: Connect to Tailscale
         # SHA-pinned to mitigate supply-chain hijack of the v2 floating tag.
-        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
         with:
           authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
 

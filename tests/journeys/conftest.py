@@ -407,6 +407,168 @@ class McpSession:
         return McpToolResult(True, text)
 
 
+# ---- External MCP access (abilityai/trinity-enterprise#1101) ----------------
+#
+# This harness dials `MCP_URL` from the host the stack runs on, and the MCP
+# server classes that as an OFF-BOX peer: a published port arrives from a
+# Docker bridge gateway, never from inside the agent network. A fresh install
+# refuses off-box `/mcp` until an admin turns External MCP access on, so every
+# fixture that opens an `McpSession` goes through `external_mcp_access_on` —
+# which first proves the refusal on a fresh stack, so the proof is kept rather
+# than switched around.
+
+# The gate caches its verdict for 10 s; twice that is the deadline for a flip
+# to reach an off-box client.
+EXTERNAL_ACCESS_DEADLINE_S = float(os.getenv("JOURNEY_EXTERNAL_ACCESS_DEADLINE_S", "20"))
+EXTERNAL_ACCESS_PATH = "/api/settings/mcp-external-access"
+EXTERNAL_ACCESS_REFUSAL = "external_mcp_access_off"
+EXTERNAL_ACCESS_JSONRPC_CODE = -32003
+
+
+def external_access_state(client) -> dict:
+    resp = client.get(EXTERNAL_ACCESS_PATH)
+    assert resp.status_code == 200, (
+        f"reading External MCP access answered {resp.status_code}: {resp.text[:300]}"
+    )
+    return resp.json()
+
+
+def set_external_access(client, enabled: bool) -> dict:
+    resp = client.put(EXTERNAL_ACCESS_PATH, json={"enabled": enabled})
+    assert resp.status_code == 200, (
+        f"setting External MCP access to {enabled} as the admin answered "
+        f"{resp.status_code}: {resp.text[:300]}"
+    )
+    return resp.json()
+
+
+def clear_external_access(client) -> dict:
+    resp = client.delete(EXTERNAL_ACCESS_PATH)
+    assert resp.status_code == 200, (
+        f"clearing the External MCP access setting answered {resp.status_code}: "
+        f"{resp.text[:300]}"
+    )
+    return resp.json()
+
+
+def restore_external_access(client, prior: dict) -> None:
+    """Put the switch back the way `prior` (a GET of it) found it: the
+    Settings row it held, or no row at all."""
+    if prior.get("source") == "settings":
+        set_external_access(client, bool(prior.get("enabled")))
+    else:
+        clear_external_access(client)
+
+
+def mcp_initialize(api_key: Optional[str] = None) -> httpx.Response:
+    """One bare `initialize` POST to `MCP_URL`, as an outside client sends it.
+
+    Returns the response, never a repr carrying the request: the key is only
+    ever in the outgoing headers, which no assertion here quotes.
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    body = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "trinity-journey-external-access", "version": "1"},
+        },
+    }
+    return httpx.post(MCP_URL, headers=headers, json=body, timeout=30)
+
+
+def external_access_refusal_problem(resp: httpx.Response) -> Optional[str]:
+    """Why `resp` is NOT the named off-box refusal, or None when it is."""
+    if resp.status_code != 403:
+        return f"HTTP {resp.status_code} (expected 403): {resp.text[:200]}"
+    header = resp.headers.get("x-trinity-refusal")
+    if header != EXTERNAL_ACCESS_REFUSAL:
+        return f"X-Trinity-Refusal was {header!r}, expected {EXTERNAL_ACCESS_REFUSAL!r}"
+    try:
+        error = (resp.json() or {}).get("error") or {}
+    except ValueError:
+        return f"403 body is not JSON: {resp.text[:200]}"
+    if error.get("code") != EXTERNAL_ACCESS_JSONRPC_CODE:
+        return f"JSON-RPC error code was {error.get('code')!r}, expected {EXTERNAL_ACCESS_JSONRPC_CODE}"
+    if not str(error.get("message", "")).startswith(f"{EXTERNAL_ACCESS_REFUSAL}:"):
+        return f"JSON-RPC message does not lead with the reason: {str(error.get('message'))[:200]}"
+    return None
+
+
+def wait_for_mcp_initialize(api_key: str, *, refused: bool, describe: str) -> httpx.Response:
+    """Poll `initialize` until the gate's verdict reaches an outside client:
+    the named refusal when `refused`, else HTTP 200."""
+    def observe():
+        resp = mcp_initialize(api_key)
+        if refused:
+            return resp if external_access_refusal_problem(resp) is None else None
+        return resp if resp.status_code == 200 else None
+
+    return poll_until(observe, deadline_s=EXTERNAL_ACCESS_DEADLINE_S,
+                      interval_s=1.0, describe=describe)
+
+
+@pytest.fixture(scope="session")
+def journey_mcp_user_key(journey_client):
+    """A user-scoped MCP key the admin mints for this run — what an outside MCP
+    client holds — deleted by id at teardown."""
+    resp = journey_client.post(
+        "/api/mcp/keys",
+        json={"name": f"{EPHEMERAL_PREFIX}external-mcp-{uuid.uuid4().hex[:8]}"},
+    )
+    assert resp.status_code == 200, (
+        f"minting a user-scoped MCP key as the admin answered {resp.status_code} "
+        f"(body withheld: on success it carries the key)"
+    )
+    created = resp.json()
+    try:
+        yield created["api_key"]
+    finally:
+        try:
+            journey_client.delete(f"/api/mcp/keys/{created['id']}")
+        except Exception:  # noqa: BLE001 — teardown must never mask the real failure
+            pass
+
+
+@pytest.fixture(scope="session")
+def external_mcp_access_on(journey_client, journey_mcp_user_key):
+    """External MCP access on, for every fixture that dials `MCP_URL`.
+
+    On a fresh stack (off, from the default) the refusal is proved FIRST, so
+    turning the switch on can never hide a gate that stopped refusing. The
+    switch is put back the way it was found at teardown, and only if this
+    fixture changed it.
+    """
+    prior = external_access_state(journey_client)
+    if prior.get("enabled"):
+        yield
+        return
+    if prior.get("source") == "default":
+        problem = external_access_refusal_problem(mcp_initialize())
+        if problem:
+            raise AssertionError(
+                f"a fresh install must refuse an outside MCP client with "
+                f"{EXTERNAL_ACCESS_REFUSAL} before an admin turns External MCP "
+                f"access on; {MCP_URL} answered {problem}"
+            )
+    set_external_access(journey_client, True)
+    try:
+        wait_for_mcp_initialize(
+            journey_mcp_user_key, refused=False,
+            describe=f"an admin turned External MCP access on, but {MCP_URL} "
+                     f"never answered initialize with 200",
+        )
+        yield
+    finally:
+        restore_external_access(journey_client, prior)
+
+
 # ---- permission edges (P-01 / P-02 arrangement, as the owner) ---------------
 
 def permitted_agents(client, source: str) -> List[str]:
@@ -504,9 +666,11 @@ def pair(journey_client, journey_agent_pair):
 
 
 @pytest.fixture()
-def mcp_as_caller(pair):
+def mcp_as_caller(pair, external_mcp_access_on):
     """An MCP session authenticated as agent A — the caller's own key, so every
-    call crosses the same `checkAgentAccess` gate a real playbook call does."""
+    call crosses the same `checkAgentAccess` gate a real playbook call does.
+
+    Dialled from the host, so External MCP access must be on (ent#1101)."""
     a, _ = pair
     return McpSession(agent_mcp_key(a))
 

@@ -28,7 +28,7 @@ Trinity is designed with security-first principles:
 - **Self-hosted** — Data never leaves your infrastructure
 - **Credential isolation** — Redis-backed secrets with hot-reload capability
 - **Role-based access** — Authentication required for all operations
-- **Ephemeral SSH** — Time-limited terminal access, no permanent exposure
+- **Ephemeral SSH** — Time-limited keys; the agent SSH server starts only when an admin issues a grant, and its port is published on loopback by default (`AGENT_SSH_BIND_ADDRESS`) behind the `DOCKER-USER` firewall rules Trinity ships
 - **Network isolation** — Agents communicate through controlled MCP channels
 
 ## Security Best Practices

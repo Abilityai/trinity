@@ -361,7 +361,12 @@ async def _compute_agent_stats(agent_name: str) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to get stats for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get stats ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def get_agent_stats_logic(

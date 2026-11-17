@@ -51,3 +51,23 @@ export function apiErrorMessage(err, fallback = 'Something went wrong') {
   if (typeof err?.message === 'string' && err.message.trim()) return err.message
   return fallback
 }
+
+/**
+ * The machine-readable refusal code of a named refusal, or null.
+ *
+ * Named refusals carry `detail: {code, message, …}` (ent#720, ent#966). The
+ * message is what a person reads (`apiErrorMessage`); the code is what a panel
+ * branches on to pick a recovery action. String details (dependency refusals,
+ * 429s from the rate limiter) and Pydantic arrays have no code — callers fall
+ * back to the HTTP status.
+ *
+ * @param {unknown} err the caught error (Axios error, or anything)
+ * @returns {string|null}
+ */
+export function apiErrorCode(err) {
+  const detail = err?.response?.data?.detail
+  if (detail && typeof detail === 'object' && !Array.isArray(detail) && typeof detail.code === 'string' && detail.code) {
+    return detail.code
+  }
+  return null
+}

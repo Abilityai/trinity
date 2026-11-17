@@ -9,6 +9,7 @@ import os
 import secrets
 import shutil
 import stat as stat_mod
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -47,6 +48,30 @@ def _load_path_policy():
 
 
 _policy = _load_path_policy()
+
+
+def _log_failure(what: str, exc: BaseException) -> None:
+    """Log an unforeseen failure with its traceback, credential-scrubbed. Its
+    text stays here: the answer names only the class (trinity#4284). The
+    sanitizer comes through the package when there is one, by file path
+    otherwise, so this router stays loadable with no package context (#1795)."""
+    if __package__:
+        from ..utils.credential_sanitizer import sanitize_text
+    else:
+        import importlib.util
+        import sys
+        name = "trinity_agent_credential_sanitizer"
+        if name not in sys.modules:
+            source = Path(__file__).resolve().parent.parent / "utils" / "credential_sanitizer.py"
+            spec = importlib.util.spec_from_file_location(name, str(source))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            sys.modules[name] = module
+        sanitize_text = sys.modules[name].sanitize_text
+    logger.error(
+        "%s (%s): %s", what, type(exc).__name__,
+        sanitize_text("".join(traceback.format_exception(exc))),
+    )
 
 
 def _home_str() -> str:
@@ -161,12 +186,12 @@ def _mutation_target(path: str, verb: str) -> tuple[Path, str]:
     return target, named
 
 
-def _walk_dir_nofollow(rel_parts, *, create: bool = False) -> int:
-    """Open home/<rel_parts> as a directory, one component at a time, never
-    following a link; with `create`, make missing components. Returns the fd
-    (the caller closes it). A link → 403 `resolved_path_mismatch`; a file used
-    as a directory → 400."""
-    fd = os.open(_HOME.resolve(), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+def _walk_dir_nofollow(rel_parts, *, create: bool = False, base: Optional[Path] = None) -> int:
+    """Open <base>/<rel_parts> (the home by default) as a directory, one
+    component at a time, never following a link; with `create`, make missing
+    components. Returns the fd (the caller closes it). A link → 403
+    `resolved_path_mismatch`; a file used as a directory → 400."""
+    fd = os.open((_HOME if base is None else base).resolve(), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         for part in rel_parts:
             if create:
@@ -315,8 +340,8 @@ async def list_files(path: str = "/home/developer", show_hidden: bool = False):
         }
 
     except Exception as e:
-        logger.error(f"File listing error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
+        _log_failure("File listing error", e)
+        raise HTTPException(status_code=500, detail=f"Failed to list files: {type(e).__name__}") from e
 
 
 @router.get("/api/files/download")
@@ -339,8 +364,8 @@ async def download_file(path: str):
             # At most the size it had when opened: a file that grows is not read past it.
             content = f.read(st.st_size).decode("utf-8", errors="replace")
         except Exception as e:
-            logger.error(f"File download error: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
+            _log_failure("File download error", e)
+            raise HTTPException(status_code=500, detail=f"Failed to read file: {type(e).__name__}") from e
     # ent#820: the backend refuses a file with more than one name below the
     # owner tier (a hard link to a credential); it needs the count to do so.
     return PlainTextResponse(content=content, headers={"X-File-Nlink": str(st.st_nlink)})
@@ -360,10 +385,11 @@ PROTECTED_PATHS = list(_policy.AGENT_SERVER_DELETE_PROTECTED_NAMES)
 # The sanctioned path (#2008 — this comment previously named
 # `/api/credentials/update`, which had no callers anywhere and was removed):
 #   * `POST /api/agents/{name}/credentials/inject`, gated by
-#     `validate_mcp_config` — Layer 2 of the #590 closure (#598). Real today.
-#
-# PLANNED, not yet available: rendering `.mcp.json.template` into `.mcp.json`
-# at container startup — #2007 / PR #2013.
+#     `validate_mcp_config` — Layer 2 of the #590 closure (#598).
+#   * `.mcp.json.template` from the agent's repo, rendered from `.env` into
+#     `.mcp.json` at every container start by `agent_server.mcp_template`
+#     (#2007; run from `startup.sh`). It merges servers in and validates each
+#     one; it is never written through this endpoint.
 #
 # CLAUDE.md is editable here: who may edit it is a TIER the backend decides
 # (owner tier through the Files tab, ent#820); this server cannot tell callers
@@ -506,8 +532,8 @@ async def delete_file(path: str):
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"File delete error: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to delete: {str(e)}")
+            _log_failure("File delete error", e)
+            raise HTTPException(status_code=500, detail=f"Failed to delete: {type(e).__name__}") from e
     finally:
         os.close(parent_fd)
 
@@ -617,18 +643,22 @@ def if_match_holds(path: Path, if_match: Optional[str]) -> bool:
         os.close(dir_fd)
 
 
-def _write_text_atomic_at(dir_fd: int, name: str, content: str) -> None:
+def _write_bytes_atomic_at(dir_fd: int, name: str, data: bytes, mode: Optional[int] = None) -> None:
     """tmp + os.replace inside the opened directory. The tmp name is random and
     created O_EXCL|O_NOFOLLOW, so neither a crash leftover nor a planted link
-    blocks or redirects the write; an existing file keeps its mode (ent#820)."""
+    blocks or redirects the write. `mode` sets the file's permissions (created
+    with it, so the content is never briefly wider); None keeps an existing
+    file's mode (ent#820)."""
     old = _lstat_at(dir_fd, name)
     tmp_name = f".{name}.tmp-{secrets.token_hex(6)}"
     fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                 0o644, dir_fd=dir_fd)
+                 0o644 if mode is None else mode, dir_fd=dir_fd)
     try:
         with os.fdopen(fd, "wb") as f:
-            f.write(content.encode("utf-8"))
-            if old is not None and stat_mod.S_ISREG(old.st_mode):
+            f.write(data)
+            if mode is not None:
+                os.fchmod(f.fileno(), mode)
+            elif old is not None and stat_mod.S_ISREG(old.st_mode):
                 os.fchmod(f.fileno(), stat_mod.S_IMODE(old.st_mode))
         os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     finally:
@@ -636,6 +666,33 @@ def _write_text_atomic_at(dir_fd: int, name: str, content: str) -> None:
             os.unlink(tmp_name, dir_fd=dir_fd)
         except FileNotFoundError:
             pass
+
+
+def _write_text_atomic_at(dir_fd: int, name: str, content: str) -> None:
+    _write_bytes_atomic_at(dir_fd, name, content.encode("utf-8"))
+
+
+def write_bytes_nofollow(rel: str, data: bytes, *, mode: Optional[int] = None,
+                         base: Optional[Path] = None) -> None:
+    """Write `data` to <base>/<rel> (the home by default) without following a
+    link anywhere on the way (ent#822): the parents are walked — and created —
+    one component at a time with O_NOFOLLOW, a final component that is a link
+    is refused rather than replaced, and the file goes in by tmp + os.replace.
+    A link at any level is a 403 `resolved_path_mismatch`, never a write that
+    lands somewhere else. For the agent server's own writers (credential
+    injection, snapshot restore); `rel` is a home-relative path they have
+    already validated."""
+    parts = Path(rel).parts
+    if not parts or Path(rel).is_absolute() or ".." in parts:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    dir_fd = _walk_dir_nofollow(parts[:-1], create=True, base=base)
+    try:
+        st = _lstat_at(dir_fd, parts[-1])
+        if st is not None and stat_mod.S_ISLNK(st.st_mode):
+            raise HTTPException(status_code=403, detail=dict(_LINK_REFUSAL))
+        _write_bytes_atomic_at(dir_fd, parts[-1], data, mode)
+    finally:
+        os.close(dir_fd)
 
 
 def write_text_atomic(path: Path, content: str) -> None:
@@ -682,6 +739,11 @@ async def update_file(
     # (ent#820). The final component is not followed: a link there is refused.
     requested_path, _named = _mutation_target(path, _policy.WRITE)
 
+    # The home itself is a directory, not a file to write: a named 400, as
+    # mkdir and DELETE answer, not the 500 its missing parent raised (ent#949).
+    if requested_path == _HOME.resolve():
+        raise HTTPException(status_code=400, detail="Not a file: /home/developer")
+
     # Check if it's a protected path (for editing)
     # Platform writes can bypass .trinity protection (but not .git, .env, etc.)
     if _is_edit_protected_path(requested_path):
@@ -725,8 +787,8 @@ async def update_file(
             _write_text_atomic_at(parent_fd, requested_path.name, request.content)
             stat = os.stat(requested_path.name, dir_fd=parent_fd, follow_symlinks=False)
         except Exception as e:
-            logger.error(f"File update error: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to update file: {str(e)}")
+            _log_failure("File update error", e)
+            raise HTTPException(status_code=500, detail=f"Failed to update file: {type(e).__name__}") from e
     finally:
         os.close(parent_fd)
 
@@ -790,8 +852,8 @@ async def create_folder(path: str):
             os.mkdir(requested_path.name, dir_fd=parent_fd)
             stat = os.stat(requested_path.name, dir_fd=parent_fd, follow_symlinks=False)
         except Exception as e:
-            logger.error(f"Folder create error: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to create folder: {str(e)}")
+            _log_failure("Folder create error", e)
+            raise HTTPException(status_code=500, detail=f"Failed to create folder: {type(e).__name__}") from e
     finally:
         os.close(parent_fd)
 

@@ -14,6 +14,10 @@ Memory. A **Workspace** conversation resumes: every message reattaches to the sa
 
 It preserves the agent's full working memory: tool results (files it read, commands it ran), mid-skill state, and reasoning state — not just the text of the conversation. The stateless Chat tab only re-sends the visible message log as text, so the agent loses tool outputs and internal state between turns. Use the Workspace for long multi-turn reasoning or multi-step work; the Chat tab is fine for one-shot questions. See [Continuous Conversations](../agents/agent-session.md).
 
+## Does the agent remember me from one chat to the next?
+
+Yes, through person memory, which is separate from a chat's working memory. The agent keeps notes about you and Trinity keeps a rolling summary of your conversations, and both are given to it on every turn that serves you, in any chat. On the agent's **Info** tab, **What it remembers about you** shows the notes and every change to them, with **Undo**. Where an admin has turned on retrieval memory, the agent also recalls facts from earlier runs that match what you ask. Your memory is never shown to anyone else the agent talks to. See [Agent Memory](../agents/agent-memory.md).
+
 ## Why doesn't my agent seem to remember anything between turns?
 
 Most likely you're on the **Chat** tab rather than the Workspace — the Chat tab is stateless by design. If you are in the Workspace, the other cause is the runtime: a Codex agent has no resume primitive, so its turns replay the visible history as text instead of carrying working memory forward. The conversation stays coherent either way; what's lost is the agent's tool results and mid-task state. See [Continuous Conversations](../agents/agent-session.md).
@@ -32,7 +36,7 @@ Every (you, agent) pair has one pinned **Main** chat: it is always the first tab
 
 ## How do I start a new chat with an agent, and can I rename it?
 
-**New chat** in the conversation header (or **⌘J** / **Ctrl+J**) starts a fresh chat with the agent in front of you; **New chat** in the sidebar opens the agent picker instead. A provisional tab appears at once and the chat itself is created when you send the first message. Trinity names it from that message (and takes a second pass if your opener was only a greeting); to rename it, click the pencil beside its title or edit it on the sidebar row — one line of up to 100 characters, Enter saves, Esc abandons, and a name you typed always stands. Only Main can't be renamed. A direct link `/workspace?agent=<name>` lands on that agent the way a click on its sidebar row does — its chat with an unread reply first, else the chat you last had open with it in this tab, else a draft, else a new chat — and `?new=1` forces a fresh one. See [Workspace](../sharing-and-access/workspace.md#starting-a-chat).
+**New chat** in the conversation header (or **⌘J** / **Ctrl+J**) starts a fresh chat with the agent in front of you; with no agent in front of you, the hotkey opens the agent picker instead. A provisional tab appears at once and the chat itself is created when you send the first message. Trinity names it from that message (and takes a second pass if your opener was only a greeting); to rename it, click the pencil beside its title or edit it on the sidebar row — one line of up to 100 characters, Enter saves, Esc abandons, and a name you typed always stands. Only Main can't be renamed. A direct link `/workspace?agent=<name>` lands on that agent the way a click on its sidebar row does — its chat with an unread reply first, else the chat you last had open with it in this tab, else a draft, else a new chat — and `?new=1` forces a fresh one. See [Workspace](../sharing-and-access/workspace.md#starting-a-chat).
 
 ## Will I lose what I was typing if I switch to another agent or chat?
 
@@ -116,7 +120,7 @@ Fable is the most capable tier — reach for it on the longest, hardest, most in
 
 ## Does chat render markdown, and can I attach files?
 
-Replies render as markdown on both surfaces — headings, lists, tables and code blocks — sanitized before display. In the Workspace a code block is its own object with a language label and an always-visible **Copy**, and every reply carries **Copy message** plus Helpful / Not helpful thumbs. On the **Chat** tab, attach with the paperclip or by dropping onto the input: images (JPEG, PNG, GIF, WebP) reach the agent as vision content, while plain text, CSV, JSON and ZIP are written to `/home/developer/uploads/` inside the container (a ZIP is stored as-is, not extracted — the paperclip picker filters it out, so drop it instead). Limits are 3 files per message, 5 MB each, 10 MB of images in total; PDF, tar, gzip, video and audio are refused. Workspace uploads work differently — see the next question. See [Agent Chat](../agents/agent-chat.md#file-attachments).
+Replies render as markdown on both surfaces — headings, lists, tables and code blocks — sanitized before display. In the Workspace a code block is its own object with a language label and an always-visible **Copy**, and every reply carries **Copy message** plus Helpful / Not helpful thumbs. On the **Chat** tab, attach with the paperclip or by dropping onto the input: images (JPEG, PNG, GIF, WebP) reach the agent as vision content, while plain text, CSV, JSON and ZIP are written to `/home/developer/uploads/` inside the container (a ZIP is stored as-is, not extracted). Limits are 3 files per message, 5 MB each, 10 MB of images in total; PDF, tar, gzip, video and audio are refused. Workspace uploads work differently — see the next question. See [Agent Chat](../agents/agent-chat.md#file-attachments).
 
 ## How do I send files to my agent in the Workspace, and where do they end up?
 
@@ -128,7 +132,7 @@ Click the **×** on the file's chip in the composer. A file still waiting to upl
 
 ## How do I know a reply has arrived when I'm not looking at the chat?
 
-Three ways. While anything is unread, the browser tab's title carries the count — `(3) Trinity — Workspace` — and the agent's row in the sidebar shows its own unread badge (questions the agent is waiting on you to answer are counted separately). Inside a chat, if you've scrolled up to re-read something, an arriving message doesn't pull you back down: a **N new messages** control appears, and sending, opening a chat or clicking it returns you to the bottom. Opening the chat clears the count; unread badges count 1:1 chats only, not rooms. See [Workspace](../sharing-and-access/workspace.md#reading-replies).
+Three ways. While anything is unread, the browser tab's title carries the count — `(3) Trinity — Workspace` — and the agent's row in the sidebar shows its own unread badge (questions the agent is waiting on you to answer are counted separately). Inside a chat, if you've scrolled up to re-read something, an arriving message doesn't pull you back down: a **N new messages** control appears, and sending, opening a chat or clicking it returns you to the bottom. Opening the chat clears the count. Rooms count too: a room's row shows how many agent messages arrived since you last read it. See [Workspace](../sharing-and-access/workspace.md#reading-replies).
 
 ## How is the Workspace Inbox sorted?
 

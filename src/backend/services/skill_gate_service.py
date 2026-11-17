@@ -36,11 +36,14 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from config import PORTAL_SOURCE_CHANNEL
+from sqlalchemy.exc import SQLAlchemyError
+
+from config import PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL
 from database import db
 from db.skill_gates import ORIGIN_CLEARED
 from models import TaskExecutionStatus
 from services import peer_skill_policy, rate_limiter, role_addressing
+from services import execution_attribution  # ent#1105
 from services.skill_gate_errors import (  # noqa: F401 — re-exported for entries and tests
     APPROVAL_PENDING_CODE,
     OUTCOME_DELIVERY_AGENT_TASK,
@@ -175,6 +178,7 @@ async def enforce(
     refuse_only: bool = False,
     gates: Optional[Mapping[str, SkillGate]] = None,
     context_text: Optional[str] = None,
+    request_parts: Optional[List[str]] = None,
 ) -> GateDecision:
     """Decide whether a request to `agent_name` may be dispatched now.
 
@@ -232,6 +236,39 @@ async def enforce(
             f"{_skill_list(names)} on {agent_name} needs approval, which "
             "can't be requested from here. Ask in chat instead.", skills=names)
 
+    # trinity#4505: a room's card text (its gated posts) is narrower than the
+    # scan, and must still name every skill the request matched — else the
+    # approver reads a request that names none, and Approve runs it. The gate
+    # map can change between the room's read and this one. The scanned text has
+    # no sender labels, so a post's newline could forge a sender line on it: raise
+    # no card. Room only: `/task` scans `user_message`, which its executor never
+    # receives (#3274). A name the sanitizer redacts (`MY_TOKEN=/pay-invoice`)
+    # is carded as redacted, and Approve runs that (`room_card_misses`). A room
+    # wake whose own map read failed sends no card text: refuse, so no card
+    # carries the raw, unlabelled slice. A match only in the context text (the
+    # waker's email, say) names no post, so the room sends no card: the normal
+    # card path below cards it with `_card_context`.
+    if triggered_by == "room":
+        replayed = "\n".join(t for t in ((dispatch or {}).get(REPLAY_MESSAGE),
+                                          (dispatch or {}).get(REPLAY_SYSTEM_PROMPT)) if t)
+        if not replayed and set(names) - set(beside):
+            logger.warning("[SkillGate] room wake for %s sent no card — refusing", agent_name)
+            raise SkillGateRefused(
+                503, "gate_unavailable",
+                f"Could not check whether this request to {agent_name} needs approval; "
+                "nothing was run. Try again shortly.")
+        # PR #4552 review 4: a card that misses a scanned name is a standing
+        # refusal. The room holds the gated posts, so a mismatch costs one wake.
+        if room_card_misses(set(names) - set(beside),
+                            request_parts if request_parts is not None else [request_text or ""],
+                            replayed, gates):
+            logger.warning("[SkillGate] room card for %s misses %s — refusing",
+                           agent_name, names)
+            raise SkillGateRefused(
+                409, "room_card_incomplete",
+                f"{_skill_list(names)} on {agent_name} needs approval, and this request "
+                "could not be put to an approver. Nothing was run, and it is not passed "
+                "on again. Ask again in a new message.", skills=names)
     clean_text = _card_text(request_text, dispatch)
     # The context lines go on the card only when a skill was named nowhere else
     # — otherwise the approver would read a request that names no gated skill.
@@ -285,7 +322,8 @@ async def enforce(
         requester_mcp_key_id=requester.mcp_key_id,
         origin_execution_id=origin_execution_id,
         triggered_by=triggered_by,
-        dispatch={**dict(dispatch or {}), **_requester_chat(requester)},
+        dispatch={**dict(dispatch or {}), **_requester_chat(requester),
+                  **_requester_continues(requester)},
     )
     if not created:   # a concurrent call for the same occurrence won
         raise _answer_for_record(record, role)
@@ -337,24 +375,12 @@ def _resolved_people(agent_name: str, role: str) -> List[str]:
 
 
 def _can_open(agent_name: str, email: str) -> bool:
-    """Can this person reach a gated approval on `agent_name`? (trinity-enterprise#881)
-
-    A decision is made in the Workspace (the agent on the person's roster:
-    owned or shared) or in Operations (an operator or admin with access to the
-    agent). A platform account is asked `can_user_access_agent` — owner, shared
-    or admin, which covers both doors; an email with no account only has the
-    Workspace, so the agent must be shared with it. Fails closed: an unreadable
-    lookup is "cannot open", which refuses by name rather than waits silently."""
-    try:
-        user = db.get_user_by_email(email)
-        if user:
-            return bool(db.can_user_access_agent(user["username"], agent_name))
-        from client_portal.service import agent_on_roster
-        return bool(agent_on_roster(agent_name, email, include_owned=False))
-    except Exception:  # noqa: BLE001
-        logger.warning("[SkillGate] could not tell whether an approver can open %s",
-                       agent_name, exc_info=True)
-        return False
+    """Can this approver reach a gated approval on `agent_name`? The rule is
+    `role_addressing.can_open_agent` (trinity-enterprise#881; moved there for
+    trinity-enterprise#1007 so an ask to a canon role applies the same one).
+    This name stays the gate's seam: `_approvers` reads it, and the tests
+    patch it."""
+    return role_addressing.can_open_agent(agent_name, email)
 
 
 def _approvers(agent_name: str, role: str) -> List[str]:
@@ -425,6 +451,52 @@ def read_gates(agent_name: str) -> Dict[str, SkillGate]:
             503, "gate_unavailable",
             f"Could not check whether this request to {agent_name} needs approval; "
             "nothing was run. Try again shortly.")
+
+
+# trinity#3402: refusals the SAME request gets again on every retry, until a
+# person changes the request or the agent's gate setup. A room records the posts
+# behind one (as it does a hold) so later wakes do not refuse them forever. Every
+# other refusal clears by itself — an unreadable map, a rate or queue cap, an
+# agent that is down, an ask that could not be raised — and the room delivers
+# the post again.
+STANDING_REFUSALS = frozenset({
+    "mixed_approvers",
+    "request_too_long",
+    "role_unassigned",
+    "approver_cannot_open_agent",
+    "gated_skill_not_installed",
+    "gated_skill_ambiguous",
+    "gated_skill_unreadable",
+    "room_card_incomplete",
+})
+
+
+def gate_hold_on_write(agent_name: str, text: Optional[str]) -> Dict[str, str]:
+    """trinity#3402: the `gate_hold` a public-link or channel row is WRITTEN with
+    — `{"gate_hold": "named"}` when its text invokes a skill gated on
+    `agent_name`, else `{}` (the ordinary write is unchanged).
+
+    Only for senders who can never self-approve (a public visitor, a channel
+    user): for them such a message never runs as itself, so it is kept out of
+    every later prompt from the moment it is stored — a turn built while this
+    one is still inside the gate's check, and group chatter the gate never sees.
+    The verdict overwrites the mark (`mark_public_chat_messages_held`). An
+    unreadable gate map stores the row unmarked: nothing would ever clear a
+    `named` mark, so a turn that then ran would lose its message from every
+    later prompt. The verdict still marks each turn the gate holds or refuses
+    (the dispatch-time read refuses `gate_unavailable` while the map is still
+    unreadable). The gap is a message invoking a gated skill that is stored
+    during the blip and never dispatched: group chatter, or a turn that fails
+    before its dispatch."""
+    from db.public_chat import GATE_HOLD_NAMED
+
+    if not text:
+        return {}
+    try:
+        gates = read_gates(agent_name)
+    except SkillGateRefused:
+        return {}
+    return {"gate_hold": GATE_HOLD_NAMED} if find_gated_invocations(text, gates) else {}
 
 
 def _skill_list(names: List[str]) -> str:
@@ -922,8 +994,11 @@ def requester_for_dispatch(*, triggered_by: str, source_user_email: Optional[str
                          email=source_user_email)
     if triggered_by in _CHANNEL_TRIGGERS or source_channel:
         who = source_user_email or source_channel_chat_id or "unknown"
+        # trinity#4505: not a channel user. Not "a person" either: the gated
+        # post may be an agent's. The card's lines name each post's sender.
         return Requester(kind=KIND_CHANNEL, key=f"channel:{source_channel or triggered_by}:{who}",
-                         email=source_user_email)
+                         email=source_user_email,
+                         label="A room conversation" if source_channel == ROOM_SOURCE_CHANNEL else None)
     if triggered_by == "public":
         return Requester(kind=KIND_PUBLIC, key=f"public:{(source_user_email or 'anonymous').casefold()}",
                          email=source_user_email)
@@ -1093,6 +1168,34 @@ def _could_not_tell_text(subagent: Optional[str]) -> str:
             "so it was not run. Do not carry out its steps another way.")
 
 
+def peer_hook_refusal_text(skills: List[str], *, caller: str, agent_name: str,
+                           subagent: Optional[str] = None) -> str:
+    """What the executor reads when a peer's run loads a library skill that
+    peer holds no grant for (trinity-enterprise#925). A real load, not a text
+    match, so it hands back without offering a way around: no slash before a
+    name, and nothing that sends anyone to widen a grant (#3949)."""
+    one = len(skills) == 1
+    names = _and_join(skills)
+    noun = ("the skill " if one else "the skills ") + names
+    was, it, its = ("was", "it", "its") if one else ("were", "them", "their")
+    if subagent:
+        head = f"the subagent {subagent} loads {noun}, which {was} assigned"
+    else:
+        head = f"{noun} {was} assigned"
+    return (f"Not run: {head} to {agent_name} from the skills library, and this run is a "
+            f"request from the agent {caller}, which holds no grant for {it}. Do not carry out "
+            f"{its} steps another way. Tell {caller} that {names} {'is' if one else 'are'} not "
+            f"available to it on {agent_name}.")
+
+
+def peer_could_not_tell_text(*, caller: str, agent_name: str, subagent: Optional[str] = None) -> str:
+    what = (f"which skills the subagent {subagent} loads" if subagent
+            else "which skill this call loads")
+    return (f"Not run: this run is a request from the agent {caller}, which may run "
+            f"{agent_name}'s library skills only with a grant, and Trinity could not tell "
+            f"{what}. Do not carry out its steps another way.")
+
+
 async def check_invocation(agent_name: str, *, via: str, invoked: Optional[str],
                            names: List[str], resolved: bool, subagent: Optional[str] = None,
                            execution_id: Optional[str] = None, marker: Optional[bool] = None,
@@ -1100,19 +1203,28 @@ async def check_invocation(agent_name: str, *, via: str, invoked: Optional[str],
     """The in-container hook's question: may this run load these skills?
 
     `names` are every name the invoked skill (or a subagent's preloads)
-    answers to; `resolved` is False when the hook could not tell. Not gated →
-    allowed. Gated → allowed only when `execution_id` is this agent's LIVE run
-    and a gate record clears it for every gated skill the call loads (D3: the
-    execution and the skill). Every verdict is RETURNED: a raise would reach
-    the app handler as a non-200, which the hook reads as "no answer" and
-    decides by its marker. Only an unreadable gate map raises (503).
+    answers to; `resolved` is False when the hook could not tell.
+
+    First the peer rule (trinity-enterprise#925): on a run whose requester is
+    a peer agent, a library skill that peer holds no grant for is refused,
+    on every agent, gated or not — the gateway's order. Then the gate: not
+    gated → allowed; gated → allowed only when `execution_id` is this agent's
+    LIVE run and a gate record clears it for every gated skill the call loads
+    (D3: the execution and the skill). Every verdict is RETURNED: a raise
+    would reach the app handler as a non-200, which the hook reads as "no
+    answer" and decides by its marker. Only an unreadable gate map raises
+    (503); an unreadable peer read fails open instead.
     """
     gates = read_gates(agent_name)
     _heal_marker(agent_name, has_gates=bool(gates), reported=marker)
-    if not gates:
-        return {"allowed": True, "gated": False, "message": None}
     who = _one_line(subagent) if via == "subagent_preload" else None
     run = execution_id if execution_id and execution_id != "manual" else None
+    peer = await _peer_verdict(agent_name, via=via, invoked=invoked, names=names,
+                               resolved=resolved, subagent=who, run=run, current_user=current_user)
+    if peer is not None:
+        return peer
+    if not gates:
+        return {"allowed": True, "gated": False, "message": None}
     refusal = dict(via=via, subagent=who, execution_id=run, current_user=current_user)
     if not resolved:
         return await _refuse(agent_name, [], reason="could_not_tell",
@@ -1130,6 +1242,47 @@ async def check_invocation(agent_name: str, *, via: str, invoked: Optional[str],
         return {"allowed": True, "gated": True, "message": None}
     return await _refuse(agent_name, uncleared, reason="not_cleared" if live else "run_not_live",
                          text=hook_refusal_text(uncleared, no_run=False, subagent=who), **refusal)
+
+
+async def _peer_verdict(agent_name: str, *, via: str, invoked: Optional[str], names: List[str],
+                        resolved: bool, subagent: Optional[str], run: Optional[str],
+                        current_user) -> Optional[Dict[str, Any]]:
+    """The refusal, or None, for the peer rule at load (trinity-enterprise#925).
+    No run → the agent's own session: no requester. An agent holding no
+    library skill (the common case — every skill load fleet-wide asks) costs
+    one read and stops. Otherwise one row read for every id, so an unknown id
+    and another agent's run read alike. A database error fails OPEN (the
+    owner's ruling): the peer rule is silent and the gate still answers from
+    its OWN reads — the gate's clearance never rides on this fail-open read.
+    Any other error propagates."""
+    if run is None:
+        return None
+    try:
+        assigned = peer_skill_policy.library_assigned(agent_name)
+        if not assigned:
+            return None
+        row = db.get_execution_requester(run)
+        caller = peer_skill_policy.run_requester(agent_name, row)
+        if caller is None:
+            return None
+        refused, unsure = peer_skill_policy.check_load(
+            agent_name, caller, names=names, invoked=invoked, resolved=resolved,
+            assigned=assigned)
+    except SQLAlchemyError:
+        logger.warning("[SkillGate] peer check for run %s on %s could not read — letting the "
+                       "peer rule pass", run, agent_name, exc_info=True)
+        return None
+    if not refused and not unsure:
+        return None
+    text = (peer_hook_refusal_text(refused, caller=caller, agent_name=agent_name, subagent=subagent)
+            if refused else
+            peer_could_not_tell_text(caller=caller, agent_name=agent_name, subagent=subagent))
+    logger.info("[SkillGate] in-container peer refusal on %s: caller=%s via=%s skills=%s run=%s",
+                agent_name, caller, via, ",".join(refused) or "-", run)
+    await peer_skill_policy.audit_in_container_refusal(
+        caller=caller, callee=agent_name, skills=refused, via=via, subagent=subagent,
+        execution_id=run, requester_key_id=row[3], current_user=current_user)
+    return {"allowed": False, "gated": False, "message": text}
 
 
 def _cleared_skills(agent_name: str, execution_id: str) -> Tuple[set, bool]:
@@ -1280,9 +1433,9 @@ _marker_locks: Dict[Tuple[int, str], Any] = {}
 
 def spawn_gate_marker_sync(agent_name: str, *, only_if_gated: bool = True) -> bool:
     """Fire-and-forget `sync_gate_marker`; True when a sync was scheduled.
-    `only_if_gated` (start and recreate) skips the exec for an agent with no
-    gates, and for an unreadable map, so an agent start costs nothing while
-    the gate is unused. A heal passes False. Never raises."""
+    `only_if_gated` (a recreate, whose fresh layer has no marker to remove)
+    skips the exec for an agent with no gates, and for an unreadable map. A
+    start and a heal pass False. Never raises."""
     import asyncio
 
     if only_if_gated:
@@ -1331,6 +1484,13 @@ DISPATCH_FIELDS: Dict[str, str] = {
     "source_channel_chat_id": FREEZE,
     "source_channel_thread": FREEZE,
     "source_channel_client": FREEZE,
+    # trinity#2328: the caller's per-task turn cap is a property of the task,
+    # like its model and timeout — the approved run keeps it.
+    "max_turns": FREEZE,
+    # trinity-enterprise#1225: the turn the request continues, recorded by the
+    # platform while it ran. The approved run is rated as that turn, as the
+    # request would have been.
+    "continues_execution_id": FREEZE,
     # trinity#3653: set on a requester's wake-up only; an approved run is the
     # requester's own request and never carries a binding agent of its own.
     "source_channel_agent": DROP,
@@ -1346,6 +1506,11 @@ DISPATCH_FIELDS: Dict[str, str] = {
     "images": DROP,
     "open_canvas_id": DROP,
     "conversation_key": DROP,
+    # abilityai/trinity-enterprise#1108: an answer wake asks to queue on the
+    # durable backlog rather than fail at capacity. That is the wake producer's
+    # choice for its own dispatch; an approved run is the requester's request
+    # replayed later, and keeps every producer's default admission.
+    "queue_on_capacity": DROP,
     "execution_id": RESET,
     "slot_already_held": RESET,
     "attempt": RESET,
@@ -1381,6 +1546,53 @@ REPLAY_SYSTEM_PROMPT = "replay_system_prompt"
 # in the record's `dispatch` beside the frozen fields and read only by the
 # requester's wake-up — never replayed to the approved run.
 REQUESTER_CHAT = "requester_chat"
+# trinity-enterprise#1225: the requesting AGENT's turn, recorded while it ran
+# (`turn_tier_service.continuation_origin`). The notice that wakes the
+# requester when the request is decided (`skill_gate`) continues that turn and
+# is rated as it. Never a dispatch field: the approved run is another agent's.
+REQUESTER_CONTINUES = "requester_continues"
+
+
+def _requester_continues(requester) -> Dict[str, str]:
+    """`{REQUESTER_CONTINUES: id}` for an agent requester whose named turn is
+    running on it now; empty otherwise (a person, `manual`, a finished or
+    foreign turn, an unreadable lookup)."""
+    agent = getattr(requester, "agent_name", None)
+    if not agent:
+        return {}
+    from services import turn_tier_service
+    origin = turn_tier_service.continuation_origin(db, agent, getattr(requester, "execution_id", None))
+    return {REQUESTER_CONTINUES: origin} if origin else {}
+
+
+# abilityai/trinity-enterprise#1105: the project the request was attributed to,
+# resolved NOW, while the requesting turn runs (lineage needs it live), and
+# kept in the record's `dispatch` beside the frozen fields. The approved run is
+# recorded with it (`_dispatch_approved`); `project_requested` marks a project
+# the request named itself (checked before the hold), so the replay is
+# recorded as that explicit claim rather than as an inherited one.
+FROZEN_PROJECT = "project_id"
+FROZEN_PROJECT_REQUESTED = "project_requested"
+
+
+def frozen_project(project_id: Optional[str] = None, *, agent_name: Optional[str] = None,
+                   principal: Any = None, requested_project_id: Optional[str] = None,
+                   triggered_by: Optional[str] = None) -> Dict[str, Any]:
+    """`dispatch` keys carrying the request's project; empty when there is none.
+
+    Pass a project already resolved (a fan-out batch's), or the request's facts
+    to resolve it through the attribution seam (inert in OSS → empty). Never
+    raises: the seam's resolve fails open to None."""
+    if project_id is None and agent_name:
+        project_id = execution_attribution.resolve(
+            agent_name=agent_name, principal=principal,
+            requested_project_id=requested_project_id, triggered_by=triggered_by)
+    if not project_id:
+        return {}
+    out: Dict[str, Any] = {FROZEN_PROJECT: project_id}
+    if requested_project_id and project_id == requested_project_id:
+        out[FROZEN_PROJECT_REQUESTED] = True
+    return out
 
 
 def _requester_chat(requester: Requester) -> Dict[str, Dict[str, str]]:
@@ -1412,6 +1624,28 @@ def _requester_chat(requester: Requester) -> Dict[str, Dict[str, str]]:
         return {REQUESTER_CHAT: {k: v for k, v in chat.items() if v is not None}}
     except Exception:  # noqa: BLE001 — provenance never fails the gate
         return {}
+
+
+# trinity#4505: a room wake's scanned parts (each post the agent is shown, and
+# the ask answer), passed beside the replay keys in `gate_replay` for the
+# coverage check. Read by the backstop, never stored in the record.
+REQUEST_PARTS = "request_parts"
+
+
+def room_card_misses(names, request_parts: List[str], card: str, gates) -> set:
+    """The skills in `names` a room card must name and does not.
+
+    The card carries each gated part sanitised by itself, so what it must name
+    is what each gated part still names once sanitised by itself. Sanitising the
+    join lets a credential pattern reach across the line into the next part and
+    spell a name no part holds (PR #4552 review 4). A part the gate map read here
+    finds and the room's read did not (the map changed between them) is
+    required too."""
+    required = set()
+    for part in request_parts:
+        if find_gated_invocations(part, gates):
+            required.update(find_gated_invocations(sanitize_text(part), gates))
+    return set(names) & required - set(find_gated_invocations(card, gates))
 
 
 def frozen_replay(message: Optional[str], system_prompt: Optional[str] = None) -> Dict[str, str]:
@@ -1600,8 +1834,12 @@ async def _end_not_run(record, decider, why: str) -> str:
 
 
 #: The ask-resume and ask-ending wakes (ent#329, ent#611) — mirrors
-#: `operator_resume_service.TRIGGERED_BY{,_ENDING}`.
-_PERSONLESS_REPLAY_TRIGGERS = frozenset({"operator_response", "operator_ending"})
+#: `operator_resume_service.TRIGGERED_BY{,_ENDING}` — and the delegation-ending
+#: wake (trinity-enterprise#1102, `caller_wake_service.TRIGGERED_BY_CALLER_WAKE`):
+#: all three are platform-framed turns no person wrote — and so is the project
+#: steward wake (trinity-enterprise#1236).
+_PERSONLESS_REPLAY_TRIGGERS = frozenset({"operator_response", "operator_ending", "caller_wake",
+                                         "project_steward"})
 
 
 async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
@@ -1646,6 +1884,7 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
         system_prompt=system_prompt,
         timeout_seconds=frozen.get("timeout_seconds"),
         async_mode=True,
+        max_turns=frozen.get("max_turns"),
     )
     row = db.create_task_execution(
         agent_name=agent,
@@ -1664,9 +1903,18 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
             source_channel_chat_id=frozen.get("source_channel_chat_id"),
             source_channel_thread=frozen.get("source_channel_thread"),
             source_channel_client=frozen.get("source_channel_client"),
+            continues_execution_id=frozen.get("continues_execution_id"),
         ),
         execution_id=execution_id,
     )
+    # ent#1105: an edition may attribute the replayed run. The project frozen at
+    # hold time (`frozen_project`) is carried — as the request's own explicit
+    # claim when it named it, else inherited; with none frozen the row decides.
+    frozen_project_id = frozen.get(FROZEN_PROJECT)
+    requested = frozen_project_id if frozen.get(FROZEN_PROJECT_REQUESTED) else None
+    execution_attribution.record_row(
+        row, requested_project_id=requested,
+        inherited_project_id=None if requested else frozen_project_id)
     if row is None:
         raise RuntimeError("could not create the execution record")
 
@@ -2176,6 +2424,8 @@ async def _wake_requester_agent(record: Dict[str, Any], text: str, *,
                 message=text,
                 triggered_by=SKILL_GATE_TRIGGER,
                 chain_depth=frozen.get("chain_depth"),
+                # trinity-enterprise#1225: the notice stands as the requesting turn.
+                continues_execution_id=frozen.get(REQUESTER_CONTINUES),
                 **chat,
             )
         except Exception:  # noqa: BLE001 — a stopped requester misses it; the record stands

@@ -29,6 +29,10 @@ from utils.helpers import utc_now_iso
 # Header injected into every public chat request so agents know they're serving a public user
 PUBLIC_LINK_MODE_HEADER = "### Trinity: Public Link Access Mode"
 
+# trinity#3402: the `gate_hold` of a row written naming a gated skill, before the
+# gate decided — the one value a verdict may overwrite (`mark_messages_held`).
+GATE_HOLD_NAMED = "named"
+
 
 class PublicChatOperations:
     """Operations for managing public chat sessions and messages."""
@@ -61,6 +65,7 @@ class PublicChatOperations:
             # backward-compatible if a row is projected without the columns.
             sender_email=row.get("sender_email"),
             sender_label=row.get("sender_label"),
+            gate_hold=row.get("gate_hold"),
         )
 
     def get_or_create_session(
@@ -183,6 +188,7 @@ class PublicChatOperations:
         cost: Optional[float] = None,
         sender_email: Optional[str] = None,
         sender_label: Optional[str] = None,
+        gate_hold: Optional[str] = None,
     ) -> PublicChatMessage:
         """
         Add a message to a session and update session stats.
@@ -198,6 +204,9 @@ class PublicChatOperations:
             sender_label: Display label for attributed history replay (#903) —
                 e.g. ``"John Smith (@johndoe)"`` for a channel user, agent name
                 for the assistant. Null falls back to a role label.
+            gate_hold: trinity#3402 — set when the row must never be replayed to
+                the agent (``GATE_HOLD_NAMED`` for a message naming a gated
+                skill, written before the gate decides).
 
         Returns:
             PublicChatMessage model
@@ -217,6 +226,7 @@ class PublicChatOperations:
                     cost=cost,
                     sender_email=sender_email,
                     sender_label=sender_label,
+                    gate_hold=gate_hold,
                 )
             )
 
@@ -242,6 +252,7 @@ class PublicChatOperations:
         session_id: str,
         limit: int = 20,
         sender_email: Optional[str] = None,
+        include_held: bool = False,
     ) -> List[PublicChatMessage]:
         """
         Get messages for a session, ordered oldest-first for context building.
@@ -252,13 +263,12 @@ class PublicChatOperations:
             sender_email: When set, only that speaker's messages (#903) — used by
                 the MEM-001 summarizer so a shared thread never feeds one user's
                 turns into another user's memory.
+            include_held: see ``get_recent_messages``.
 
         Returns:
             List of messages, oldest first
         """
-        conditions = [public_chat_messages.c.session_id == session_id]
-        if sender_email is not None:
-            conditions.append(public_chat_messages.c.sender_email == sender_email)
+        conditions = self._conditions(session_id, sender_email, include_held)
         with get_engine().connect() as conn:
             rows = conn.execute(
                 select(public_chat_messages)
@@ -274,6 +284,7 @@ class PublicChatOperations:
         limit: int = 20,
         sender_email: Optional[str] = None,
         since: Optional[str] = None,
+        include_held: bool = False,
     ) -> List[PublicChatMessage]:
         """
         Get the most recent N messages, ordered for display (oldest first).
@@ -288,10 +299,13 @@ class PublicChatOperations:
                 cutoff (ent#600 — the group-context rolling window). Build it
                 with ``iso_cutoff()``; ``timestamp`` is an ISO-Z TEXT column,
                 so the comparison is lexicographic (Invariant #16).
+            include_held: trinity#3402 — rows with a ``gate_hold`` (a gated
+                request that did not run as itself, or the platform's answer to
+                one) are left out unless this is True. Every prompt builder
+                reads through here and gets the default; only a reader a PERSON
+                sees (the visitor's own history) asks for them.
         """
-        conditions = [public_chat_messages.c.session_id == session_id]
-        if sender_email is not None:
-            conditions.append(public_chat_messages.c.sender_email == sender_email)
+        conditions = self._conditions(session_id, sender_email, include_held)
         if since is not None:
             conditions.append(public_chat_messages.c.timestamp >= since)
         with get_engine().connect() as conn:
@@ -307,6 +321,34 @@ class PublicChatOperations:
                 select(recent).order_by(recent.c.timestamp.asc())
             ).mappings().all()
             return [self._row_to_message(row) for row in rows]
+
+    @staticmethod
+    def _conditions(session_id: str, sender_email: Optional[str], include_held: bool) -> list:
+        conditions = [public_chat_messages.c.session_id == session_id]
+        if sender_email is not None:
+            conditions.append(public_chat_messages.c.sender_email == sender_email)
+        if not include_held:
+            conditions.append(public_chat_messages.c.gate_hold.is_(None))
+        return conditions
+
+    def mark_messages_held(self, message_ids: List[str], gate_hold: str) -> int:
+        """Mark rows the skill gate stopped (trinity#3402) — the request id or
+        ``refused:<code>``. A verdict overwrites only an unmarked row or
+        ``GATE_HOLD_NAMED``, never an earlier verdict. Returns the rows marked."""
+        ids = [i for i in (message_ids or []) if i]
+        if not ids:
+            return 0
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(public_chat_messages)
+                .where(and_(
+                    public_chat_messages.c.id.in_(ids),
+                    or_(public_chat_messages.c.gate_hold.is_(None),
+                        public_chat_messages.c.gate_hold == GATE_HOLD_NAMED),
+                ))
+                .values(gate_hold=gate_hold)
+            )
+            return result.rowcount or 0
 
     def prune_session(self, session_id: str, keep: int) -> int:
         """Delete every message of a session except the newest ``keep`` (ent#600).

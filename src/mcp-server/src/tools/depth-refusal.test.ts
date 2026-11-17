@@ -23,6 +23,8 @@ const DEPTH_BODY = JSON.stringify({
     caller: "alpha",
     target: "alpha",
     message: "Inter-agent chain depth limit reached (4 > 3). Do not retry this call.",
+    exhausted_by: { execution_id: "exec-3", chain_depth: 3, triggered_by: "agent", source_agent: "beta" },
+    resets: "The depth falls when that execution finishes.",
   },
 });
 const DENIED_BODY = JSON.stringify({ detail: "Access denied" });
@@ -63,6 +65,11 @@ describe("#2973 depth refusal on loop / schedule-trigger / emit tools", () => {
       assert.equal(out.retryable, false);
       assert.equal(out.depth, 4);
       assert.equal(out.max_depth, 3);
+      // #4357: the hop and the reset sentence reach the model.
+      assert.deepEqual(out.exhausted_by, {
+        execution_id: "exec-3", chain_depth: 3, triggered_by: "agent", source_agent: "beta",
+      });
+      assert.equal(out.resets, "The depth falls when that execution finishes.");
     });
 
     it(`${name}: a plain 403 is not mistaken for a depth refusal`, async () => {

@@ -74,12 +74,14 @@ def test_webhook_url_is_none_without_a_host():
 @pytest.mark.parametrize("url, headers, expected", [
     # Proxy serves /mcp on the same origin, so no :8080.
     ("http://trinity.test/api/x", {"x_forwarded_proto": "https"}, "https://trinity.test/mcp"),
-    ("http://trinity.test/api/x", {"x_forwarded_proto": "http"}, "http://trinity.test:8080/mcp"),
+    # Through a proxy over plain http, /mcp is still on the same origin (ent#1101).
+    ("http://trinity.test/api/x", {"x_forwarded_proto": "http"}, "http://trinity.test/mcp"),
     ("http://trinity.test/api/x", {}, "http://trinity.test:8080/mcp"),
     ("http://localhost/api/x", {}, "http://localhost:8080/mcp"),
     ("http://127.0.0.1:8000/api/x", {}, "http://localhost:8080/mcp"),
 ])
-def test_default_mcp_url(url, headers, expected):
+def test_default_mcp_url(url, headers, expected, monkeypatch):
+    monkeypatch.delenv("MCP_BIND_ADDRESS", raising=False)  # ent#1101's host-only branch
     assert mcp_url._get_default_mcp_url(_request(url, **headers)) == expected
 
 

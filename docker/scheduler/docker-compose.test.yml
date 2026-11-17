@@ -44,6 +44,7 @@ services:
         condition: service_healthy
     environment:
       - DATABASE_PATH=/data/trinity.db
+      - TRINITY_ALLOW_SQLITE=1
       - "REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379"
       - HEALTH_PORT=8001
       - LOG_LEVEL=DEBUG

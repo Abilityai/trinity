@@ -1,6 +1,6 @@
 # Agent Sharing & Access
 
-Two owner-only surfaces on the Agent Detail page control who can reach an agent: **Settings › People** (the former Access tab) manages the *people the agent is shared with* (they use it in the Workspace), and the **Sharing** tab manages *external clients* (outside users reaching the agent through Slack, Telegram, WhatsApp, voice calls, or public links).
+Two owner-only surfaces on the Agent Detail page control who can reach an agent: **Settings › People** (the former Access tab) manages the *people the agent is shared with* (they use it in the Workspace), and the **Channels** tab manages *external clients* (outside users reaching the agent through Slack, Telegram, WhatsApp, voice calls, or public links).
 
 ## Concepts
 
@@ -14,12 +14,16 @@ Two owner-only surfaces on the Agent Detail page control who can reach an agent:
 **Settings › People** lists the people this agent is shared with. It is the Access tab moved into the Settings home, unchanged.
 
 1. Open the agent detail page, click the **Settings** tab and pick **People** in the rail (owner only; `?tab=settings&section=people`, and an old `?tab=access` link lands there too).
-2. Enter an email and click **Add person**. The person can sign in to the [Workspace](workspace.md) with a code emailed to them. Sharing does **not** create a platform account or add the email to the login whitelist; whether someone also gets the operator UI is their platform role, which an admin sets on the person's row here or in **Settings → Access**.
+2. Enter an email and click **Add person**. As you type, the field suggests people who already have an account on this instance, by email, username or name; pick one, or type any address. The person can sign in to the [Workspace](workspace.md) with a code emailed to them. Sharing does **not** create a platform account or add the email to the login whitelist; whether someone also gets the operator UI is their platform role, which an admin sets on the person's row here or in **Settings → Access**.
 3. Each row shows a status badge:
    - **Active** — the email resolved to an existing Trinity account (shows username, role, and last-active time, or "never signed in"). An admin may see a role select on the row instead of the role label: the role applies on every agent, every change asks for confirmation, and an admin's own row stays read-only.
    - **Pending** — no platform account ("No platform account — uses the Workspace"). Where the row offers **Give a platform account**, an admin can create the account right away (after a confirmation; as `user` — Workspace only — unless an earlier allow-list entry set another role), so the person can be assigned to the agent before they first sign in; they sign in at `/login`. Give accounts to colleagues — a platform account sees the team's view of every agent shared with its address — and keep outside clients on a plain share.
 4. Each operator row also carries a **proactive-messaging toggle** — "allow this operator to receive proactive DMs from the agent." It is off by default; turn it on per operator to let the agent message that person unprompted. This is a **per-recipient** DM permission (`PUT /api/agents/{name}/shares/proactive`, body `{email, allow_proactive}`). Trinity records consent in three states — *not asked* (every new share), *declined* and *consented* — and only *consented* lets the agent send; the other two are both a no, kept apart so you can see whether anyone ever asked.
 5. Click **Remove** on a row to revoke access.
+
+When you add someone with no account, Trinity emails them an invitation that says who invited them and which agent, and links to the Workspace sign-in. Use **Resend invite** on their Pending row to send it again, up to 3 times an hour. If email isn't set up for sign-in on your instance, no invitation goes out and the panel says so, so tell them how to sign in yourself.
+
+The invitation's link is built from `FRONTEND_URL` (in `.env`) only. If `FRONTEND_URL` is empty, the email carries no link and tells the person to use your Trinity sign-in page. The Public URL is never used for invitations, because the public chat address serves chat only and would answer the Workspace with an error. Set `FRONTEND_URL` whenever you set a Public URL.
 
 On instances licensed for it, Settings › People also shows a **People this agent serves** section above this list: the agent's primary person, its other stakeholders, and the seat the agent holds or serves. Assigning someone there also shares the agent with them, because an assignment by itself grants no access; a row for someone the agent is not shared with carries a warning and **Share with them**. Without the entitlement the section is absent, and non-admins see it read-only.
 
@@ -30,7 +34,7 @@ The per-recipient DM toggle above is complemented on the channel side by the per
 | Level | Permissions |
 |-------|-------------|
 | **Owner** | Full control -- create, delete, configure, share, manage credentials and schedules. |
-| **Shared operator** | Interact only -- chat, run tasks, view files (except credential files) and logs. Cannot modify config, credentials, or permissions. |
+| **Shared operator** | Interact only -- chat, run tasks, start and stop the agent, view files (except credential files) and the executions they started. Cannot modify config, credentials, or permissions. |
 | **Admin** | Full access to all agents regardless of ownership. |
 
 ### What someone you share an agent with can do
@@ -40,6 +44,18 @@ The per-recipient DM toggle above is complemented on the channel side by the per
 - They cannot open or download credential files: `.env`, `.mcp.json`, SSH and cloud credentials, key and certificate files (`*.key`, `*.pem`, `*.p12`, `*.pfx`) and the agent runtimes' login files. Trying shows a message saying so.
 - To see or change a credential, they ask the agent's owner or an admin. Managing credentials (set, inject, import, export) is for the owner or an admin.
 - If opening the agent's files shows "This agent needs a restart to apply an update", they ask the agent's owner or an admin to stop and start it in Trinity.
+- They see only their own work: the executions, task history, live streams and queued prompts **they** started. They do not see the owner's turns or anyone else's, the container log, the activity timeline or the agent's full chat history. Runs with no person behind them (Slack, Telegram, voice, public-link and scheduled runs) are not in their list. The Tasks panel says "you see the tasks you started".
+- They can stop a run only when it is wholly theirs. Changing the agent's model, a forced git pull and managing a schedule's webhook (unless they created that schedule) stay with the owner or an admin. Starting and stopping the agent stay open to them.
+
+### What the agent does for someone you share it with
+
+An agent acts for whoever is chatting with it, so Trinity holds the agent to that person's limits for the length of their turn. Trinity decides this from the execution record, not from anything the person or the agent says:
+
+- **The owner, an admin, or work the owner set up** (a schedule, reminder, loop, webhook or event subscription the owner created) — the agent can do everything it normally can.
+- **A person the agent is shared with** — the agent's file tools reach only the paths that person could open in the Files tab, so it will not edit its own instructions, skills or startup files for them. It gets **no shell**. It cannot set up standing work for them (schedules, loops, reminders, event subscriptions), create or deploy agents, or read anyone else's executions. On a **Gemini CLI or Codex** agent their message is refused before it runs, with a reason that says the owner can switch the agent to Claude Code; those runtimes cannot limit what a turn does.
+- **A channel or public-link visitor** (Slack, Telegram, WhatsApp, a public link, voice, a paid call) — the file tools reach the share paths. Whether the agent may also use the shell, run on Gemini or Codex, and set up standing work depends on the owner's **Channel and public visitors may run commands** switch under **Settings › Guardrails** (on by default). See [Agent Guardrails](../agents/agent-guardrails.md#visitors-and-the-shell).
+
+When the agent refuses something for these reasons it says so, so the person can ask the owner. A turn the platform starts to continue earlier work (for example the agent waking up when an ask it raised is answered, or when a delegated run finishes) is held to the same limits as the turn it continues. If the person who answered an ask could not stand as the asking turn (a shared person answering the owner's ask, say), the wake-up is held to a shared person's limits.
 
 Enforcement notes:
 
@@ -47,9 +63,9 @@ Enforcement notes:
 - Shared users see only their own chat messages. Admins see all messages.
 - Deleting an agent cascades to remove all associated sharing records.
 
-## Sharing Tab — External Clients
+## Channels Tab — External Clients
 
-The **Sharing** tab is organized around "who outside the team can reach this agent, and through what." Sections, top to bottom:
+The **Channels** tab is organized around "who outside the team can reach this agent, and through what." Sections, top to bottom:
 
 ### Who can chat with this agent?
 
@@ -90,7 +106,15 @@ Both actions are recorded in the audit log, and an agent's own API key cannot pe
 
 ### Client roster — who's reaching this agent
 
-A read-only table of external channel users who have messaged the agent, aggregated across Telegram and WhatsApp (more channels to follow): client name, channel, verified email, message count, and last-active time, ordered by most recent. The roster is database-sourced, so it renders even when the agent container is stopped.
+A table of external channel users who have messaged the agent, aggregated across Telegram and WhatsApp (more channels to follow): client name, channel, verified email, message count, last-active time, and access, ordered by most recent. The roster is database-sourced, so it renders even when the agent container is stopped.
+
+Each row has its own controls:
+
+- **Approve** — shown on a client whose access request is pending; the same as approving it under Pending requests.
+- **Revoke** — shown on an approved client; removes their access to this agent. While access is Restricted, their next message asks for approval again. While it is Open they can still chat, so block them to stop that.
+- **Block** / **Unblock** — stops this client reaching this agent on that channel, whatever the access policy. Their messages are dropped without a reply. Their history and any approval are kept, and unblocking restores them. A client who never verified an email can be blocked too.
+
+Each action affects this agent only, is available to the agent's owner (and admins), and is recorded in the audit log.
 
 ### Distribution
 
@@ -109,7 +133,10 @@ One collapsible panel for distributing the agent's output rather than granting a
 | `/api/agents/{name}/shares` | GET | List all shares for an agent; each carries `proactive_consent` (`not_asked`, `declined` or `consented`) |
 | `/api/agents/{name}/access` | GET | Roster of people the agent is shared with (active + pending) for Settings › People, with each row's `proactive_consent` |
 | `/api/agents/{name}/shares/proactive` | GET / PUT | Per-recipient proactive-DM permission; PUT body `{email, allow_proactive}` (owner/admin) |
-| `/api/agents/{name}/clients` | GET | External client roster (owner-only, read-only) |
+| `/api/agents/{name}/clients` | GET | External client roster with each client's `client_id` and `access` state (owner-only) |
+| `/api/agents/{name}/clients/block` | POST | Block one channel client on this agent; body `{channel, client_id, reason?}` (owner/admin, people only) |
+| `/api/agents/{name}/clients/unblock` | POST | Lift that block; body `{channel, client_id}` (owner/admin, people only) |
+| `/api/agents/{name}/clients/revoke` | POST | Remove an approved client's access to this agent; body `{channel, client_id}` (owner/admin, people only) |
 | `/api/enterprise/client-portal/agents/{name}/clients` | GET | Portal clients with last-seen, block and session state (owner/admin; the prefix is historical) |
 | `/api/enterprise/client-portal/agents/{name}/clients/{email}/logout` | POST | End the client's live Workspace sessions (owner/admin, people only) |
 | `/api/enterprise/client-portal/agents/{name}/clients/{email}/block` | POST / DELETE | Block (optional `{reason}`) or unblock the client platform-wide (admin, people only) |

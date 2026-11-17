@@ -39,7 +39,7 @@ from typing import Optional
 from utils.helpers import utc_now_iso
 
 from . import db
-from .models import PortalRealtimeVoice
+from .models import PortalDirectVoice, PortalRealtimeVoice
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,8 @@ _CONTEXT_ROWS = 20
 # today's provider's; the sentence is about voice.
 REASON_DISABLED = "Voice is turned off on this instance."
 REASON_NO_KEY = "No voice provider key is configured on this instance."
+REASON_DIRECT_OFF = "Direct calls are turned off on this instance."
+DIRECT_LABEL = "Direct call"
 
 
 # ---- The live-call lease (#2694, #2700) --------------------------------------
@@ -221,13 +223,34 @@ def realtime_voice_capability(is_platform: bool) -> PortalRealtimeVoice:
     return PortalRealtimeVoice(available=True, reason=None)
 
 
+def direct_voice_capability(is_platform: bool) -> PortalDirectVoice:
+    """The roster's Direct-call capability (trinity-enterprise#1046). Same rule as the
+    realtime field: nothing for a portal-token client, an honest reason for a platform
+    user, fail-closed when the answer cannot be read."""
+    if not is_platform:
+        return PortalDirectVoice(available=False, reason=None)
+    try:
+        from config import VOICE_ENABLED
+        from services.settings_service import settings_service
+        from services.speech import direct_voice_readiness
+        if not VOICE_ENABLED or not settings_service.is_direct_voice_enabled():
+            return PortalDirectVoice(available=False, reason=REASON_DIRECT_OFF)
+        provider, reason = direct_voice_readiness()
+        return PortalDirectVoice(available=provider is not None, reason=reason, provider=provider)
+    except Exception as e:  # noqa: BLE001 - a roster load must survive this
+        logger.warning("workspace voice: direct capability read failed: %s", e)
+        return PortalDirectVoice(available=False, reason=REASON_DIRECT_OFF)
+
+
 def build_portal_context_summary(agent_name: str, email: str, session_id: str) -> str:
     """The thread's recent turns, as the voice model's opening context.
 
     Same truncation rule as the Agent Detail summary. Platform `system` rows are
     skipped (the ent#523 lesson: they are the platform speaking about the
     thread, not a party to it), and an earlier call's spoken rows are labelled
-    so the model knows which of its own lines were said aloud.
+    so the model knows which of its own lines were said aloud. A turn the skill
+    gate held or refused, and its notice, are not read at all (trinity#3402 —
+    `get_portal_messages`' default).
     """
     try:
         rows = db.get_portal_messages(agent_name, email, limit=_CONTEXT_ROWS, session_id=session_id)
@@ -265,6 +288,7 @@ async def start_workspace_voice(
     user_id: int,
     user_label: str,
     voice_name: Optional[str] = None,
+    mode: str = "live",
 ) -> dict:
     """Start a voice call bound to a Workspace thread.
 
@@ -280,9 +304,14 @@ async def start_workspace_voice(
     if not is_platform or not on_roster or not thread:
         raise ClientPortalError(404, "Conversation not found")
 
-    cap = realtime_voice_capability(is_platform)
+    from services import direct_voice_service
+    cap = direct_voice_capability(is_platform) if mode == "direct" else realtime_voice_capability(is_platform)
     if not cap.available:
         raise ClientPortalError(503, cap.reason or REASON_DISABLED)
+
+    # trinity-enterprise#1046: one call per thread, whichever kinds they are.
+    if direct_voice_service.call_active(portal_session_id) or (mode == "direct" and voice_call_active(portal_session_id)):
+        raise ClientPortalError(409, "A call is already on in this chat — end it first.")
 
     # #2694: no typed reply may land mid-call. The tab's own composer is inert
     # during a call, but a reply can still be in flight from another tab, a
@@ -299,6 +328,26 @@ async def start_workspace_voice(
 
     from config import WORKSPACE_VOICE_MAX_DURATION
     from database import db as core_db
+
+    if mode == "direct":
+        from services.docker_service import get_agent_runtime
+        runtime = get_agent_runtime(agent_name)
+        session = direct_voice_service.create_session(
+            agent_name=agent_name, user_id=user_id, client_email=email,
+            portal_session_id=portal_session_id, max_duration=WORKSPACE_VOICE_MAX_DURATION,
+            voice_name=voice_name or core_db.get_voice_name(agent_name),
+        )
+        return {
+            "voice_session_id": session.session_id,
+            "websocket_url": f"/ws/voice/{session.session_id}",
+            "portal_session_id": portal_session_id,
+            "max_duration_seconds": WORKSPACE_VOICE_MAX_DURATION,
+            "mode": "direct",
+            "provider": cap.provider,
+            "runtime": runtime,
+            "early_speech": direct_voice_service.supports_early_speech(runtime),
+        }
+
     from services.gemini_voice import WORKSPACE_PANEL_INSTRUCTIONS, canvas_context_section, voice_service
     from services.voice_prompt_service import get_voice_system_prompt
 
@@ -395,11 +444,12 @@ def persist_voice_turn(session, role: str, text: str) -> bool:
 
 
 def call_label(duration_seconds: float, end_reason: Optional[str] = None,
-               max_duration: Optional[int] = None, end_message: Optional[str] = None) -> str:
+               max_duration: Optional[int] = None, end_message: Optional[str] = None,
+               *, kind: str = "Voice call") -> str:
     """The one line the chat keeps about the call: `Voice call · N min`, plus
     how it ended when it did not end by choice."""
     minutes = max(1, int(round((duration_seconds or 0) / 60)))
-    label = f"Voice call · {minutes} min"
+    label = f"{kind} · {minutes} min"
     if end_reason == "cap":
         cap_min = max(1, int(round((max_duration or duration_seconds or 0) / 60)))
         label += f" · ended at the {cap_min}-minute limit"
@@ -443,3 +493,24 @@ def persist_voice_call_end(session, duration_seconds: float, end_reason: Optiona
     except Exception as e:  # noqa: BLE001
         logger.warning("workspace voice: call-end persist failed for %s: %s", session.session_id, e)
         return turns
+
+
+def persist_direct_call_end(session, duration_seconds: float, turns: int,
+                            end_reason: Optional[str] = None) -> int:
+    """Close a Direct call in the thread (trinity-enterprise#1046): one label row, so
+    the block has a name. The turns' own rows were written and counted by the turn path,
+    so only this row is added. A call in which nothing was asked writes nothing."""
+    if turns <= 0:
+        return 0
+    try:
+        label = call_label(duration_seconds, end_reason, session.max_duration, kind=DIRECT_LABEL)
+        db.add_portal_message(
+            uuid.uuid4().hex, session.agent_name, session.client_email, "system", label,
+            None, utc_now_iso(), session_id=session.portal_session_id,
+            source=VOICE_SOURCE, voice_call_id=session.session_id,
+        )
+        db.touch_portal_session(session.portal_session_id, utc_now_iso(), added=1)
+        return 1
+    except Exception as e:  # noqa: BLE001
+        logger.warning("workspace voice: direct call-end persist failed for %s: %s", session.session_id, e)
+        return 0

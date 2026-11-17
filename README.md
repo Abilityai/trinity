@@ -37,14 +37,14 @@ Apache 2.0 &middot; independently pentested, UnderDefense Grade A &middot; we ru
 > Find this useful? ⭐ [Star the repo](https://github.com/abilityai/trinity) - it's how other people find Trinity.
 
 > [!NOTE]
-> **📦 Trinity 1.0** <!-- at tag: date + link docs/releases/1.0.0.md --> is the release where Trinity runs a company, not a console:
-> - a **role** for every agent, with objectives tied to a number the company actually tracks
-> - **approvals in your Inbox** - anything irreversible waits for a person, and the answer wakes the agent
-> - **gated skills**, approvers by role, skill sets you assign as one unit
-> - **Projects** with tasks, a log and a steward (Enterprise)
-> - rate the work, reply in-thread, one Skills tab, agents that pull their own repo
+> **📦 Trinity 1.0.5** (2026-11-17, [release notes](docs/releases/1.0.5.md)) makes an agent's seat on the team workable day to day:
+> - **Projects you run work from** - a board, task runs, briefs for agents, and a steward that works in Track, Propose or Auto (Enterprise)
+> - **agents that wake** when their question is answered or the work they delegated ends
+> - **memory you can search**, off until you turn it on
+> - **Direct voice calls**, systems that reconcile to their manifest, and one `trinity update` command
+> - **closed to the network by default** - external MCP access and agent SSH stay on the host until an admin opens them
 >
-> [What's new →](https://docs.ability.ai/whats-new) · [Release notes →](docs/releases/) <!-- at tag: docs/releases/1.0.0.md --> · Previous: [v0.9.5](docs/releases/0.9.5.md)
+> [What's new →](https://docs.ability.ai/whats-new) · [Release notes →](docs/releases/1.0.5.md) · Previous: [v1.0.0](docs/releases/1.0.0.md)
 
 ## See it move
 
@@ -58,6 +58,7 @@ One task, end to end: a schedule fires, the agent works in its container, reache
 
 **Watch more**
 
+- [Trinity 1.0 — The Complete Course](https://youtu.be/Q3-YFXz8NSI) - 41 chapters in 8 parts, from first setup to governance (1:16:21)
 - [Trinity Architecture Explained](https://youtu.be/XDLOq1crF9w) - one scheduled task followed through the container, gate, delegation, approval, audit and breaker machinery (4:44)
 - [The Multi-Agent Platform I Run My Company On](https://youtu.be/8j6q-kABRqc) - a live fleet tour: delegation, memory, observability
 - [Autonomous Cornelius on Trinity](https://youtu.be/QUZ5ZgB5f6E) - a second-brain agent running on its own

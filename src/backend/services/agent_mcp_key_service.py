@@ -591,6 +591,10 @@ def _entry_verdict(row: Optional[Dict[str, Any]], agent_name: str) -> str:
     # (revoke it in Settings → MCP Keys) would break a monitoring integration.
     if scope == "ops":
         return "foreign_ops_key"
+    # #3180 — same reason for its write sibling: a bounded machine credential
+    # for ops automation, not a person's key.
+    if scope == "ops_write":
+        return "foreign_ops_write_key"
     # ALLOWlist, matching `reject_non_interactive_principal`: everything that is
     # not this agent's own agent-scoped key is foreign. `scope` is free-text with
     # no CHECK constraint, so an explicit ("user","system","portal_delegate")
@@ -622,6 +626,14 @@ def _verdict_message(entry: AgentMcpKeyVerifyEntry) -> Optional[str]:
             "cannot reach this agent's own surfaces, so tool calls will fail. "
             "Regenerate this agent's key here; leave the ops key alone — it "
             "belongs to a monitoring integration."
+        )
+    if entry.verdict == "foreign_ops_write_key":
+        return (
+            "This agent authenticates with a bounded ops-write key "
+            f"({entry.key_prefix or 'unknown'}…) rather than its own. That key "
+            "cannot reach this agent's own surfaces, so tool calls will fail. "
+            "Regenerate this agent's key here; leave the ops-write key alone — it "
+            "belongs to an ops automation."
         )
     if entry.verdict == "foreign_agent_key":
         return (

@@ -49,6 +49,17 @@ describe('ent#479 the Dashboard tab appears for EITHER gate', () => {
   it('is not hidden for the system agent', () => {
     expect(ids({ hasDeclaredMetrics: true, isSystem: true })).toContain('dashboard')
   })
+
+  // trinity-enterprise#1006: the Dashboard tab is where an owner declares
+  // metrics, so it cannot wait for the first one to exist.
+  it('appears for an owner with neither, so the first metric can be declared', () => {
+    expect(ids({ canShare: true })).toContain('dashboard')
+  })
+
+  it('stays hidden for a shared viewer with neither, and for the system agent', () => {
+    expect(ids({ canShare: false })).not.toContain('dashboard')
+    expect(ids({ canShare: true, isSystem: true })).not.toContain('dashboard')
+  })
 })
 
 describe('buildTabs stays a pure, defaulted builder', () => {

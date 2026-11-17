@@ -65,11 +65,13 @@
         <InlineError :message="error" @dismiss="$emit('dismiss-error')" />
       </div>
       <template v-else>
+        <!-- trinity-enterprise#584: no description tells the author where to
+             write one; the hover names the file (utils/skillCards.js). -->
         <p
           class="h-[38px] text-[12.5px] leading-[19px] line-clamp-2"
-          :class="description ? 'text-gray-600 dark:text-gray-300' : 'italic text-gray-500 dark:text-gray-400'"
-          :title="description || undefined"
-        >{{ description || (card.missing ? 'This gate stays until someone clears it.' : 'No description') }}</p>
+          :class="descLine.muted ? 'italic text-gray-500 dark:text-gray-400' : 'text-gray-600 dark:text-gray-300'"
+          :title="descLine.title"
+        ><template v-for="(seg, i) in descLine.segments" :key="i"><code v-if="seg.code" class="font-mono not-italic">{{ seg.code }}</code><template v-else>{{ seg.text }}</template></template></p>
         <p
           class="mt-[3px] h-4 font-mono text-[11px] leading-4 truncate text-gray-500 dark:text-gray-400"
           :title="card.argumentHint || undefined"
@@ -203,7 +205,7 @@ import BaseCard from '../base/BaseCard.vue'
 import BaseSelect from '../base/BaseSelect.vue'
 import BaseToggle from '../base/BaseToggle.vue'
 import InlineError from '../InlineError.vue'
-import { kindOptionLabel } from '../../utils/skillCards'
+import { kindOptionLabel, descriptionLine } from '../../utils/skillCards'
 
 const props = defineProps({
   card: { type: Object, required: true },
@@ -220,7 +222,7 @@ const props = defineProps({
 
 const emit = defineEmits(['run', 'edit-run', 'set-gate', 'clear-gate', 'unassign', 'details', 'dismiss-error'])
 
-const description = computed(() => (props.card.missing ? '' : props.card.description || ''))
+const descLine = computed(() => descriptionLine(props.card))
 
 // The kinds, then the canon roles in their own group (trinity-enterprise#848).
 const isRole = (kind) => typeof kind === 'string' && kind.startsWith('role:')

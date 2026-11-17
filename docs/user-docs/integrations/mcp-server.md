@@ -1,6 +1,6 @@
 # MCP Server
 
-Trinity's MCP server exposes 168 tools across 38 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 163 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
+Trinity's MCP server exposes 185 tools across 41 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 180 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent — MCP setup](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -56,27 +56,50 @@ Add Trinity as an MCP server in your Claude Code configuration:
 
 #### Which URL to use
 
-- **Local install:** `http://localhost:8080/mcp` — the MCP server's own published port.
+- **Local install:** `http://localhost:8080/mcp` — the MCP server's own published port. On a fresh install that port is published on `127.0.0.1` only, so it answers on the Trinity host itself.
 - **Production install behind the frontend (nginx):** `https://your-domain.com/mcp`. The frontend proxies `/mcp` to the MCP server, so an install that exposes only ports 80/443 (a firewalled host, a one-click cloud image) still serves MCP without opening port 8080.
 
-The URL Trinity advertises — in the MCP Keys page's connection snippet and in an exposed agent's **Copy connection config** — is auto-detected from the request: `https://<host>/mcp` when the proxy in front of Trinity sends `X-Forwarded-Proto: https` (the frontend serves `/mcp` on the same origin, so no `:8080`), otherwise `http://<host>:8080/mcp`. A Cloudflare Tunnel sends that header; if you run your own proxy, configure it to (see [Public Access](../guides/deploying/public-access.md#tls-is-terminated-outside-trinity)). When the detected URL is still wrong — an 80/443-only install whose proxy reports plain HTTP — an admin sets the real one under **Settings → MCP Keys → MCP Server URL** (it must end in `/mcp`); `Auto-detect` there shows what would be advertised otherwise.
+Either URL answers an outside client only while **External MCP access** is on — see below. A fresh install, local development included, starts with it off: turn it on once before Claude Code on your laptop connects.
+
+The URL Trinity advertises — in the MCP Keys page's connection snippet and in an exposed agent's **Copy connection config** — is auto-detected from the request. A request that came through a proxy (the bundled frontend always sends `X-Forwarded-Proto`; a Cloudflare Tunnel does too) gets `<origin>/mcp`, with no `:8080`, whatever the scheme — the frontend serves `/mcp` on the same origin. A request that reached the backend directly gets the raw port: `http://127.0.0.1:8080/mcp` when `MCP_BIND_ADDRESS` is set (the port answers only on that address), otherwise `http://<host>:8080/mcp`. If you run your own proxy, configure it to send `X-Forwarded-Proto` (see [Public Access](../guides/deploying/public-access.md#tls-is-terminated-outside-trinity)). When the detected URL is still wrong, an admin sets the real one under **Settings → MCP Keys → MCP Server URL** (it must end in `/mcp`); `Auto-detect` there shows what would be advertised otherwise.
+
+### External MCP Access
+
+**External MCP access** decides whether clients outside the Trinity server may reach `/mcp` at all. It is off on a fresh install. Agents running on the instance are never affected: they connect to the MCP server over the Docker network and keep working whatever the switch says.
+
+- **The switch:** **Settings → MCP Keys → External MCP access** (admins). Everyone else sees the current state on the same page. While it is off, the page shows a notice in place of the connection snippet, and an exposed agent's **Copy connection config** is disabled with the reason.
+- **Precedence:** a value saved in Settings wins, on or off. With nothing saved, `MCP_EXTERNAL_ACCESS=true` in the environment turns it on. Otherwise it is off. The page says which of the three is in effect, and **Clear** removes the saved value so the environment or the default decides again.
+- **Upgrades:** an install that already had users when it upgraded keeps external MCP access on — the upgrade saves that value for it once. Only new installs start off.
+
+**Who counts as outside.** The MCP server looks at where each connection comes from. Loopback inside its container and agents on the agent network are inside. Everything else is outside — the bundled web frontend's `/mcp`, a Cloudflare Tunnel, a reverse proxy on the host (Caddy included), and any client using the published port, even from the Trinity host itself. The only ways in from outside are the frontend's `/mcp` and the published `:8080` port, and the switch covers both. Docker daemons with IPv6 enabled are not supported by this check: their peers read as outside.
+
+**What a refused client sees.** Every request on the MCP port — `/mcp` in any spelling, the legacy `/sse` + `/messages` transport, any other path — is answered with a JSON-RPC error rather than a dropped connection, except `DELETE /mcp` (so a client can still close its session) and the `/health` probe:
+
+| Status | `X-Trinity-Refusal` | Meaning | What to do |
+|--------|---------------------|---------|------------|
+| `403` | `external_mcp_access_off` | External MCP access is off on this instance | An admin turns it on under **Settings → MCP Keys** |
+| `503` (with `Retry-After: 5`) | `external_mcp_access_unverified` | The MCP server could not get the setting from the backend yet — it is still starting, or `INTERNAL_API_SECRET` is not set | Retry shortly; if it persists, check the backend and that `INTERNAL_API_SECRET` is set |
+
+The JSON-RPC error code is `-32003` for both. Only `GET` or `HEAD /health` (the container's own health probe) and `DELETE /mcp` are ever let through while the switch is off; there is no path or transport on the port that bypasses it.
+
+**The published port — `MCP_BIND_ADDRESS`.** This `.env` key is the interface the MCP server's `:8080` port is published on. Fresh installs set `127.0.0.1`, so the port answers only on the Trinity host and outside clients use the frontend's `/mcp`. An upgraded `.env` that does not carry the key keeps publishing on every interface, as before. Empty means every interface. The key is read when the containers are created, so change it in `.env` and recreate the stack.
 
 ### Tool Categories
 
 | Module | Tools | Description |
 |--------|-------|-------------|
-| `agents.ts` | 22 | Agent lifecycle, credentials, SSH, local deploy, GitHub sync, per-agent PAT (`get_agent_github_pat_status`, `set_agent_github_pat`), runtime-data export/import, compatibility report, `get_agent_info` (an agent's template metadata and capabilities) and `list_templates` (the template IDs `create_agent` accepts) |
+| `agents.ts` | 22 | Agent lifecycle, credentials, SSH, local deploy, GitHub sync, per-agent PAT (`get_agent_github_pat_status`, `set_agent_github_pat`), runtime-data export/import, compatibility report, `get_agent_info` (an agent's template metadata and capabilities) and `list_templates` (the template IDs `create_agent` accepts). `create_agent` can fork a template into a repository you own (`import_intent: "fork"` with a `fork_to_own` block) — never a token argument. The fork spends your saved personal GitHub token only from a signed-in session, so over MCP it is refused `FORK_PAT_REQUIRED` for every key; create the fork in the web UI. `list_agents`, `get_agent` and `get_agent_info` return each agent's `kind` (`agent` or `deployment`, `null` when unknown) `rename_agent`, `initialize_github_sync`, `set_agent_github_pat`, `inject_credentials` and `export_credentials` are a person's: shown only to your own user-scoped key. `import_credentials` takes a signed-in session and is shown to no key; `get_credential_encryption_key` is shown to user-scoped and system-scoped keys, and the backend admits an administrator only |
 | `chat.ts` | 4 | `chat_with_agent`, `get_chat_history`, `get_agent_logs`, `fan_out` — chat and parallel dispatch, all gateway-timeout safe |
 | `executions.ts` | 5 | `list_recent_executions`, `get_execution_result`, `get_fan_out_result`, `get_agent_activity_summary`, `search_executions` — execution queries, polling for async tasks and fan-out batches, activity monitoring; `search_executions` needs a matching entitlement and is never offered to agent keys |
 | `schedules.ts` | 8 | Schedule CRUD (including retries, post-run validation and Workspace delivery) and execution history |
 | `skills.ts` | 14 | Skill management and assignment (including skill sets: `list_skill_sets`, `unassign_skill_set`), the per-agent skill gate map (`list_skill_gates`, `set_skill_gate`, `clear_skill_gate` — see [Approvals](../automation/approvals.md#gated-skill-approvals)), plus the skill-runner tools `run_skill` and `list_runnable_skills` (enterprise-gated — return `"disabled"` in community builds) |
-| `skill_sources.ts` | 6 | Skills-library source management — `list_skill_sources`, `register_skill_source` (idempotent on the repository URL), `update_skill_source`, `delete_skill_source`, `sync_skill_source`, `sync_skill_library`. Admin only: shown to an admin's user-scoped key and the system agent, never to agent-scoped or connector keys; the backend admits the same callers |
+| `skill_sources.ts` | 6 | Skills-library source management — `list_skill_sources`, `register_skill_source` (idempotent on the repository URL), `update_skill_source`, `delete_skill_source`, `sync_skill_source`, `sync_skill_library`. Admin only: shown to user-scoped and system-scoped keys, never to agent-scoped or connector keys; the backend admits an administrator only |
 | `tags.ts` | 5 | Agent tagging |
-| `systems.ts` | 5 | `deploy_system`, `list_systems`, `restart_system`, `get_system_manifest`, `teardown_system` (needs a matching entitlement; previews by default) — see [System Manifest](../collaboration/system-manifest.md) |
-| `subscriptions.ts` | 6 | Subscription management |
+| `systems.ts` | 6 | `deploy_system`, `list_systems`, `restart_system`, `get_system_manifest`, `teardown_system` (needs a matching entitlement; previews by default), `apply_system` (reconciles a live instance to a manifest; previews by default; a person's key only) — see [System Manifest](../collaboration/system-manifest.md) |
+| `subscriptions.ts` | 6 | Subscription management. `assign_subscription` takes a signed-in session and is shown to no key; `clear_agent_subscription` is shown only to your own user-scoped key |
 | `monitoring.ts` | 4 | `get_fleet_health`, `get_fleet_sync_audit`, `get_agent_health`, `trigger_health_check` — fleet health, git sync health, and the fleet sync audit (see [Monitoring](../operations/monitoring.md)) |
 | `metrics.ts` | 4 | `record_metrics`, `get_metrics`, `get_objectives`, `refresh_metric_definitions` — the calling agent's declared business metrics and objectives (see [Dynamic Dashboards](../advanced/dynamic-dashboards.md#declared-metrics)) |
-| `nevermined.ts` | 4 | Payment configuration |
+| `nevermined.ts` | 6 | Payment configuration, payment history, agent spending and delegation revocation. `configure_nevermined` takes a signed-in session and is shown to no key; `toggle_nevermined` and `revoke_agent_delegation` are shown only to your own user-scoped key |
 | `notifications.ts` | 1 | `send_notification` — agent-to-platform notifications (`alert`, `info`, `status`, `completion`, `question`) |
 | `events.ts` | 4 | Agent event pub/sub |
 | `docs.ts` | 2 | `get_agent_requirements`, `ask_trinity` — agent documentation and grounded Q&A about Trinity |
@@ -84,13 +107,13 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `messages.ts` | 1 | `send_message` — proactive message to a person, addressed by role |
 | `voice.ts` | 1 | `send_voice_reply` — speak one reply of the current channel turn as a voice note (see [Voice Replies](../advanced/voice-replies.md)) |
 | `files.ts` | 1 | `share_file` — publish file to a signed download URL |
-| `memory.ts` | 1 | `write_user_memory` — per-user memory blob, isolated server-side |
-| `decisions.ts` | 2 | `record_decision`, `list_seat_decisions` — record why something was approved, deferred or killed for the seat an agent serves, and read that seat's standing decisions back |
+| `memory.ts` | 2 | `write_user_memory` — per-user memory blob, isolated server-side; `search_memory` — search the agent's retrieval memory on demand |
+| `decisions.ts` | 3 | `record_decision`, `list_seat_decisions` — record why something was approved, deferred or killed for the seat an agent serves, and read that seat's standing decisions back; `get_autonomy` — what this companion may do unprompted for that seat, and why not where it may not |
 | `loops.ts` | 3 | `run_agent_loop`, `get_loop_status`, `stop_loop` — sequential bounded task loops |
 | `voip.ts` | 1 | `call_user` — outbound phone call (flag-gated, requires a per-agent voice binding) |
-| `operator_queue.ts` | 6 | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue`, `get_my_ask`, `ask_operator`, `withdraw_ask` — read and resolve Operating Room queue items; an agent raises its own asks, reads them back, and withdraws one that no longer needs an answer |
+| `operator_queue.ts` | 7 | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue`, `get_my_ask`, `ask_operator`, `withdraw_ask`, `ask_for_credential` — read and resolve Operating Room queue items; an agent raises its own asks, reads them back, and withdraws one that no longer needs an answer; `ask_for_credential` asks the person in the conversation for a secret by name, which they type into a masked field in their Workspace. `respond_to_operator_queue` is shown only to your own user-scoped key, because only a person answers an item |
 | `reminders.ts` | 3 | `set_reminder`, `list_reminders`, `cancel_reminder` — durable one-shot deferred self-triggers |
-| `rooms.ts` | 5 | `create_room`, `list_rooms`, `read_room`, `post_to_room`, `close_room` — multi-agent rooms (see [Rooms](../collaboration/rooms.md)) |
+| `rooms.ts` | 5 | `create_room`, `list_rooms`, `read_room`, `post_to_room`, `close_room` — multi-agent rooms (see [Rooms](../collaboration/rooms.md)). `close_room` is shown only to your own user-scoped key, because only a person moderates a room |
 | `canvas.ts` | 5 | `set_canvas`, `patch_canvas`, `get_canvas`, `list_canvases`, `clear_canvas` — the agent's durable render surface in the Workspace (see [Agent Canvas](../agents/agent-canvas.md)) |
 | `git.ts` | 6 | Deterministic git operations — status, sync, log, pull, sync-state, and the destructive reset-to-main recovery |
 | `pipelines.ts` | 2 | Read-only introspection of an agent's self-published pipelines |
@@ -99,8 +122,11 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `aauth.ts` | 2 | `request_person_token`, `call_aauth_resource` — prototype AAuth legs (person-token binding, allow-listed resource calls); always registered, agent-scoped key only, answer `aauth_disabled: true` while the AAuth or prototype switch is off. See [A2A Protocol](a2a-protocol.md#prototypes-acting-for-the-owner-and-calling-aauth-resources) |
 | `a2a_call.ts` | 2 | `call_a2a_agent`, `get_a2a_task` — task a registered external A2A agent by endpoint name and poll it |
 | `credential_vault.ts` | 2 | `list_available_credentials`, `fetch_credential` — pull a granted vault credential by name at runtime (see [Credential Management](../credentials/credential-management.md#credential-vault)) |
-| `projects.ts` | 13 | Tools for agents working on Workspace projects (enterprise-gated; where unavailable they return a result that says so) |
+| `projects.ts` | 17 | Tools for agents working on Workspace projects (enterprise-gated; where unavailable they return a result that says so) |
+| `platform_files.ts` | 4 | `list_platform_files`, `read_platform_file`, `write_platform_file`, `remove_platform_file` — list, read, write and remove text files in a file space the calling agent works in (enterprise-gated; where unavailable they return a result that says so) |
 | `assignments.ts` | 1 | `get_agent_assignments` — read who an agent works for (read-only; degrades to a not-available result where unsupported) |
+| `permissions.ts` | 2 | `get_agent_permissions`, `get_agent_capability_grants` — read an agent's permission edges (the agents it may call) and its self-change permissions; read-only, granting stays in the UI. An agent key reads edges for itself, an agent it has an edge to, or one it spawned, and grants only for itself or an agent it spawned |
+| `member_progress.ts` | 1 | `set_member_progress` — the member's assistant agent reports a step of the member's setup progress card; agent-scoped key, for itself only |
 | `connector.ts` | 3 | `list_playbooks`, `run_playbook`, `ask` — the consumption-only set a **connector key** sees; operator tools stay hidden from connector keys |
 | `auth.ts` | 2 | `request_login`, `verify_login` — registered only when inline email auth is on, advertised only to keyless sessions |
 
@@ -165,11 +191,11 @@ Suppressed sends are written to the audit log. For a message or group message, a
 
 When a tool refuses a call because the caller may not reach the target agent, it returns a result rather than a transport error: `{"error": "Access denied", "reason": "..."}` (some tools also carry `success: false`). When an agent-scoped key names an agent it has no permission for, `chat_with_agent`, `fan_out` and `run_agent_loop` give the reason `Permission denied: Agent '<caller>' is not permitted to communicate with '<target>'`. Tools addressed by an id rather than an agent name — `get_loop_status` and `stop_loop` — answer a uniform `Loop '<id>' not found or not accessible` instead, so the reply never reveals whose loop it is.
 
-Every refusal is recorded in the audit log as a refusal, not as a successful call: the `mcp_operation` entry carries `success: false`, `denied: true`, and the reason. A backend `403` that surfaces through a tool is marked `denied` too. See [Audit Trail](../operations/audit-trail.md#refused-mcp-calls).
+Every refusal is recorded in the audit log as a refusal, not as a successful call: the `mcp_operation` entry carries `success: false`, `denied: true`, and the reason. A backend `403` that surfaces through a tool is marked `denied` too. A failure a tool *returns* rather than raises is recorded as a failure as well: `apply_system` and `teardown_system` log a refused or failed run (a `409` refusal report, a retryable `503`, a lost connection) as `success: false` with a short `error` and no `denied` flag, while the JSON you receive is unchanged. See [Audit Trail](../operations/audit-trail.md#refused-mcp-calls).
 
 ### Receipts
 
-A **receipt** is what a chat tool returns when it has handed the work to the agent but cannot hand you the reply: an `execution_id` and a `status` of `accepted` (an async call), `queued` (the agent was at capacity and the task was queued) or `queued_timeout` (the call outlived `MCP_CHAT_TIMEOUT_MS`, default 25 s, or the platform's own wait, and the run is still going). The work is running. Read its outcome with `get_execution_result(agent_name, execution_id)` and never re-send the same message; the receipt's `message` says exactly that.
+A **receipt** is what a chat tool returns when it has handed the work to the agent but cannot hand you the reply: an `execution_id` and a `status` of `accepted` (an async call), `queued` (the agent was at capacity, or it is a pull-mode agent, which queues every task for its workers) or `queued_timeout` (the call outlived `MCP_CHAT_TIMEOUT_MS`, default 25 s, or the platform's own wait, and the run is still going). The work is running. Read its outcome with `get_execution_result(agent_name, execution_id)` and never re-send the same message; the receipt's `message` says exactly that.
 
 When the caller is an agent serving a Slack, Telegram or Workspace conversation, a receipt can also carry `report_back`:
 
@@ -189,7 +215,8 @@ When the caller is an agent serving a Slack, Telegram or Workspace conversation,
 | `get_fan_out_result` | Poll a fan-out batch: `running` while any task can still change, then `completed`, `partial` (some succeeded — normal for a best-effort batch) or `failed`, with per-task status and results. Each result carries the `task_id` you gave the task. |
 | `run_agent_loop` | Run the same task against an agent repeatedly (bounded, sequential), with templated messages and an optional stop signal. Poll with `get_loop_status`; stop gracefully with `stop_loop`. An agent-scoped key can loop only on itself or on agents it has permission to call — the same rule as `chat_with_agent` — and the refusal happens before any loop starts. `get_loop_status` and `stop_loop` apply the same rule to the loop's agent. See [Agent Loops](../automation/agent-loops.md). |
 | `list_operator_queue` | Read the Operating Room queue (approvals, questions, alerts). Agent-scoped keys see only the calling agent plus its permitted agents. Complete within `limit`, with `total`, `has_more`, `next_cursor` and `next_offset`; page with `cursor="start"`, then `next_cursor`. Resolve an item with `respond_to_operator_queue`. |
-| `ask_operator` | Raise an approval, question or alert as the calling agent. An ask addressed to a role several people fill reaches each of them, and the first answer wins. It is checked at once and answered with a receipt; asking again with the same id returns the first receipt. Read how it ended with `get_my_ask`. |
+| `ask_operator` | Raise an approval, question or alert as the calling agent. An ask addressed to a role several people fill reaches each of them, and the first answer wins. Where your install provides roles, `to` may also name a canon role, `role:<id>`: it reaches only the people seated in it who can open the agent, with no fallback to the owner, and is refused with `422 role_unavailable`, `role_unassigned` or `role_cannot_open_agent` instead. An ask to `approver` follows the same reach rule: it is refused with `422 role_cannot_open_agent` when no seated approver can open the agent. Where your install provides projects, `to: project` reaches the project the current chat or room turn is on: its steward, else its creator, refused with `422 project_unavailable`, `not_in_project_turn` or `project_unreachable` when it cannot reach either (see [Approvals](../automation/approvals.md#asks-addressed-to-a-workspace-user)). It is checked at once and answered with a receipt; asking again with the same id returns the first receipt. Read how it ended with `get_my_ask`. |
+| `ask_for_credential` | Ask the person you are chatting with for a secret by name (`name`, `why`). They type it into a masked field in their Workspace; it is stored in the agent's environment under that name and never appears in the chat, the ask or the agent's wake, which says only that it was provided. Use it only in a conversation with that person: with no single person to ask it is refused with `422 no_person`, when neither the agent's primary contact nor its owner can open the agent in their Workspace with `422 role_cannot_open_agent`, and a reserved or malformed name with `422 invalid_credential_name`. |
 | `set_reminder` | Schedule a durable one-shot deferred self-trigger — the agent re-invokes itself later with a message it picks. Survives restarts; list with `list_reminders`, cancel with `cancel_reminder`. |
 | `register_skill_source` | Add a skills repository to the library from an MCP client, or re-apply it: an already-registered repository is updated in place (`ref`, `priority`, …) instead of duplicated. Follow with `sync_skill_source`; the sync tools say whether the sync `ran`, was `refused_busy` (another sync is running — retry) or `failed`, and point at `get_skills_library_status` → `last_fleet_reinject` when it started a fleet re-inject. Admin only — use an admin's own user-scoped key; agent keys never see it. The URL must not contain a token; private repositories use the instance's GitHub PAT. |
 | `run_skill` | Run a named skill headlessly (enterprise-gated; returns `"disabled"` in community builds). Discover runnable skills with `list_runnable_skills`. |
@@ -199,10 +226,11 @@ When the caller is an agent serving a Slack, Telegram or Workspace conversation,
 | `call_user` | Place an outbound phone call to a user and hold a voice conversation. Server-gated: works only when VoIP is enabled platform-wide and the agent has a voice binding; rate-limited and daily-capped. See [VoIP Telephony](../advanced/voip-telephony.md). |
 | `share_file` | The agent drops a file into `/home/developer/public/` and calls this tool to mint a signed, expiring download URL (universal — works for web, Slack, Telegram, WhatsApp, email). |
 | `write_user_memory` | Per-user memory blob in an isolated store. Trinity resolves the user's email from `execution_id` server-side, so an agent cannot accidentally cross-write another user's memory. |
-| `send_message` | Proactive message to a person, addressed by role (`to`: `primary`, `approver`, `viewer`); the platform resolves who fills it. When nobody holds the `primary` seat, the agent's owner receives it; any other unfilled role, or one several people fill, is refused by name. `recipient_email` is deprecated. Rate-limited and audit-logged. Takes an optional `idempotency_key` (see [Sending once across runs](#sending-once-across-runs)). |
+| `send_message` | Proactive message to a person, addressed by role (`to`: `primary`, `approver`, `viewer`); the platform resolves who fills it. When nobody holds the `primary` seat, the agent's owner receives it; any other unfilled role, or one several people fill, is refused by name. `recipient_email` is deprecated. `channel` picks the delivery path: `auto` (default — Telegram, then Slack, then web), `telegram`, `slack` or `web`; `web` lands in the person's Workspace conversation with the agent, which reaches people who use only the Workspace but sends no notification. Rate-limited and audit-logged. Takes an optional `idempotency_key` (see [Sending once across runs](#sending-once-across-runs)). |
 | `send_group_message` | Proactive message to a channel group (Slack channel, Telegram chat). Discovered via `list_channel_groups`. Takes an optional `idempotency_key`. |
 | `ask_trinity` | Grounded Q&A about Trinity itself, answered from the documentation. Pass the `session_id` it returns to ask follow-ups; the tool tells you when a session reset dropped your context. Also available standalone as the `trinity-docs-mcp` npx package, with no Trinity instance or API key required. |
 | `record_metrics` | Record observations of the agent's declared business metrics as data. A batch is all-or-nothing, with a reason code per bad point; declare a metric in `template.yaml` first and call `refresh_metric_definitions`. Read back with `get_metrics`, and targets vs actuals with `get_objectives`. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md#declared-metrics). |
+| `get_agent_permissions` | Read the agents an agent may call. Strict: when Docker can't be read you get an error, not an empty list. Only edges you can see are listed (`observed_within`), so a missing edge is not proof it was removed. `get_agent_capability_grants` reads the agent's five self-change permissions. An agent key reads only its own grants or those of agents it spawned, and any other target is refused. A refusal is an error, never "no grants". |
 | `report` | Publish a structured report (table, KPI set, markdown, timeline); `to` addresses it to a role's person. Read them back with `list_reports` / `get_report`. See [Agent Reports](../operations/agent-reports.md). |
 
 ## For Agents
@@ -217,18 +245,25 @@ When the caller is an agent serving a Slack, Telegram or Workspace conversation,
 | `/api/mcp/keys/{key_id}/revoke` | POST | Deactivate a key; its record stays for audit |
 | `/api/mcp/keys/{key_id}` | DELETE | Permanently delete a key |
 | `/api/settings/mcp-url` | GET/PUT/DELETE | The advertised MCP URL: read the override (`url`, `null` when none) and the auto-detected value (`default_url`), set an override, or clear it (admin) |
+| `/api/settings/mcp-external-access` | GET | External MCP access: `enabled`, `source` (`settings`, `environment` or `default`), `env_value`, the `advertised_url` and `raw_port_bind_address` (any signed-in user) |
+| `/api/settings/mcp-external-access` | PUT | Turn it on or off (`{"enabled": true}`; admin, recorded in the audit log) |
+| `/api/settings/mcp-external-access` | DELETE | Clear the saved value so `MCP_EXTERNAL_ACCESS` or the default decides (admin) |
 
 ### MCP Endpoint
 
 | Endpoint | Transport | Description |
 |----------|-----------|-------------|
-| `http://localhost:8080/mcp` | Streamable HTTP | MCP tool server on its own port |
+| `http://localhost:8080/mcp` | Streamable HTTP | MCP tool server on its own port (published on `127.0.0.1` on a fresh install) |
 | `https://your-domain.com/mcp` | Streamable HTTP | The same server, proxied by the production frontend — the URL for an install that exposes only 80/443 |
+
+Both answer outside clients only while [External MCP access](#external-mcp-access) is on.
 
 ## Limitations
 
 - Agent-scoped keys cannot access tools outside their assigned agent (plus explicitly permitted agents).
 - MCP clients must be manually reconnected after a backend restart.
+- A client connected with an API key keeps its MCP session when the MCP server itself restarts or is redeployed: its next call picks the session up again, provided the key is still active and the session is less than 30 days old. Each revival is written to the audit log. This does not cover a keyless email-code session (log in again), a call that was in flight at the moment of the restart, or the legacy `/sse` transport; a revived session sees an agent's dedicated `chat_with_<agent>` tools again within about 20 seconds. The session ids are signed with `INTERNAL_API_SECRET`, so changing that secret costs every connected client one reconnect.
+- Outside clients are refused with `external_mcp_access_off` until an admin turns on External MCP access; a fresh install starts with it off.
 - `chat_with_agent` and `fan_out` sync modes cap at `MCP_CHAT_TIMEOUT_MS` (default 25s). Longer calls switch to poll-mode via the returned `execution_id` (or `fan_out_id`); a receipt is issued only when the running work can be attributed to your call unambiguously.
 - A `model` passed to `chat_with_agent` (it applies with `parallel=true`) must look like a model id — a short alias such as `sonnet` or a full id such as `claude-sonnet-4-6`. Anything else is refused with `422` before the task starts. See [Chat API](../api-reference/chat-api.md#model-override).
 - Fan-out is self-only: an agent fans out to itself, not to another agent.

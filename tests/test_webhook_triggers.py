@@ -313,20 +313,28 @@ class TestWebhookTrigger:
         """A flood of well-formed-but-unknown tokens is throttled per-IP (#1424).
 
         The per-token limiter never engages for unknown tokens; the pre-auth
-        per-IP limit must (429 + Retry-After). Isolated to its own bucket via
-        X-Real-IP (127.0.0.1 is a trusted proxy, so _get_client_ip honors it).
+        per-IP limit must (429 + Retry-After).
+
+        The flood counts against the bucket of the address it comes FROM, and
+        since trinity-enterprise#873 no header selects that bucket, so the test
+        cannot isolate itself on a shared instance. It runs only against a
+        backend this run owns:
+        TRINITY_ISOLATED_BACKEND_URL (a sibling stack), optionally from a
+        dedicated local address (TRINITY_FLOOD_SOURCE_ADDRESS).
         """
+        import os
+
         import httpx
+        base = os.environ.get("TRINITY_ISOLATED_BACKEND_URL", "").rstrip("/")
+        if not base:
+            pytest.skip("needs TRINITY_ISOLATED_BACKEND_URL — the flood would throttle a shared instance")
+        source = os.environ.get("TRINITY_FLOOD_SOURCE_ADDRESS") or None
+        client = httpx.Client(transport=httpx.HTTPTransport(local_address=source), timeout=15.0)
         # WEBHOOK_IP_RATE_LIMIT default is 60/60s; send enough to cross it.
-        headers = {"X-Real-IP": "203.0.113.77"}
         saw_429 = False
         retry_after_ok = True
         for _ in range(70):
-            resp = httpx.post(
-                "http://localhost:8000/api/webhooks/" + "Z" * 43,
-                headers=headers,
-                timeout=15.0,
-            )
+            resp = client.post(base + "/api/webhooks/" + "Z" * 43)
             if resp.status_code == 429:
                 saw_429 = True
                 retry_after_ok = "Retry-After" in resp.headers

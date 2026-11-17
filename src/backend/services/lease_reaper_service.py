@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import config
 from utils.helpers import utc_now_iso
@@ -84,6 +84,11 @@ class LeaseReapReport:
     # not FAILED: a superseded attempt is not a failure, and #1332 exists so
     # activity-derived views don't collapse the two.
     requeued_execution_ids: List[str] = field(default_factory=list)
+    # #3932: the dead attempt's dispatch activity id, read BEFORE the re-queue
+    # commits. The caller closes it by id: a lookup run after the commit can
+    # hit the re-claimed attempt's fresh bar and cancel the live turn. An
+    # execution absent here (the read failed) falls back to the lookup.
+    requeued_activity_ids: Dict[str, Optional[str]] = field(default_factory=dict)
 
 
 def get_max_redelivery(agent_name: str) -> int:
@@ -137,9 +142,9 @@ def reap_expired_leases(
             # never re-finds a failed row) — a stuck task no human is told about.
             # Alert-first inverts this to a benign failure mode: a crash after the
             # alert leaves the row still running+expired, so the next pass
-            # re-finds it, re-inserts the alert (idempotent via the item's
-            # id-derived on_conflict_do_nothing), and parks. The alert is always
-            # durable before the row goes terminal.
+            # re-finds it, re-reports the alert (one pending row per execution:
+            # the seam updates it in place, #3254), and parks. The alert is
+            # always durable before the row goes terminal.
             #
             # Edge (rare, benign): if the park CAS then LOSES because a
             # genuinely-late worker SUCCESS won the row via its kept claim_token
@@ -149,7 +154,7 @@ def reap_expired_leases(
                 f"{_POISON_LEASE_TAG}: pull lease expired and re-delivery cap "
                 f"({cap}) reached — parked to operator queue"
             )
-            if not _create_park_item(db, agent_name, eid, count, cap, now):
+            if not _create_park_item(agent_name, eid, count, cap):
                 # The alert could not be persisted (DB error). Do NOT park yet —
                 # parking now would flip the row to failed with no operator alert
                 # (invisible poison). Leave it running+expired so the next pass
@@ -165,9 +170,16 @@ def reap_expired_leases(
                 )
         else:
             # Under the cap → re-queue the SAME row (execution_id preserved).
+            try:
+                dead_activity_id = db.get_open_activity_id_for_execution(eid)
+                captured = True
+            except Exception:  # noqa: BLE001 — never block the re-queue
+                captured = False
             if db.requeue_expired_lease(eid, now_iso=now):
                 report.requeued += 1
                 report.requeued_execution_ids.append(eid)
+                if captured:
+                    report.requeued_activity_ids[eid] = dead_activity_id
                 logger.info(
                     "[#1081 reaper] re-queued execution %s (agent=%s), "
                     "redelivery_count %d→%d (cap=%d)",
@@ -177,47 +189,47 @@ def reap_expired_leases(
     return report
 
 
-def _create_park_item(db, agent_name: str, execution_id: str, count: int, cap: int, now: str) -> bool:
-    """Create an operator-queue park item for a poison-parked execution (OPS-001).
+def _create_park_item(agent_name: str, execution_id: str, count: int, cap: int) -> bool:
+    """Report a poison-parked execution to the operator queue (OPS-001).
 
-    Reuses the existing operator_queue create path. The item id is derived from
-    the execution_id so ``create_item``'s ``on_conflict_do_nothing`` makes a
-    re-insert (a re-found row, or a raced second pass) idempotent.
+    Through the platform alert seam (#3246, #3254): one pending row per
+    execution (subject ``poison:<execution_id>``), so a re-found row or a raced
+    second pass updates that row instead of filing another. ``poison`` is a
+    must-act kind: it never expires, and only a person ends it. The seam
+    writes through the ``database`` singleton, not the reaper's injected
+    handle.
 
-    Returns True when the alert is durable (inserted, or already present via
-    on-conflict) and False when it could not be persisted. #1081 B3: the caller
-    parks the row ONLY on True — a failed alert must NOT be followed by the
-    terminal write, or the poison becomes invisible (a failed row is excluded
-    from ``find_expired_leases`` and never re-found).
+    Returns True when the alert is durable: filed, updated in place, or
+    snoozed because a person already ended this execution's alert (the old
+    create's on-conflict "already present"). Returns False when it was not
+    persisted (``failed``) or was refused. #1081 B3: the caller parks the row
+    ONLY on True. A failed alert must NOT be followed by the terminal write,
+    or the poison becomes invisible (a failed row is excluded from
+    ``find_expired_leases`` and never re-found); the next pass retries it.
     """
-    try:
-        db.create_operator_queue_item(
-            agent_name,
-            {
-                "id": f"poison-{execution_id}",
-                "type": "alert",
-                "status": "pending",
-                "priority": "high",
-                "title": "Task poison-parked (lease expired)",
-                "question": (
-                    f"Execution {execution_id} for agent '{agent_name}' exceeded the "
-                    f"re-delivery cap ({cap}) after repeated worker lease expiries and "
-                    f"was marked failed. Investigate the worker/task and re-trigger "
-                    f"manually if appropriate."
-                ),
-                "context": {
-                    "execution_id": execution_id,
-                    "reason": _POISON_LEASE_TAG,
-                    "redelivery_count": count,
-                    "max_redelivery": cap,
-                },
-                "created_at": now,
-            },
-        )
+    from services import platform_alerts
+    outcome = platform_alerts.observe(
+        agent_name, "poison", execution_id,
+        priority="high",
+        title="Task poison-parked (lease expired)",
+        question=(
+            f"Execution {execution_id} for agent '{agent_name}' exceeded the "
+            f"re-delivery cap ({cap}) after repeated worker lease expiries and "
+            f"was marked failed. Investigate the worker/task and re-trigger "
+            f"manually if appropriate."
+        ),
+        context={
+            "execution_id": execution_id,
+            "reason": _POISON_LEASE_TAG,
+            "redelivery_count": count,
+            "max_redelivery": cap,
+        },
+    )
+    if outcome in (platform_alerts.OBSERVED_CREATED, platform_alerts.OBSERVED_UPDATED,
+                   platform_alerts.OBSERVED_SNOOZED):
         return True
-    except Exception as e:  # pragma: no cover - best-effort
-        logger.error(
-            "[#1081 reaper] failed to create operator-queue park item for %s: %s",
-            execution_id, e,
-        )
-        return False
+    logger.error(
+        "[#1081 reaper] the park alert for %s was not persisted (%s); "
+        "leaving it running for the next pass", execution_id, outcome,
+    )
+    return False

@@ -11,6 +11,7 @@ Falls back to SECRET_KEY if INTERNAL_API_SECRET is not set.
 import asyncio
 import os
 import hmac
+import re
 from fastapi import APIRouter, HTTPException, Depends, Request, Header
 from typing import Optional, Dict
 import logging
@@ -18,11 +19,13 @@ import logging
 from database import db
 from models import (
     InternalAuditRequest,
+    InternalPreCheckRequest,
     InternalTaskExecutionRequest,
     PullTaskResultRequest,
     TaskExecutionStatus,
     ValidateExecutionRequest,
 )
+from services import execution_attribution  # ent#1105
 from services.activity_service import activity_service
 from services.task_execution_service import get_task_execution_service
 from services.skill_gate_errors import SkillGateError
@@ -31,6 +34,7 @@ from services import (
     heartbeat_service, idempotency_service, schedule_seat_memory, schedule_workspace_delivery,
 )
 from services.runtime_secret_scrub import get_staged_values, scrub_text
+from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
 from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
@@ -120,6 +124,64 @@ def _pull_authorized(request: Request, agent_name: str) -> bool:
     return heartbeat_service.authorize_heartbeat(_validated_agent_key(request), agent_name)
 
 
+_CLAIM_DENIED_NOTED: set = set()
+
+# The Docker container-naming shape `sanitize_agent_name` (utils/helpers.py)
+# produces: lowercase, alphanumeric first character, then `[a-z0-9_.-]`. Every
+# stored agent name has passed through it, so a name that does not match it
+# cannot be one — and must never become a Redis key or a log component.
+_AGENT_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,62}")
+
+
+def _note_claim_denied(agent_name: str, validation: Optional[Dict]) -> None:
+    """Count a refused `/next-task` claim for this agent (#4257).
+
+    Gated on what the request PROVED, never on the refusal itself. The branch
+    this hangs off is reached before any credential is read (`_pull_authorized`
+    answers False for a non-pilot name first), so an unauthenticated caller
+    could otherwise mint a 24 h Redis key, an unbounded in-process set entry and
+    a WARNING line per name of its choosing. ``validation`` is the caller's
+    already-validated MCP key; the counter runs only when it is the agent's OWN
+    key (``heartbeat_service.authorize_heartbeat`` — the same self-binding rule
+    that gates the seam), which is exactly the case the diagnostic exists for: a
+    live worker holding a valid key that the pilot allowlist now turns away.
+    The name is additionally shape-checked before it is used as a key or a log
+    argument, so nothing attacker-shaped reaches Redis or the log pipeline.
+
+    Best-effort: a Redis failure must never change the answer the caller gets,
+    and the counter is observability only. The WARNING is once per agent per
+    process — the refusal repeats every poll (≤15 s), and a log line per poll
+    would bury the one thing worth reading.
+    """
+    if not heartbeat_service.authorize_heartbeat(validation, agent_name):
+        return
+    if not _AGENT_NAME_RE.fullmatch(agent_name):
+        return
+    try:
+        from services.pull_pilot import (
+            PULL_CLAIM_DENIED_KEY_PREFIX,
+            PULL_CLAIM_DENIED_TTL_SECONDS,
+        )
+        from services.slot_service import get_slot_service
+
+        key = f"{PULL_CLAIM_DENIED_KEY_PREFIX}{agent_name}"
+        redis = get_slot_service().redis
+        redis.incr(key)
+        redis.expire(key, PULL_CLAIM_DENIED_TTL_SECONDS)
+    except Exception:  # noqa: BLE001
+        logger.debug("[#4257] could not count a denied claim for %s",
+                     agent_name, exc_info=True)
+    if agent_name not in _CLAIM_DENIED_NOTED:
+        _CLAIM_DENIED_NOTED.add(agent_name)
+        logger.warning(
+            "[#4257] refusing pull claims for '%s' — it is not in "
+            "PULL_MODE_PILOT_AGENTS, or its key does not authorize it. Its "
+            "queued rows will not move until this agrees with the container's "
+            "TRINITY_PULL_MODE (logged once per process)",
+            agent_name,
+        )
+
+
 # =============================================================================
 # Pull / work-stealing coordination (#1081 Phase 2)
 # =============================================================================
@@ -148,6 +210,16 @@ async def internal_next_task(request: Request, agent_name: str, worker_id: str):
     chosen so a drained poll and a real claim are one unambiguous 200 shape).
     """
     if not _pull_authorized(request, agent_name):
+        # #4257: the backend is the party that ISSUED this refusal, and the
+        # worker swallows it — `pull_worker._claim_once` treats any non-200 as
+        # "queue empty" and goes back to sleep. So a disagreement between
+        # `PULL_MODE_PILOT_AGENTS` here and the container's `TRINITY_PULL_MODE`
+        # parks every row silently, with a live pool that B-08 reads as healthy.
+        # Count it where it happens, so the stall alert can say "alive and being
+        # turned away" rather than only "nothing has run". The counter is gated
+        # on the caller's own validated key inside `_note_claim_denied` — the
+        # refusal alone proves nothing about who asked.
+        _note_claim_denied(agent_name, _validated_agent_key(request))
         raise HTTPException(status_code=403, detail=_PULL_AUTH_DENIED)
 
     from services import pull_coordination_service
@@ -156,6 +228,7 @@ async def internal_next_task(request: Request, agent_name: str, worker_id: str):
     if claim is None:
         # §3.2 — no work available.
         return {"envelope": None}
+    await pull_coordination_service.open_claim_activity(claim["execution_id"])
     return claim
 
 
@@ -209,7 +282,7 @@ async def internal_task_result(
 
     from services import pull_coordination_service
 
-    outcome = pull_coordination_service.apply_task_result(
+    outcome = await pull_coordination_service.handle_task_result(
         execution_id,
         payload.claim_token,
         status=payload.status,
@@ -222,6 +295,10 @@ async def internal_task_result(
         metadata=payload.metadata,
     )
 
+    if outcome.kind == "retry":
+        # #3487: the turn was refused on a credential and the pool has another
+        # one — run it again under the same claim (the new token is in here).
+        return {"applied": False, "retry": outcome.retry}
     if outcome.kind == "applied":
         return {"applied": True, "status": outcome.status}
     if outcome.kind == "replayed":
@@ -241,17 +318,21 @@ async def internal_task_result(
 
 
 @router.post("/agents/{agent_name}/pre-check")
-async def internal_agent_pre_check(agent_name: str):
+async def internal_agent_pre_check(
+    agent_name: str, body: Optional[InternalPreCheckRequest] = None
+):
     """Run the agent's optional pre-check hook (SCHED-COND-001 / #454).
 
     Thin passthrough — all logic lives in
     ``services/pre_check_service.py`` (Invariant #1: Router → Service
-    → DB). See that module for the full contract.
+    → DB). See that module for the full contract. The optional body names
+    the schedule being gated (#3966); without it the hook runs as before.
     """
     from services.pre_check_service import run_pre_check, AgentNotFound
 
+    schedule = body.model_dump(exclude_none=True) if body else {}
     try:
-        return await run_pre_check(agent_name)
+        return await run_pre_check(agent_name, **schedule)
     except AgentNotFound:
         raise HTTPException(status_code=404, detail="Agent not found")
 
@@ -416,10 +497,34 @@ async def execute_task_internal(
                 "message": refusal.detail,
                 "execution_id": request.execution_id,
             })
+        # trinity-enterprise#1022: the seat's retrieval memory for this run's
+        # prompt — awaited first, then threaded into the block.
+        try:
+            from services import memory_service
+            seat_retrieved = await memory_service.recall(
+                request.agent_name, request.deliver_to_workspace_email, request.message,
+            )
+        except Exception as e:  # noqa: BLE001 — never block a scheduled run on memory
+            logger.debug("[ent#1022] seat recall skipped: %s", e)
+            seat_retrieved = ()
+        # The keyword rides only when there is something to carry, so the call
+        # is byte-identical to the pre-#1022 one while memory is off (the default).
+        seat_kwargs = {"retrieved": seat_retrieved} if seat_retrieved else {}
         seat_system_prompt = await asyncio.to_thread(
-            schedule_seat_memory.build_seat_caller_prompt,
-            request.agent_name, request.deliver_to_workspace_email,
+            lambda: schedule_seat_memory.build_seat_caller_prompt(
+                request.agent_name, request.deliver_to_workspace_email, **seat_kwargs,
+            )
         )
+
+    # ent#1105: the scheduler created this row in its own process, so it is
+    # offered to the attribution seam here — once, after the ent#498 stamp (the
+    # row's channel fields are final) and before dispatch. Inert in OSS.
+    if request.execution_id:
+        try:
+            created_row = db.get_execution(request.execution_id)
+        except Exception:  # noqa: BLE001 — attribution never blocks a scheduled run
+            created_row = None
+        execution_attribution.record_row(created_row)
 
     if request.async_mode:
         # Fire-and-forget: spawn background task, return immediately
@@ -469,9 +574,27 @@ async def execute_task_internal(
         return result_payload
 
     except Exception as e:
-        logger.error(f"Internal task execution failed for {request.agent_name}: {e}")
+        # The claim is released first: the log scrub below reads the staged
+        # set, and releasing the claim must not depend on that read.
         idempotency_service.fail(idem)
-        raise HTTPException(status_code=500, detail=str(e))
+        # #4284: the class name in the body, the scrubbed text in the log: an
+        # execution error can echo agent output, which can hold a credential.
+        # The staged values are masked by identity with the same seam the
+        # persisted copies of agent output use, then URL userinfo and the known
+        # credential shapes. That seam replaces three renditions per value, so
+        # the cost stays linear however long or numerous the staged values are
+        # (the store caps them at 1000 but not their length).
+        logger.error(
+            "Internal task execution failed for %s (%s): %s",
+            request.agent_name, type(e).__name__,
+            sanitize_text(redact_url_userinfo(
+                scrub_text(get_staged_values(), str(e))
+            )),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal task execution failed ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 
@@ -736,8 +859,36 @@ async def log_audit_entry(request: InternalAuditRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to log audit entry: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # #4284: a DB error here can echo the bound parameters, i.e. the tool
+        # call's details; the body carries the class name, the log scrubbed text.
+        logger.error(
+            "Failed to log audit entry (%s): %s",
+            type(e).__name__, sanitize_text(redact_url_userinfo(str(e))),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to log audit entry ({e.__class__.__name__} — details in backend logs)",
+        )
+
+
+# ---------------------------------------------------------------------------
+# External MCP access verdict (trinity-enterprise#1101)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/mcp-external-access")
+async def mcp_external_access():
+    """The MCP server's read of the external-access switch.
+
+    The backend is the sole resolver (Settings row → `MCP_EXTERNAL_ACCESS`
+    env opt-in → default off); the MCP server caches this verdict and refuses
+    off-box `/mcp` requests while it is off. Agents are on-box and never asked
+    about. Behind the router-level `verify_internal_secret`.
+    """
+    from services import settings_service
+
+    enabled, source = settings_service.is_mcp_external_access_enabled()
+    return {"enabled": enabled, "source": source}
 
 
 # ---------------------------------------------------------------------------

@@ -243,8 +243,11 @@
         </div>
       </div>
 
-      <!-- Skills Section -->
-      <div v-if="templateInfo.skills && templateInfo.skills.length > 0" class="bg-white dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700">
+      <!-- Skills Section — trinity-enterprise#584: template.yaml `skills:`
+           DECLARES names; what each does is its SKILL.md `description:`, shown
+           on the Skills tab. Template-side descriptions were a sixth source and
+           are not rendered. -->
+      <div v-if="templateInfo.skills && templateInfo.skills.length > 0" data-testid="info-declared-skills" class="bg-white dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700">
         <h3 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider mb-3 flex items-center">
           <svg class="w-4 h-4 mr-2 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
@@ -258,30 +261,34 @@
             class="flex items-start space-x-3 px-3 py-2 bg-teal-50 dark:bg-teal-900/30 rounded-lg"
           >
             <span class="text-sm font-medium text-teal-800 dark:text-teal-300 flex-shrink-0">{{ getItemName(skill) }}</span>
-            <p v-if="getItemDescription(skill)" class="text-xs text-teal-600 dark:text-teal-400 mt-0.5">
-              {{ getItemDescription(skill) }}
-            </p>
           </div>
         </div>
+        <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">What each skill does is on the Skills tab, from its SKILL.md.</p>
       </div>
 
-      <!-- Capabilities Section -->
-      <div v-if="templateInfo.capabilities && templateInfo.capabilities.length > 0" class="bg-white dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700">
+      <!-- Template tags — trinity-enterprise#584: template.yaml `capabilities:`
+           are tags, not capabilities. Shown raw (the exact string the template
+           and the brain-orb gate use), as neutral facts. -->
+      <div v-if="templateInfo.capabilities && templateInfo.capabilities.length > 0" data-testid="info-template-tags" class="bg-white dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700">
         <h3 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider mb-3 flex items-center">
           <svg class="w-4 h-4 mr-2 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
           </svg>
-          Capabilities
+          Template tags
         </h3>
         <div class="flex flex-wrap gap-2">
-          <span
-            v-for="capability in templateInfo.capabilities"
-            :key="capability"
-            class="px-3 py-1 bg-status-success-100 dark:bg-status-success-900/50 text-status-success-800 dark:text-status-success-300 text-sm font-medium rounded-full"
-          >
-            {{ formatCapability(capability) }}
-          </span>
+          <BaseBadge
+            v-for="(tag, i) in templateInfo.capabilities"
+            :key="i"
+            variant="neutral"
+            size="sm"
+            class="font-mono"
+            data-testid="info-template-tag"
+          >{{ getItemName(tag) }}</BaseBadge>
         </div>
+        <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
+          From template.yaml <code class="font-mono">capabilities:</code>. They switch on features such as brain-orb, and the A2A card lists them as its skills. What each skill does comes from its SKILL.md <code class="font-mono">description:</code>.
+        </p>
       </div>
 
       <!-- Platforms Section -->
@@ -332,6 +339,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import LoadFailed from './LoadFailed.vue'
+import BaseBadge from './base/BaseBadge.vue'
 import InlineError from './InlineError.vue'
 import { apiErrorMessage } from '../utils/apiError'
 import { viewState, staleBannerMessage } from '../utils/loadingState'
@@ -417,14 +425,6 @@ const getItemName = (item) => {
 const getItemDescription = (item) => {
   if (typeof item === 'string') return null
   return item?.description || null
-}
-
-const formatCapability = (capability) => {
-  // Convert snake_case to Title Case
-  return capability
-    .split('_')
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ')
 }
 
 const handleItemClick = (type, text) => {

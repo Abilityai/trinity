@@ -145,6 +145,14 @@ New ops class (not a mixin — `access_requests` is its own domain table):
 | `get(request_id)` | Single-row lookup. |
 | `decide(request_id, approve, decided_by_user_id)` | Sets `status` to `approved` or `denied`, stamps `decided_by` and `decided_at`. |
 | `delete_for_agent(agent_name)` | Cascade delete on agent removal. |
+| `list_by_requester(channel, channel_user_id)` | Every request, on any agent and in any status, made by one channel identity (trinity-enterprise#737). |
+
+**Who asked (trinity-enterprise#737).** `upsert_pending(..., identity=)` stores `REQUESTER_FIELDS` (`requester_channel_id`, `_handle`, `_name`, `_chat_id`, `_thread_id`). The values come from `ChannelAdapter.requester_identity(message)`:
+- the base default reads `sender_id`, `sender_username` / `sender_display_name`, and the chat and thread when they differ from the DM;
+- Telegram adds @username and first/last name from the update;
+- WhatsApp adds the profile name.
+
+A refresh replaces the whole identity. `services/access_request_service.list_access_requests` adds `identity_captured` and `known_as` (prior requests plus verified Telegram/WhatsApp links for the same channel id, limited to agents the viewer may manage).
 
 ### Extended `AgentSharingMixin` (`src/backend/db/agent_settings/sharing.py`)
 
@@ -281,6 +289,8 @@ Then reply with /login 123456 to complete verification.
 state                                   action
 ─────────────────────────────────────────────────────────────────
 no pending login                        user sends `/login alice@x.com`
+                                        → channel_login_limit.login_code_request_allowed
+                                          (over limit → reply "Too many sign-in code requests", stop)
                                         → db.create_login_code(email, 10min)
                                         → EmailService.send_verification_code
                                         → _PENDING_LOGINS[(binding_id, tg_user)] = email
@@ -487,7 +497,7 @@ These are co-located with the router (slight deviation from invariant #15) becau
 
 ## Frontend Layer (`src/frontend/src/components/SharingPanel.vue`)
 
-The Sharing tab on `AgentDetail.vue` already housed Team Sharing + Public Links. #311 prepends a new "Channel Access Policy" section.
+The Channels tab on `AgentDetail.vue` already housed Team Sharing + Public Links. #311 prepends a new "Channel Access Policy" section.
 
 ### Layout (lines 3-74)
 
@@ -563,6 +573,8 @@ The component uses raw `axios` (matching the existing pattern in this file) rath
 ### Email
 On `/login email`, an email is sent via `EmailService.send_verification_code` — same path as web email auth (see [email-authentication.md](email-authentication.md)).
 
+**Rate limit (trinity-enterprise#1253).** Before minting a code, Telegram `/login <email>`, WhatsApp `/login <email>` and the Slack `require_email` email step call `services/channel_login_limit.login_code_request_allowed(channel, bot_key, sender_id, email)`. Caps over 10 minutes: 5 per sender (`{channel}:{sender_id}`; Slack `{team}:{user}`), 3 per address (one `rate_limiter` budget, `login_code_email:<sha256 of the stripped, lowercased email>`, a fixed-size key, shared with the web login and MCP inline auth, which charge it through `channel_login_limit.address_allowed` before their whitelist / known-address check; the cap never reads `email_login_codes`, because the web login writes rows only for whitelisted addresses and a reply derived from them would reveal whitelist membership), 20 per bot / WhatsApp binding / Slack workspace. Checked in that order; a request refused by any cap is charged to none (the caps it passed are refunded). Accepted risk: any sender can keep one named address from receiving a code everywhere by requesting 3 codes for it per 10 minutes. Requests are counted with `rate_limiter.check` keyed on the input, and the check runs after the email-format check and before the ent#849 membership branch, so the reply is the same for members and outsiders. Over the limit the bot replies "Too many sign-in code requests. Try again in 10 minutes.", sends nothing and logs a WARN; Slack keeps the pending row at `awaiting_email`. Commands reach `handle_command` straight from the transports and never pass the router's per-sender message limit, which is why this cap lives in the adapters.
+
 ### Whitelist auto-add — retired (trinity-enterprise#837)
 Approval no longer adds the email to the platform whitelist, matching `/share`. Rows written before the change keep `source="access_request"` and yield Workspace-only `user` accounts ([workspace-only-role.md](workspace-only-role.md)).
 
@@ -579,6 +591,7 @@ Approving an access request inserts the email into `agent_sharing` so all future
 | Verified email but not allowed (restrictive policy) | Channel reply: "🔒 Your access request is pending approval." |
 | `/login` with no arg | Telegram reply with usage instructions |
 | `/login {bad-email}` | Telegram reply: "That doesn't look like an email address." |
+| `/login {email}` over a rate cap (ent#1253) | Reply: "Too many sign-in code requests. Try again in 10 minutes." No code, no email, WARN log |
 | `/login {6-digit-code}` without pending | Telegram reply: "I don't have a pending login for you." |
 | `/login {wrong-code}` | Telegram reply: "❌ Invalid or expired code. Try again or request a new one." |
 | `decide` request not found / wrong agent | 404 |
@@ -597,12 +610,12 @@ Approving an access request inserts the email into `agent_sharing` so all future
 
 ### Test 1: Telegram `/login` happy path
 1. As an unverified Telegram user, DM the bot. **Expected**: free passthrough (no policy set yet).
-2. As owner via UI: Sharing tab → check "Require verified email". **Expected**: policy persisted.
+2. As owner via UI: Channels tab → check "Require verified email". **Expected**: policy persisted.
 3. DM the bot again. **Expected**: bot replies with `/login` instructions (`prompt_auth`).
 4. Send `/login alice@example.com`. **Expected**: bot replies "📧 Sent a 6-digit code"; email arrives.
 5. Send `/login 123456` (the code from the email). **Expected**: bot replies "✅ Verified as alice@example.com".
 6. Send a normal message. **Expected**: bot still replies "🔒 Your access request is pending approval".
-7. As owner: Sharing tab shows `alice@example.com` in pending requests. Click Approve.
+7. As owner: Channels tab shows `alice@example.com` in pending requests. Click Approve.
 8. As alice on Telegram: send another message. **Expected**: real agent response.
 
 ### Test 2: Open access
@@ -663,6 +676,7 @@ Working. Telegram, Slack, and web public-chat all run the same gate.
 
 | Date | Changes |
 |------|---------|
+| 2026-11-03 | **trinity-enterprise#737** — an access request names who asked: the channel's user id, handle, display name, chat and thread, captured on the router gate and both `/login` flows. The pending list shows the person and where they were seen before. |
 | 2026-10-09 | **trinity-enterprise#837** — approving an access request no longer adds the email to the login whitelist; the requester signs in to the Workspace with the code. |
 | 2026-04-22 | **#446 — team-share gate hardening + Sharing UX**: (1) `share_agent` now deletes any stale pending `access_requests` row for the same `(agent, email)` atomically with the share insert, so a manual Team Share add clears the owner's Pending list. (2) Defense-in-depth email normalization (`.strip().lower()`) added in `email_has_agent_access`, `is_agent_shared_with_email`, `routers/public.py` gate, and both DM+group branches of `adapters/message_router.py` so mixed-case session emails can't bypass the allow-list. (3) `SharingPanel.vue` restructured: new framing banner distinguishes "Identity proof" (verify who the user is) from "Authorization" (allow-list + approval queue); "Team Sharing" heading tagged "— allow-list"; dead-end warning banner when `require_email=true && !open_access && shares.length===0`. New unit tests: `tests/test_team_share_gate_unit.py` (8 tests). |
 | 2026-04-12 | Initial implementation (#311). New migration `access_control`, `AccessPolicyMixin`, `AccessRequestOperations`, ABC additions, Telegram `/login` state machine, Slack `users.info` resolver, four owner endpoints, SharingPanel UI. |

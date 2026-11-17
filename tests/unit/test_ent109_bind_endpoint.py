@@ -93,6 +93,8 @@ def _user(*, agent_name=None, role="admin", username="alice"):
         email=f"{username}@example.com",
         role=role,
         agent_name=agent_name,
+        mcp_scope=None,
+        mcp_key_id=None,
     )
 
 
@@ -464,7 +466,9 @@ class TestIdempotency:
     async def test_key_is_verb_folded(self, endpoint):
         await _call(endpoint, idempotency_key="abc123")
         begin = next(c for c in endpoint.idem if c[0] == "begin")
-        assert begin[1] == "agent:bot"
+        assert begin[1] == "agent:bot:caller:user:1", (
+            "a header key is scoped to its caller (trinity-enterprise#830)"
+        )
         assert begin[2] == "bind_to_own_repo:abc123", (
             "a client reusing one key across verbs must not replay the wrong "
             "snapshot (learnings 2026-07-01)"
@@ -660,8 +664,9 @@ class TestUnexpectedErrorIsScrubbed:
     ):
         """Belt for the class the charset guard closes at the boundary: the next
         library that echoes a credential in an exception message is not knowable
-        in advance, so the one handler that surfaces a raw exception string
-        scrubs it."""
+        in advance, so the one handler that sees a raw exception string answers
+        its class name only (#4284) and masks the PAT out of the logged
+        traceback."""
         endpoint.bind_raises = RuntimeError(
             f"Illegal header value b'Bearer {PAT}'"
         )
@@ -669,7 +674,8 @@ class TestUnexpectedErrorIsScrubbed:
             await _call(endpoint)
         assert exc.value.status_code == 500
         assert PAT not in str(exc.value.detail)
-        assert "***" in exc.value.detail["error"]
+        assert "RuntimeError" in exc.value.detail["error"]
+        assert "Illegal header value" not in exc.value.detail["error"]
 
 
 # ---------------------------------------------------------------------------

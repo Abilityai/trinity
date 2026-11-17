@@ -310,6 +310,7 @@ async def _deliver(
 
 async def _run_and_report(request, backend_url: str, mcp_key: str, dispatch_monotonic: float) -> None:
     """Run the headless turn, build + persist the typed terminal, deliver it."""
+    from ..services.execution_env import auto_memory_spawn_kwargs
     from ..services.runtime_adapter import get_runtime
 
     execution_id = request.execution_id
@@ -329,6 +330,8 @@ async def _run_and_report(request, backend_url: str, mcp_key: str, dispatch_mono
             resume_session_id=request.resume_session_id,
             persist_session=bool(request.persist_session),
             images=request.images,
+            # #4156: a turn serving someone other than the owner (Claude only).
+            **auto_memory_spawn_kwargs(runtime, getattr(request, "disable_auto_memory", False)),
         )
         envelope = _success_envelope(response_text, raw_messages, metadata, session_id)
         finish_success: Optional[bool] = True

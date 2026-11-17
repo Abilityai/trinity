@@ -4,11 +4,11 @@
 
 ## What hardware and operating system do I need to run Trinity?
 
-Locally you need Docker Desktop (version 24 or later recommended, which includes Docker Compose), Git, `openssl` on your PATH, and 8 GB of RAM available to Docker — Trinity runs entirely in containers, so nothing else is installed on the host. For a server, use a Linux VPS or dedicated machine (Ubuntu 22.04 LTS or later recommended) with Docker Engine 24+, the Docker Compose plugin, a minimum of 8 GB RAM, and outbound HTTPS (image pulls and model API calls). See [Local Development](../guides/deploying/local-development.md) and [Single-Server Deployment](../guides/deploying/single-server.md).
+Locally you need Docker Desktop (version 24 or later recommended, which includes Docker Compose), Git, `openssl` on your PATH, and 8 GB of RAM available to Docker — Trinity runs entirely in containers, so nothing else is installed on the host. For a server, use a Linux VPS or dedicated machine (Ubuntu 22.04 LTS or later recommended) with Docker Engine 24+, the Docker Compose plugin, 8 GB RAM (4 vCPU / 8 GB is the recommended starting size), and outbound HTTPS (image pulls and model API calls). See [Local Development](../guides/deploying/local-development.md), [Single-Server Deployment](../guides/deploying/single-server.md) and [Sizing Your Server](../guides/deploying/capacity-planning.md).
 
 ## How many agents can I run on one machine?
 
-RAM is the practical ceiling — Trinity itself doesn't cap fleet size. Each agent runs as its own Docker container with a configurable memory limit (options range from 1g to 64g, and an admin can set fleet-wide defaults for new containers), so budget your host memory against the limits you assign. The docs recommend 8 GB minimum and 16 GB for running multiple agents; watch host memory and CPU against the thresholds in the monitoring guide as your fleet grows. See [Agent Configuration](../agents/agent-configuration.md) and [Monitoring](../guides/deploying/monitoring.md).
+Trinity doesn't cap fleet size, and the number of agents matters less than how many run at the same moment. An idle agent uses about 50–100 MB of memory and almost no CPU; a running one uses about 0.5 GB for a typical task and up to its own limit (4 GB and 2 cores by default) for heavy work such as builds or a headless browser. Agent limits are ceilings, not reservations, so they can add up to more than the host has. As observed on running instances, 4 vCPU / 8 GB handles about 8 agents with about 2 running at a time, and 4 vCPU / 16 GB about 20 agents with about 6 at a time. Watch disk too: it fills before memory on most instances. See [Sizing Your Server](../guides/deploying/capacity-planning.md), [Agent Configuration](../agents/agent-configuration.md) and [Monitoring](../guides/deploying/monitoring.md).
 
 ## I claimed my new instance in the browser — when does the system agent appear?
 
@@ -64,7 +64,7 @@ Yes, with the same provisioned install: on a fresh Ubuntu 24.04 Vultr instance w
 
 ## Can I run Trinity on a cheap VPS?
 
-Yes — any Linux VM that runs Docker works, and the ops agent repo ships provisioning guides for Hetzner Cloud, GCP, AWS, DigitalOcean, and localhost in its `provision/` directory. With prebuilt images (`start.sh --hosted`) a fresh VM is serving in about two minutes. Plan for 8 GB of RAM if you intend to run a real agent fleet (the DigitalOcean image boots on 4 GB for one or two agents), plus enough disk for Docker images, logs, and the database. See [Single-Server Deployment](../guides/deploying/single-server.md) and [Ops Agent](../guides/deploying/ops-agent.md).
+Yes — any Linux VM that runs Docker works, and the ops agent repo ships provisioning guides for Hetzner Cloud, GCP, AWS, DigitalOcean, and localhost in its `provision/` directory. With prebuilt images (`start.sh --hosted`) a fresh VM is serving in about two minutes. Plan for 8 GB of RAM if you intend to run a real agent fleet (the DigitalOcean image boots on 4 GB for one or two agents), plus enough disk for Docker images, logs, and the database — see [Sizing Your Server](../guides/deploying/capacity-planning.md). See [Single-Server Deployment](../guides/deploying/single-server.md) and [Ops Agent](../guides/deploying/ops-agent.md).
 
 ## Does Trinity run on ARM hosts?
 
@@ -76,7 +76,7 @@ Trinity ships three complete, standalone stacks: `docker-compose.yml` (dev, sour
 
 ## What ports does Trinity use?
 
-The frontend web UI binds host port 80, the backend API 8000, the MCP server 8080, and Vector (log aggregation) 8686. Redis binds 6379 on loopback only (127.0.0.1), so it is never reachable from outside the host, and agent SSH access uses incrementing ports 2222–2262. The scheduler's health endpoint on 8001 is *not* published to the host by any compose file — probe it with `docker exec trinity-scheduler curl -sf http://localhost:8001/health`. The bundled PostgreSQL on a hosted install (5432) is not published either; it is reachable only on the platform network. See [Local Development](../guides/deploying/local-development.md).
+The frontend web UI binds host port 80, the backend API 8000, the MCP server 8080, and Vector (log aggregation) 8686. Redis binds 6379 on loopback only (127.0.0.1), so it is never reachable from outside the host, and agent SSH access uses incrementing ports 2222–2262 — published on loopback only by default (`AGENT_SSH_BIND_ADDRESS`), with no SSH server listening until an admin issues an SSH grant. Note that a host firewall such as ufw does not cover ports Docker publishes; on a hand-installed server run `scripts/deploy/docker-firewall.sh` (see [Deployment → Firewall](../../DEPLOYMENT.md#firewall-docker-publishes-past-ufw)). The scheduler's health endpoint on 8001 is *not* published to the host by any compose file — probe it with `docker exec trinity-scheduler curl -sf http://localhost:8001/health`. The bundled PostgreSQL on a hosted install (5432) is not published either; it is reachable only on the platform network. See [Local Development](../guides/deploying/local-development.md).
 
 ## How do I change the port the web UI runs on?
 
@@ -88,7 +88,7 @@ You must set `ADMIN_PASSWORD` yourself — `start.sh` refuses to boot while it i
 
 ## How do I change the admin password?
 
-Edit `ADMIN_PASSWORD` in `.env` and **recreate** the backend container — `docker compose up -d backend` (with `-f docker-compose.prod.yml` or `-f docker-compose.hosted.yml` on a server), or re-run `./scripts/deploy/start.sh` (`--hosted` on a hosted install). A plain `docker compose restart` does not re-read `.env`, so the old password stays in force. `.env` is the source of truth: the backend re-applies that value on every boot, so a password changed anywhere else is overwritten at the next boot, and there is no change-password form in the UI. On a DigitalOcean Droplet the file is `/opt/trinity/.env`. See [First-Time Setup](../getting-started/setup.md).
+Sign in as `admin` and open **Settings → General → Password**: enter the current password and the new one twice. The change survives restarts and upgrades, signs out every other session, and can also revoke the MCP API keys you created. Then update `ADMIN_PASSWORD` in `.env` to match, because the MCP server's legacy password sign-in and your scripts still read it there. To reset a forgotten password, set a new `ADMIN_PASSWORD` in `.env` and **recreate** the backend container — `docker compose up -d backend` (with `-f docker-compose.prod.yml` or `-f docker-compose.hosted.yml` on a server), or re-run `./scripts/deploy/start.sh` (`--hosted` on a hosted install); the backend applies a value it has not applied before, and a plain `docker compose restart` does not re-read `.env`. On a DigitalOcean Droplet the file is `/opt/trinity/.env`. See [First-Time Setup](../getting-started/setup.md).
 
 ## I forgot the admin password on a hosted install or a claimed Droplet — how do I reset it?
 
@@ -148,11 +148,11 @@ Retention windows are configurable per data type — execution logs and rows, he
 
 ## Should I use SQLite or PostgreSQL?
 
-PostgreSQL. SQLite reached end-of-support on September 1, 2026: it no longer receives schema migrations or fixes, and it stays the zero-config default only for local development. A fresh hosted install (`start.sh --hosted`, and every one-click image) starts on the PostgreSQL container bundled in the hosted compose file with nothing to configure. A source-built production install points `DATABASE_URL` at a PostgreSQL server you operate (`DATABASE_URL=postgresql://trinity:your-postgres-password@your-db-host:5432/trinity`), and the dev compose bundles one behind `--profile postgres`. Migrating an existing instance's data is a deliberate cutover — the Trinity Ops Agent has a dedicated migration skill for it, and a full guide ships in the repo under `docs/migrations/`. See [Single-Server Deployment → Database backend](../guides/deploying/single-server.md#database-backend).
+PostgreSQL. SQLite reached end-of-support on September 1, 2026. Every compose file runs a bundled PostgreSQL container with nothing to configure, and the Trinity images refuse to boot on SQLite. To use a server you operate, set `DATABASE_URL=postgresql://trinity:your-postgres-password@your-db-host:5432/trinity`. Moving existing data takes one command: see `docs/migrations/SQLITE_TO_POSTGRES.md` and [Single-Server Deployment → Database backend](../guides/deploying/single-server.md#database-backend).
 
-## I upgraded my hosted install — did it move me to PostgreSQL?
+## I upgraded and Trinity refuses to start. Why?
 
-No. When `start.sh --hosted` finds an existing `trinity.db`, it writes an empty `DATABASE_URL=` to `.env`, so the install stays on SQLite and never boots an empty PostgreSQL beside your data. It still generates `POSTGRES_PASSWORD` and starts an idle `trinity-postgres` container, because the hosted compose file needs both. Every run then prints a warning that SQLite reached end-of-support, with a pointer to the migration guide. Moving is a separate step you choose: the Ops Agent's `/migrate-to-postgres` skill, or `docs/migrations/SQLITE_TO_POSTGRES.md`. See [Upgrading](../guides/deploying/upgrading.md).
+Your install has data in `trinity.db`, and Trinity will not come up on an empty PostgreSQL beside it. Run the copy command in `docs/migrations/SQLITE_TO_POSTGRES.md`, then start the stack. To stay on SQLite for this release only, set both `DATABASE_URL=` (empty) and `TRINITY_ALLOW_SQLITE=1` in `.env`. See [Upgrading](../guides/deploying/upgrading.md).
 
 ## Can I roll a hosted install on the bundled PostgreSQL back to an older release?
 
@@ -176,7 +176,7 @@ No — and by default none of it is. Public exposure is only required for inboun
 
 ## Can MCP clients connect if only ports 80 and 443 are open?
 
-Yes. The production frontend proxies `/mcp` to the MCP server, so an install that exposes only 80/443 — a tunnel, a reverse proxy, the DigitalOcean 1-Click — serves MCP at the same hostname as the web UI: point Claude Code at `https://trinity.your-domain.com/mcp` with an MCP API key from Settings → MCP Keys (port 8080 also works wherever it is reachable). **Settings → MCP Keys → MCP Server URL** sets the URL the UI shows to users; leave it empty to derive it from the hostname — `https://<host>/mcp` when the proxy reports HTTPS, `http://<host>:8080/mcp` otherwise. The dev Vite server does not proxy `/mcp` — locally the endpoint is `http://localhost:8080/mcp`. See [Single-Server Deployment → Connect from Claude Code](../guides/deploying/single-server.md#connect-from-claude-code).
+Yes. The production frontend proxies `/mcp` to the MCP server, so an install that exposes only 80/443 — a tunnel, a reverse proxy, the DigitalOcean 1-Click — serves MCP at the same hostname as the web UI: point Claude Code at `https://trinity.your-domain.com/mcp` with an MCP API key from Settings → MCP Keys, once an admin has turned on **External MCP access** on that page (a fresh install starts with it off; an upgraded install kept it on). Port 8080 also works wherever it is reachable — a fresh install publishes it on `127.0.0.1` only (`MCP_BIND_ADDRESS`). **Settings → MCP Keys → MCP Server URL** sets the URL the UI shows to users; leave it empty to derive it from the request — `<origin>/mcp` through a proxy that sends `X-Forwarded-Proto`, the raw `:8080` port otherwise. The dev Vite server does not proxy `/mcp` — locally the endpoint is `http://localhost:8080/mcp`. See [Single-Server Deployment → Connect from Claude Code](../guides/deploying/single-server.md#connect-from-claude-code).
 
 ## Why does my webhook URL show http:// instead of https://?
 

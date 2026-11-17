@@ -394,7 +394,8 @@ class TestReadOnlyModeHookInjection:
 
             # Should have message field
             assert "message" in data
-            assert "Read-only mode enabled" in data["message"]
+            # trinity-enterprise#341: the toggle selects the Strict read-only profile.
+            assert "Strict read-only" in data["message"]
 
         finally:
             # Restore disabled state
@@ -428,7 +429,8 @@ class TestReadOnlyModeHookInjection:
 
             # Should have message field
             assert "message" in data
-            assert "disabled" in data["message"].lower()
+            # trinity-enterprise#341: OFF returns to the profile it came from.
+            assert "Full access" in data["message"]
 
         finally:
             # Ensure disabled state

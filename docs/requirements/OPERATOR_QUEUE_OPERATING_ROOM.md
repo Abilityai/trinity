@@ -210,7 +210,7 @@ CREATE INDEX idx_operator_queue_created ON operator_queue(created_at DESC);
 
 ### 2.2 File Sync Service
 
-**Location**: `src/backend/services/operator_queue_service.py`
+**Location**: `src/backend/services/operator_queue_service/`
 
 A background service that syncs operator queue files with the database.
 
@@ -416,7 +416,7 @@ These tools allow the system agent or orchestrator agents to process queue items
 
 | File | Purpose |
 |------|---------|
-| `src/backend/services/operator_queue_service.py` | **NEW** — File sync service, polling, response write-back |
+| `src/backend/services/operator_queue_service/` | **NEW** — File sync service, polling, response write-back |
 | `src/backend/routers/operator_queue.py` | **NEW** — REST API for queue CRUD and response |
 | `src/backend/db/operator_queue.py` | **NEW** — Database operations for operator_queue table |
 | `src/backend/db/schema.py` | **MODIFY** — Add operator_queue table |

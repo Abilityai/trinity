@@ -615,6 +615,9 @@ tick. Users opt in (1-5) when a missed tick is genuinely costly.
 Execution fails → _maybe_schedule_retry()
     ├─ Skip SKIPPED / CANCELLED, and rows the lease reaper poison-parked
     │    (`error` starts with `poison_lease` — already with the operator, #2845)
+    ├─ Skip a turn-limit failure (#3993): the push row's "Task exceeded turn
+    │    limit:" text or the pull row's `[max_turns]` prefix. The same task under
+    │    the same cap stops at the same place, so a retry only repeats it.
     ├─ Check schedule.max_retries > 0
     ├─ Check attempt_number <= max_retries
     ├─ Calculate delay (2x for 429/rate-limit, capped at 300s)
@@ -624,8 +627,13 @@ Execution fails → _maybe_schedule_retry()
 _execute_retry() fires:
     ├─ Clear retry_scheduled_at from original execution
     ├─ Verify schedule still exists and enabled
+    ├─ Retry of a cron fire (or an unreadable original) — the fire's gates (#3363):
+    │    ├─ autonomy off → dropped, no row (as on cron)
+    │    └─ git-sync freeze → skipped row (triggered_by="retry", reason), no dispatch
+    │    (a retry of a manual / webhook run is not gated, as that run was not;
+    │     neither branch moves next_run_at — a retry consumes no cron window)
     ├─ Create new execution record (triggered_by="retry", attempt_number=N+1)
-    └─ Call _call_backend_execute_task()
+    └─ Call _call_backend_execute_task(deliver_to_workspace_email=schedule's, #3363)
          └─ on exception: FAILED only if the row is still `running`
             (CAS — a pull pilot may already have queued it, #2845)
 ```
@@ -634,7 +642,9 @@ _execute_retry() fires:
 it is in both `_AUTONOMOUS_TRIGGERS` (an unresolved command alerts) and
 `PULL_REACHABLE_TRIGGERS` (a pilot claims it from the durable queue) — #2845. A
 retry is a new row, so it starts with its own `redelivery_count`; RETRY-001
-attempts and lease re-deliveries are counted separately.
+attempts and lease re-deliveries are counted separately. Outside dispatch, a retry also reads as the scheduled work it is: the
+client Workspace ledger's `work_kind` maps it to `schedule`, and the
+first-autonomous-success milestone (ent#437) counts it (#3363).
 
 ### Execution Record Fields
 

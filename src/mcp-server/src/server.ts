@@ -46,8 +46,12 @@ import { createA2ACallTools } from "./tools/a2a_call.js";
 import { createAAuthTools } from "./tools/aauth.js";
 import { createCredentialVaultTools } from "./tools/credential_vault.js";
 import { createProjectTools } from "./tools/projects.js";
+import { createPlatformFileTools } from "./tools/platform_files.js";
 import { createAssignmentTools } from "./tools/assignments.js";
-import { configureAudit, withAudit } from "./audit.js";
+import { createPermissionTools } from "./tools/permissions.js";
+import { createMemberProgressTools } from "./tools/member_progress.js"; // ent#1175
+import { configureAudit, logSessionRevival, withAudit } from "./audit.js";
+import { revivalRequests } from "./session-front.js";
 import { installLogRedaction } from "./log-redaction.js";
 import type { McpAuthContext } from "./types.js";
 import { EXECUTION_ID_HEADER, parseExecutionIdHeader } from "./tools/execution_id.js";
@@ -561,6 +565,13 @@ export async function createServer(config: ServerConfig = {}) {
               // #2392: per-request — fastmcp re-authenticates every POST.
               executionId: parseExecutionIdHeader(readHeader(request.headers[EXECUTION_ID_HEADER])),
             };
+            // #4060: the session front's synthetic revival initialize. Audited
+            // here because only this path knows who the key belongs to.
+            const revived = revivalRequests.get(request as any);
+            if (revived !== undefined) {
+              revivalRequests.delete(request as any);
+              logSessionRevival(authContext, revived);
+            }
             return authContext;
           }
 
@@ -681,7 +692,10 @@ export async function createServer(config: ServerConfig = {}) {
     createAAuthTools(client, requireApiKey),         // AAuth — request_person_token (ent#878), call_aauth_resource (ent#879); self-acting
     createCredentialVaultTools(client, requireApiKey), // Credential vault runtime — list/fetch (license-blind proxy, ent#279)
     createProjectTools(client, requireApiKey),       // Workspace Projects — list/get read tools (license-blind proxy, ent#661)
+    createPlatformFileTools(client, requireApiKey),  // File spaces — list/read/write/remove (license-blind proxy, ent#1237)
     createAssignmentTools(client, requireApiKey),     // Role assignments — read who an agent serves (license-blind proxy, ent#500)
+    createPermissionTools(client, requireApiKey),     // Permission edges + self-change grants, read-only (ent#991)
+    createMemberProgressTools(client, requireApiKey), // Member onboarding progress card — the member's assistant agent self-reports (ent#1175)
   ];
   // Operator tools: visible ONLY to fully-credentialed operator scopes.
   for (const group of toolGroups) {

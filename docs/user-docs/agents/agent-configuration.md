@@ -12,33 +12,34 @@ The Agent Detail page has one **Settings** tab (visible to owners only), pinned 
 
 | Pane | `?section=` | Question | What it holds |
 |------|-------------|----------|---------------|
-| **General** | `general` | What this agent is | **Identity** — display name, agent id (**Rename…**), avatar (**Change…**, **Next emotion**), the template's description, tags. **Model and funding** — runtime, model, funding. **Execution** — execution timeout, parallel capacity, read-only mode, memory and CPU. **Template** — what the agent was deployed from, with a **Technical details** dialog holding the template metadata. **Danger zone** — reset the workspace to main (only when a repository is bound) and delete |
-| **Guardrails** | `guardrails` | What it may do | **Bounds** — guardrail rules behind **Manage rules**, [permissions to change itself](#permissions-to-change-itself), the number of skills that need approval with **Open Skills**. **Unprompted work** — autonomy, read-only here. **Checks** — cross-model validation, shown only when the instance has the matching entitlement. **Reliability** — the dispatch circuit breaker and wake-on-ask-ended |
+| **General** | `general` | What this agent is | **Identity** — display name, agent id (**Rename…**), avatar (**Change…**, **Next emotion**), the template's description, tags. **Model and funding** — runtime, model, funding. **Execution** — execution timeout, parallel capacity, memory and CPU. **Template** — what the agent was deployed from, with a **Technical details** dialog holding the template metadata. **Danger zone** — reset the workspace to main (only when a repository is bound) and delete |
+| **Credentials** | `credentials` | What secrets it runs with | The agent's credentials: the per-variable checklist, quick inject, file upload, and encrypted export and import (see [Credential Management](../credentials/credential-management.md)) |
+| **Guardrails** | `guardrails` | What it may do | **Tool access** — which tools the agent may use, as a profile; read-only mode is the **Strict read-only** profile (see [Agent Guardrails](agent-guardrails.md#tool-access)). **Bounds** — guardrail rules behind **Manage rules**, [permissions to change itself](#permissions-to-change-itself), the number of skills that need approval with **Open Skills**. **Unprompted work** — autonomy, read-only here. **Checks** — cross-model validation, shown only when the instance has the matching entitlement. **Reliability** — the dispatch circuit breaker and wake-on-ask-ended |
 | **People** | `people` | Who works with it | The former Access tab, unchanged — see [Agent Sharing](../sharing-and-access/agent-sharing.md) |
-| **Channels** | `channels` | Where outsiders reach it | **Voice replies** (see [Voice Replies](../advanced/voice-replies.md)), and a row that opens the **Sharing** tab, which still holds chat policy, channels, public links and the client roster |
+| **Channels** | `channels` | Where outsiders reach it | **Voice replies** (see [Voice Replies](../advanced/voice-replies.md)), and a row that opens the **Channels** tab, which still holds chat policy, channels, public links and the client roster |
 | **Integrations** | `integrations` | What calls it, what it calls | **Programmatic access** — **Expose via MCP** and the agent's **Trinity access key** (see [MCP Server](../integrations/mcp-server.md#dedicated-agent-tools-expose-via-mcp)); rows that open the **Permissions**, **A2A** and **Payments** tabs, each shown only when you can see that tab |
-| **Storage** | `storage` | What it keeps and shares | **Repository** — the bound repository, **Bind to your own repo**, **GitHub authentication** and the **Sync** switches (see [GitHub Sync](../integrations/github-sync.md)). **Credentials** (see [Credential Management](../credentials/credential-management.md)). **Shared folders** and **File sharing** (see [Agent Files](agent-files.md)) |
+| **Storage** | `storage` | What it keeps and shares | **Repository** — the bound repository, **Bind to your own repo**, **GitHub authentication** and the **Sync** switches (see [GitHub Sync](../integrations/github-sync.md)). **Shared folders** and **File sharing** (see [Agent Files](agent-files.md)) |
 
-**Find a setting.** The search box above the rail filters the panes by the words you would use for a control — `timeout` keeps General, `token` and `folders` keep Storage — even when the word is not in a pane's name. A query that matches nothing says so and suggests words to try.
+**Find a setting.** The search box above the rail filters the panes by the words you would use for a control — `timeout` keeps General, `secrets` keeps Credentials, `token` and `folders` keep Storage — even when the word is not in a pane's name. A query that matches nothing says so and suggests words to try.
 
 **One restart banner.** Every change that waits for a restart is named in one bar at the top of Settings, whichever pane you are on: **File sharing**, **Shared folders**, **Memory and CPU**, **Guardrail rules**, **GitHub token** and **Funding**. The bar carries one button — **Restart now** for a running agent, **Start now** for a stopped one — and keeps its footprint when nothing is waiting (*Every change here is live*). The list clears when the agent actually comes up: Trinity settles it on the agent's status edge from stopped to running, not on the button, so a stop and start from the header settles it too, and a start that fails leaves every entry listed because nothing applied. After the restart each row re-reads the backend and lists itself again if its change still has not taken.
 
-**Who sees what.** Settings is owner-only. The system agent gets **General** (read-only), **Guardrails** (without the autonomy section) and **Integrations**. A `?section=` naming a pane you cannot see lands on the first pane you can.
+**Who sees what.** Settings is owner-only. The system agent gets **General** (read-only), **Credentials**, **Guardrails** (without the autonomy section) and **Integrations**. A `?section=` naming a pane you cannot see lands on the first pane you can.
 
-**Where the old tabs went.** The Info, Credentials, Access and Folders tabs are gone, and their old links still resolve: `?tab=info` opens General, `?tab=guardrails` opens Guardrails, `?tab=credentials` and `?tab=folders` open Storage, `?tab=access` opens People. The page header keeps identity, the running state and badges, the **Autonomy** chip, Start/Stop, the bound GitHub repository with its branch and push/pull counts, the tags (owners edit them from the header or here) and a small context-window ring — nothing else. Live CPU, memory and spend are read on the **Overview** tab. The **Git** tab keeps the operational half of git: status, pending changes, recent commits, **Pull**, **Push** and **Refresh**.
+**Where the old tabs went.** The Info, Credentials, Access and Folders tabs are gone, and their old links still resolve: `?tab=info` opens General, `?tab=guardrails` opens Guardrails, `?tab=credentials` opens Credentials, `?tab=folders` opens Storage, `?tab=access` opens People. The page header keeps identity, the running state and badges, the **Autonomy** chip, Start/Stop, the bound GitHub repository with its branch and push/pull counts, the tags (owners edit them from the header or here) and a small context-window ring — nothing else. Live CPU, memory and spend are read on the **Overview** tab. The **Git** tab keeps the operational half of git: status, pending changes, recent commits, **Pull**, **Push** and **Refresh**.
 
 The sections below say which pane holds each setting. Everything is also available through the API.
 
 ### Permissions to Change Itself
 
-An agent's own key acts for its owner, so without a fence it could rewrite any agent its owner holds. Trinity fences those changes behind permissions that an instance admin grants per agent. No agent holds any of them by default. People and the system agent never need them.
+An agent's own key acts for its owner, so without a fence it could rewrite any agent its owner holds. Trinity fences those changes behind permissions that an instance admin grants per agent. No agent holds any of them by default. People never need them, and neither does the system agent, except that its key is refused wherever a change takes a person or an agent holding the permission. A schedule's webhook is one such change; so are an agent's read-only mode, resources, timeout, public-channel model and guardrails, and a skill's approval gate.
 
 The **Permissions to change itself** card under **Settings › Guardrails › Bounds** shows one toggle per permission, with what it allows, what is refused without it, and who granted it and when:
 
 | Toggle | Permission | Lets the agent | Without it |
 |--------|-----------|----------------|------------|
 | **Change skills** | `skills.manage` | Assign, unassign and re-deliver skills, and set skill approval gates on other agents — see [Skills and Playbooks](../automation/skills-and-playbooks.md#who-can-change-an-agents-skills) | Every skill change is refused, its own included |
-| **Change other agents' schedules** | `schedules.manage` | Create, change, enable, disable or delete another agent's schedules and their webhooks | It still manages its own schedules, never another agent's |
+| **Change other agents' schedules** | `schedules.manage` | Create, change, enable, disable or delete another agent's schedules, and manage a schedule's webhook, its own included, except on a schedule that delivers to someone other than its owner | It still manages its own schedules but not their webhooks, and never another agent's |
 | **Change instructions** | `instructions.manage` | Write `CLAUDE.md`, `AGENTS.md` and `.claude/` files (not skills) through the Files API, and reset an agent to `main` while keeping its state | Those writes are refused, its own instructions included |
 | **Manage other agents** | `agents.manage` | Create, deploy and delete agents, deploy a system, and change an agent's model, resources, timeout, public-channel model, read-only mode and guardrails | It can still spawn and discard short-lived (ephemeral) helpers |
 | **Start projects** | `projects.manage` | Start a project on its owner's behalf, on installations that offer projects | It still works on projects it is already on |
@@ -52,11 +53,17 @@ Bounds that hold even with a permission:
 
 The owner and admins see the card; anyone else does not. Only an instance admin, signed in to the UI, can flip a toggle: owners see the state with *Only an instance admin can change these*. Every grant and revocation is audited. A system agent and an ephemeral agent cannot receive a permission, and an agent still being calibrated cannot receive **Change instructions**.
 
+**Limiting what agents build from.** An instance admin can also limit which templates agents create agents from, in **Settings → Agents → Template sources for agent-created agents**. One entry per line: `local:<template>` (a bundled template), `github:<owner>/*` (every repository of an owner), `github:<owner>/<repo>` (every branch of a repository) or `github:<owner>/<repo>@<branch-or-tag>` (exactly that one: an agent created from it tracks that branch or tag pull-only, and a working-branch create, which starts from the default branch, is refused). A pinned name is only as safe as the repository's own protection: anyone who can push can move a branch, or create a branch with a pinned tag's name, so protect pinned names on GitHub. While the list has entries, an agent that creates an agent — with **Manage other agents**, or by spawning an ephemeral helper — must use a listed source: anything else, a blank agent, or an uploaded archive (`deploy-local`) is refused with `template_source_not_allowed` or `template_upload_not_allowed`, and the refusal lists the allowed sources. A system deploy by an agent with any unlisted member deploys nothing, and its dry run lists those members. People are never limited. An empty list (the default) limits nothing. The panel also lists the templates that agent-created agents use today, each marked allowed or refused, so you can see what a new entry would stop. The list governs where an agent is built from, not what it does afterwards: the permissions above govern that.
+
 **When an agent is refused.** An agent without the permission gets a `403` that names it (`skill_management_not_permitted`, `schedule_management_not_permitted`, `instruction_management_not_permitted`, `agent_management_not_permitted` or `project_management_not_permitted`), and the refusal is audited. The message tells the agent to raise a question to its operator whose title includes the permission id (for example `schedules.manage`). The card lists those open requests under **Open permission requests**, with a link to Operations. Answering the request grants nothing: an admin grants the permission on this card.
+
+**In the audit log.** Each call an agent makes on one of these permissions is recorded as `capability_used`, with the agent, its key, the permission and the target. It means the permission let the call through, not that the change succeeded. A refusal is `capability_refused`; a grant or revocation is `capability_grant` or `capability_revoke`. Entries written before this was added use `skill_manager_grant` and `skill_manager_revoke` for **Change skills**.
 
 **After upgrading.** No agent holds the schedule, instruction or agent permissions after the upgrade that introduces them. An orchestrating agent that creates agents, writes another agent's schedules or instructions, or reconfigures agents is refused until an admin grants the permission.
 
-The fence covers the platform's routes, not the agent's own container: an agent can still edit files in its own workspace with its own tools.
+Read the five permissions over MCP with `get_agent_capability_grants` (an agent key reads itself or an agent it spawned; a person key reads as the agent's owner or an admin). Granting stays on this card.
+
+The fence covers the platform's routes, not the agent's own container: an agent can still edit files in its own workspace with its own tools. A permission reaches only agents the same owner owns, and never the system agent.
 
 ### Parallel Capacity
 
@@ -79,7 +86,7 @@ Master gate for the agent's scheduled operations.
 
 Prevents modification of source files (`*.py`, `*.js`, etc.) inside the agent container.
 
-- Toggle under **Settings › General › Execution › Read-only mode**
+- Read-only mode is the **Strict read-only** tool-access profile, set under **Settings › Guardrails › Tool access** — see [Agent Guardrails → Tool access](agent-guardrails.md#tool-access). The **Read-only** toggle in the agent header and on the Dashboard is a shortcut: on switches to Strict read-only, off returns to the previous profile
 - Uses a `PreToolUse` hook to intercept `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` tool calls. Codex agents enforce it through the Codex sandbox instead
 - Blocked by default: source and config files (`*.py`, `*.js`, `*.ts`, `*.sh`, `*.yaml`, `*.json`, `CLAUDE.md`, `.claude/*`, `.env`, and similar)
 - Allowed by default: `content/*`, `output/*`, `reports/*`, `exports/*`, `*.log`, `*.txt` (generated files are permitted)
@@ -136,12 +143,13 @@ When a breaker is open, the agent header and the agent's Dashboard tile show a "
 
 ### Wake When an Ask Ends
 
-How one of the agent's parked requests (an approval, a question) ended always reaches the agent, but by default it is only read on the agent's *next* turn. An agent with no schedule has no next turn, so an approved action would wait indefinitely. Turn on **Wake this agent when an ask it raised ends** under **Settings › Guardrails › Reliability** and the agent is woken for one turn when a person answers (trigger `operator_response`) — and also when an ask is cancelled or expires, so it stops waiting for an answer that will not come (trigger `operator_ending`, one turn per agent per cancellation sweep or expiry). Off by default.
+How one of the agent's parked requests (an approval, a question) ended always reaches the agent. **Wakes when an ask ends** under **Settings › Guardrails › Reliability** is on by default: the agent is woken for one turn when a person answers (trigger `operator_response`) or cancels the ask (trigger `operator_ending`, one turn per agent per cancellation sweep), so it acts on the decision, or stops waiting for an answer that will not come. An expiry wakes nobody — the agent reads the timeout on its next turn. Switched off, an ending is only read on the agent's *next* turn; an agent with no schedule has no next turn, so an approved action would wait until someone writes to it.
 
-- Each wake-up is one turn the owner pays for: one per answer, one per cancellation or expiry event. A stopped agent is not woken.
+- Each wake-up is one turn the owner pays for: one per answer, one per cancellation event; an expiry costs nothing. A stopped agent is not woken — its answered asks read **Agent not yet woken** and are delivered when it next starts.
 
 - Only the owner or an admin can change it, and never with an agent's key: an agent's own key is refused with `403` even though it acts for the owner. Each wake is a turn the owner pays for, so an agent cannot switch on its own wake-ups. An agent can still read the setting.
-- API: `GET /api/agents/{name}/operator-resume` and `PUT /api/agents/{name}/operator-resume` (`{"enabled": true}`)
+- The same switch decides whether the agent is woken when a run it delegated to another agent ends (trigger `caller_wake`) — see [Agent Network → Wake on Ending](../collaboration/agent-network.md#concepts). Switching it off stops both kinds of wake.
+- API: `GET /api/agents/{name}/operator-resume` and `PUT /api/agents/{name}/operator-resume` (`{"enabled": true}`, or `{"mode": "default" | "on" | "off"}`, where `default` follows the instance default, which is on). The GET answers `mode`, the `effective` result and the `source` that decided it
 - See [Approvals](../automation/approvals.md) for the operator side, and for how an agent reads an ending back (`get_my_ask`).
 
 ### Funding
@@ -153,14 +161,18 @@ Controls which credential the agent uses for Claude: the platform API key or a C
 
 ### Model Selection
 
-Choose the Claude model used for tasks and scheduled executions.
+Choose the Claude model the agent runs on.
 
 - Change it under **Settings › General › Model and funding › Model**. The model is read from the agent, so the row can be read or changed only while the agent is running; stopped, it says *Start the agent to read or change its model*
+- On a Claude Code agent, the model you pick is also saved as the agent's **own model**. Turns the platform starts without naming a model — wakes, ask endings, event tasks, and reminders, schedules and loops with no model of their own — run on it, and it survives a restart. The change is recorded in the audit log as `update_agent_model`. If the agent accepts the model but saving it fails, the request answers `500` with `model_not_saved` and the agent is put back on its previous model
+- **Where the own model comes from.** At creation, Trinity saves the model the template declares (`runtime.model`, or a top-level `model:` in `template.yaml`), for `local:` and `github:` templates alike. An agent created before this existed gets one at the next backend start, from its running container or its template, if it has none yet. A value set by a person is never overwritten. A model this instance cannot run is skipped (the read below names it), and those turns run on the platform default instead
+- **Which model a turn runs on**: a model the request names (a schedule's, a loop's, a reminder's, or a pick in chat) wins; then the agent's own model; then the platform default. Gemini and Codex agents run on their own runtime's model
 - Available models lead with the current generation: **Opus 5.5** (the most capable Opus, marked *(latest)*), **Fable 5.1** (most capable, best for the longest tasks) and **Sonnet 5** (fast and smart, with a 1M-token context window), followed by the prior Opus, Sonnet and Haiku generations. **Opus 5** and **Fable 5** are still offered and still supported; they are simply no longer the latest in their tiers.
 - Custom model input is supported.
 - If Claude Code refuses the model — an id it does not know, or one newer than the agent's Claude Code version — the run fails with error code `model_unsupported` (HTTP `400`) and the API's own message. It is not treated as an authentication failure, so the agent is not switched to another subscription or to the platform API key. Pick a supported model, or rebuild the base image so the agent runs a newer Claude Code.
 - Selection is persisted to `localStorage`; `model_used` is recorded in the execution audit trail.
-- **Platform default**: when an agent has no model override, executions use the platform default model configured in Settings → Platform. The UI now surfaces this fallback so empty selections aren't mistaken for failures.
+- **Platform default**: when an agent has no own model, executions use the platform default model configured in Settings → Platform. The UI surfaces this fallback so empty selections aren't mistaken for failures.
+- `GET /api/agents/{name}/model` reports the model the container runs now (`model`), the saved own model (`default_model`), the model a platform-started turn runs on (`backend_turn_model`) and where it came from (`default_model_source`: `agent`, `platform_default` or `runtime`), and why a saved model was skipped (`default_model_refused`)
 
 ### Runtime
 

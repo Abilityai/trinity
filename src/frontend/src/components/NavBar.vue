@@ -410,6 +410,7 @@ import { useEnterpriseStore } from '../stores/enterprise'
 import { useWebSocket } from '../utils/websocket'
 import { useBuildInfo } from '../composables/useBuildInfo'
 import { buildNavLinks, moreLabel } from '../utils/navLinks'
+import { isWorkspaceOnlyRole } from '../utils/workspaceOnly'
 import { computeInlineCount } from '../utils/overflowFit'
 
 const router = useRouter()
@@ -633,6 +634,19 @@ onMounted(() => {
 
   // Start polling for notifications
   notificationsStore.startPolling(60000)
+
+  // #3302: the badge's queue part, read on every page — the store's own reads
+  // run only where the list is shown or after a queue event, so elsewhere it
+  // read 0 until something happened. Deferred a tick: this mounts BEFORE the
+  // page it sits in, and a page that reads the list (Operations) starts that
+  // read in its own mount — which covers the counts, so none are read ahead of
+  // it. A Workspace-only person has no operator queue (the WebSocket wiring
+  // skips the store for them too).
+  nextTick(() => {
+    if (!operatorQueueStore.listLive && !isWorkspaceOnlyRole(authStore.user?.role)) {
+      operatorQueueStore.fetchCounts()
+    }
+  })
 
   // #926: kick off the cached build-info fetch — failures are non-fatal
   // (chip is hidden if fetch fails; e.g., unauthenticated brief window).

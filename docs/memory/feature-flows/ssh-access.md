@@ -9,6 +9,7 @@ As a platform admin, I want to generate temporary SSH credentials for agent cont
 ## Revision History
 | Date | Change |
 |------|--------|
+| 2026-11-07 | **Listener posture (trinity-enterprise#1168)**. Agent containers published `22/tcp` as a bare int → every host interface, past ufw (Docker's rules run first), on installs where `ssh_access_enabled` is off and the listener served nobody. Now: (1) the port is published on `AGENT_SSH_BIND_ADDRESS` (`127.0.0.1` unless set; IP literal validated, invalid → loopback + one ERROR) through `services/agent_ssh_binding.py::agent_ssh_port_binding` at all three create sites, pinned by `tests/unit/test_1168_agent_ssh_bind.py`; (2) the endpoint advertises the host the port is ACTUALLY published on (`HostConfig.PortBindings`, Invariant #11) via `decide_ssh_connection(attrs, port, host, source)` — loopback → `127.0.0.1` + a `-J` hint only when `get_ssh_host_detail()` says the host came from `SSH_HOST`/`FRONTEND_URL`; every interface → the detected host + a "recreate to apply" warning; a specific IP → that IP, naming a disagreeing `SSH_HOST` — and the response always carries `warnings: []` and `connection.bind_address`, repeated in `instructions`; (3) no listener without a grant: create sites pass `ENABLE_SSH=false`, `SshService.ensure_sshd_running` (root exec, creates `/var/run/sshd`, zombie-safe `pgrep --runstates RSD`) runs before the key is injected, and `sweep_agent_ssh_posture()` at boot names containers still on every interface and stops idle listeners where the setting is off; (4) base image: `developer` password locked, sshd policy is a drop-in whose effective values the build asserts with `sshd -T`. Existing containers keep their binding until recreated — runbook `docs/migrations/AGENT_SSH_BIND_2026-11.md`. |
 | 2026-07-17 | **Enforce key TTL on the filesystem + injection-safe inject/remove (#1616)**. The expired-key security gap: an ephemeral key's TTL was enforced ONLY on its Redis metadata — `SshService.cleanup_expired_credentials()` (which removes the line from the `authorized_keys` file sshd reads) had **zero callers** (`SSH_ACCESS_CLEANUP_INTERVAL` was unused), so on a preserved (never-recreated) volume an **expired** key lingered in the file and still granted login. Wired it into the 5-min `cleanup_service` loop (`_sweep_expired_ssh_credentials`, report field `ssh_credentials_expired`; fail-open). The sweep is **`expires_at`-driven**: it removes the file line once the key's true deadline passes, and `store_credential_metadata` keeps the Redis row alive `SSH_ACCESS_CLEANUP_GRACE_SECONDS` (600 s > the 300 s cadence) past that deadline so every expired key is observed by at least one cycle — closing the ~80% cross-cycle miss a naive `ttl in [0,60]` window had against the 5-min cadence (a legacy row without `expires_at` falls back to that window). A **live probe caught** that the sweep's keyspace scan used `redis_client.keys()`, which the backend's `-@dangerous` Redis ACL user **blocks** (`NoPermissionError`) — the fail-open handler would have swallowed it to 0-cleaned every cycle, leaving the fix inert; switched all three `ssh_service` scans (`cleanup_expired_credentials`, `list_active_keys`, `cleanup_agent_credentials`) to `scan_iter`. `inject_ssh_key` now passes the public key via the exec **environment** (never string-interpolated) in one atomic `sh -c` and gained `skip_if_present=True` (append-if-absent via `grep -qxF`), killing both the repeat-inject double-add and the docker-py `shlex.split`→`sh -c` double-unquoting injection class. `remove_ssh_key` (now load-bearing for cleanup) matches the comment as an exact awk `$NF` last-field via `ENVIRON` (no regex/shell metachar escaping, no substring over-delete). **Scope note:** #1616's reported *recreate-wipe* symptom is a SEPARATE, unidentified mechanism — a normal never-renamed agent is volume-safe on recreate (`/home/developer` is a named volume, forwarded by the config-recreate path), the #1664/#1665/#1667 volume-identity family (fixed by #1666) postdates the reporter's build, and no start-time re-injection hook was added (it is near-inert and would mask data loss). |
 | 2026-07-16 | **Removed password auth (#1615)**: the option was broken end-to-end — host-side hashing imported the stdlib `crypt` module (removed in Python 3.13, so every request 500'd), and the agent sshd runs `PasswordAuthentication no`, so a password login could never succeed even with a hash set. `auth_method` now accepts only `"key"`; `"password"` returns 400. Removed `generate_password()` and `set_container_password()`. `clear_container_password()` is **retained** as a cleanup-only path (it locks a password left by a pre-#1615 backend on Python <3.13); nothing sets passwords any more. |
 | 2026-04-18 | **SEC: Admin-only access**: Changed from owner/admin to admin-only. Uses `require_admin` dependency instead of `can_user_delete_agent` check. |
@@ -164,19 +165,41 @@ async def create_ssh_access(
     # 5. Validate and clamp TTL (0.1 - 24 hours)
     ttl_hours = max(0.1, min(body.ttl_hours, SSH_ACCESS_MAX_TTL_HOURS))
 
-    # 6. Get SSH port and host
+    # 6. Get SSH port, then the host the port is ACTUALLY published on
+    #    (trinity-enterprise#1168). The detected host and its source are
+    #    passed INTO the pure decision table; the leaf never imports ssh_service.
     labels = container.attrs.get("Config", {}).get("Labels", {})
     ssh_port = int(labels.get("trinity.ssh-port", "2222"))
-    host = get_ssh_host()  # Tailscale IP, SSH_HOST env, or localhost
+    detected_host, host_source = get_ssh_host_detail()   # SSH_HOST → FRONTEND_URL → tailscale → …
+    decision = decide_ssh_connection(container.attrs, ssh_port, detected_host, host_source)
+    host = decision.host   # 127.0.0.1 for a loopback-bound agent; the bound IP; or detected_host
 
-    # 7. Inject the client-supplied key and record metadata
+    # 7. Start sshd on demand (containers are created with ENABLE_SSH=false),
+    #    then inject the client-supplied key and record metadata
+    await ssh_service.ensure_sshd_running(agent_name)      # root exec; 500 if it fails
     await ssh_service.inject_ssh_key(agent_name, public_key_with_comment)
     await ssh_service.store_key_metadata(...)
-    return { key response — no private_key field }
+    return { connection{command, host, port, user, bind_address}, warnings[], instructions[...] }
 ```
 
 There is one flow now. The old `if auth_method == "password"` branch is gone
 along with the service functions it called.
+
+#### What the response says about the binding (trinity-enterprise#1168)
+
+`decide_ssh_connection` reads Docker's `HostConfig.PortBindings['22/tcp'][0].HostIp`
+(`""` = every interface; Invariant #11 — the config says what NEW containers get,
+Docker says what THIS one has):
+
+| Published on | `connection.host` | `warnings[]` |
+|---|---|---|
+| every interface (pre-#1168 container, or `AGENT_SSH_BIND_ADDRESS=0.0.0.0`) | the detected host | if the configured bind differs: created before the binding changed — recreate the agent |
+| loopback | `127.0.0.1` | connect from the host; `… or jump through it: ssh -J <you>@<host> -p PORT developer@127.0.0.1` only when the host came from `SSH_HOST`/`FRONTEND_URL` (from a Mac, `host.docker.internal` is undialable); how to bind a VPN interface instead |
+| a specific IP | that IP | if `SSH_HOST` is set and differs: named, the command uses the bound IP |
+| no `22/tcp` mapping | the detected host | none |
+
+`warnings` is always a list (possibly empty) and is repeated in `instructions`,
+so the MCP passthrough and a client that only prints instructions both show it.
 
 ### SSH Service
 
@@ -266,12 +289,18 @@ def store_credential_metadata(
     logger.info(f"Stored SSH {auth_type} metadata: {redis_key} (TTL: {ttl_hours}h)")
 ```
 
-#### Host Detection (Lines 479-567) - get_ssh_host()
+#### Host Detection - get_ssh_host_detail() / get_ssh_host()
+
+Since trinity-enterprise#1168 the chain lives in `get_ssh_host_detail() -> (host, source)`
+(source ∈ `ssh_host`, `frontend_url`, `tailscale`, `host_docker_internal`, `gateway`,
+`localhost`); `get_ssh_host()` is a wrapper returning the host alone. The endpoint
+uses the source to decide whether a `-J` jump hint makes sense (only the first two
+name a host an admin can dial from their own machine).
 
 ```python
-def get_ssh_host() -> str:
+def get_ssh_host_detail() -> tuple[str, str]:
     """
-    Get the host IP/domain for SSH connections.
+    Get the host IP/domain for SSH connections, and where it came from.
 
     Priority:
     1. SSH_HOST environment variable (explicit configuration)
@@ -697,6 +726,8 @@ security_opt=['apparmor:docker-default'],  # no-new-privileges removed for SSH s
 
 9. **Tailscale Priority**: Prefers Tailscale IP over localhost for secure network access.
 
+10. **Loopback publication and no idle listener (trinity-enterprise#1168)**: each agent's `22/tcp` is published on `AGENT_SSH_BIND_ADDRESS` (`127.0.0.1` by default), and no sshd runs until a grant starts one. Docker publishes past ufw, so the binding is defense in depth and `scripts/deploy/docker-firewall.sh` (`DOCKER-USER`) is the firewall control; a specific interface IP must be assigned at every container start. The `developer` account's password is locked in the image and the sshd policy is build-asserted with `sshd -T`.
+
 ---
 
 ## Environment Variables
@@ -708,6 +739,7 @@ security_opt=['apparmor:docker-default'],  # no-new-privileges removed for SSH s
 | `SSH_ACCESS_CLEANUP_INTERVAL` | 900 | **Unused** (legacy). The expired-key sweep runs on `cleanup_service`'s own 5-min cycle (`CLEANUP_INTERVAL_SECONDS`), not this value (#1616). |
 | `SSH_HOST` | (auto-detect) | Override host for SSH commands (highest priority) |
 | `FRONTEND_URL` | `http://localhost` | Used to auto-detect SSH host in production (e.g., `https://trinity.abilityai.dev` → `trinity.abilityai.dev`) |
+| `AGENT_SSH_BIND_ADDRESS` | `127.0.0.1` | Host interface each agent's `22/tcp` is published on at create/recreate (trinity-enterprise#1168). An IP literal, or `0.0.0.0` for every interface; invalid → `127.0.0.1` + one ERROR. Forwarded by all three compose files; `start.sh --provision` writes `127.0.0.1`. Existing containers keep their binding until recreated. |
 
 ---
 

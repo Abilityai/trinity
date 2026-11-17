@@ -171,12 +171,6 @@ def test_title_is_one_masked_bounded_line(svc):
     assert svc.clean_title(None) == "(no message)"
 
 
-def test_error_is_bounded_and_none_when_empty(svc):
-    assert svc.clean_error(None) is None
-    assert svc.clean_error("  ") is None
-    assert len(svc.clean_error("e" * 500)) <= svc.ERROR_MAX
-
-
 def test_mask_never_returns_an_off_roster_name(svc):
     roster = {AGENT, OTHER}
     assert svc.mask(AGENT, roster) == AGENT
@@ -244,7 +238,7 @@ class _Ledger:
             return self.queued
         return self.recent
 
-    def get_fleet_execution_stats(self, agent_names, hours=24):
+    def get_fleet_execution_stats(self, agent_names, hours=24, **_):
         self.calls.append(("stats", tuple(agent_names), hours))
         return {"total": self.total}
 
@@ -260,6 +254,9 @@ def wired(svc, monkeypatch):
     ledger = _Ledger()
     monkeypatch.setattr(svc, "core_db", ledger)
     monkeypatch.setattr(svc, "roster_agent_names", lambda email, include_owned: {AGENT, OTHER})
+    # ent#875: the viewer OWNS both agents here, so no row is narrowed away.
+    monkeypatch.setattr(svc.portal_db, "get_owned_roster",
+                        lambda email: [{"agent_name": AGENT}, {"agent_name": OTHER}])
     monkeypatch.setattr(svc.portal_db, "get_portal_session",
                         lambda sid, agent, email: {"id": sid} if sid == SESSION and agent == AGENT else None)
     monkeypatch.setattr(svc, "_resolve_timeout", lambda agent: 3600)
