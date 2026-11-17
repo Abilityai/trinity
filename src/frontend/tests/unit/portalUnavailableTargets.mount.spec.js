@@ -230,6 +230,20 @@ describe('#4517 — an unshared agent link when you have no chats yet', () => {
   })
 })
 
+describe('#4517 — an agent click while the thread list failed', () => {
+  // `threadsLoaded` only latches on a clean read; a failed list must not stop
+  // the agent page from landing, or the old conversation sits under the new URL.
+  it('lands on the clicked agent instead of keeping the previous one on stage', async () => {
+    arm({ sessionsFail: true })
+    const { w, router } = await boot('/workspace/c/t1')
+    w.findComponent({ name: 'PortalSidebar' }).vm.$emit('open-agent', 'sage')
+    await flushPromises(); await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/workspace/a/sage')
+    expect(conversation(w).props('agent').name).toBe('sage')
+    expect(conversation(w).props('newChat')).toBe(true)
+  })
+})
+
 describe('#3140 — a refused agent page offers no retry', () => {
   // The band and the details panel read `denied` from this composable.
   function harness(status) {

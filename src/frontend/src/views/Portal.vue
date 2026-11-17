@@ -3137,7 +3137,7 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
 // thread list: a roster-only wake would mint a chat against an empty list,
 // and the later length change would treat that landing as already done.
 watch(
-  [activeAgentPageName, () => threads.value.length, () => store.rosterLoaded],
+  [activeAgentPageName, () => threads.value.length, () => store.rosterLoaded, () => store.sessionsFailed],
   ([name], [prevName]) => {
   if (!name || !store.isClientSignedIn) return
   // Wait for the roster verdict. Landing before it means `activeAgent` cannot
@@ -3151,7 +3151,9 @@ watch(
     unreachableAgent.value = name
     return
   }
-  if (!threadsLoaded.value) return
+  // A list that FAILED is settled too: nothing more is coming, and waiting would
+  // leave the stage on the previous agent under the new URL. Land as before.
+  if (!threadsLoaded.value && !store.sessionsFailed) return
   // ent#784: the landing no longer navigates away, so — unlike every earlier
   // version of this watcher — it can re-fire with the route unchanged, once per
   // thread-list refresh, for as long as the person stays on this URL. The
