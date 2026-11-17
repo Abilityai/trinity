@@ -275,6 +275,10 @@ _tokens = st.one_of(
     .map(lambda t: "sk-" + t[0] + t[1]),
     *[_tok(p, _alnum, 36, 44) for p in ("ghp_", "gho_", "ghs_", "ghr_")],
     _tok("github_pat_", _alnum + "_", 22, 40),
+    # trinity-enterprise#1277: installation tokens are `ghs_<appid>_<JWT>`.
+    st.tuples(st.integers(1, 9_999_999),
+              st.lists(st.text(alphabet=_alnum + "_-", min_size=12, max_size=40), min_size=3, max_size=3))
+    .map(lambda t: f"ghs_{t[0]}_" + ".".join(t[1])),
     *[_tok(p, _alnum + "-", 1, 30) for p in ("xoxb-", "xoxp-", "xoxa-")],
     _tok("AKIA", _UP, 16, 16),
     _tok("trinity_mcp_", _alnum, 16, 30),
