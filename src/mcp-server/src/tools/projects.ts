@@ -130,7 +130,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     return JSON.stringify(
       {
         success: false,
-        error: known ? "No project with this id that you are working on." : (code ? message : explain(status, code, detailIsString)),
+        error: known ? "No project with this id that you are working on." : (code && !(status === 403 && code === "agent_key_required") ? message : explain(status, code, detailIsString)),
         ...(code ? { code } : {}),
         ...(known ? { not_found: true } : {}),
       },
