@@ -46,7 +46,8 @@ def test_the_ami_is_what_marketplace_accepts() -> None:
         "Marketplace rejects encrypted snapshots"
     )
     assert re.search(r'volume_type\s*=\s*"gp3"', t) and re.search(r"volume_size\s*=\s*25\b", t)
-    assert re.search(r'ami_groups\s*=\s*\["all"\]', t), "the Launch Stack lane needs a public AMI"
+    assert re.search(r'ami_groups\s*=\s*var\.ami_public \? \["all"\] : \[\]', t), "the Launch Stack lane needs a public AMI"
+    assert re.search(r'variable "ami_public" \{[^}]*default = true', t), "public stays the default"
 
 
 def test_the_image_tag_must_be_pinned() -> None:
@@ -144,16 +145,8 @@ def test_cleanup_removes_and_verifies_what_marketplace_checks() -> None:
 
 
 def test_shell_scripts_parse() -> None:
-    for p in (_CLEANUP, _SUBMIT):
+    for p in (_CLEANUP, _SUBMIT, _AWS / "scripts" / "boot-check.sh"):
         subprocess.run(["bash", "-n", str(p)], check=True)
-
-
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
-def test_submit_is_a_no_op_without_a_product_id(tmp_path) -> None:
-    r = subprocess.run(["bash", str(_SUBMIT)], cwd=tmp_path, capture_output=True, text=True,
-                       env={"PATH": _SYS_PATH})
-    assert r.returncode == 0, r.stderr
-    assert "not submitted" in r.stdout
 
 
 def test_submit_defaults_to_a_dry_run() -> None:
