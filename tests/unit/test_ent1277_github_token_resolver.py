@@ -162,6 +162,16 @@ def test_app_credentials_round_trip_encrypted_with_no_env_leg(monkeypatch):
     assert ss.get_stored_secret_setting(KEY) == '{"private_key": "pem"}'
 
 
+def test_stored_secret_read_refuses_a_key_that_is_not_a_secret_setting():
+    """The read lazily migrates a legacy cleartext row, so it must not be
+    reachable for an ordinary setting."""
+    db.set_setting("some_ordinary_setting", "plain")
+    with pytest.raises(ValueError):
+        ss.get_stored_secret_setting("some_ordinary_setting")
+    assert db.get_setting_value("some_ordinary_setting", None) == "plain"
+    assert db.get_setting_value(encrypted_key_for("some_ordinary_setting"), None) is None
+
+
 def test_app_credentials_are_refused_in_cleartext():
     with pytest.raises(SecretSettingWriteError):
         db.set_setting(KEY, "pem")

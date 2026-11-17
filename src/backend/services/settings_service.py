@@ -1143,6 +1143,10 @@ async def resolve_github_token(repo: str,
     Raises ``github_token_provider.GithubTokenUnavailable`` when the provider
     covers ``repo`` and cannot produce a token. The platform PAT is not used
     as a fallback in that case.
+
+    Caller contract: this function does NO per-caller authorization. The call
+    site must already have established that the caller may act on ``repo``.
+    ``permissions`` is handed to the provider as given, unvalidated.
     """
     from services import github_token_provider
 
@@ -1209,7 +1213,16 @@ def clear_secret_setting(key: str) -> bool:
 
 
 def get_stored_secret_setting(key: str) -> str:
-    """A credential-bearing setting's decrypted value from the DB, '' if absent. No env leg."""
+    """A credential-bearing setting's decrypted value from the DB, '' if absent. No env leg.
+
+    Only for keys in ``SECRET_SETTING_KEYS``: the read lazily migrates a legacy
+    cleartext row to ``<key>_encrypted``, which must never happen to an ordinary
+    setting.
+    """
+    from services.secret_settings import SECRET_SETTING_KEYS
+
+    if key not in SECRET_SETTING_KEYS:
+        raise ValueError(f"{key!r} is not a credential-bearing setting")
     return settings_service._stored_secret_setting(key)
 
 
