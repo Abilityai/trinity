@@ -1125,6 +1125,40 @@ def resolve_github_pat_candidates(agent_name: Optional[str] = None,
     return ladder
 
 
+async def resolve_github_token(repo: str,
+                               agent_name: Optional[str] = None,
+                               owner_id: Optional[int] = None,
+                               permissions: Optional[dict] = None) -> tuple:
+    """Resolve a GitHub credential for ONE operation on ``repo`` (trinity-enterprise#1277).
+
+    Returns ``(token, tier, expires_at)``. Order: per-agent PAT, per-user PAT,
+    the registered repo-token provider (tier ``"app"``), platform PAT. PAT
+    tiers carry ``expires_at`` None.
+
+    An ``"app"`` token expires within the hour. Use it for the operation at
+    hand; never persist it or put it in a container environment. That is why
+    this is separate from ``resolve_github_pat``, whose answer the create path
+    bakes into the container.
+
+    Raises ``github_token_provider.GithubTokenUnavailable`` when the provider
+    covers ``repo`` and cannot produce a token. The platform PAT is not used
+    as a fallback in that case.
+
+    Caller contract: this function does NO per-caller authorization. The call
+    site must already have established that the caller may act on ``repo``.
+    ``permissions`` is handed to the provider as given, unvalidated.
+    """
+    from services import github_token_provider
+
+    pat, tier = resolve_github_pat(agent_name=agent_name, owner_id=owner_id)
+    if tier in ("per_agent", "per_user"):
+        return pat, tier, None
+    scoped = await github_token_provider.token_for_repo(repo, permissions)
+    if scoped:
+        return scoped.token, "app", scoped.expires_at
+    return pat, tier, None
+
+
 def get_google_api_key() -> str:
     """Get Google API key from settings, fallback to env var."""
     return settings_service.get_google_api_key()
@@ -1176,6 +1210,20 @@ def set_secret_setting(key: str, value: str) -> None:
 def clear_secret_setting(key: str) -> bool:
     """Remove a credential-bearing setting (encrypted + any legacy row)."""
     return settings_service.clear_secret_setting(key)
+
+
+def get_stored_secret_setting(key: str) -> str:
+    """A credential-bearing setting's decrypted value from the DB, '' if absent. No env leg.
+
+    Only for keys in ``SECRET_SETTING_KEYS``: the read lazily migrates a legacy
+    cleartext row to ``<key>_encrypted``, which must never happen to an ordinary
+    setting.
+    """
+    from services.secret_settings import SECRET_SETTING_KEYS
+
+    if key not in SECRET_SETTING_KEYS:
+        raise ValueError(f"{key!r} is not a credential-bearing setting")
+    return settings_service._stored_secret_setting(key)
 
 
 def has_secret_setting(key: str) -> bool:
