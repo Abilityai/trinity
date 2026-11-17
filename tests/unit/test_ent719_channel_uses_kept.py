@@ -305,7 +305,7 @@ def test_an_unvouched_loopback_jwt_cannot_set_consent(world):
     """A real, signed loopback token with no source agent, through the real
     `get_current_user`: the entry fence refuses it here too, and the row does
     not move."""
-    from jose import jwt
+    import jwt
 
     before = world.stored()
     token = jwt.encode(

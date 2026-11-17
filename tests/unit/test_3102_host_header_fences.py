@@ -126,7 +126,7 @@ def test_portal_delegate_fence_reads_routed_path(mcp_key):
 def test_event_loopback_fence_reads_routed_path(monkeypatch):
     import dependencies as deps
     from config import ALGORITHM, SECRET_KEY
-    from jose import jwt
+    import jwt
 
     monkeypatch.setattr(deps.db, "get_user_by_username", lambda *_a, **_k: {
         "id": 1, "username": "admin", "email": "admin@example.com", "role": "admin",

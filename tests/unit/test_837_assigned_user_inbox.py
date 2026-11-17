@@ -134,7 +134,7 @@ def _principal(username, monkeypatch):
     import client_portal.db as portal_db
     from client_portal.portal_auth import get_portal_principal
     from config import ALGORITHM, SECRET_KEY
-    from jose import jwt
+    import jwt
     from starlette.requests import Request
     from starlette.responses import Response
 

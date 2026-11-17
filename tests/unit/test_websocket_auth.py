@@ -46,7 +46,7 @@ class MockWebSocket:
 
 def create_valid_token(secret_key, username="admin"):
     """Create a valid JWT token for testing."""
-    from jose import jwt
+    import jwt
     from datetime import datetime, timedelta
     return jwt.encode(
         {"sub": username, "exp": datetime.utcnow() + timedelta(hours=1)},
@@ -57,7 +57,7 @@ def create_valid_token(secret_key, username="admin"):
 
 def create_expired_token(secret_key, username="admin"):
     """Create an expired JWT token for testing."""
-    from jose import jwt
+    import jwt
     from datetime import datetime, timedelta
     return jwt.encode(
         {"sub": username, "exp": datetime.utcnow() - timedelta(hours=1)},
@@ -73,7 +73,7 @@ async def websocket_auth_check(websocket, token, secret_key, algorithm="HS256"):
     Returns (authenticated: bool, username: str | None).
     Side effect: calls websocket.close() on rejection.
     """
-    from jose import JWTError, jwt
+    import jwt
 
     if not token:
         await websocket.close(code=4001, reason="Authentication required: provide ?token=<jwt>")
@@ -85,7 +85,7 @@ async def websocket_auth_check(websocket, token, secret_key, algorithm="HS256"):
         if not username:
             await websocket.close(code=4001, reason="Invalid token: missing subject")
             return False, None
-    except JWTError:
+    except jwt.PyJWTError:
         await websocket.close(code=4001, reason="Invalid authentication token")
         return False, None
 
@@ -156,7 +156,7 @@ class TestWebSocketAuthCheck:
 
     def test_token_missing_sub_rejects_before_accept(self):
         """Token without 'sub' claim → close with 4001, never accept."""
-        from jose import jwt
+        import jwt
         from datetime import datetime, timedelta
         ws = MockWebSocket()
         token = jwt.encode(

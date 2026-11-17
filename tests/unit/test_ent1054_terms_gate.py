@@ -85,7 +85,7 @@ def jwt_as(monkeypatch):
     """A real platform JWT whose `sub` resolves to a user holding `role`."""
     import database
     from config import ALGORITHM, SECRET_KEY
-    from jose import jwt
+    import jwt
 
     def make(role, username="member", interactive=True):
         monkeypatch.setattr(
@@ -435,7 +435,7 @@ class TestTheInteractiveClaim:
     @staticmethod
     def _claims(token):
         from config import ALGORITHM, SECRET_KEY
-        from jose import jwt
+        import jwt
 
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
 
@@ -582,7 +582,7 @@ class TestOneConsult:
         import database
         from config import ALGORITHM, SECRET_KEY
         from fastapi import HTTPException
-        from jose import jwt
+        import jwt
         import dependencies as deps
 
         p = provider(REQUIRED)

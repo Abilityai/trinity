@@ -1,0 +1,139 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-17",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/ent1124-pyjwt",
+  "merge_base": "73d75e881",
+  "issue": "abilityai/trinity-enterprise#1124 (python-jose part)",
+  "counts_as_full_run": false,
+  "docker_available": true,
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    7,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_skipped_no_overlap": [
+    4,
+    5,
+    6,
+    8
+  ],
+  "stack_cve_quicklist": [
+    {
+      "component": "all rows",
+      "verdict": "no overlap",
+      "note": "no image base, lockfile, workflow, compose or runtime-CLI change; the only dependency touched is pyjwt 2.14.0 -> 2.15.1 (relocated beside the backend's own dependencies), audited in P3"
+    }
+  ],
+  "attack_surface": {
+    "endpoints_added": 0,
+    "mcp_tools_added": 0,
+    "websocket_channels_added": 0,
+    "agent_context_ingress_added": 0,
+    "behaviour_change": "JWT library behind 10 decode sites and 2 mint sites: python-jose -> PyJWT 2.15.1 (was 2.14.0 in the image); catch class JWTError -> PyJWTError; two unverified reads spelled options={verify_signature: False}; algorithms=[ALGORITHM] unchanged everywhere; tightenings only (exp==now and future iat refused; None token and nested header now caught DecodeError instead of escaping AttributeError/RecursionError)"
+  },
+  "findings": [],
+  "info": [
+    {
+      "category": "supply-chain/pyjwt",
+      "title": "pyjwt bumped 2.14.0 -> 2.15.1 in this diff; 2.15.1 has no OSV advisory",
+      "ids_closed": [
+        "CVE-2026-101918",
+        "GHSA-42vr-xj54-vc7v",
+        "CVE-2026-102275",
+        "GHSA-x33g-cr3x-6449"
+      ],
+      "reachability_before": "neither reachable: CVE-2026-101918 needed an unverified decode of attacker JSON (the only such site, routers/users.py:210, is wrapped in except Exception); CVE-2026-102275 needed an OKP JWK key object",
+      "re_measured": "behaviour deltas identical on 2.15.1; nested-payload unverified read now a caught DecodeError"
+    },
+    {
+      "category": "supply-chain/python-jose-3.3.0",
+      "title": "python-jose stays installed (3 CVEs at 3.3.0), no longer imported by OSS code",
+      "reachability": "CVE-2024-33663 class needs an asymmetric public key as the HMAC key and unrestricted algorithms; the OSS backend pinned algorithms=[HS256] with a shared hex secret before and after. Remaining importer is a private module, out of this diff.",
+      "recommendation": "drop the image pin and the test-requirements line when the private module moves"
+    }
+  ],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "OSV over the installed tree of the built backend image — not run (per-pin OSV covers the two libraries this diff touches)",
+    "gitleaks over full history / zizmor — not run in diff mode (P2 grep over the diff ran; P4 has no overlap)",
+    "the private module's decode path and test — private repo, not in this diff"
+  ],
+  "supply_chain_summary": {
+    "scanner": "OSV API per pin (api.osv.dev/v1/query, 2026-11-17)",
+    "pins_queried": [
+      "pyjwt==2.14.0",
+      "pyjwt==2.15.1",
+      "python-jose==3.3.0",
+      "python-jose==3.5.0"
+    ],
+    "pyjwt_2.14.0": {
+      "advisories": 2,
+      "fixed_in": "2.15.0",
+      "reachable": false
+    },
+    "python_jose_3.3.0": {
+      "advisory_ids": 7,
+      "distinct_cves": 3,
+      "imported_by_oss_code": false
+    },
+    "python_jose_3.5.0": {
+      "advisory_ids": 2,
+      "distinct_cves": 1,
+      "fixed_version": null
+    },
+    "dockerfile_floors_introduced": 0,
+    "lockfile_change": false,
+    "pyjwt_2.15.1": {
+      "advisories": 0,
+      "pinned_by_this_diff": true
+    }
+  },
+  "guard_tests": {
+    "new": "tests/unit/test_ent1124_pyjwt_swap.py (90 pass after the swap; 10 red on the pre-swap tree)",
+    "existing_in_full_suite": [
+      "test_293_admin_gate_rejects_agent_keys",
+      "test_1310_auth_wiring",
+      "test_2996_human_only_routes",
+      "test_186_enumeration_uniformity",
+      "test_ent435_settings_sink_guard",
+      "test_ent679_payments_pin_parity"
+    ]
+  },
+  "filter_stats": {
+    "candidates": 3,
+    "excluded_dos": 1,
+    "excluded_unreachable_dependency_cve": 2,
+    "demoted_to_info": 2,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior_reports_on_surface": 2,
+    "resolved": 0,
+    "persistent": 0,
+    "new": 0,
+    "note": "cso-2026-09-29/30 Finding 8 judged python-jose 3.3.0 not reachable with HS256 symmetric decode and cheap to fix; this diff is that fix for the OSS half, with the reachability verdict confirmed and the OSV alias dedupe recorded"
+  },
+  "image_checks": {
+    "pth_census": "0 .pth files in site-packages of a backend image built from this branch before the pin bump (2026-11-17); no rebuild after the bump (stack-level verification left to CI)",
+    "installed": {
+      "pyjwt": "2.14.0",
+      "python-jose": "3.3.0"
+    }
+  }
+}

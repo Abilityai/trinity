@@ -230,7 +230,7 @@ def test_unvouched_loopback_is_refused_by_the_entry_fence(whitelist_db, monkeypa
     route but the subscriber-task dispatch. This pins that layer on THIS route.
     """
     from config import ALGORITHM, SECRET_KEY
-    from jose import jwt
+    import jwt
 
     # Only reached if the fence let the token through: an admin account that is
     # not suspended and a token that is not revoked, so a pass would be a 200,

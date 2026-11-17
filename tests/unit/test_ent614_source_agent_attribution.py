@@ -605,7 +605,7 @@ class TestLoopbackToken:
     def test_token_carries_scope_and_vouched_source_and_round_trips(self):
         from config import ALGORITHM, SECRET_KEY
         from dependencies import EVENT_LOOPBACK_SCOPE
-        from jose import jwt
+        import jwt
         from services import event_dispatch_service as eds
 
         tok = eds._get_internal_token("worker-a")
@@ -621,7 +621,7 @@ class TestLoopbackToken:
 
     def test_token_without_a_source_vouches_nothing(self):
         from config import ALGORITHM, SECRET_KEY
-        from jose import jwt
+        import jwt
         from services import event_dispatch_service as eds
 
         tok = eds._get_internal_token(None)
@@ -646,7 +646,7 @@ class TestLoopbackToken:
         from datetime import datetime, timedelta
 
         from config import ALGORITHM, SECRET_KEY
-        from jose import jwt
+        import jwt
 
         tok = jwt.encode(
             {"sub": "admin", "exp": datetime.utcnow() + timedelta(minutes=5)},
@@ -661,7 +661,7 @@ class TestLoopbackToken:
         from datetime import datetime, timedelta
 
         from config import ALGORITHM, SECRET_KEY
-        from jose import jwt
+        import jwt
 
         tok = jwt.encode(
             {"sub": "admin", "source_agent": "worker-a",
@@ -706,7 +706,7 @@ class TestTriggerSubscription:
     def test_agent_originated_event_carries_header_and_claim(self):
         from config import ALGORITHM, SECRET_KEY
         from dependencies import EVENT_LOOPBACK_SCOPE
-        from jose import jwt
+        import jwt
 
         headers = _dispatch(agent_originated=True)
         assert headers["X-Source-Agent"] == "worker-a"
@@ -718,7 +718,7 @@ class TestTriggerSubscription:
     def test_human_originated_event_carries_neither(self):
         from config import ALGORITHM, SECRET_KEY
         from dependencies import EVENT_LOOPBACK_SCOPE
-        from jose import jwt
+        import jwt
 
         headers = _dispatch(agent_originated=False)
         assert "X-Source-Agent" not in headers

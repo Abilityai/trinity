@@ -160,7 +160,7 @@ def test_challenge_token_is_challenge_scoped_not_a_session(client, provider):
     if the challenge token ever became session-usable, the fence above it would
     be the thing that failed.
     """
-    from jose import jwt
+    import jwt
     from config import SECRET_KEY, ALGORITHM
     from dependencies import MFA_CHALLENGE_SCOPE, decode_token
 

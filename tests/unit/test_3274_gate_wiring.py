@@ -58,7 +58,7 @@ def test_an_ordinary_session_token_is_a_person():
     from datetime import datetime, timedelta
 
     from config import ALGORITHM, SECRET_KEY
-    from jose import jwt
+    import jwt
     from services.skill_gate_service import requester_from_principal
 
     tok = jwt.encode({"sub": "admin", "exp": datetime.utcnow() + timedelta(minutes=5)},

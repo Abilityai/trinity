@@ -41,7 +41,7 @@ def _make_user(db, username, role, *, name=None):
 @pytest.fixture
 def world(monkeypatch):
     from fastapi import FastAPI
-    from jose import jwt
+    import jwt
 
     from config import ALGORITHM, SECRET_KEY
     from database import db

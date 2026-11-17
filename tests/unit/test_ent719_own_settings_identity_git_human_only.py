@@ -826,7 +826,7 @@ def test_a_real_unvouched_loopback_jwt_is_refused_by_the_entry_fence(world, name
     """A signed loopback JWT with no source agent, through real authentication.
     The route primitive is the second layer; this pins the first on each route."""
     from config import ALGORITHM, SECRET_KEY
-    from jose import jwt
+    import jwt
 
     spec, observe, before = _armed(world, name)
     token = jwt.encode(

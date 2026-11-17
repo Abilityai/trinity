@@ -63,7 +63,7 @@ def jwt_as(monkeypatch):
     """A real platform JWT whose `sub` resolves to a user holding `role`."""
     import database
     from config import ALGORITHM, SECRET_KEY
-    from jose import jwt
+    import jwt
 
     def make(role, username="member"):
         monkeypatch.setattr(

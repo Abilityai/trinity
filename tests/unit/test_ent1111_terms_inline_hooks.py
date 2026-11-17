@@ -82,7 +82,7 @@ def jwt_as(monkeypatch):
     """A real platform JWT whose `sub` resolves to `row`."""
     import database
     from config import ALGORITHM, SECRET_KEY
-    from jose import jwt
+    import jwt
 
     def make(row):
         monkeypatch.setattr(

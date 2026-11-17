@@ -281,7 +281,7 @@ class TestThePrincipalTheBackendResolves:
         from config import ALGORITHM, SECRET_KEY
         from database import db
         from dependencies import PORTAL_MINT_OTP, create_portal_session_token
-        from jose import jwt
+        import jwt
 
         monkeypatch.setattr(portal_db, "is_client_blocked", lambda *_a, **_k: False)
         email = f"member-{uuid.uuid4().hex[:8]}@example.com"

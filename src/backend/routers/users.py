@@ -204,10 +204,12 @@ async def change_my_password(
     revokes the ones this person minted, otherwise the response says how many
     still work. Audited either way; no password reaches the audit row.
     """
-    from jose import jwt
+    import jwt
 
+    # The auth dependency already verified this bearer; only its `mode` claim is
+    # copied into the fresh token, so the read is deliberately unverified.
     try:
-        mode = jwt.get_unverified_claims(token).get("mode")
+        mode = jwt.decode(token, options={"verify_signature": False}).get("mode")
     except Exception:
         mode = None
     audit = dict(

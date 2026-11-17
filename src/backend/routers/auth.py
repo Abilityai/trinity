@@ -9,7 +9,8 @@ from fastapi import APIRouter, Depends, Form, HTTPException, status, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
-from jose import JWTError, jwt
+import jwt
+from jwt import PyJWTError
 import redis
 from pydantic import ValidationError
 
@@ -543,7 +544,7 @@ async def validate_token(request: Request):
                 headers={"WWW-Authenticate": "Bearer"}
             )
         return {"status": "valid", "user": username}
-    except JWTError:
+    except PyJWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
@@ -568,7 +569,7 @@ async def logout(
     """
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
+    except PyJWTError:
         # Not a JWT (e.g. an MCP API key) — nothing to revoke by jti.
         return {"status": "logged_out"}
     revoke_token_jti(payload.get("jti"), payload.get("exp"))

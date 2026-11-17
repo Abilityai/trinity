@@ -437,7 +437,7 @@ def test_2973_vouched_loopback_without_a_claim_counts_the_emitters_running_rows(
 
 
 def test_2973_a_forged_claim_is_rejected_by_the_signature(client):
-    from jose import jwt
+    import jwt
 
     token = jwt.encode(
         {"sub": "admin", "scope": "event_loopback", "chain_depth": 1}, "not-the-key", algorithm="HS256"

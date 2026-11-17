@@ -9,7 +9,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional, Annotated
 from fastapi import Depends, HTTPException, status, Request, Path
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
+import jwt
+from jwt import PyJWTError
 from passlib.context import CryptContext
 from models import User
 from config import SECRET_KEY, ALGORITHM
@@ -364,7 +365,7 @@ def decode_mfa_challenge(token: str) -> Optional[dict]:
     resolve the half-authenticated identity before minting the real token."""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
+    except PyJWTError:
         return None
     if payload.get("scope") != MFA_CHALLENGE_SCOPE:
         return None
@@ -532,7 +533,7 @@ def portal_session_minted_by(token: str) -> Optional[str]:
     """
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
+    except PyJWTError:
         return None
     if payload.get("scope") != PORTAL_SESSION_SCOPE:
         return None
@@ -546,7 +547,7 @@ def portal_session_is_interactive(token: str) -> bool:
     token `decode_portal_session` accepted. False for a token without it."""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
+    except PyJWTError:
         return False
     return payload.get("scope") == PORTAL_SESSION_SCOPE and payload.get("interactive") is True
 
@@ -557,7 +558,7 @@ def decode_portal_session(token: str) -> Optional[str]:
     by the entitled portal endpoints to resolve the client identity."""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
+    except PyJWTError:
         return None
     if payload.get("scope") != PORTAL_SESSION_SCOPE:
         return None
@@ -620,7 +621,7 @@ def portal_session_needs_rotation(token: str) -> bool:
 
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
+    except PyJWTError:
         return False
     if payload.get("scope") != PORTAL_SESSION_SCOPE:
         return False
@@ -663,7 +664,7 @@ def renew_portal_session(token: str) -> Optional[str]:
 
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
+    except PyJWTError:
         return None
     if payload.get("scope") != PORTAL_SESSION_SCOPE:
         return None
@@ -793,7 +794,7 @@ def decode_token(token: str) -> Optional[dict]:
             "exp": payload.get("exp"),
             "mode": payload.get("mode")
         }
-    except JWTError:
+    except PyJWTError:
         return None
 
 
@@ -1012,7 +1013,7 @@ async def _resolve_platform_credential(request: Request, token: str) -> User:
             # trinity-enterprise#1107: the session the SPA declared at sign-in.
             interactive_session=bool(payload.get("interactive")) and not loopback,
         )
-    except JWTError:
+    except PyJWTError:
         # JWT failed, try MCP API key
         pass
 

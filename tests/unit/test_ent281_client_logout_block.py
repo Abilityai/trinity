@@ -146,7 +146,7 @@ def test_a_token_with_no_iat_is_treated_as_revoked(portal_db, fake_redis):
         ALGORITHM, SECRET_KEY, PORTAL_SESSION_SCOPE, decode_portal_session,
         revoke_portal_sessions_for_email,
     )
-    from jose import jwt
+    import jwt
 
     legacy = jwt.encode(
         {
