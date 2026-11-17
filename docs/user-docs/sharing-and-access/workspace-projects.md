@@ -70,6 +70,8 @@ The Tasks tab has two views of the same tasks, **List** and **Board**; it opens 
 
 **Board** shows one column per step a task goes through: **Active**, **Awaiting verification** and **Done**, each with its count. A task that is blocked, needs a decision or is paused stays in **Active** and carries a badge saying so; the column header counts them. A card shows the task's id and title, **P1** when it is one, who it is assigned to (a person, an agent or both), who created it and how long ago it last changed. Opening a card's title opens the same task the list opens.
 
+![A project's Tasks tab in Board view: Active, Awaiting verification and Done columns, with a blocked task and Confirm buttons on finished work](../../screenshots/workspace-project-board.webp)
+
 - **Move a card** by dragging it to another column. With a keyboard, focus the card's title, press **←** or **→** to pick a column, then **Enter** to move it there (**Esc** cancels). The card shows **Saving…** in its new column until the server has it; if the move is refused, the card goes back and a message says why.
 - **Into Done.** From **Awaiting verification**, a move to **Done** is your confirmation, the same as **Confirm** on the card. From **Active** it asks first and needs a short reason — where the result is, or why the task is no longer needed — because the task never waited for verification and nothing has checked the work. The reason is added to the task's log, where the agents on the project read it.
 - **A done task** can only be moved back to **Active**, which reopens it.
@@ -125,6 +127,8 @@ The **Steward** card on the Overview shows who it is, the project's health as a 
 
 A goal and a steward do not start a project: a person does. A new project begins **Not started**.
 
+![A running project: Stop project and the Mode menu set to Propose in the header, the Continue card, Where it stands, and the Steward card showing when Trinity last woke the steward](../../screenshots/workspace-project-mode-steward.webp)
+
 | State | What it means for agents |
 |-------|--------------------------|
 | **Not started** | No task's run starts. The steward may write the plan (tasks, notes, the log) before you press **Start project**; other agents' turns with no person in them can't write to it. |
@@ -157,6 +161,8 @@ Lowering the mode to Track withdraws pending proposals; going from Auto to Propo
 
 Open a task and use **Run this task** to start its work from the project itself:
 
+![A task open on Run this task: the agent picker, Start, and the preview of what the agent is given — the objective, the definition of done, the context files and the recent task log](../../screenshots/workspace-project-task-run.webp)
+
 - **Pick the agent.** You're offered the agents working on the project that you can use. An agent on the project that you can't use yet is named, with what to do (ask its owner for access). With none at all, add one in **Members & access** first.
 - **Preview what it gets.** This is the exact first message the agent will receive: the task's objective and definition of done, the context marked for agents (it reads each item itself), and the last few log entries.
 - **Start** opens a chat with that agent, tied to the task. The first message is sent once, even if you press Start twice. Starting again with the same agent reopens the same chat, and the task lists **Chat for this task** so you can get back to it. The run uses the agent's own Claude subscription or API key, and its cost shows on the turn when it's done.
@@ -164,6 +170,12 @@ Open a task and use **Run this task** to start its work from the project itself:
 Only members and the creator can start a run. Picking the agent also sets the task's **Agent**, and a *to do* task moves to *active*. A task for a person can't be started.
 
 On a project that is not started, stopped or done, **Run this task** says why in place of **Start**; the task's chats stay open. A task with a run under way names it — **Run R-… on {agent}: Running** — and **Start** is refused with a run already under way. A refused **Start** always says why, by name.
+
+### Runs
+
+The **Runs** tab lists the runs behind the project across its agents. The cards at the top give the total cost and the cost and run count for each agent. Each row shows a run's status, agent, model, cost, how long it ran, when, and the task it belongs to. Filter by **Agent**, **Status** and **Window**. Runs are kept for 90 days.
+
+![A project's Runs tab: the total cost and a card per agent, then each run with its status, agent, model, cost, run time and task](../../screenshots/workspace-project-runs.webp)
 
 ### Files, reports and decisions
 
