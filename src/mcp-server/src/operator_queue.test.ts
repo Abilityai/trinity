@@ -981,6 +981,11 @@ describe("trinity-enterprise#1066 ask_for_credential", () => {
     assert.match(d, /never repeat/i);
     assert.match(d, /no_person/);
     assert.match(d, /role_cannot_open_agent/);
+    // #4599: the platform picks the reader (the primary, else the owner); the
+    // text used to say the ask reaches "the person of the current chat".
+    assert.match(d, /your primary person, else your owner/);
+    assert.doesNotMatch(d, /person of the current chat/);
+    assert.match(d, /could not check/);
     assert.match(d, /get_my_ask/);
     assert.doesNotMatch(d, /mcp__trinity__/);
   });

@@ -16,12 +16,12 @@ inside the package names this module.
 import json
 import logging
 import re
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence, Tuple
 
 from services import operator_queue_service as _oq
 from utils.helpers import parse_iso_timestamp, to_utc_iso, utc_now_iso
 
-from . import rows
+from . import deps, rows
 
 logger = logging.getLogger("services.operator_queue_service")
 
@@ -59,21 +59,6 @@ def _scalar_text(value):
     if isinstance(value, (bool, int, float)) and value:
         return str(value)
     return value
-
-
-def _primary_addressee(agent_name: str, email: str) -> Optional[str]:
-    """``email`` if it is the ONE person who fills ``agent_name``'s primary
-    role, else None (trinity-enterprise#1066). Fails CLOSED and never raises,
-    like `_validated_addressee`."""
-    try:
-        from services import role_addressing
-
-        single = role_addressing.resolve(agent_name, "primary").single
-    except Exception:  # noqa: BLE001 — unresolvable → unaddressed, per #1632
-        logger.warning("[OperatorQueue] primary of %s unresolvable; credential item "
-                       "left unaddressed (ent#1066)", agent_name, exc_info=True)
-        return None
-    return email if single and single.strip().lower() == email else None
 
 
 def _validated_addressee(agent_name: str, raw) -> Optional[str]:
@@ -119,7 +104,8 @@ def _validated_addressee(agent_name: str, raw) -> Optional[str]:
     return None
 
 
-def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
+def _clamp_ingested_item(req: dict, agent_name: str = "", *,
+                         credential: Optional[Tuple[str, dict]] = None) -> dict:
     """#1632: total field-hygiene clamp for an agent-authored queue item.
 
     Called INSIDE the create try/except so any failure is quarantined by #1525
@@ -154,6 +140,12 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     - addressed_to_email: resolved, never trusted (ent#364) — see above.
     - context.workspace_session_id: agent value stripped, platform value written
       for an addressed ask (ent#429) — see above.
+    - a `credential` entry (#4599): the addressee and the context are the
+      PLATFORM's — `credential`, the `(reader, stored context)` the poller got
+      from `CredentialCycle.judge` — and the entry's own `addressed_to_email`
+      is ignored. The poller creates such a row only with a reader; called
+      without one, the entry is left unaddressed (fail closed), never handed
+      to the address the agent wrote.
     """
     out = dict(req)
 
@@ -174,12 +166,17 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     # Resolved BEFORE the context block below, not after, because ent#429 writes
     # the addressee's thread id INTO context — doing it afterwards would add
     # bytes the size cap had already signed off on.
-    out["addressed_to_email"] = _validated_addressee(agent_name, out.get("addressed_to_email"))
-    if out.get("type") == "credential" and out["addressed_to_email"]:
-        # trinity-enterprise#1066: this channel never reaches `_validated_ask`,
-        # which holds the kind to primary on the platform door. A secret field
-        # opens for the agent's primary person only; anyone else → unaddressed.
-        out["addressed_to_email"] = _primary_addressee(agent_name, out["addressed_to_email"])
+    if out.get("type") == "credential":
+        # #4599: a secret field has ONE door, so its reader is the one the
+        # platform's chain picks (the primary, else the owner), never the
+        # address the agent wrote. The shared-roster rule below would refuse
+        # every owner, and the agent's pick could be anyone on the roster.
+        reader, stored_context = credential if credential else (None, None)
+        out["addressed_to_email"] = reader
+        if stored_context is not None:
+            out["context"] = stored_context
+    else:
+        out["addressed_to_email"] = _validated_addressee(agent_name, out.get("addressed_to_email"))
 
     context = out.get("context")
     if not isinstance(context, dict):
@@ -400,15 +397,37 @@ def changed_fields(row: dict, req: dict) -> list:
     """Which content fields the agent rewrote since ingest. `addressee` counts
     only when the row resolved one: the ingest value is an authorization
     decision against the roster (ent#364), so an addressee the roster refused
-    is not a rewrite — a re-address is ent#619's supersede vocabulary."""
+    is not a rewrite — a re-address is ent#619's supersede vocabulary. Never
+    for a `credential` row, whose addressee is the platform's (#4599)."""
     a, b = _row_content(row), _entry_content(req)
+    # #4599: on a credential row the addressee and the stored destination are
+    # the platform's own, written at ingest (the reader chain; the validated,
+    # normalised destination). Neither is the entry's, so neither is a rewrite:
+    # compared, the row turned `changed` one cycle after ingest and the secret
+    # field refused it for good (`item_diverged` has no acknowledge path
+    # there). An agent that wants another destination raises the ask again.
+    credential = a["type"] == "credential"
+    if credential:
+        a["context"] = _comparable_context(_sans_destination(row.get("context")))
+        b["context"] = _comparable_context(_sans_destination(req.get("context")))
     out = []
     for f in _CONTENT_FIELDS:
-        if f == "addressee" and not a["addressee"]:
+        if f == "addressee" and (credential or not a["addressee"]):
             continue
         if a[f] != b[f]:
             out.append(f)
     return out
+
+
+_DESTINATION_KEY = "credential_destination"  # services.credential_destination.CONTEXT_KEY
+
+
+def _sans_destination(ctx):
+    """`ctx` without a credential ask's destination (#4599), for the
+    comparison in `changed_fields`. Anything but an object is returned as is."""
+    if not isinstance(ctx, dict):
+        return ctx
+    return {k: v for k, v in ctx.items() if k != _DESTINATION_KEY}
 
 
 def _well_formed_queue(data) -> bool:
@@ -431,7 +450,26 @@ HOLD_INVALID_ID = "invalid_id"
 # self-clearing `queue_full`/`rate_limited` reason can never hide them.
 HOLD_INVALID_OPTIONS = "invalid_options"
 HOLD_INVALID_TITLE = "invalid_title"
+# #4599: a NEW `credential` entry no row may be created for. The first two are
+# the refusal codes `ask_for_credential` returns for the same state, so an
+# agent reads one vocabulary on both channels: nobody who could fill the ask
+# can open the agent in their Workspace, and no single person to ask. The
+# third covers an entry that fails the kind's own checks (the name, an option
+# list, the destination, an oversize context). `invalid_options` is not reused
+# for it: that is the #3243 cap hold, and its marker carries the option limits.
+HOLD_ROLE_CANNOT_OPEN = "role_cannot_open_agent"
+HOLD_NO_PERSON = "no_person"
+HOLD_INVALID_CREDENTIAL = "invalid_credential"
+CREDENTIAL_HOLDS = (HOLD_ROLE_CANNOT_OPEN, HOLD_NO_PERSON, HOLD_INVALID_CREDENTIAL)
+# Held this cycle with NO marker: the platform could not check who can open
+# the agent. Not the agent's to fix and a marker has no sentence to say so;
+# the entry is read again on the next cycle. Never written to the file.
+HOLD_UNCHECKED = "unchecked"
+# Not judged this cycle: the per-cycle bound on registry reads was reached.
+# The entry waits, unnamed, until the entries the marker does name are fixed.
+HOLD_NOT_JUDGED = "not_judged"
 _HOLD_RANK = {HOLD_INVALID_OPTIONS: 0, HOLD_INVALID_TITLE: 0,
+              HOLD_ROLE_CANNOT_OPEN: 0, HOLD_NO_PERSON: 0, HOLD_INVALID_CREDENTIAL: 0,
               HOLD_INVALID_ID: 1, HOLD_RATE_LIMITED: 2, HOLD_QUEUE_FULL: 3}
 # How many offending ids the marker names per list (ids already `_ID_RE`-valid).
 _MARKER_MAX_IDS = 10
@@ -445,12 +483,14 @@ def _stronger_hold(current: Optional[str], new: str) -> str:
 
 
 def _ingestion_marker(reason: Optional[str], invalid_options: Sequence[str] = (),
-                      invalid_title: Sequence[str] = ()) -> Optional[dict]:
+                      invalid_title: Sequence[str] = (), *,
+                      credential: Optional[Mapping[str, Sequence[str]]] = None) -> Optional[dict]:
     """The marker a held file should carry, or None when nothing is held. `since`
     is stamped when it is written (`_apply_ingestion_marker`). #3243: the ids of
     entries held over the authoring caps, with the limits in force, ride beside
     `reason` — only the agent can fix them, so they are named whatever reason
-    wins."""
+    wins. #4599: so do the ids of held `credential` entries, each list under
+    its hold's name (`CREDENTIAL_HOLDS`)."""
     if reason is None:
         return None
     marker = {"reason": reason, "max_pending": _oq.OPERATOR_QUEUE_MAX_PENDING_PER_AGENT}
@@ -461,7 +501,88 @@ def _ingestion_marker(reason: Optional[str], invalid_options: Sequence[str] = ()
     if invalid_title:
         marker[HOLD_INVALID_TITLE] = list(invalid_title)[:_MARKER_MAX_IDS]
         marker["max_title_chars"] = _oq.OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS
+    for hold in CREDENTIAL_HOLDS:
+        ids = (credential or {}).get(hold)
+        if ids:
+            marker[hold] = list(ids)[:_MARKER_MAX_IDS]
     return marker
+
+
+def is_credential_entry(req: dict) -> bool:
+    """Is this file entry a `credential` ask, read as the clamp will store it?"""
+    return _bounded_type(req.get("type")) == "credential"
+
+
+class CredentialCycle:
+    """One sync cycle's judgement of an agent's NEW `credential` entries
+    (#4599): is this an ask `raise_ask` would file, and for whom?
+
+    The file channel never reaches `raise_ask`, so the checks and the reader
+    chain are run here, through the ask sink's own functions
+    (`deps.ask_service.file_credential_*`), in an order that bounds the work
+    an agent-authored file can cost every 5 seconds: the checks that read only
+    the entry first; the reader ONCE per cycle (it depends on the agent, not
+    on the entry); the destination check, which reads the endpoint registry,
+    last and at most `_MARKER_MAX_IDS` times a cycle.
+
+    `judge` never raises. `held` collects the ids of the entries a marker
+    names, per hold.
+    """
+
+    def __init__(self, agent_name: str):
+        self.agent_name = agent_name
+        self.held: dict = {hold: [] for hold in CREDENTIAL_HOLDS}
+        self._reader: Optional[Tuple[Optional[str], Optional[str]]] = None
+        self._destination_checks = 0
+        # True once an entry was held because the platform could not check:
+        # this cycle cannot say which credential holds stand, so the poller
+        # leaves the file's marker as it is rather than clear a hold that an
+        # outage merely hid.
+        self.unchecked = False
+
+    def _reader_verdict(self) -> Tuple[Optional[str], Optional[str]]:
+        """`(reader, None)` or `(None, hold)`, resolved once per cycle."""
+        if self._reader is None:
+            ask = deps.ask_service
+            try:
+                self._reader = (ask.file_credential_reader(self.agent_name), None)
+            except ask.AskRejected as e:
+                from services.role_addressing import CAUSE_UNCHECKED
+                if getattr(e, "cause", None) == CAUSE_UNCHECKED:
+                    self._reader = (None, HOLD_UNCHECKED)
+                else:
+                    self._reader = (None, HOLD_NO_PERSON if e.code == "no_person"
+                                    else HOLD_ROLE_CANNOT_OPEN)
+            except Exception:  # noqa: BLE001 — a reader nobody could check is no reader
+                logger.warning("[OperatorQueue] could not resolve the reader of a credential "
+                               "entry for %s; held this cycle (#4599)", self.agent_name,
+                               exc_info=True)
+                self._reader = (None, HOLD_UNCHECKED)
+        return self._reader
+
+    def judge(self, req: dict) -> Tuple[Optional[Tuple[str, dict]], Optional[str]]:
+        """`((reader, stored context), None)` for an entry to create, or
+        `(None, hold)` for one to hold."""
+        ask = deps.ask_service
+        try:
+            ask.file_credential_entry_checks(req)
+            reader, hold = self._reader_verdict()
+            if hold:
+                self.unchecked = self.unchecked or hold == HOLD_UNCHECKED
+                return None, hold
+            context = req.get("context")
+            if isinstance(context, dict) and _DESTINATION_KEY in context:
+                if self._destination_checks >= _MARKER_MAX_IDS:
+                    return None, HOLD_NOT_JUDGED
+                self._destination_checks += 1
+            return (reader, ask.file_credential_context(self.agent_name, req)), None
+        except ask.AskRejected:
+            return None, HOLD_INVALID_CREDENTIAL
+        except Exception:  # noqa: BLE001 — never break the sync; an unjudged entry is held
+            logger.warning("[OperatorQueue] could not judge a credential entry for %s; held "
+                           "this cycle (#4599)", self.agent_name, exc_info=True)
+            self.unchecked = True
+            return None, HOLD_UNCHECKED
 
 
 def _current_marker(queue_data) -> Optional[dict]:

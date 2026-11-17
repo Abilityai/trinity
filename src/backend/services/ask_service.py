@@ -856,6 +856,10 @@ class AskRejected(Exception):
         self.code = code
         self.message = message
         self.extra = extra
+        # #4599: why a `role_cannot_open_agent` refusal fired
+        # (`role_addressing.CAUSE_*`), for a caller that words its own refusal.
+        # Never in `extra`: the agent's remedy is the message, not a new field.
+        self.cause: Optional[str] = None
 
 
 # trinity-enterprise#1066: `credential` — the agent asks for a secret BY NAME
@@ -1124,8 +1128,13 @@ def readdress_role(agent_name: str, role: str, *, reason: str) -> Dict[str, int]
         own_credential = row.get("type") == "credential" and role == "primary" and not gate
         key = (gate, own_credential)
         if key not in fresh:
-            fresh[key] = (_fresh_credential_audience(agent_name) if own_credential
-                          else _fresh_audience(agent_name, role, gate=gate))
+            try:
+                fresh[key] = (_fresh_credential_audience(agent_name) if own_credential
+                              else _fresh_audience(agent_name, role, gate=gate))
+            except _RuleRefused:
+                # A refused rule leaves the rows as they were, and is cached so
+                # each row does not resolve (and log) it again.
+                fresh[key] = None
         audience = fresh[key]
         if audience is None:
             out["unchanged"] += 1
@@ -1151,27 +1160,42 @@ def readdress_role(agent_name: str, role: str, *, reason: str) -> Dict[str, int]
     return out
 
 
-def _fresh_credential_audience(agent_name: str) -> Optional[Tuple[List[str], Optional[str]]]:
+class _RuleRefused(Exception):
+    """The rule that addresses a row refuses today, so the row stays as it
+    was (#4599). `code` is the refusal's own code and `cause` its
+    `role_addressing.CAUSE_*` word, when it has one: `readdress_role` reads
+    the refusal as "unchanged", an admin's re-address words its 409 from it."""
+
+    def __init__(self, code: str, cause: Optional[str] = None):
+        super().__init__(code)
+        self.code = code
+        self.cause = cause
+
+
+def _fresh_credential_audience(agent_name: str) -> Tuple[List[str], Optional[str]]:
     """`_fresh_audience` for an agent's `credential` row (#4579): the reader a
-    fresh raise would record NOW (`role_addressing.resolve_credential_reader`),
-    or None when nobody can open the secret field, so the row stays as it was."""
+    fresh raise would record NOW (`role_addressing.resolve_credential_reader`).
+    Raises `_RuleRefused` when nobody can open the secret field, so the row
+    stays as it was."""
     from services import role_addressing
 
     try:
         r = role_addressing.resolve_credential_reader(agent_name, owner_lookup=_owner_email)
     except role_addressing.RoleRefused as e:
-        logger.info("[AskService] the credential asks on %s are not re-addressed: %s",
-                    agent_name, e.code)
-        return None
+        logger.info("[AskService] the credential asks on %s are not re-addressed: %s%s",
+                    agent_name, e.code, f" ({e.cause})" if e.cause else "")
+        raise _RuleRefused(e.code, e.cause) from None
     people = _people_list(r.people)
     return people, (people[0] if len(people) == 1 else None)
 
 
-def _fresh_audience(agent_name: str, role: str, *, gate: bool) -> Optional[Tuple[List[str], Optional[str]]]:
+def _fresh_audience(agent_name: str, role: str, *, gate: bool) -> Tuple[List[str], Optional[str]]:
     """`(people, single)` the role reaches NOW, by the rule the row's raiser
-    uses; None when the role refuses and the rows must stay as they were.
-    Nobody filling `primary` is `([], None)` — the operators — for both."""
+    uses. Raises `_RuleRefused` when the role refuses and the rows must stay
+    as they were. Nobody filling `primary` is `([], None)` — the operators —
+    for both."""
     if gate:
+        from services import role_addressing
         from services import skill_gate_service as sgs
         try:
             people = sgs._approvers(agent_name, role)
@@ -1181,16 +1205,50 @@ def _fresh_audience(agent_name: str, role: str, *, gate: bool) -> Optional[Tuple
             else:
                 logger.info("[AskService] %s on %s not re-addressed for gate approvals: %s",
                             role, agent_name, e.code)
-                return None
+                cause = role_addressing.CAUSE_UNCHECKED if getattr(e, "unchecked", False) else None
+                raise _RuleRefused(e.code, cause) from None
     else:
         try:
             people, _, _ = _address(agent_name, role)
         except AskRejected as e:
             logger.info("[AskService] %s on %s not re-addressed for the agent's asks: %s",
                         role, agent_name, e.code)
-            return None
+            raise _RuleRefused(e.code, e.cause) from None
     people = _people_list(people)
     return people, (people[0] if len(people) == 1 else None)
+
+
+def _rule_refused_message(row: Mapping[str, Any], refusal: _RuleRefused, *, credential: bool) -> str:
+    """What an admin reads when "re-address by its rule" is refused (#4599):
+    the real cause and its remedy. One sentence used to cover every cause
+    ("Nobody can be found for the role"), which sent an admin to end a card
+    whose remedy was to share the agent. Names roles, never a person."""
+    from services import role_addressing as ra
+
+    if refusal.cause == ra.CAUSE_UNCHECKED:
+        return ("The platform could not check right now who can open this agent, so the card "
+                "stays as it is. Try again in a few minutes.")
+    if credential and refusal.cause == ra.CAUSE_SYSTEM_AGENT:
+        return ("This is a system agent, and a system agent is in nobody's Workspace, so "
+                "nobody can fill this card. End it with a reason.")
+    if credential and refusal.cause == ra.CAUSE_NO_PRIMARY:
+        return ("This agent has no primary person, and its owner cannot open it in their "
+                "Workspace, so the card stays as it is. Assign a primary person, share the "
+                "agent with them and re-address the card again, or end it with a reason.")
+    if credential and refusal.cause == ra.CAUSE_OWNER_IS_PRIMARY:
+        return ("The primary person for this agent is its owner, who cannot open it in their "
+                "Workspace, so the card stays as it is. Check the owner's access to the "
+                "Workspace and re-address the card again, or end it with a reason.")
+    if credential and refusal.code == "role_cannot_open_agent":
+        return ("The primary person for this agent cannot open it in their Workspace, and "
+                "neither can its owner, so the card stays as it is. Share the agent with its "
+                "primary person and re-address the card again, or end it with a reason.")
+    if refusal.code in ("role_cannot_open_agent", "approver_cannot_open_agent"):
+        return (f"The people in the {ra.role_label(row['to_role'])} role for this agent cannot "
+                "open it, so the card stays as it is. Share the agent with them and re-address "
+                "the card again, or end it with a reason.")
+    return (f"Nobody can be found for the {row['to_role']} role on this agent "
+            "right now, so the card stays as it is; end it with a reason instead.")
 
 
 # ---------------------------------------------------------------------------
@@ -1262,8 +1320,9 @@ def admin_readdress(item_id: str, *, to: str, reason: str, actor: Actor) -> Dict
     Raises `AskNotFound`, or `ReaddressRefused`: 409 `not_pending`, 422
     `unknown_family` (no rule to re-run), 422 `admin_seat_unsupported`, 409
     `rule_refused` (the role refuses today, the family's rule raises, or it
-    names a person seat with nobody on it), 409 `audience_unchanged` naming
-    who the card waits for. The caller (the route) has already applied the
+    names a person seat with nobody on it; for a role the message names the
+    real cause and its remedy, `_rule_refused_message`, #4599), 409
+    `audience_unchanged` naming who the card waits for. The caller (the route) has already applied the
     admin + person gate and the row's visibility.
     """
     from services import operator_queue_service as oqs
@@ -1324,14 +1383,14 @@ def admin_readdress(item_id: str, *, to: str, reason: str, actor: Actor) -> Dict
         # #4579: an agent's credential row is re-addressed by the rule its
         # raise used, so "by its rule" cannot hand the secret field to a
         # primary who cannot open it.
-        audience = (_fresh_credential_audience(agent_name)
-                    if row.get("type") == "credential" and row["to_role"] == "primary" and not gate
-                    else _fresh_audience(agent_name, row["to_role"], gate=gate))
-        if audience is None:
-            raise ReaddressRefused(409, "rule_refused",
-                                   f"Nobody can be found for the {row['to_role']} role on this agent "
-                                   "right now, so the card stays as it is; end it with a reason instead.")
-        people, single = audience
+        credential = row.get("type") == "credential" and row["to_role"] == "primary" and not gate
+        try:
+            people, single = (_fresh_credential_audience(agent_name) if credential
+                              else _fresh_audience(agent_name, row["to_role"], gate=gate))
+        except _RuleRefused as refusal:
+            raise ReaddressRefused(
+                409, "rule_refused",
+                _rule_refused_message(row, refusal, credential=credential)) from None
         seat = row["to_role"]
         if row.get("type") == "credential" and not single:
             raise ReaddressRefused(409, "rule_refused",
@@ -1352,10 +1411,14 @@ def admin_readdress(item_id: str, *, to: str, reason: str, actor: Actor) -> Dict
         now_seat = _decider_seat(fresh) or fresh.get("to_role")
         who = (f"{_SEAT_LABELS.get(now_seat or '', 'the person it was addressed to')}: "
                f"{', '.join(waiting)}" if waiting else "an instance admin")
+        # #4599: the admin seat is offered only where it can be taken. A card
+        # addressed by role is always refused there (`admin_seat_unsupported`).
+        way_out = ("Move it to the admin seat (to: admin) or end it with a reason."
+                   if resolver is not None else "End it with a reason instead.")
         raise ReaddressRefused(
             409, "audience_unchanged",
             f"This card already waits for {who}; re-addressing by its rule changes nothing. "
-            "Move it to the admin seat (to: admin) or end it with a reason.",
+            f"{way_out}",
             waiting_on=waiting, seat=now_seat)
     return {"id": item_id, "waiting_on": people, "seat": seat}
 
@@ -1552,10 +1615,7 @@ def raise_ask(
         # primary) or several (a role two people fill) is refused before
         # anything is written — the value must not be typed by whoever
         # answers first and recorded against everyone it was delivered to.
-        raise AskRejected(
-            422, "no_person",
-            "A credential ask must reach exactly one person; ask it from a conversation "
-            "with the person who holds the credential, addressed to primary.")
+        raise AskRejected(422, "no_person", _NO_PERSON)
     _refuse_key_state(norm, destination_key_state)
 
     context = dict(norm["context"])
@@ -1800,6 +1860,113 @@ def _too_large(field: str, limit: int, unit: str) -> AskRejected:
                        field=field, limit=limit, unit=unit)
 
 
+_NO_PERSON = ("A credential ask must reach exactly one person; ask it from a conversation "
+              "with the person who holds the credential, addressed to primary.")
+
+
+# The `credential` kind's own raise checks (trinity-enterprise#1066, ent#1109),
+# one function each so the queue-file channel runs the same ones (#4599) and the
+# two doors cannot drift. The first two read nothing but their argument.
+
+def _refuse_credential_options(options: Any) -> None:
+    """The person types the value into the secret field; there is nothing to
+    choose, and an option list would read as a place to put the value."""
+    if options:
+        raise AskRejected(422, "invalid_options",
+                          "A credential ask offers no options; the person types the value "
+                          "into the secret field it opens.")
+
+
+def _refuse_credential_name(context: Mapping[str, Any]) -> None:
+    from services import credential_ask_policy
+
+    problem = credential_ask_policy.credential_name_problem(context.get("credential_name"))
+    if problem is not None:
+        raise AskRejected(
+            422, "invalid_credential_name",
+            "A credential ask needs context.credential_name: the environment variable "
+            f"the person is filling — a variable name of at most "
+            f"{credential_ask_policy.CREDENTIAL_NAME_MAX} characters that the platform "
+            "and the agent runtime do not reserve.",
+            reason=problem)
+
+
+def _credential_destination_stored(context: Mapping[str, Any], agent_name: str) -> Mapping[str, Any]:
+    """`context` with its destination, if it names one, in the STORED form
+    (trinity-enterprise#1109): where the value lands when that is not this
+    agent — validated by name (shape, the outbound A2A switch, the admin's
+    endpoint registry for THIS agent; no resolver call on the loop), and
+    normalised. Reads the registry, unlike the two checks above."""
+    from services import credential_destination
+
+    if credential_destination.CONTEXT_KEY not in context:
+        return context
+    try:
+        stored = credential_destination.validate(
+            context[credential_destination.CONTEXT_KEY], agent_name=agent_name)
+    except credential_destination.DestinationProblem as exc:
+        raise AskRejected(422, exc.code, exc.message, reason=exc.reason) from None
+    return {**context, credential_destination.CONTEXT_KEY: stored}
+
+
+# ---------------------------------------------------------------------------
+# A `credential` entry of the queue file (#4599)
+# ---------------------------------------------------------------------------
+# The file channel never reaches `raise_ask`, so before #4599 it skipped the
+# kind's checks and let the AGENT pick the reader (vetoed against the shared
+# roster only, which no owner is on). These three are what its poller calls,
+# in this order, so a credential row from the file is one `raise_ask` would
+# have filed: the pure checks, the reader chain, then the stored context.
+
+def file_credential_entry_checks(entry: Mapping[str, Any]) -> None:
+    """The checks of a credential entry that read nothing but the entry:
+    options, the context's shape, the name. Raises `AskRejected` by the codes
+    `raise_ask` uses. An absent context is the name refusal, as there."""
+    _refuse_credential_options(entry.get("options"))
+    context = entry.get("context")
+    if context is None:
+        context = {}
+    if not isinstance(context, Mapping):
+        raise AskRejected(422, "invalid_context", "context must be an object.")
+    _refuse_credential_name(context)
+
+
+def file_credential_reader(agent_name: str) -> str:
+    """The ONE reader a credential ask from `agent_name` is recorded for:
+    `_address_credential`, the rule of the native raise. Raises `AskRejected`
+    `role_cannot_open_agent` (with its `cause`) or `no_person`. Quiet: the
+    poller calls this every cycle while an entry is held and logs once."""
+    _, addressee, _ = _address_credential(agent_name, quiet=True)
+    if not addressee:
+        raise AskRejected(422, "no_person", _NO_PERSON)
+    return addressee
+
+
+def file_credential_context(agent_name: str, entry: Mapping[str, Any]) -> Dict[str, Any]:
+    """The context a credential row from the file stores: the entry's, with
+    its destination in the stored form. Raises `AskRejected` by the codes
+    `raise_ask` uses.
+
+    Sized AS THE POLLER'S CLAMP STORES IT — the stored destination plus the
+    Workspace thread the clamp adds — so the clamp can never replace a context
+    judged here with its truncation marker, which keeps neither the name nor
+    the destination and would leave a field that cannot work. Not run: the
+    native route's read of the agent's own key (`destination_key_state`),
+    which needs the agent's environment; delivery checks it."""
+    from services import operator_queue_service as oqs
+
+    context = entry.get("context")
+    context = dict(context) if isinstance(context, Mapping) else {}
+    context = {k: v for k, v in context.items() if k not in oqs._PLATFORM_CONTEXT_KEYS}
+    context = dict(_credential_destination_stored(context, agent_name))
+    sized = oqs._json_bytes({**context, oqs._WORKSPACE_THREAD_KEY: "x" * 64})
+    if sized is None:
+        raise AskRejected(422, "invalid_context", "context must serialize as JSON.")
+    if sized > oqs.OPERATOR_QUEUE_CONTEXT_MAX_BYTES:
+        raise _too_large("context", oqs.OPERATOR_QUEUE_CONTEXT_MAX_BYTES, "bytes")
+    return context
+
+
 def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent",
                    agent_name: str = "") -> Dict[str, Any]:
     """The static half of validation — nothing here depends on the clock or
@@ -1868,40 +2035,16 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent",
     if kind == "approval" and not options:
         raise AskRejected(422, "options_required",
                           "An approval needs the options a person can choose from.")
-    if kind == "credential" and options:
-        # trinity-enterprise#1066: the person types the value into the secret
-        # field; there is nothing to choose, and an option list would read as
-        # a place to put the value.
-        raise AskRejected(422, "invalid_options",
-                          "A credential ask offers no options; the person types the value "
-                          "into the secret field it opens.")
+    if kind == "credential":
+        _refuse_credential_options(options)
     context = ask.get("context")
     if context is None:
         context = {}
     if not isinstance(context, Mapping):
         raise AskRejected(422, "invalid_context", "context must be an object.")
     if kind == "credential":
-        from services import credential_ask_policy, credential_destination
-        problem = credential_ask_policy.credential_name_problem(context.get("credential_name"))
-        if problem is not None:
-            raise AskRejected(
-                422, "invalid_credential_name",
-                "A credential ask needs context.credential_name: the environment variable "
-                f"the person is filling — a variable name of at most "
-                f"{credential_ask_policy.CREDENTIAL_NAME_MAX} characters that the platform "
-                "and the agent runtime do not reserve.",
-                reason=problem)
-        if credential_destination.CONTEXT_KEY in context:
-            # trinity-enterprise#1109: where the value lands when that is not
-            # this agent — validated here, by name (shape, the outbound A2A
-            # switch, the admin's endpoint registry for THIS agent; no
-            # resolver call on the loop), and stored normalised.
-            try:
-                stored = credential_destination.validate(
-                    context[credential_destination.CONTEXT_KEY], agent_name=agent_name)
-            except credential_destination.DestinationProblem as exc:
-                raise AskRejected(422, exc.code, exc.message, reason=exc.reason) from None
-            context = {**context, credential_destination.CONTEXT_KEY: stored}
+        _refuse_credential_name(context)
+        context = _credential_destination_stored(context, agent_name)
     elif isinstance(context, Mapping) and "credential_destination" in context:
         raise AskRejected(422, "destination_on_non_credential",
                           "Only a credential ask carries a destination.")
@@ -2303,7 +2446,7 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
         try:
             r = role_addressing.resolve_role_id_for_ask(agent_name, role_id)
         except role_addressing.RoleRefused as e:
-            raise AskRejected(422, e.code, e.message, role=e.role)
+            raise _rejected(e) from None
         return r.people, r.single, r.resolved
     try:
         r = (role_addressing.resolve_approver_for_ask(agent_name) if role == "approver"
@@ -2312,16 +2455,28 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
         if e.code == "role_cannot_open_agent":
             # A refusal files nothing, so the log is the only trace a stalled
             # agent leaves. The role and the agent, never a person.
-            logger.warning("[AskService] an ask to the %s role from %s was refused: nobody "
-                           "seated in it can open the agent", role, agent_name)
-            raise AskRejected(422, e.code, e.message, role=e.role)
+            why = ("the platform could not check who can open the agent"
+                   if e.cause == role_addressing.CAUSE_UNCHECKED
+                   else "nobody seated in it can open the agent")
+            logger.warning("[AskService] an ask to the %s role from %s was refused: %s",
+                           role, agent_name, why)
+            raise _rejected(e) from None
         raise AskRejected(422, "role_unassigned",
                           f"Nobody fills the {role} role for this agent yet; address the ask to "
                           "primary or operator.", role=role)
     return r.people, r.single, r.resolved
 
 
-def _address_credential(agent_name: str) -> Tuple[List[str], Optional[str], bool]:
+def _rejected(e: Any) -> AskRejected:
+    """A `RoleRefused` as the 422 the agent gets, with its `cause` carried on
+    the exception for a caller that words its own refusal (#4599)."""
+    rejected = AskRejected(422, e.code, e.message, role=e.role)
+    rejected.cause = e.cause
+    return rejected
+
+
+def _address_credential(agent_name: str, *,
+                        quiet: bool = False) -> Tuple[List[str], Optional[str], bool]:
     """`(resolved_to, addressed_to_email, resolved)` for a `credential` ask
     (#4579): `role_addressing.resolve_credential_reader` — the agent's primary
     person when they can open the Workspace secret field, else its owner when
@@ -2329,15 +2484,21 @@ def _address_credential(agent_name: str) -> Tuple[List[str], Optional[str], bool
     answered through that field alone (`answer` refuses anything else), so a
     reader who cannot open it would leave an ask nobody can fill. Nobody or
     several is returned as it is and refused `no_person` by the caller. A
-    refusal files nothing, so it is logged: the agent, never a person."""
+    refusal files nothing, so it is logged: the agent and the real cause
+    (#4599), never a person. `quiet` is the queue-file poller, which asks
+    every cycle and logs a held entry once itself."""
     from services import role_addressing
 
     try:
         r = role_addressing.resolve_credential_reader(agent_name, owner_lookup=_owner_email)
     except role_addressing.RoleRefused as e:
-        logger.warning("[AskService] a credential ask from %s was refused: neither its primary "
-                       "person nor its owner can open the agent in their Workspace", agent_name)
-        raise AskRejected(422, e.code, e.message, role=e.role)
+        if not quiet:
+            why = ("the platform could not check who can open the agent in their Workspace"
+                   if e.cause == role_addressing.CAUSE_UNCHECKED
+                   else "nobody who could fill it can open the agent in their Workspace")
+            logger.warning("[AskService] a credential ask from %s was refused: %s",
+                           agent_name, why)
+        raise _rejected(e) from None
     return r.people, r.single, r.resolved
 
 
