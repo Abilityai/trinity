@@ -122,6 +122,7 @@ describe('redactSecrets', () => {
     'ghp_abcdefghijklmnop1234',
     'gho_abcdefghijklmnop1234',
     'ghs_abcdefghijklmnop1234',
+    'ghs_1234567_eyJhbGciOi-J9.eyJpc3MiOiIx_In0.c2lnbmF0dXJl',
     'ghu_abcdefghijklmnop1234',
     'github_pat_11ABCDEFG_abcdefgh',
     'xoxb-123456789-abcdef',

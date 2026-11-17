@@ -9264,6 +9264,18 @@
         "operator-queue"
       ],
       "description": "#4483: the fleet base-image check names every running, non-ephemeral agent still on an older agent image in ONE platform alert (fleet_base_image_stale:fleet), updates it as the set changes and ends it when none are left; a base image whose version label is older than the backend is reported even with no drifted agent, with the source and hosted commands; Docker unreadable, an agent whose comparison failed and a base image with no parseable label are 'could not check' (no alert, no clear); no container is touched; only the lease holder runs a cycle (fail-open without Redis) and main.py starts the loop. Also: 409 env_unreadable names the older agent image and the restart when the agent's read answer carries no `missing` list (credential sink and Nevermined delegation)."
+    },
+    {
+      "file": "unit/test_ent1277_github_token_resolver.py",
+      "feature": "trinity-enterprise#1277",
+      "added": "2026-11-17",
+      "categories": [
+        "unit",
+        "backend",
+        "security",
+        "github"
+      ],
+      "description": "The repo-scoped GitHub token seam: resolve_github_token walks per-agent PAT, per-user PAT, the registered provider, then the platform PAT; with no provider the answer equals resolve_github_pat's; an uncovered repo falls through; a provider failure on a covered repo raises and never yields the platform PAT; a malformed repo never reaches the provider; resolve_github_pat and its candidates never consult the provider; the provider credential setting is encrypted at rest, refused in cleartext and covered by key rotation."
     }
   ]
 }
