@@ -82,6 +82,8 @@ MCP server configuration is different. An `.env` injection does not rewrite `.mc
 
 Someone who works with an agent only in the Workspace has no Credentials section. When the agent needs a key, it asks for it **by name** with `ask_for_credential`, and the ask appears in the conversation (and in the Inbox) as a **secret field**: the variable's name, a masked input with **Show**/**Hide**, and **Send**.
 
+![A Needs a credential card in a Workspace chat: the credential's name, the agent's reason, a masked field with Show and Send, and a note that the value never appears in the chat](../../screenshots/workspace-credential-ask.webp)
+
 - Type or paste the value and press **Send**. The field empties at once; the value is stored in the agent's `.env` under that name and the agent's next turn reads it from its environment. No restart is needed.
 - The conversation then shows **NAME provided**. The value does not appear in the chat, in the ask's answer, in the agent's wake or in the audit log, which records only the name.
 - If the agent is stopped, nothing is stored: start it, then send again. Other refusals say what happened in the card.
