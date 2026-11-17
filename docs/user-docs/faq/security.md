@@ -191,7 +191,7 @@ Not any more — the admin gate is an allowlist over key scopes, not a list of k
 
 ## Can my admin API key act on behalf of one of my agents?
 
-Yes, for the tools that act as the calling agent itself: raising or withdrawing an ask, filing a report, recording metrics, reading objectives, and the canvas and project tools. Pass `agent_name` to the tool from an MCP client using an admin's own `user` key, and the request is made and recorded as that agent. Only an admin's `user` key may do this; any other key or a browser session that tries gets `403 act_as_not_permitted`. Every such request writes an `acted_as_agent` audit entry naming you and the agent, and credentials stay out of it: `ask_for_credential` still needs the agent's own key. See [Authentication → An admin's key acting for an agent](../api-reference/authentication.md#an-admins-key-acting-for-an-agent).
+Yes, for the tools that act as the calling agent itself: raising or withdrawing an ask, filing a report, recording metrics, reading objectives, and the canvas tools. The Workspace project tools are not included. Pass `agent_name` to the tool from an MCP client using an admin's own `user` key, and the request is made and recorded as that agent. Only an admin's `user` key may do this; any other key or a browser session that tries gets `403 act_as_not_permitted`. Every such request writes an `acted_as_agent` audit entry naming you and the agent, and credentials stay out of it: `ask_for_credential` still needs the agent's own key. See [Authentication → An admin's key acting for an agent](../api-reference/authentication.md#an-admins-key-acting-for-an-agent).
 
 ## Why can't my script create or list MCP API keys using another API key?
 
