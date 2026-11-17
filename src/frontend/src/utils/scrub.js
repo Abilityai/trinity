@@ -15,6 +15,7 @@ const RULES = [
   [/trinity_mcp_[A-Za-z0-9]+/g, REDACTED],
   [/sk-ant-[A-Za-z0-9_-]+/g, REDACTED],
   [/sk-[A-Za-z0-9_-]{16,}/g, REDACTED],
+  [/ghs_\d{1,20}_[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]{1,2048}\.[A-Za-z0-9_-]{1,512}/g, REDACTED], // installation token: ghs_<appid>_<JWT>
   [/gh[pos_ru]_[A-Za-z0-9]{20,}/g, REDACTED],
   [/github_pat_[A-Za-z0-9_]{20,}/g, REDACTED],
   [/xox[baprs]-[A-Za-z0-9-]+/g, REDACTED],
