@@ -1222,7 +1222,9 @@ def _rule_refused_message(row: Mapping[str, Any], refusal: _RuleRefused, *, cred
     """What an admin reads when "re-address by its rule" is refused (#4599):
     the real cause and its remedy. One sentence used to cover every cause
     ("Nobody can be found for the role"), which sent an admin to end a card
-    whose remedy was to share the agent. Names roles, never a person."""
+    whose remedy was to restore the person's reach. Names roles, never a
+    person, and what to check (the share, that they can sign in), never which
+    of the two fails."""
     from services import role_addressing as ra
 
     if refusal.cause == ra.CAUSE_UNCHECKED:
@@ -1241,12 +1243,14 @@ def _rule_refused_message(row: Mapping[str, Any], refusal: _RuleRefused, *, cred
                 "Workspace and re-address the card again, or end it with a reason.")
     if credential and refusal.code == "role_cannot_open_agent":
         return ("The primary person for this agent cannot open it in their Workspace, and "
-                "neither can its owner, so the card stays as it is. Share the agent with its "
-                "primary person and re-address the card again, or end it with a reason.")
+                "neither can its owner, so the card stays as it is. Make sure the agent is "
+                "shared with its primary person and that they can sign in, then re-address "
+                "the card again, or end it with a reason.")
     if refusal.code in ("role_cannot_open_agent", "approver_cannot_open_agent"):
         return (f"The people in the {ra.role_label(row['to_role'])} role for this agent cannot "
-                "open it, so the card stays as it is. Share the agent with them and re-address "
-                "the card again, or end it with a reason.")
+                "open it, so the card stays as it is. Make sure the agent is shared with them "
+                "and that they can sign in, then re-address the card again, or end it with a "
+                "reason.")
     return (f"Nobody can be found for the {row['to_role']} role on this agent "
             "right now, so the card stays as it is; end it with a reason instead.")
 

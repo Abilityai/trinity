@@ -419,8 +419,8 @@ def _approvers(agent_name: str, role: str) -> List[str]:
         raise SkillGateRefused(
             422, "approver_cannot_open_agent",
             f"The {role_addressing.role_label(role)} for {agent_name} can't open {agent_name}, "
-            "so they would never see this approval. Ask the agent's owner to share "
-            f"{agent_name} with them.", role=role)
+            "so they would never see this approval. Ask the agent's owner or an admin to "
+            f"make sure {agent_name} is shared with them and that they can sign in.", role=role)
     return reachable
 
 

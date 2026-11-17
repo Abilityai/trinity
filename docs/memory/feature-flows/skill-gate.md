@@ -67,7 +67,7 @@ request → entry point
   │      with it. A deactivated account opens nothing; the client block stops an email with no
   │      account and a Workspace-only account, never an operator or admin (#4599).
   │      Named people but none can open it → 422 approver_cannot_open_agent (names the
-  │      role, says to share the agent); nobody reachable because the platform could not check
+  │      role, says what to check); nobody reachable because the platform could not check
   │      → 503 gate_unavailable (#4599: clears by itself, so it is not a standing refusal);
   │      some can → the ask goes to those only
   ├─ proven person ∈ approvers?  ── yes → self-approved → dispatch (+ audit, :641)
@@ -314,7 +314,7 @@ All responses go through the app handler `error_handlers.skill_gate_error` (`src
 | Gate map unreadable | 503 `gate_unavailable` | nothing dispatched |
 | Approval could not be raised | 503 `approval_unavailable` | no pending record left behind |
 | Nobody fills the role | 422 `role_unassigned` | nothing raised |
-| The role's people can't open the agent (trinity-enterprise#881) | 422 `approver_cannot_open_agent` | nothing raised; share the agent with them |
+| The role's people can't open the agent (trinity-enterprise#881) | 422 `approver_cannot_open_agent` | nothing raised; make sure the agent is shared with them and that they can sign in |
 | Who can open the agent could not be checked (#4599) | 503 `gate_unavailable` | `Could not check who can open <agent> to approve this request; nothing was run. Try again shortly.` Nothing raised; a room delivers the post again. The Skills tab keeps the `not_shared` label |
 | Skills with different approvers | 422 `mixed_approvers` | ask for them separately |
 | Request too long for the card | 422 `request_too_long` | shorten it |

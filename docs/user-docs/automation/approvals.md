@@ -76,7 +76,7 @@ An item raised with `ask_operator` is addressed by role: `primary` (the default 
 
 - `role_unavailable` — roles cannot be answered on this install right now. Address the ask to `primary` or `operator` instead.
 - `role_unassigned` — nobody is seated in the role for this agent yet. Ask the agent's owner to seat someone, or address the ask to `primary` or `operator`.
-- `role_cannot_open_agent` — the people seated in the role cannot open the agent, so they would never see the ask. Ask the agent's owner to share the agent with them. The same code is returned when Trinity could not check who can open the agent; its message says to try again in a few minutes.
+- `role_cannot_open_agent` — the people seated in the role cannot open the agent, so they would never see the ask. Ask the agent's owner or an admin to make sure the agent is shared with them and that they can sign in. The same code is returned when Trinity could not check who can open the agent; its message says to try again in a few minutes.
 
 Reports and messages cannot be addressed to a role id; they refuse it with `invalid_to`.
 
@@ -138,7 +138,7 @@ When the owner marks a skill on an agent **Requires approval** (see [Skills and 
 
 **Held requests are never replayed.** Whatever was decided, a request the gate held or refused — and the platform's notice about it — never reaches a later turn's prompt: in Workspace chats, public links, Telegram groups and rooms as on the Chat tab. People still see both in the conversation. The only way a held request runs is **Approve**, which runs it once. In a room, the card shows the posts that invoke a gated skill and the requester's latest post, each line prefixed with its sender, and the requester reads *A room conversation*; a long post by someone else in the room does not make a short request too long for the card.
 
-**Refusals.** A gated request can also be refused outright, with nothing raised: nobody fills the approver role (`422 role_unassigned`), the people who fill it cannot open the agent (`422 approver_cannot_open_agent` — share the agent with them), the skills need different approvers (`422 mixed_approvers`), the request is too long for the card (`422 request_too_long`), the skill is missing or ambiguous on the agent (`409`), too many requests are waiting or arriving (`429 approval_queue_full` / `approval_rate_limited`), or the gate settings cannot be read, or Trinity could not check who can open the agent to approve (`503 gate_unavailable`: nothing was run, try again shortly). Asking again after a decision returns that decision (`409 request_<state>`), never "pending". A voice call refuses a gated skill and says to ask in chat instead.
+**Refusals.** A gated request can also be refused outright, with nothing raised: nobody fills the approver role (`422 role_unassigned`), the people who fill it cannot open the agent (`422 approver_cannot_open_agent` — make sure the agent is shared with them and that they can sign in), the skills need different approvers (`422 mixed_approvers`), the request is too long for the card (`422 request_too_long`), the skill is missing or ambiguous on the agent (`409`), too many requests are waiting or arriving (`429 approval_queue_full` / `approval_rate_limited`), or the gate settings cannot be read, or Trinity could not check who can open the agent to approve (`503 gate_unavailable`: nothing was run, try again shortly). Asking again after a decision returns that decision (`409 request_<state>`), never "pending". A voice call refuses a gated skill and says to ask in chat instead.
 
 ### Authoring limits
 
@@ -159,7 +159,7 @@ Trinity holds items an agent raises to a few hard limits, so that each one is a 
 
 An entry that cannot be filed is **held**: no queue row is created, the entry stays `pending` in the file, and the file's `platform.ingestion` block lists its id under one of three names:
 
-- `role_cannot_open_agent`: nobody who could fill it can open the agent in their Workspace. An admin shares the agent with its primary contact, or assigns one; the next sync then files the entry.
+- `role_cannot_open_agent`: nobody who could fill it can open the agent in their Workspace. An admin makes sure the agent is shared with its primary contact and that they can sign in, or assigns one; the next sync then files the entry.
 - `no_person`: there is no single person to ask (nobody could be named, or several people fill the role).
 - `invalid_credential`: the entry breaks the rules of a credential ask. Fix the entry, or raise it with `ask_for_credential`, whose refusal names the reason.
 

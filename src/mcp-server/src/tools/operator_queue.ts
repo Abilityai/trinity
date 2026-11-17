@@ -157,8 +157,8 @@ const askOperatorParameters = z.object({
     ])
     .optional()
     .describe(
-      "Who should answer: primary (your owner — it also shows in their Workspace; the default for approval and question) or operator (the platform's operators; the default for alert). approver and viewer are refused with role_unassigned until someone fills them. approver: it reaches the seated approvers who can open you, and is refused with role_cannot_open_agent when none of them can (ask your owner to share you with them, or try again when the message says the platform could not check; do not send the approval to someone else instead); only a person seated as approver can answer (anyone else is refused with not_addressee). A role several people fill reaches every one of them: the first answer wins. " +
-        "Or role:<id> — a canon role on your own roster, reaching every person seated in it who can open you; refused by name with role_unavailable (the assignments module is absent, has no answer for the role or could not answer: address primary or operator), role_unassigned (nobody is seated) or role_cannot_open_agent (nobody seated can open you: ask your owner to share you with them, or try again when the message says the platform could not check). " +
+      "Who should answer: primary (your owner — it also shows in their Workspace; the default for approval and question) or operator (the platform's operators; the default for alert). approver and viewer are refused with role_unassigned until someone fills them. approver: it reaches the seated approvers who can open you, and is refused with role_cannot_open_agent when none of them can (ask your owner or an admin to make sure you are shared with them and that they can sign in, or try again when the message says the platform could not check; do not send the approval to someone else instead); only a person seated as approver can answer (anyone else is refused with not_addressee). A role several people fill reaches every one of them: the first answer wins. " +
+        "Or role:<id> — a canon role on your own roster, reaching every person seated in it who can open you; refused by name with role_unavailable (the assignments module is absent, has no answer for the role or could not answer: address primary or operator), role_unassigned (nobody is seated) or role_cannot_open_agent (nobody seated can open you: ask your owner or an admin to make sure you are shared with them and that they can sign in, or try again when the message says the platform could not check). " +
         "Or project — from a chat or room turn on a project you work on, reaching that project's steward, else its creator, even if they cannot open you; only they can answer; refused by name with project_unavailable (not on this install), not_in_project_turn (this turn is not on such a project) or project_unreachable (nobody on it can be reached): address primary or operator instead.",
     ),
   expires_at: z
@@ -746,8 +746,9 @@ export function createOperatorQueueTools(
         "as {success: false, status, code, message}: 422 no_person (no single person " +
         "to ask — ask from a chat with them), 422 role_cannot_open_agent (nobody who " +
         "could fill it can open you in their Workspace, or the platform could not " +
-        "check; the message names the remedy: an admin shares you or assigns a " +
-        "primary person, or you try again), 422 invalid_credential_name (a malformed " +
+        "check; the message names the remedy: an admin makes sure you are shared " +
+        "with that person and that they can sign in, or assigns a primary person, " +
+        "or you try again), 422 invalid_credential_name (a malformed " +
         "or reserved name; reason says which), 429 rate_limited or queue_full. Acts " +
         "as the agent your key belongs to; there is no agent parameter. For an " +
         "agent on another Trinity, set destination with the registered instance (see the parameter).",

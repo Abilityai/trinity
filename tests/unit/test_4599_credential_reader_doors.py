@@ -55,6 +55,9 @@ import client_portal.service  # noqa: E402,F401
 CODE = "role_cannot_open_agent"
 NAME = "ACME_API_TOKEN"
 COULD_NOT_CHECK = "could not check right now"
+# The remedy of a "cannot open" refusal fits every cause (not shared, blocked,
+# deactivated) without saying which: what to check, never which one fails.
+REMEDY = "is shared with them and that they can sign in"
 
 _REAL_ON_ROSTER = client_portal.service.agent_on_roster
 _REAL_OWNER_EMAIL = services.ask_service._owner_email
@@ -351,6 +354,10 @@ class TestCanOpenAgent:
         _seat(approver=[gone])
         refusal = _refused(agent, kind="approval", to="approver")
         assert refusal.code == CODE and COULD_NOT_CHECK not in refusal.message
+        # The agent IS shared with this person: "share it with them" would
+        # send the owner to do something already done.
+        assert f"make sure {agent} {REMEDY}" in refusal.message
+        assert "deactivated" not in refusal.message and "blocked" not in refusal.message
         assert _rows(agent) == []
 
     def test_an_unreadable_lookup_is_unknown_and_still_not_reachable(self, agent, people, monkeypatch):
@@ -393,10 +400,12 @@ class TestRaiseWording:
         assert "assign" not in refusal.message.lower()
         assert "@" not in refusal.message
 
-    def test_a_seated_primary_who_cannot_open_keeps_the_share_remedy(self, agent, people):
+    def test_a_seated_primary_who_cannot_open_is_told_what_to_check(self, agent, people):
         _seat(primary=[people["alice"]])
         refusal = _refused(agent)
-        assert refusal.code == CODE and "share" in refusal.message.lower()
+        assert refusal.code == CODE
+        assert (f"Ask an admin to make sure {agent} is shared with its primary person and "
+                "that they can sign in.") in refusal.message
         assert COULD_NOT_CHECK not in refusal.message
 
     def test_a_system_agent_is_told_sharing_cannot_help(self, agent, people, monkeypatch):
@@ -517,10 +526,13 @@ class TestRaiseWording:
         refusal = _refused(agent)
         assert refusal.code == CODE and COULD_NOT_CHECK in refusal.message
 
-    def test_control_an_approver_who_cannot_open_keeps_the_share_remedy(self, agent, people):
-        _seat(approver=[people["alice"]])
-        refusal = _refused(agent, kind="approval", to="approver")
-        assert refusal.code == CODE and "share" in refusal.message.lower()
+    @pytest.mark.parametrize("to", ["approver", "role:head-of-sales"])
+    def test_control_a_person_who_cannot_open_is_told_what_to_check(self, agent, people, to):
+        _seat({"head-of-sales": [people["alice"]]}, approver=[people["alice"]])
+        refusal = _refused(agent, kind="approval", to=to)
+        assert refusal.code == CODE and COULD_NOT_CHECK not in refusal.message
+        assert (f"Ask the agent's owner or an admin to make sure {agent} {REMEDY}."
+                ) in refusal.message
 
 
 class TestGateWording:
@@ -572,6 +584,8 @@ class TestGateWording:
         with pytest.raises(sgs.SkillGateRefused) as exc:
             sgs._approvers(agent, "approver")
         assert (exc.value.status_code, exc.value.code) == (422, "approver_cannot_open_agent")
+        assert (f"Ask the agent's owner or an admin to make sure {agent} {REMEDY}."
+                ) in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
@@ -605,8 +619,9 @@ class TestAdminReaddressWording:
         assert (refusal.status, refusal.code) == (409, "rule_refused")
         assert refusal.message == (
             "The primary person for this agent cannot open it in their Workspace, and neither "
-            "can its owner, so the card stays as it is. Share the agent with its primary "
-            "person and re-address the card again, or end it with a reason.")
+            "can its owner, so the card stays as it is. Make sure the agent is shared with its "
+            "primary person and that they can sign in, then re-address the card again, or end "
+            "it with a reason.")
 
     def test_nobody_seated_is_told_to_assign_a_primary_person(self, agent, people, shared, owner):
         row = self._filed_for_alice(agent, people, shared)
@@ -625,7 +640,7 @@ class TestAdminReaddressWording:
         assert refusal.code == "rule_refused"
         assert "The primary person for this agent is its owner" in refusal.message
         assert "Check the owner's access" in refusal.message
-        assert "Share the agent" not in refusal.message
+        assert "shared with" not in refusal.message
 
     def test_a_system_agent_is_told_only_to_end_the_card(self, agent, people, shared, monkeypatch):
         from services import role_addressing
@@ -635,7 +650,7 @@ class TestAdminReaddressWording:
         refusal = self._refusal(row)
         assert refusal.code == "rule_refused"
         assert "This is a system agent" in refusal.message
-        assert "Share" not in refusal.message and "re-address" not in refusal.message
+        assert "shared with" not in refusal.message and "re-address" not in refusal.message
 
     def test_a_lookup_that_fails_is_told_to_try_again(self, agent, people, shared, monkeypatch):
         import client_portal.service as portal_service
@@ -657,8 +672,10 @@ class TestAdminReaddressWording:
         refusal = self._refusal(row)
         assert refusal.code == "rule_refused"
         assert "Nobody can be found" not in refusal.message
-        assert "approver role for this agent cannot open it" in refusal.message
-        assert "Share the agent with them" in refusal.message
+        assert refusal.message == (
+            "The people in the approver role for this agent cannot open it, so the card stays "
+            "as it is. Make sure the agent is shared with them and that they can sign in, then "
+            "re-address the card again, or end it with a reason.")
 
     def test_control_an_unfilled_role_keeps_nobody_can_be_found(self, agent, people, shared):
         row = self._filed_for_alice(agent, people, shared, kind="approval", to="approver")
@@ -971,6 +988,29 @@ class TestQueueFile:
         poller.run()
         [row] = _pending_credential_rows(agent)
         assert (row["sync_state"], row["sync_detail"]) == ("changed", "title")
+
+    def test_a_file_card_has_no_rule_to_be_re_addressed_by(self, agent, people, shared, poller):
+        """The stated limit: a row from the file carries no role, so it is
+        addressed once, at ingest. An admin cannot re-address it by rule or
+        move it to the admin seat; it can only be ended."""
+        from models import User
+        from services import ask_service as svc
+        shared.add(people["alice"])
+        _seat(primary=[people["alice"]])
+        poller.put(_entry("cred-1"))
+        poller.run()
+        [row] = _pending_credential_rows(agent)
+        assert row.get("to_role") is None
+        admin = svc.Actor(email="root@example.com",
+                          user=User(id=3, username="root", email="root@example.com", role="admin"))
+        for to in ("rule", "admin"):
+            with pytest.raises(svc.ReaddressRefused) as exc:
+                svc.admin_readdress(row["id"], to=to, reason="check", actor=admin)
+            assert (exc.value.status, exc.value.code) == (422, "unknown_family")
+        assert svc.readdress_role(agent, "primary", reason=svc.ASSIGNMENT_CHANGED) == {
+            "readdressed": 0, "unchanged": 0}
+        [after] = _pending_credential_rows(agent)
+        assert after["addressed_to_email"] == people["alice"]
 
     def test_a_question_entry_keeps_the_roster_rule_it_had(self, agent, people, shared, poller):
         shared.add(people["bob"])

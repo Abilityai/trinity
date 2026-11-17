@@ -326,8 +326,9 @@ AES-256-GCM envelopes. What changed is how git *reads* one.
     is filed (`role_addressing.resolve_credential_reader`). A pending
     credential ask is re-addressed by the same rule.
   - The refusal keeps the one code and names its real cause and remedy
-    (#4599): share the agent with its primary person (a seated primary and
-    the owner both cannot open it); assign a primary person and share the
+    (#4599): make sure the agent is shared with its primary person and that
+    they can sign in (a seated primary and the owner both cannot open it;
+    the remedy says what to check, never which one fails); assign a primary person and share the
     agent with them (nobody is seated and the owner cannot open it); check
     the owner's access to the Workspace (the owner is the primary person);
     set the credential on the agent directly (a system agent, which is in

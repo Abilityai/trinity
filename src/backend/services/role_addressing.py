@@ -519,7 +519,8 @@ def resolve_credential_reader(
     * the owner is the primary person (seated, or by default where no
       assignments module answers) — an agent cannot be shared with its own
       owner, so the owner's own access is the thing to check;
-    * otherwise a seated primary and the owner both cannot — share it.
+    * otherwise a seated primary and the owner both cannot — the remedy names
+      what to check (the share, and that they can sign in), not which fails.
 
     The message names roles, never a person, and never which account state
     stops them.
@@ -571,8 +572,8 @@ def resolve_credential_reader(
     raise RoleRefused(
         code, "primary",
         f"Neither the primary person for {agent_name} nor its owner can open {agent_name} "
-        "in their Workspace, so nobody would see this ask. Ask an admin to share "
-        f"{agent_name} with its primary person.",
+        "in their Workspace, so nobody would see this ask. Ask an admin to make sure "
+        f"{agent_name} is shared with its primary person and that they can sign in.",
     )
 
 
@@ -595,8 +596,9 @@ def resolve_approver_for_ask(agent_name: str) -> Resolution:
     (``skill_gate_service._approvers``). The other kinds are not fenced and
     keep :func:`resolve_addressee`. Several reachable people are all recorded;
     ``single`` only when exactly one. The message names the role, never a
-    person, and its remedy is to share the agent — not to address someone
-    else, which would hand a separate approval to the owner.
+    person, and its remedy is to restore that person's reach (the share, and
+    that they can sign in: it never says which one fails, #4599) — not to
+    address someone else, which would hand a separate approval to the owner.
     """
     r = resolve(agent_name, "approver")
     reach = reach_of(agent_name, r.people)
@@ -607,7 +609,8 @@ def resolve_approver_for_ask(agent_name: str) -> Resolution:
         raise RoleRefused(
             "role_cannot_open_agent", "approver",
             f"The approver for {agent_name} cannot open {agent_name}, so they would "
-            f"never see this ask. Ask the agent's owner to share {agent_name} with them.",
+            "never see this ask. Ask the agent's owner or an admin to make sure "
+            f"{agent_name} is shared with them and that they can sign in.",
         )
     return Resolution("approver", reachable, reachable[0] if len(reachable) == 1 else None, True)
 
@@ -658,7 +661,8 @@ def resolve_role_id_for_ask(agent_name: str, role_id: str) -> Resolution:
         raise RoleRefused(
             "role_cannot_open_agent", role,
             f"The {label} for {agent_name} cannot open {agent_name}, so they would "
-            f"never see this ask. Ask the agent's owner to share {agent_name} with them.",
+            "never see this ask. Ask the agent's owner or an admin to make sure "
+            f"{agent_name} is shared with them and that they can sign in.",
         )
     return Resolution(role, reachable, reachable[0] if len(reachable) == 1 else None, True)
 
