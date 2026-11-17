@@ -2657,6 +2657,15 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   an `operator_resume_dispatch` audit entry (ent#329). An absent or false
   `resume_requested` says only "Sent." — reading `null` as "started" would be
   the over-claim ent#430 spent a blocker removing.
+  **An agent that is not running also gets only "Sent."** (#4502):
+  `resume_requested` says a wake was
+  requested, not that it could be delivered, and the response is projected
+  before the dispatch learns the agent is stopped. So the card re-reads the
+  roster after such an answer and keeps "is picking this up" only when the
+  agent's `availability` is not `stopped` / `unavailable` (and the row does not
+  already say `wake_state: pending`); `unknown` — Docker could not be asked —
+  keeps it, as the dispatch itself still tries. The Inbox pane shows no
+  confirmation line at all: it opens the next ask (§5.40).
 - The confirmation cannot live on the ask row, because answering removes it.
   `PortalAsks.visible` therefore also stays true while a confirmation is up —
   gating on `items.length` alone unmounted the surface at the same instant the
@@ -3977,15 +3986,27 @@ to localStorage in the clear.
   read from that, never parsed out of the body (an agent reply that begins "**Finished**" is
   not a run outcome).
 - **The pane (AC 3)**: an ask renders the existing ask card for that one ask (select-option,
-  note, Send — never a one-tap Approve) and stays selected after an answer, shown ended in
-  place. A chat renders its newest arrivals (from the first unread message) and its
+  note, Send — never a one-tap Approve). **Answer, then next**: once the server confirms the
+  reader's OWN answer given in the pane (a typed answer, an approval, a one-click gate
+  Approve / Reject, "Got it", a credential), the row holds its ended badge for a short beat,
+  the next pending ask in the visible order opens (the one below, else the one above; ended
+  rows are skipped; `?item=` is replaced, never pushed) and the row collapses out of the list
+  — about 350 ms in all, at once under `prefers-reduced-motion`. After the last one the pane
+  says "All caught up" with a next action; a `?from=` filter the reader's own answers emptied
+  is kept, with "Show all agents". On All the row stays (it is a member for 7 days) and only
+  the selection moves on. An ask that ends any other way — another person's answer, an
+  expiry, a withdrawal, the reader's own answer from another tab, a Dismiss (which keeps its
+  Undo), a failed answer — stays selected, shown ended in place. For 300 ms after the next
+  ask opens this way its answer controls ignore input, so a late second click cannot answer
+  an ask the reader has not seen. A chat renders its newest arrivals (from the first unread message) and its
   deliverables through `ReportRenderer` with the summary fallback. Opening a chat row (or
   arriving on its `?item=` deep link) marks it read only AFTER the pane has rendered it —
   history, deliverables and every deliverable payload on screen (§3g S5, D-3); a failed load
   leaves it unread, a failed write says so in the pane, and the pane's **Mark read** (shown
   while the chat has new messages) reads it on demand. The row keeps its place, drawn read, for the rest of the tab visit (§3g S1: a row that
   leaves any tab stays as a ghost — a chat drawn read, an ask drawn ended — and a poll never
-  re-sorts; leaving the tab, clicking it again or a completed Mark all read starts a new visit). **Open
+  re-sorts; leaving the tab, clicking it again or a completed Mark all read starts a new visit; the
+  one exception is the reader's own answer in Action, above, which removes its row). **Open
   in chat** / **Reply in chat** open the chat at the first arrival (`?anchor=`), with the
   composer focused for Reply (A2 — no composer in the pane). **Reply to one message** works
   through both doors (ent#738): each agent message in the pane, and each persisted agent

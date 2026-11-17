@@ -85,6 +85,9 @@ Sign-in / reload on bare /workspace
                                ?agent=, a stage key) → filterByAgent before stableRows; a new
                                ?from= is a new visit; it holds while the agent has asks or its
                                ended ask is selected (activeAgentFilter), then leaves the URL
+                               — unless the reader's OWN answers emptied it: then it is kept
+                               (keptFrom), with "Nothing is waiting on you from X." + "Show
+                               all agents" (see "Answer, then next" below)
                                (its strip stays while it holds, even at zero asks); a tab
                                change drops it; choosing another agent closes an open ask
                                that is not theirs; counts are badgeVariant 'neutral' with a
@@ -101,6 +104,8 @@ Sign-in / reload on bare /workspace
                                stays as a ghost (chat drawn read, ask drawn ended); a poll never
                                re-sorts; a new row goes in before its nearest fresh neighbour; a
                                deleted chat drops. New visit = tab change, re-click, bulk read.
+                               THE ONE EXCEPTION to principle 5: the reader's own answer in
+                               Action removes its row (dropFromVisit) — "Answer, then next" below.
     selectedItem = the row, else resolveItem(key, threads/asks/previews) — never "Pick something"
                    for an old chat; on a phone a key that resolves to nothing goes Back
     PortalInboxList   bounded; the head counts LIVE rows in units — listHeadLabel: "21 asks",
@@ -124,8 +129,17 @@ Sign-in / reload on bare /workspace
                       badge (#4229) so the badge line is never empty and the ended badge
                       (Answered · you / Expired / …) replaces it in place — a row is one
                       height in every state, nothing below it moves on answer
+                      a row being crossed off (prop `crossing`: key → done | leaving) is
+                      li.grid > div.min-h-0 > div.pb-1 > button: `done` only marks it
+                      (data-crossing); `leaving` adds grid-rows-[0fr] opacity-0 +
+                      overflow-hidden on the wrapper, `inert` and aria-hidden — the row's
+                      height collapses over 200 ms ease-out and the rows below follow it
+                      (no FLIP, no <TransitionGroup>: nothing else in the list animates);
+                      motion-reduce:transition-none + motion-reduce:duration-0. The gap
+                      between rows is that pb-1 (not space-y), so it collapses too
     PortalInboxPane
-      ask   → <PortalAsks :ask-ids="[id]" testid-prefix="inbox-ask"> → store.answerAsk → asks/router
+      ask   → <PortalAsks :ask-ids="[id]" testid-prefix="inbox-ask" :notify-answered :hold-ms>
+              → store.answerAsk → asks/router
               the card (§3g L6, every surface): a pick focuses the note (not on a coarse
               pointer) so Enter sends; a question's options are quick picks that FILL the
               answer (questionQuickPicks, ≤ 500 chars) and never send; the badge is
@@ -395,8 +409,9 @@ table, no migration. The report publish may mint the addressee's Main
 live stack with an admin whose email is on at least one agent's roster.
 
 **Test steps (manual):** sign in → lands on `/workspace/inbox`; the pinned row's two counts
-equal the agent rows; answer an ask in the pane → it stays in place drawn ended until you leave the
-tab, then shows in All (where it does not move); open an Unread chat → the pane shows the arrivals, the badge clears in the sidebar
+equal the agent rows; answer an ask in the pane → its row shows the ended badge for a beat, the
+next ask opens and the row collapses out of Action (it is in All, drawn ended, where it does
+not move); answer the last one → "All caught up"; open an Unread chat → the pane shows the arrivals, the badge clears in the sidebar
 too; a deliverable renders through `ReportRenderer`; `?agent=X` and `?new=1` still win;
 375 px and both themes.
 
@@ -415,6 +430,9 @@ an ask that ends while selected; a deep-linked `?item=`; previews read failing m
 | `tests/unit/test_ent959_room_unread.py` | ent#959: agent messages after the room cursor count, own/system lines never; the baseline for a never-opened room; a non-member (cursor row, other identity space, departed, no reader) gets NO entry and no preview; an admin keeps their own starred non-member row at 0; the read write moves a room cursor only for an active member (unknown and unauthorized answer alike); a removed agent can no longer fetch, list or post into the room; the platform door carries its username to the room reader; `member` on the rooms list |
 | `src/frontend/tests/unit/portalInboxRooms.spec.js`, `portalInboxRooms.mount.spec.js`, `portalInboxRoomsShell.mount.spec.js` | ent#959: member rooms in Unread / All, non-member rooms never drawn or fetched, the pane reads the room after render, `roomTranscriptComplete`, a room past the page bound or short of its count stays partial and unread, the room view reads a multi-page room only once all of it is loaded and never on a failed open, opening a room from the sidebar writes no read, Mark all read by kind, the footer note gone, the count-parity property with rooms, the open room's `read` through the shell |
 | `src/frontend/tests/unit/portalInboxStore.spec.js` | `fetchChatState({previews})`, `markChatReadStrict` |
+| `src/frontend/tests/unit/portalInbox.mount.spec.js` (answer, then next) | the beat → advance → collapse → drop sequence with its states and classes; next below / above; `?sort=` and `?from=` order; the kept filter; "All caught up" with and without ended rows, and its next action per session; ended rows skipped and a far row scrolled to; a failed answer (409, 403), four poll endings and Dismiss move nothing; reduced motion; All (the row stays, the selection moves); an ask that is not a row; a confirm after the reader moved on; double and stale confirms; a new visit mid-sequence; no timer after unmount; gate / "Got it" / credential; the 300 ms guard; stacked history, last ask and focus. 33 call-site mutations, all red |
+| `src/frontend/tests/unit/portalInboxRowHeight.mount.spec.js` | #4229 one badge per state; the crossing row's `done` / `leaving` arms, the clip only while leaving, both reduced-motion classes, the gap inside the track |
+| `src/frontend/tests/unit/portalAskWakePending.mount.spec.js` | the "Agent not yet woken" line; #4502: "Sent." for a stopped or missing agent from a roster re-read after the answer, the sentence kept for a running one, a failed re-read, no read without a wake, no "Sent" line and no read when a surface takes the answer over, the hook on the success path only |
 | `src/frontend/tests/unit/portalInbox.mount.spec.js` | honest states, mark-read once, answer via store, Mark all read (Unread/All only, confirm for k>1 with Cancel focused, k=1 direct, success toast + new visit, partial failure), phone Back + focus; §3g S1 rows keep their place (A1 click-then-read, A7 answer on All, A12 poll ghosts + "All caught up"), a deleted open chat goes Back on phone; §3g S5 read after render (payloads awaited, a failed payload stays unread + Mark read, preview not in the URL, deep link reads, a false write shows the error) |
 | `src/frontend/tests/unit/portalInboxShell.mount.spec.js` | the stage chain (roster error, empty roster, no `PortalConversation`), selection never writes `activeAgentName`; ent#738: `reply` → the target, the `messageId` guard, cleared on leaving (and back), cleared on a New chat from a URL that does not name the chat, the Inbox path keeps its target |
 | `src/frontend/tests/unit/portalInChatReply.mount.spec.js` | ent#738: Reply only on persisted agent messages; the payload names the RESOLVED chat; focus in the tap; the chip + `aria-describedby`; the send carries the id and the sent bubble shows the quote; × returns focus; disabled during a call; Esc innermost first (typeahead, chip, turn — with a positive control), a hidden target never eats the turn's Esc, a claimed Esc is left alone; the bubble's row order and shared recipe; the pane's Reply still opens the chat at the message. 18 call-site mutations, all red |
@@ -631,6 +649,70 @@ fence instead: the platform chose the addressee; the roster was never its fence.
   ingestion boundaries (native and file), so an agent cannot forge one.
 
 Tests: `tests/unit/test_ent981_addressee_reach.py`.
+
+## Answer, then next — the one exception to principle 5
+
+Principle 5 ("updates preserve scroll, selection, focus and expansion") is why a row that
+leaves a tab stays as a ghost for the visit. That rule protects the reader from changes they
+did not cause. Working down a queue is the opposite case: the reader caused the change, and
+a list that never gets shorter makes them click the next row by hand every time. So **the
+reader's own confirmed answer, given in the pane, removes its row and opens the next ask**.
+Nothing else does.
+
+**What triggers it.** Only the local answer path, after the server confirmed it:
+`PortalAsks.submit` (a typed answer, an approval's Send, a one-click gate Approve / Reject,
+"Got it") and `PortalCredentialField.submit`, each calling the `notifyAnswered(askId)`
+function prop the Inbox hands down through the pane. A function prop, not an emit: the pane
+is keyed by the item, so a reader who selects another row while the POST is in flight
+unmounts the card, and Vue drops an emit from an unmounted instance. Never the data: an ask
+that a poll brings back ended — by someone else, by an expiry, withdrawn, or answered by the
+same person in another tab (`ended_by: 'you'`) — keeps its ghost and its selection. A failed
+answer (409, 403, any non-2xx) calls nothing. Dismiss is not an answer and keeps its Undo.
+
+**The sequence** (`PortalInbox.onAnswered`, Action):
+
+| When | What |
+|---|---|
+| confirm | the row is already a ghost drawn ended ("Answered · you", "Approved · you") — that badge IS the done state; `crossing[key] = 'done'` |
+| +150 ms | the selection moves to `nextPendingAsk(rows, key)` — the first pending ask below, else the nearest above; ended rows are skipped — by `replaceQuery({ item })`, never a push, also when the answered ask was only a preview; focus goes to the new pane's heading (when focus was inside the Inbox); the live region says "Answered. Next: <title>."; `crossing[key] = 'leaving'` and the row collapses |
+| +350 ms | `dropFromVisit(visit, key)`: the row leaves the visit (the ONLY row of the list leaves at +150 ms: it has no rows below to bring up, and the empty state follows at once) |
+
+Under `prefers-reduced-motion` both waits are zero and the three steps run in one pass.
+A tab change, a click on the active tab, a filter or sort change, or a completed Mark all
+read during the sequence ends it (the new visit has no such row). A next ask that is not
+the adjacent row (ended rows or, on All, chats sit between) is scrolled into view once the
+row is gone; an adjacent one is already where the reader is looking.
+
+- **Stacked.** The advance replaces; the entry the reader's open pushed is still the only
+  one, so `pushedKey`, `returnKey` and `returnIndex` move with the selection and one Back
+  returns to the list (§3g A6). After the last ask the pane goes Back by itself.
+- **Nothing left.** The selection is cleared, never moved to an ended row. With no rows the
+  list column's empty block reads "All caught up"; with ended rows still listed the pane
+  shows the same block (`inbox-caught-up`) instead of "Pick something on the left". Its next
+  action: "Open Operations" for a platform session, "See what came back" → Unread for a
+  client when Unread is not empty. A `?from=` filter the reader's own answers emptied is
+  kept ("Nothing is waiting on you from X." + "Show all agents").
+- **All.** An answered ask is still a member of All for 7 days, so its row stays; only the
+  selection moves, to the next pending ask, and stays put when there is none.
+- **Not selected / not a row.** If the reader moved on before the confirm, the row is
+  crossed off and the selection, the URL and focus are left alone. An answered ask that is
+  not a row of the current view (a deep link on another tab) stays selected.
+- **The guard.** The next ask's buttons land where the last ones were. For 300 ms after an
+  advance opens an ask (`hold-ms`, `ANSWER_HOLD_MS`), `PortalAsks` takes no send — a click,
+  Enter, a one-click gate's Approve / Reject — so a late second click cannot answer an ask
+  the reader has not seen. Nothing looks disabled, and an ask the reader opens themselves is
+  never held. (The credential field needs a typed value, so it has nothing to guard.)
+- **No "Sent" line here.** The card's confirmation would be unmounted with it; the Inbox's
+  one `sr-only` live region (`inbox-announce`) speaks instead, and says only "Answered."
+  when nothing advances.
+
+**Limits.** The tab counter, the sidebar counts and the list head drop at the confirm, one
+beat before the row goes. A second person answering first is a 409 on the card; the row
+reads pending until the next poll. A reader who answers an agent's LAST ask under a
+`?from=` filter and leaves the pane (Back) before the server confirms loses the filter: the
+existing watcher drops it before the confirm arrives. The motion itself is not testable in
+jsdom — the specs pin the states and classes, and the collapse is checked by eye in both
+themes.
 
 ## Related Flows
 
