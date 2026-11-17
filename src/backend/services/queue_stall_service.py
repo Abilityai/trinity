@@ -383,18 +383,16 @@ def run_once(now: Optional[datetime] = None) -> Dict[str, int]:
         if agent in stalled:
             continue
         try:
-            summary["cleared"] += platform_alerts.clear(
-                agent, ALERT_KIND, agent, reason="queue head moved"
-            )
+            # Head moved: the default reason, `condition_cleared`.
+            summary["cleared"] += platform_alerts.clear(agent, ALERT_KIND, agent)
         except Exception:  # noqa: BLE001
             summary["errors"] += 1
     try:
         # An agent whose queue emptied between ticks has no head to clear
         # from, so reconcile against the live stalled set as well.
         for agent in _agents_with_pending_alerts(stalled, enriched):
-            summary["cleared"] += platform_alerts.clear(
-                agent, ALERT_KIND, agent, reason="queue drained"
-            )
+            # Queue drained: the default reason, `condition_cleared`.
+            summary["cleared"] += platform_alerts.clear(agent, ALERT_KIND, agent)
     except Exception:  # noqa: BLE001
         logger.debug("[#4257] stall alert reconcile skipped", exc_info=True)
     return summary
