@@ -68,6 +68,8 @@ def encrypted_key_for(key: str) -> str:
 #: and ``db/users.py``).
 SECRET_SETTING_KEYS = frozenset({
     "anthropic_api_key",
+    # trinity-enterprise#1277: the repo-token provider's credential document.
+    "github_app_credentials",
     "github_pat",
     "google_api_key",
     # ent#582: the email-provider key, configurable from the first-run flow.
