@@ -82,6 +82,7 @@ describe("ent#661 projects — honest refusals, never a throw", () => {
       },
     });
     assert.match(JSON.parse(await notAgent.list_projects.execute({}, {})).message, /agent context/);
+    assert.doesNotMatch(JSON.parse(await notAgent.list_projects.execute({}, {})).message, /pass agent_name/);
   });
 
   it("get: a 404 is 'not a project you are on', with no further distinction", async () => {

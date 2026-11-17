@@ -24,8 +24,21 @@
 import { z } from "zod";
 import { TrinityClient, ApiError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
-import { ACT_AS_PARAM_DESCRIPTION, resolveActingAgent } from "../access.js";
+import { resolveActingAgent } from "../access.js";
 import { deriveMcpIdempotencyKey } from "./chat.js";
+
+/**
+ * The project tools cannot be driven by an admin's user key acting for an agent
+ * (the backend answers it with 403 agent_key_required, #4613), so `agent_name`
+ * is not advertised as a route. If that route opens, restore ACT_AS_PARAM_DESCRIPTION
+ * (and the user-key wording below) in the same change.
+ */
+const PROJECT_AGENT_NAME_DESCRIPTION =
+  "Not usable with a user key: the project tools refuse an admin's user key acting for an agent. " +
+  "Call them with the agent's own key, which always acts as itself — omit this.";
+const AGENT_KEY_ONLY_MESSAGE =
+  "These tools act as an agent; call them from an agent context (an agent-scoped key), from the agent itself. " +
+  "A user key, including an admin's, is refused.";
 
 /** trinity-enterprise#1024: the tool refused to act for the named agent itself. */
 class ActAsRefusal extends Error {}
@@ -60,7 +73,7 @@ function parseError(error: unknown): { status?: number; code?: string; message: 
 
 function explain(status: number | undefined, code: string | undefined, detailIsString: boolean): string {
   if (status === 403 && code === "agent_key_required") {
-    return "These tools act as an agent; call them from an agent context (an agent-scoped key), or pass agent_name with an admin's user key.";
+    return AGENT_KEY_ONLY_MESSAGE;
   }
   if (status === 403 && code === "external_audience") {
     return "Project tools are for internal conversations; someone outside the company is in this one. Don't share project details here.";
@@ -92,7 +105,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
   /**
    * trinity-enterprise#1024: the client a project tool calls with. A user key
    * acts for the named agent (`X-Trinity-Act-As-Agent`; the backend admits only
-   * an admin's user key) and is told to pass `agent_name` without one; an agent
+   * an admin's user key) and is told these tools need an agent's own key without one; an agent
    * key acts as itself and may not name another. One rule, `resolveActingAgent`.
    */
   const clientFor = (context: { session?: McpAuthContext } | undefined, requested?: string): TrinityClient => {
@@ -100,6 +113,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     const base = getClient(session);
     const named = typeof requested === "string" && requested.trim() !== "";
     if (session?.scope !== "user" && !named) return base;
+    if (session?.scope === "user" && !named) throw new ActAsRefusal(AGENT_KEY_ONLY_MESSAGE);
     let agent: string;
     try {
       agent = resolveActingAgent(session, "The project tools", requested);
@@ -145,7 +159,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
   const declared = (schema: z.ZodObject, p: Record<string, unknown>) =>
     Object.fromEntries(Object.entries(p).filter(([k]) => k in schema.shape));
   const createTaskParams = z.object({
-    agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+    agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
     project_id: projectId,
     title: z.string().min(1).max(200),
     objective: z.string().max(4000).optional(),
@@ -161,7 +175,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     refs: refList("Up to 10 GitHub issues or PRs: owner/repo#N, or https://github.com/owner/repo/issues/N or /pull/N. An item Trinity cannot read is refused (refs_refused)."),
   });
   const updateTaskParams = z.object({
-    agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+    agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
     project_id: projectId,
     task_id: taskId,
     status: statusEnum.optional(),
@@ -190,7 +204,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "steward and tracker link. Only projects your owner approved you for are listed. When a " +
         "conversation starts with a '[Project]' line, it names one of these projects by id.",
       parameters: z.object({
-        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
       }),
       execute: async (params: { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
@@ -218,7 +232,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "people's chats are private, so they appear only as a count. Use the id from the " +
         "'[Project]' line at the top of the conversation, or from list_projects.",
       parameters: z.object({
-        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         project_id: z.string().min(1).max(64).describe("The project id, e.g. prj_0123456789abcdef."),
       }),
       execute: async (params: { project_id: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
@@ -263,7 +277,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "output may not exist; read the note on its log. A task waiting on such a task still unblocks, " +
         "and lists those tasks in `blockers_closed_without_claim`.",
       parameters: z.object({
-        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         project_id: projectId,
         status: z.string().max(32).optional().describe("open (default), all, or one task status."),
         view: z.enum(["next"]).optional().describe("'next': the tasks that can be worked now. Ignores status."),
@@ -340,7 +354,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     add_project_task_note: {
       name: "add_project_task_note",
       description: "Append a note to a task's log (progress, a waiting-on, a hand-off). The log is append-only.",
-      parameters: z.object({ agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION), project_id: projectId, task_id: taskId, body: z.string().min(1).max(4000) }),
+      parameters: z.object({ agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION), project_id: projectId, task_id: taskId, body: z.string().min(1).max(4000) }),
       execute: async (p: { project_id: string; task_id: string; body: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
           return ok(await clientFor(context, p.agent_name).addProjectTaskNote(p.project_id, p.task_id, p.body, turnOf(context)));
@@ -359,7 +373,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "per call. When `truncated` is true the brief is longer: call again with offset = " +
         "`next_offset` until `truncated` is false. Read a task's brief before working the task.",
       parameters: z.object({
-        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         project_id: projectId,
         item_id: z.string().min(1).max(64).describe("The context item's id, from get_project's `context`."),
         offset: z.number().int().min(0).optional().describe("Byte offset to read from: 0, then `next_offset`."),
@@ -381,7 +395,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "Read a project's log: the decisions, deliverables, task changes, blockers and hand-offs that " +
         "people and agents recorded, oldest first within the page. get_project already includes the " +
         "latest 20; use this for more.",
-      parameters: z.object({ agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION), project_id: projectId, limit: z.number().int().min(1).max(200).optional() }),
+      parameters: z.object({ agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION), project_id: projectId, limit: z.number().int().min(1).max(200).optional() }),
       execute: async (p: { project_id: string; limit?: number } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
           const entries = await clientFor(context, p.agent_name).getProjectLog(p.project_id, p.limit ?? 50, turnOf(context));
@@ -400,7 +414,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "reads first. Write ONE entry per outcome — a decision made, a deliverable finished, a blocker, a " +
         "hand-off — never one per turn, and never a transcript. Task status changes are logged for you.",
       parameters: z.object({
-        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         project_id: projectId,
         kind: z.enum(["decision", "deliverable", "blocker", "handoff", "note"]),
         body: z.string().min(1).max(4000).describe("What happened and what it means, in a few sentences."),
@@ -425,7 +439,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "chat that is already on the project is found without this). Only your own items, and only on " +
         "a project you are working on. Sharing with outside clients is a person's decision, not yours.",
       parameters: z.object({
-        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         project_id: projectId,
         kind: z.enum(["file", "report", "decision", "ask"]),
         target_id: z.string().min(1).max(128).describe("The file, report, decision or ask id."),
@@ -449,7 +463,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "names its owner and when they were last reached. Start a stewarding run here, then record " +
         "health with set_project_health.",
       parameters: z.object({
-        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
       }),
       execute: async (params: { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
@@ -474,7 +488,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "(its `steward` field) — your primary contact approves it. Returns the project; work on it " +
         "with the task and log tools.",
       parameters: z.object({
-        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         name: z.string().min(1).max(200).describe("Short project name, e.g. 'Q4 launch'."),
         goal: z.string().min(1).max(2000).describe("What done looks like, in a sentence or two."),
         tracker_url: z.string().max(2000).optional().describe("An external tracker for its tasks, if it has one."),
@@ -502,7 +516,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "`owner` when your owner can use it, else your owner; to hand it to another agent afterwards, " +
         "ask with propose_project_changes — your primary contact approves it.",
       parameters: z.object({
-        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         path: z.string().min(1).max(300).describe("The project folder in your files, e.g. 'project_files/q4-launch'."),
       }),
       execute: async (p: { path: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
@@ -534,7 +548,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "person. Adding an agent someone else owns still needs its owner's yes. Needs the " +
         "project-management permission (`project_management_not_permitted` otherwise).",
       parameters: z.object({
-        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         project_id: projectId,
         members: z.array(z.string().min(1).max(320)).max(20).optional()
           .describe("Work emails or role:<id>, e.g. ['alex@example.com', 'role:compliance-lead']."),
@@ -577,7 +591,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "since/until (ISO; default the last 30 days, at most 180), agent, status, task_id or source " +
         "(chat, room, task, delegated, explicit, steward). Pass next_cursor back as cursor for the next page.",
       parameters: z.object({
-        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         project_id: projectId,
         since: z.string().max(64).optional().describe("ISO start of the window; default 30 days ago."),
         until: z.string().max(64).optional().describe("ISO end of the window; default now."),
@@ -624,7 +638,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "turn with no person, an agent may move a task to active or pending-verification only as that " +
         "task's run.",
       parameters: z.object({
-        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         project_id: projectId,
         task_id: taskId,
         agent: z.string().min(1).max(128).describe("The agent on the project that runs the task."),
@@ -651,7 +665,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "line saying why. It shows on the project and in the list, and is added to the project log. " +
         "Update it at least every two weeks, and whenever it changes.",
       parameters: z.object({
-        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         project_id: projectId,
         state: z.enum(["on-track", "at-risk", "off-track"]),
         note: z.string().max(280).optional().describe("One line: why, e.g. 'Vendor two weeks late.'"),
