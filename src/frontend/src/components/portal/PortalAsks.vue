@@ -699,26 +699,30 @@ onBeforeUnmount(() => { if (holdTimer) clearTimeout(holdTimer) })
 // takes the answer over (`notifyAnswered`, the Inbox pane) says nothing here.
 // "is picking this up" needs the agent to be running, and the response cannot
 // know that (answerConfirmation), so an answer that requested a wake re-reads
-// the roster first — quietly; a failed read leaves the last one standing.
+// the roster first, quietly. Nothing is said while that read is out, and a
+// read that fails says only "Sent.": the roster in hand is from page load, and
+// the line must never claim an agent that has stopped since.
 // The read is bounded: a roster that does not answer must not hold the line
-// back, so after ROSTER_WAIT_MS the last roster decides.
+// back, so after ROSTER_WAIT_MS it counts as a read that failed.
 const ROSTER_WAIT_MS = 1500
 async function confirmAnswer(answered, ask) {
   if (props.notifyAnswered || gone) return
   let availability = null
+  let verified = true
   if (answered && answered.status === 'answered' && answered.resume_requested === true) {
     let giveUp = null
     try {
-      await Promise.race([
+      // `refreshRoster` resolves true only for a read that succeeded.
+      verified = (await Promise.race([
         store.refreshRoster(),
         new Promise((resolve) => { giveUp = setTimeout(resolve, ROSTER_WAIT_MS) }),
-      ])
-    } catch (_) { /* the last roster stands */ }
+      ])) === true
+    } catch (_) { verified = false }
     clearTimeout(giveUp)
     availability = (store.agents || []).find((a) => a && a.name === ask.agent_name)?.availability || null
   }
   if (gone) return
-  showConfirmation(answerConfirmation(answered, ask.agent_name, { availability }))
+  showConfirmation(answerConfirmation(answered, ask.agent_name, { availability, verified }))
 }
 
 // #2375: one label set and one controls rule across desktop, /m and the

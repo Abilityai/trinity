@@ -2290,15 +2290,17 @@ export function composerAvailabilityNotice(agent, { memberTier = viewerIsMemberT
 //     `unavailable` say only "Sent.", and so does a row that already reads
 //     `wake_state: 'pending'`. `unknown` (Docker could not be asked) and an
 //     agent the roster does not list keep the sentence — the dispatch itself
-//     still tries in that case.
+//     still tries in that case. And `verified: false` — the caller could not
+//     read the roster just now — says only "Sent.": a roster from page load is
+//     not evidence the agent is still running.
 //
 // Returns null when there is nothing honest to say, so the caller renders
 // nothing rather than an empty line.
 const NOT_RUNNING = new Set(['stopped', 'unavailable'])
-export function answerConfirmation(answered, agentLabel = null, { availability = null } = {}) {
+export function answerConfirmation(answered, agentLabel = null, { availability = null, verified = true } = {}) {
   if (!answered || answered.status !== 'answered') return null
   const who = (agentLabel || answered.agent_name || 'the agent')
-  const deferred = answered.wake_state === 'pending' || NOT_RUNNING.has(availability)
+  const deferred = answered.wake_state === 'pending' || NOT_RUNNING.has(availability) || verified === false
   return answered.resume_requested === true && !deferred
     ? `Sent — ${who} is picking this up.`
     : 'Sent.'

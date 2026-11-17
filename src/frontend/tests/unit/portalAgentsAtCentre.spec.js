@@ -539,6 +539,10 @@ describe('ent#468 — the answer confirmation', () => {
     }
     expect(answerConfirmation({ ...woke, wake_state: 'woken' }, 'scribe', { availability: 'ready' }))
       .toBe('Sent — scribe is picking this up.')
+    // A roster that was not just read is not evidence: without it, only "Sent.".
+    expect(answerConfirmation(woke, 'scribe', { availability: 'ready', verified: false })).toBe('Sent.')
+    expect(answerConfirmation(woke, 'scribe', { availability: null, verified: false })).toBe('Sent.')
+    expect(answerConfirmation(woke, 'scribe', { availability: 'ready', verified: true })).toBe('Sent — scribe is picking this up.')
     // Availability never invents the sentence.
     expect(answerConfirmation({ status: 'answered', resume_requested: false }, 'scribe', { availability: 'ready' })).toBe('Sent.')
   })

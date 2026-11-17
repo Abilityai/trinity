@@ -2664,8 +2664,13 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   roster after such an answer and keeps "is picking this up" only when the
   agent's `availability` is not `stopped` / `unavailable` (and the row does not
   already say `wake_state: pending`); `unknown` — Docker could not be asked —
-  keeps it, as the dispatch itself still tries. The Inbox pane shows no
-  confirmation line at all: it opens the next ask (§5.40).
+  keeps it, as the dispatch itself still tries. Nothing is said while the read
+  is out, and a read that fails or takes longer than 1.5 s says only "Sent.":
+  the roster in hand is from page load, so it is not evidence the agent still
+  runs. The line is drawn only where the card outlives the answer — a project's
+  "Needs you" card. The Inbox pane shows none (it opens the next ask, §5.40),
+  and the tile in a chat never did: it becomes its history row, which is the
+  confirmation there.
 - The confirmation cannot live on the ask row, because answering removes it.
   `PortalAsks.visible` therefore also stays true while a confirmation is up —
   gating on `items.length` alone unmounted the surface at the same instant the

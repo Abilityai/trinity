@@ -87,7 +87,10 @@ describe('the "Sent" line and an agent that is not running (#4502)', () => {
   const pendingAsk = (id) => ask(id, { status: 'pending', ended_at: null, ended_by: null, answer: null })
   const confirmation = (w) => w.find('[data-testid="inbox-ask-confirmation"]')
 
-  async function answer({ rosterAfter, resume = true, rosterFails = false, before = [] } = {}) {
+  // `rosterRead`: 'ok' (resolves true, the store's verdict for a read that
+  // succeeded), 'quiet-fail' (resolves undefined: what a failed quiet refresh
+  // does), 'throws'.
+  async function answer({ rosterAfter, resume = true, rosterRead = 'ok', before = [] } = {}) {
     const item = pendingAsk('q')
     store.asks = [item]
     store.agents = before
@@ -97,8 +100,10 @@ describe('the "Sent" line and an agent that is not running (#4502)', () => {
       return answered
     })
     store.refreshRoster = vi.fn(async () => {
-      if (rosterFails) throw new Error('roster read failed')
+      if (rosterRead === 'throws') throw new Error('roster read failed')
+      if (rosterRead === 'quiet-fail') return undefined
       store.agents = rosterAfter
+      return true
     })
     wrapper = mount(PortalAsks, { props: { askIds: [item.id], testidPrefix: 'inbox-ask' } })
     await flushPromises()
@@ -126,12 +131,13 @@ describe('the "Sent" line and an agent that is not running (#4502)', () => {
     expect(confirmation(w).text()).toBe('Sent — scout is picking this up.')
   })
 
-  it('a roster read that fails falls back on the last roster, never on a guess', async () => {
-    const stopped = await answer({ before: [{ name: 'scout', availability: 'stopped' }], rosterFails: true })
-    expect(confirmation(stopped).text()).toBe('Sent.')
-    stopped.unmount(); wrapper = null
-    const ready = await answer({ before: [{ name: 'scout', availability: 'ready' }], rosterFails: true })
-    expect(confirmation(ready).text()).toBe('Sent — scout is picking this up.')
+  it.each(['quiet-fail', 'throws'])('a roster read that fails (%s) says "Sent." only: the last roster is not evidence', async (rosterRead) => {
+    // The roster in hand says ready, but it is from page load: the agent may
+    // have been stopped since. Without a fresh read the sentence is not claimed.
+    const w = await answer({ before: [{ name: 'scout', availability: 'ready' }], rosterRead })
+    expect(store.refreshRoster).toHaveBeenCalledTimes(1)
+    expect(confirmation(w).text()).toBe('Sent.')
+    expect(w.text()).not.toContain('is picking this up')
   })
 
   it('an answer that requested no wake says "Sent." and reads no roster', async () => {
@@ -160,12 +166,12 @@ describe('the "Sent" line and an agent that is not running (#4502)', () => {
     expect(store.refreshRoster).not.toHaveBeenCalled()
   })
 
-  it('a roster that does not answer does not hold the line back: after 1.5 s the last roster decides', async () => {
+  it('a roster that does not answer does not hold the line back: after 1.5 s it says "Sent." only', async () => {
     vi.useRealTimers()
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const item = pendingAsk('q')
     store.asks = [item]
-    store.agents = [{ name: 'scout', availability: 'stopped' }]
+    store.agents = [{ name: 'scout', availability: 'ready' }] // from page load: not evidence
     store.answerAsk = vi.fn(async (id) => {
       const answered = { ...item, status: 'answered', ended_by: 'you', ended_at: ago(0), resume_requested: true }
       store.asks = store.asks.map((a) => (a.id === id ? answered : a))
@@ -176,7 +182,9 @@ describe('the "Sent" line and an agent that is not running (#4502)', () => {
     await flushPromises()
     await wrapper.findAll('[data-testid="inbox-ask-option-q"]')[0].trigger('click')
     await flushPromises()
-    expect(confirmation(wrapper).exists()).toBe(false) // still waiting on the read
+    // Nothing is said while the read is out: never the claim "for a moment".
+    expect(confirmation(wrapper).exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('is picking this up')
     vi.advanceTimersByTime(1500)
     await flushPromises()
     expect(confirmation(wrapper).text()).toBe('Sent.')
