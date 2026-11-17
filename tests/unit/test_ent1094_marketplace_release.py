@@ -172,6 +172,8 @@ if tool == "curl":
                 finish("", 22)
             finish(body, rc)
     finish("", 7)
+if tool == "op":
+    finish(world.get("op_key", "KEY-FROM-1PASSWORD\n"), world.get("op_rc", 0))
 if tool == "packer":
     if args[0] == "build":
         if world.get("packer_hang"):
@@ -245,7 +247,7 @@ class Rig:
         fake = self.bin / "_fake"
         fake.write_text(_FAKE.replace("__PY__", sys.executable))
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
-        for tool in ("doctl", "aws", "curl", "ssh", "packer", "git"):
+        for tool in ("doctl", "aws", "curl", "ssh", "packer", "git", "op"):
             (self.bin / tool).symlink_to(fake)
         self.key = tmp / "key"
         self.key.write_text("k")
@@ -527,6 +529,15 @@ class TestBootCheck:
         assert result.returncode == 0, result.stdout + result.stderr
         assert self._pass_file(rig).read_text().splitlines() == [f"tag={_TAG}", "caddy=2.11.8"]
         assert rig.state()["droplets"] == []
+
+    def test_a_key_from_1password_is_gone_when_the_check_exits(self, rig: Rig) -> None:
+        env = rig.env(TRINITY_SSH_KEY_OP="op://vault/item/key", TMPDIR=str(rig.work))
+        del env["TRINITY_SSH_KEY_FILE"]
+        result = rig.run("boot-check.sh", _SNAPSHOT, _TAG, env=env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        ssh = rig.calls("ssh")[0]["args"]
+        assert Path(ssh[ssh.index("-i") + 1]).parent == rig.work, "ssh was not given the fetched key"
+        assert list(rig.work.iterdir()) == []
 
     def test_droplet_shuts_itself_down_and_uses_the_snapshot_region(self, rig: Rig) -> None:
         self._run(rig)
@@ -821,6 +832,39 @@ class TestBuild:
         assert result.returncode != 0
         assert "TRINITY_SSH_KEY_ID" in result.stderr
         assert not rig.calls("packer")
+
+    def _op_env(self, rig: Rig) -> dict:
+        env = rig.env(TRINITY_SSH_KEY_OP="op://vault/item/key", TMPDIR=str(rig.work))
+        del env["TRINITY_SSH_KEY_FILE"]
+        return env
+
+    def test_a_key_from_1password_is_gone_when_the_build_exits(self, rig: Rig) -> None:
+        result = rig.run("mp-build.sh", _TAG, env=self._op_env(rig))
+        assert result.returncode == 0, result.stderr
+        assert [c["args"] for c in rig.calls("op")] == [["read", "op://vault/item/key"]]
+        build = next(c for c in rig.calls("packer") if c["args"][0] == "build")
+        key_arg = next(a for a in build["args"] if a.startswith("ssh_private_key_file="))
+        key_file = Path(key_arg.split("=", 1)[1])
+        assert key_file.parent == rig.work, "the build was not given the fetched key"
+        assert not key_file.exists()
+        assert list(rig.work.iterdir()) == []
+
+    def test_a_locked_1password_builds_nothing_and_leaves_no_key(self, rig: Rig) -> None:
+        rig.world["op_rc"] = 1
+        rig.save()
+        result = rig.run("mp-build.sh", _TAG, env=self._op_env(rig))
+        assert result.returncode != 0
+        assert "1Password" in result.stderr
+        assert not [c for c in rig.calls("packer") if c["args"][0] == "build"]
+        assert list(rig.work.iterdir()) == []
+
+    def test_no_key_source_builds_nothing_and_names_both(self, rig: Rig) -> None:
+        env = rig.env()
+        del env["TRINITY_SSH_KEY_FILE"]
+        result = rig.run("mp-build.sh", _TAG, env=env)
+        assert result.returncode != 0
+        assert "TRINITY_SSH_KEY_OP" in result.stderr and "TRINITY_SSH_KEY_FILE" in result.stderr
+        assert not [c for c in rig.calls("packer") if c["args"][0] == "build"]
 
     def test_a_checkout_that_differs_from_the_tag_builds_nothing(self, rig: Rig) -> None:
         rig.world["git_diff_rc"] = 1

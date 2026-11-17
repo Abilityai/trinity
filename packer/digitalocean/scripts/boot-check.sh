@@ -1,9 +1,11 @@
 #!/bin/bash
 # Boot a throwaway droplet from a snapshot and test it the way a customer uses it.
 #
-#   DIGITALOCEAN_TOKEN=dop_v1_... TRINITY_SSH_KEY_ID=<id> TRINITY_SSH_KEY_FILE=<path> \
+#   DIGITALOCEAN_TOKEN=dop_v1_... TRINITY_SSH_KEY_ID=<id> TRINITY_SSH_KEY_OP=<op://...> \
 #     bash boot-check.sh <snapshot-id> <tag>
 #
+# The private key comes from 1Password for the length of the run (TRINITY_SSH_KEY_OP),
+# or from a file that stays (TRINITY_SSH_KEY_FILE).
 # A pass writes ~/.trinity-marketplace/<snapshot-id>.pass, which mp-submit.sh
 # requires. Any failure, and any check that cannot run, exits non-zero. The droplet
 # is destroyed on every exit a shell can trap, and powers itself off after 45
@@ -30,7 +32,6 @@ if ! [[ "$SNAPSHOT" =~ ^[0-9]+$ && "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-
 fi
 : "${DIGITALOCEAN_TOKEN:?DIGITALOCEAN_TOKEN must be set}"
 : "${TRINITY_SSH_KEY_ID:?TRINITY_SSH_KEY_ID must be set: an SSH key ID on the DigitalOcean team}"
-: "${TRINITY_SSH_KEY_FILE:?TRINITY_SSH_KEY_FILE must be set: the matching private key}"
 export DIGITALOCEAN_ACCESS_TOKEN="$DIGITALOCEAN_TOKEN"
 
 RECORD="${HOME}/.trinity-marketplace/${SNAPSHOT}.pass"
@@ -47,9 +48,6 @@ name_re="^trinity-${TAG//./-}-[0-9]{8}-[0-9]{4}\$"
 WORK="$(mktemp -d)"
 RUN_TAG="trinity-boot-check-$(date +%s)-$$"
 IP=""
-SSH_OPTS=(-i "$TRINITY_SSH_KEY_FILE" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=10
-          -o ServerAliveInterval=15 -o ServerAliveCountMax=3
-          -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=${WORK}/known_hosts")
 
 remote() { ssh "${SSH_OPTS[@]}" "root@${IP}" "$@"; }
 rsh() { remote -n "$1"; }
@@ -64,6 +62,7 @@ cleanup() {
         remote -n 'tail -n 40 /var/log/trinity-firstboot.log; timeout 30 docker ps -a --format "{{.Names}} {{.Status}}"' 2>&1 | sed 's/^/  /'
     fi
     reap_tag "$RUN_TAG" || rc=1
+    drop_ssh_key
     rm -rf "$WORK"
     exit "$rc"
 }
@@ -71,6 +70,11 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+
+use_ssh_key || exit 1
+SSH_OPTS=(-i "$TRINITY_SSH_KEY_FILE" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=10
+          -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+          -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=${WORK}/known_hosts")
 
 # runcmd runs after first boot, so a first boot that hangs never arms this.
 # Do not move it to bootcmd: systemd-run there wedged boot on stock Ubuntu 24.04,

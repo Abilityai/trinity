@@ -30,3 +30,24 @@ reap_tag() {
     echo "[marketplace] droplet ${left:-unknown} on tag ${tag} may still exist. Check: doctl compute droplet list --tag-name ${tag}" >&2
     return 1
 }
+
+# usage: use_ssh_key — points TRINITY_SSH_KEY_FILE at the private key for this run.
+# TRINITY_SSH_KEY_OP is a 1Password secret reference (op://vault/item/field): the key
+# is read into a temp file that drop_ssh_key deletes, so call that from the exit trap.
+# Without it, TRINITY_SSH_KEY_FILE is used as given and left alone.
+# `op run` resolves every op:// value in the environment, so run these scripts outside it.
+KEY_TMP=""
+use_ssh_key() {
+    if [ -n "${TRINITY_SSH_KEY_OP:-}" ]; then
+        KEY_TMP="$(mktemp "${TMPDIR:-/tmp}/trinity-key.XXXXXX")" || return 1
+        if ! op read "$TRINITY_SSH_KEY_OP" > "$KEY_TMP"; then
+            echo "[marketplace] could not read the SSH key from 1Password" >&2
+            return 1
+        fi
+        TRINITY_SSH_KEY_FILE="$KEY_TMP"
+    fi
+    [ -r "${TRINITY_SSH_KEY_FILE:-}" ] && return 0
+    echo "[marketplace] set TRINITY_SSH_KEY_OP (a 1Password reference) or TRINITY_SSH_KEY_FILE (a readable private key)" >&2
+    return 1
+}
+drop_ssh_key() { [ -z "$KEY_TMP" ] || rm -f "$KEY_TMP"; }
