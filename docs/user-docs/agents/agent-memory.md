@@ -56,6 +56,8 @@ Facts never leave the instance except for the extraction call itself, and creden
 
 **Searching it.** Under the per-agent switch, **Search memory** shows what the agent would be reminded of for any question you type, with the date, the kind of run and a relevance percentage for each fact. The agent can search too, with `search_memory`, when the five recalled facts are not enough; it only ever searches the scope of the turn it is in.
 
+![A person's memory view: facts with History and Forget, and Search their facts returning nine facts ranked by relevance, each with its date and kind of run](../../screenshots/agent-person-memory-search.webp)
+
 **Forgetting.** **Forget** on a fact (in a person's memory view) stops the agent recalling it. Every fact keeps a history — *Kept*, *Rewritten*, *Retired*, *Seen again, unchanged*, *Screened out*, *Pruned*, *Recalled into a prompt*, *Found by a search*, *Forgotten* — so you can see why it exists and when it was used.
 
 ## For Agents

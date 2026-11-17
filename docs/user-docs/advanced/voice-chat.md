@@ -143,6 +143,8 @@ The call owns only the blocks it draws: everything the agent put on the canvas i
 
 A **Direct call** has no voice model between you and the agent. What you say is transcribed, sent to the agent as an ordinary turn in the chat, and the agent's own reply is read aloud. It is slower than the voice call and answers in the agent's own words — with its skills, files and memory on every turn, not only when it is handed a task.
 
+![A Direct call in progress: the call bar shows the sentence being spoken with stop, mute and hang-up controls, the spoken message is in the thread marked spoken, and the agent's Working card has a Stop button](../../screenshots/workspace-direct-call.webp)
+
 Start one with **Start a Direct call**, the button beside **Start a voice call** in the composer. One call runs in a chat at a time, of either kind; the other button reads *Another call is on*.
 
 **While it runs.** A strip above the composer shows bars and one word for the state — **Connecting**, **Listening**, **Got it** (transcribing), **Thinking**, **Speaking**, **Yes or no?** — with **Stop**, **Mute** and **End call**. Your words appear as you are heard; a sentence that sounds unfinished is held for up to 3 seconds in case you carry on. Typed messages still work during the call and join it. Anything that does not read well aloud — code, a table, a list of links — is left in the chat (*The reply is in the chat.*), a very long reply ends with *The rest is in the chat.*, and a failed turn is spoken as *The agent couldn't answer that.* Credential values the agent has fetched are never spoken: they are said as "redacted".
