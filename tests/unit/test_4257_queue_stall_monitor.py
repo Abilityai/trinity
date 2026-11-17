@@ -353,6 +353,29 @@ def test_run_once_clears_when_the_head_is_young_again():
     assert stubs.alerts.clear.call_args[0][:3] == ("alpha", qss.ALERT_KIND, "alpha")
 
 
+def test_every_clear_reason_is_one_the_platform_accepts():
+    """#4578: `platform_alerts.clear` swallows the ValueError `clear_platform`
+    raises for a reason outside `PLATFORM_ENDING_REASONS`, so a free-text
+    reason left the stall alert pending after the queue moved on."""
+    from services import ask_service
+
+    tree = ast.parse((_BACKEND / "services" / "queue_stall_service.py").read_text())
+    clears = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "clear"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "platform_alerts"
+    ]
+    assert clears, "expected the stall service to clear its alert"
+    for call in clears:
+        for kw in call.keywords:
+            if kw.arg == "reason":
+                assert isinstance(kw.value, ast.Constant)
+                assert kw.value.value in ask_service.PLATFORM_ENDING_REASONS
+
+
 def test_run_once_reports_a_full_pilot_pool_as_busy_not_as_a_missing_claim():
     stubs = _Stubs([_head(minutes_ago=45)], leased=3)
 
