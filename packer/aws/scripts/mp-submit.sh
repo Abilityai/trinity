@@ -9,7 +9,8 @@
 # Refuses an AMI with no pass record from boot-check.sh; the record names the tag.
 # The change set is a dry run (Intent=VALIDATE) unless TRINITY_AWS_SUBMIT=apply.
 # An applied submit removes the record. Exit 1 means AWS rejected the change set,
-# 3 means AWS had no verdict within the wait (an hour). Expect about 30 minutes:
+# 3 means AWS had no verdict within the wait (an hour), or the change set
+# could not be read. Expect about 30 minutes:
 # AWS scans the AMI before it answers, on a dry run too.
 #
 # The product id and the ingestion role (policy AWSMarketplaceAmiIngestion,
@@ -66,18 +67,26 @@ CHANGE_SET="$(aws marketplace-catalog start-change-set \
     --change-set "$CHANGES" \
     --change-set-name "trinity-${VERSION}" \
     --query ChangeSetId --output text)"
+# Printed before the wait, so the id survives anything that ends the wait early.
+echo "[mp-submit] change set ${CHANGE_SET} started"
 
 # start-change-set only queues the request; AWS checks it while PREPARING.
 describe() {
     aws marketplace-catalog describe-change-set --region us-east-1 --catalog AWSMarketplace \
         --change-set-id "$CHANGE_SET" --output json
 }
+# A failed read is no verdict: exit 3 (pending) with the record kept, never the CLI's own code.
+unread() {
+    echo "[mp-submit] could not read change set ${CHANGE_SET}. The pass record is kept. Read the verdict with:" >&2
+    echo "  aws marketplace-catalog describe-change-set --region us-east-1 --catalog AWSMarketplace --change-set-id ${CHANGE_SET}" >&2
+    exit 3
+}
 # AWS scans a new AMI while PREPARING, dry run included: about 30 minutes on this listing.
-STATE="$(describe)"
+STATE="$(describe)" || unread
 for _ in $(seq 120); do
     [ "$(jq -r .Status <<<"$STATE")" = "PREPARING" ] || break
     sleep "${TRINITY_MP_POLL:-30}"
-    STATE="$(describe)"
+    STATE="$(describe)" || unread
 done
 STATUS="$(jq -r .Status <<<"$STATE")"
 echo "[mp-submit] change set ${CHANGE_SET}: ${STATUS}"
