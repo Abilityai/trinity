@@ -1,6 +1,10 @@
 import functions_framework
 from google.cloud import discoveryengine_v1 as discoveryengine
 import json
+import time
+import urllib.request
+
+from links import parse_catalogue, sanitize_links
 
 PROJECT_ID = "mcp-server-project-455215"
 ENGINE_ID = "trinity-search"
@@ -32,6 +36,31 @@ client — none of them can open a file from the source repository):
   name as if it were a link."""
 
 FALLBACK_ANSWER = "I wasn't able to find a specific answer to that question. Try rephrasing, or check the [Trinity docs](https://docs.ability.ai) directly."
+
+CATALOGUE_URL = "https://docs.ability.ai/llms.txt"
+CATALOGUE_TTL_SECONDS = 3600
+_catalogue = {"urls": set(), "fetched_at": 0.0}
+
+
+def known_urls():
+    """Every page/video URL the docs site serves, from its llms.txt (ent#1285).
+
+    Cached for an hour per instance. A failed refresh keeps the last good set;
+    with no set at all `sanitize_links` only drops relative `.md` links.
+    """
+    if time.time() - _catalogue["fetched_at"] < CATALOGUE_TTL_SECONDS and _catalogue["urls"]:
+        return _catalogue["urls"]
+    try:
+        req = urllib.request.Request(CATALOGUE_URL, headers={"User-Agent": "ask-trinity"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            urls = parse_catalogue(resp.read().decode("utf-8", "replace"))
+        if len(urls) >= 50:  # a truncated or error page must not shrink the allowlist
+            _catalogue["urls"] = urls
+    except Exception:
+        pass
+    _catalogue["fetched_at"] = time.time()
+    return _catalogue["urls"]
+
 
 def get_or_create_session(client, session_id=None):
     """Get existing session or create a new one."""
@@ -99,6 +128,9 @@ def ask_trinity(request):
         )
 
         answer_text = response.answer.answer_text if response.answer else ""
+        # The model invents docs URLs from repo paths; keep only links the
+        # docs site actually serves (repaired where unambiguous).
+        answer_text = sanitize_links(answer_text, known_urls())
         state = str(response.answer.state.name) if response.answer else "UNKNOWN"
 
         return (json.dumps({
