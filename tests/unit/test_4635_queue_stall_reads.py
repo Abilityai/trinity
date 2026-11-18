@@ -28,7 +28,13 @@ from db_harness import db_backend, run as _hrun, scalar as _hscalar  # noqa: E40
 pytestmark = pytest.mark.unit
 
 _PREFIX = "dispatch_queue_stalled:"
-_NOW = datetime.now(timezone.utc)
+
+
+def _now() -> datetime:
+    """The clock at CALL time. A module-level `now` is taken at collection, and
+    in a long CI run a test can execute minutes later: a "live" lease built from
+    it had already expired when the read ran (learnings 2026-08-03)."""
+    return datetime.now(timezone.utc)
 
 
 def _iso(dt: datetime) -> str:
@@ -41,7 +47,7 @@ def _pending_ask(i: int, *, agent="noisy", priority="critical"):
         "id": f"ask-{i:05d}", "agent_name": agent, "request_id": f"ask-{i:05d}",
         "type": "question", "status": "pending", "priority": priority,
         "title": "t", "question": "q",
-        "created_at": _iso(_NOW - timedelta(days=1, seconds=i)),
+        "created_at": _iso(_now() - timedelta(days=1, seconds=i)),
     }
 
 
@@ -65,7 +71,7 @@ def _stall_row(agent: str, *, priority="high", status="pending", subject=None,
         id=f"row-{agent}-{status}", ag=agent, rid=f"queue-stall-{agent}-{status}",
         st=status, pr=priority, ti=title, qu=question,
         cx=json.dumps(context or {"episode_started_at": "e0"}),
-        ca=_iso(_NOW - timedelta(hours=2)),
+        ca=_iso(_now() - timedelta(hours=2)),
         su=subject or f"{_PREFIX}{agent}",
     )
 
@@ -122,7 +128,7 @@ def test_the_subject_prefix_is_matched_exactly(db_backend):
 
 
 def _queued(agent: str, eid: str, minutes_ago: int, key=None):
-    qa = _iso(_NOW - timedelta(minutes=minutes_ago))
+    qa = _iso(_now() - timedelta(minutes=minutes_ago))
     _hrun(
         "INSERT INTO schedule_executions "
         "(id, schedule_id, agent_name, status, started_at, queued_at, message, "
@@ -134,13 +140,13 @@ def _queued(agent: str, eid: str, minutes_ago: int, key=None):
 
 def _running(agent: str, eid: str, *, key=None, lease_minutes=None):
     lease = (None if lease_minutes is None
-             else _iso(_NOW + timedelta(minutes=lease_minutes)))
+             else _iso(_now() + timedelta(minutes=lease_minutes)))
     _hrun(
         "INSERT INTO schedule_executions "
         "(id, schedule_id, agent_name, status, started_at, message, triggered_by, "
         " conversation_key, lease_expires_at) "
         "VALUES (:id, '__manual__', :a, 'running', :sa, 'm', 'mcp', :k, :le)",
-        id=eid, a=agent, sa=_iso(_NOW - timedelta(minutes=50)), k=key, le=lease,
+        id=eid, a=agent, sa=_iso(_now() - timedelta(minutes=50)), k=key, le=lease,
     )
 
 
@@ -232,8 +238,8 @@ def _item(priority: str, title: str, marker: str):
         "title": title,
         "question": f"question {title}",
         "context": {"episode_started_at": marker, "wait_reason": title},
-        "created_at": _iso(_NOW),
-        "expires_at": _iso(_NOW + timedelta(days=14)),
+        "created_at": _iso(_now()),
+        "expires_at": _iso(_now() + timedelta(days=14)),
     }
 
 
