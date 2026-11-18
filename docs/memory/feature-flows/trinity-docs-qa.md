@@ -63,8 +63,13 @@ in-app Help widget (#391), and the standalone `trinity-docs-mcp` MCP server
 
 | File | Purpose |
 |------|---------|
-| `.github/workflows/sync-docs-to-vertex.yml` | Auto-sync docs to GCS on push |
+| `.github/workflows/sync-docs-to-vertex.yml` | Sync docs + docs-site catalogue to GCS (push to `main`, daily, manual) |
 | `scripts/ask-trinity.sh` | CLI tool for querying |
+| `src/ask-trinity/main.py` | The `ask-trinity` Cloud Function — answer prompt (preamble), session handling, Answer API call (versioned here since ent#1285; previously existed only as the deployed zip) |
+| `src/ask-trinity/links.py` | Answer-link sanitiser: repairs or unlinks any docs/YouTube link the docs-site catalogue does not list (ent#1285) |
+| `src/ask-trinity/deploy.sh` | `gcloud functions deploy` with the live configuration (gen2, python312, min 1 instance) |
+| `tests/unit/test_ent1285_ask_trinity_links.py` | Sanitiser unit tests (stdlib only — no Google SDK needed) |
+| `scripts/ask-trinity-link-eval.py` | Fixed 10-question link-quality eval — doc/video link present, every URL HTTP 200, no relative `.md` links (ent#1285) |
 | `docs/onboarding/*.md` | Source documentation (onboarding) |
 | `docs/user-docs/**/*.md` | Source documentation (user docs incl. the 264-Q&A FAQ) |
 | `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md` | Source documentation (agent guide, #1459) |
@@ -74,9 +79,9 @@ in-app Help widget (#391), and the standalone `trinity-docs-mcp` MCP server
 
 ### Document Sync (GitHub Action)
 
-1. Push to `docs/onboarding/*.md` triggers workflow
+1. Triggers: push to `main` touching `docs/onboarding/**`, `docs/user-docs/**`, the agent guide or the workflow itself; a **daily schedule** (04:17 UTC — the docs-site catalogue changes when the docs site deploys, which is not a push here); manual dispatch
 2. Workflow authenticates via Workload Identity Federation
-3. Markdown files converted to `.txt` (Vertex AI requirement)
+3. Markdown files converted to `.txt` (Vertex AI requirement); `https://docs.ability.ai/llms.txt` downloaded, sanity-checked (≥50 page links, ≥10 video links — otherwise the step **fails**, because `rsync -d` + `reconciliationMode: FULL` would silently drop the catalogue from the index) and split per `## ` section into `docs-site-catalogue-<section>.txt`, each prefixed with the site header
 4. Files synced to `gs://trinity-docs-rag-*/txt/`
 5. Document re-import triggered via Discovery Engine API
 6. Vertex AI indexes and chunks documents
@@ -86,8 +91,9 @@ in-app Help widget (#391), and the standalone `trinity-docs-mcp` MCP server
 1. User sends question via `ask-trinity.sh` or direct curl
 2. Cloud Function receives request (no auth required)
 3. Function calls Vertex AI Search Answer API
-4. Gemini 2.0 Flash generates answer from indexed docs
-5. Response includes answer text and citation references
+4. Gemini 2.0 Flash generates answer from indexed docs; the preamble asks it to close with **Read more** (a docs.ability.ai page) and **Watch** (a YouTube video) using only URLs verbatim from its sources, never relative `.md` links
+5. `links.sanitize_links` checks every link against the docs site's `llms.txt` (fetched per instance, cached 1 h, last good copy kept on failure): a listed URL is kept; a docs-domain or relative `.md` link is repaired to the one page whose path ends the same way (or whose flattened path matches the indexed file name); anything else is unlinked, and a Read more / Watch line left empty is removed. Needed because the model builds `https://docs.ability.ai/<repo path>` URLs from the repo-markdown chunk it read — the prompt alone left 7/10 eval answers with a 404 link
+6. Response carries the answer text (no citations field — see contract notes)
 
 ## API
 
@@ -192,6 +198,7 @@ requirement) and syncs to GCS with a flattened name (`/` → `-`):
 | `docs/onboarding/*.md` | Welcome, getting started, use cases, workflows, troubleshooting |
 | `docs/user-docs/**/*.md` | Full user documentation — guides, API reference, integrations, operations, and the 264-Q&A FAQ |
 | `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md` | Agent authoring guide (`get_agent_requirements` source, #1459) |
+| `https://docs.ability.ai/llms.txt` → `docs-site-catalogue-<section>.txt` | The docs site's own catalogue: every page URL and YouTube video URL with a one-line description (ent#1285). The only indexed source that knows the site's routes — repo paths do not map to them (e.g. `/getting-started/deploying/digitalocean`) — and the only one carrying video URLs. Also the only coverage of site-only sections (Architecture, Cornelius, Claude Code Plugins), as one-line summaries |
 
 ## Limitations
 
@@ -273,6 +280,7 @@ Requirements: `docs/memory/requirements/mcp.md` → "Trinity Helper MCP Server (
 - [x] ~~Add more docs~~ (done: user-docs incl. API reference + FAQ; agent guide added by #1459)
 - [x] ~~Integrate into Trinity UI as help widget~~ (done: #391)
 - [x] ~~Add conversation memory for follow-up questions~~ (done: session support)
+- [x] ~~Link answers to docs.ability.ai pages and YouTube videos~~ (done: ent#1285 — catalogue indexed, prompt rules, link sanitiser; eval 0/10 → 8/10 with zero broken URLs)
 - [ ] Surface Vertex AI Search citations in the Cloud Function payload (consumers pass them through automatically)
 - [ ] Hosted remote MCP endpoint (Streamable HTTP) + MCP registry listing (#1459 fast-follow)
 - [ ] Support for code snippets with syntax highlighting

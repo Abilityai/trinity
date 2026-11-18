@@ -1033,6 +1033,17 @@ ask table (Action), the portal messages and addressed deliverables (Unread, All)
 and the #557 read cursor. It adds **no table, no store and no router**. Requirement
 §5.40 of `core-agent.md`; flow in `feature-flows/workspace-inbox.md`.
 
+**One seam from the ask card back to the Inbox: `notifyAnswered`.** A row leaves a tab
+visit only as a ghost (principle 5), with one exception: the reader's own confirmed answer
+crosses its row off Action and opens the next ask. The card tells the Inbox through a
+**function prop** handed down the pane (`PortalInbox.onAnswered` → `PortalInboxPane` →
+`PortalAsks` → `PortalCredentialField`), called on the answer's success path only. It is not
+an emit, because the pane is keyed by the item and an emit from a card unmounted
+mid-request is dropped; and it is not read off the data, because an ask a poll brings back
+ended must keep its ghost. The timing and the selection live in the container, the rules
+(`nextPendingAsk`, `dropFromVisit`, `answeredAnnouncement`) in `portalInbox.js`; still no
+store. A surface that passes the prop also takes over the "Sent" confirmation.
+
 **Unread is the #557 cursor, generalised to deliverables.** `client_portal/db.py`
 holds ONE fragment, `_UNREAD_ARRIVALS`, a `UNION ALL` of two arms that share the
 cursor-or-baseline predicate: (i) assistant messages in the viewer's own chats

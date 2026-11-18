@@ -33,7 +33,7 @@ A template can ship the recurring work its agent is designed to do in a `schedul
 1. Open the agent detail page and go to the scheduling section.
 2. Click **Create Schedule**.
 3. Configure: name, cron expression (e.g., `0 9 * * 1-5` for weekdays at 9 AM), message/task, timezone, and description. The presets **Daily 9 AM**, **Weekly Mon**, **Every 6h** and **Every 30m** fill the cron field for the common cadences.
-4. Optionally select a model override from the **Model** picker — Claude Opus 5.5, Fable 5.1, Sonnet 5, Haiku 4.5 and older models are listed, or type any model id. Left empty, the schedule uses the agent's own model (the one set under **Settings › General › Model**, or declared by its template), else the platform default model (see [Model Selection](../agents/agent-configuration.md#model-selection)). Fable 5.1 is the most capable model, for the longest and hardest tasks; Sonnet 5 is fast with a 1M-token context window.
+4. Optionally select a model override from the **Model** picker — Claude Opus 5.5, Fable 5.2, Sonnet 5.5, Haiku 5.5 and older models are listed, or type any model id. Left empty, the schedule uses the agent's own model (the one set under **Settings › General › Model**, or declared by its template), else the platform default model (see [Model Selection](../agents/agent-configuration.md#model-selection)). Fable 5.2 is the most capable model, for the longest and hardest tasks; Sonnet 5.5 is fast with a 1M-token context window.
 5. Enable or disable individual schedules with the toggle.
 6. View execution history with status, duration, and cost.
 7. Click **Run now** to trigger a schedule immediately.

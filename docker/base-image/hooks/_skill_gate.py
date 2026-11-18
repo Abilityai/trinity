@@ -54,9 +54,11 @@ import threading
 from collections import namedtuple
 from typing import Dict, List, Optional, Tuple
 
-# The Claude Code release the facts below were read from. A unit test fails
-# when the image's pin moves; re-check every item, then move this.
-SKILL_GATE_CLI_VERIFIED = "2.1.281"
+# The Claude Code release the facts below were last checked on. A unit test
+# fails when the image's pin moves; re-check every item, then move this.
+# Read from the 2.1.281 binary; re-checked on 2.1.322 (#4528) by running each
+# one in the image against a stub API, with 2.1.281 beside it as the control.
+SKILL_GATE_CLI_VERIFIED = "2.1.322"
 CLI_FACTS_TO_REAUDIT = (
     "Hook entries with `args` run in exec form: spawned directly, never through a "
     "shell, never wrapped by CLAUDE_CODE_SHELL_PREFIX.",
@@ -89,6 +91,9 @@ CLI_FACTS_TO_REAUDIT = (
     "~/.claude/.credentials.json is read from disk, so either one signs a nested claude in.",
     "A -p or --print before any `--` skips subcommand parsing, so `claude mcp -p x` is a model "
     "session; --version and --help still exit first. gated_bash_deny relies on this.",
+    "The Monitor tool (offered since 2.1.310 with telemetry off) runs a shell command of its "
+    "own; hooks registered for Bash see that command as a Bash call (since 2.1.314) and can "
+    "block it. Headless and chat turns do not offer the tool at all (PLATFORM_DENIED_TOOLS).",
 )
 
 MARKER = "/opt/trinity/skill-gates-active"

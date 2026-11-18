@@ -416,10 +416,11 @@ _EXEMPT = {
         "agent; the key's own reach was already narrowed by the route's dependency",
     ("services/skill_gate_service.py", "_openable_run"):
         "takes a person's username: the operator queue calls it for person principals only, the Workspace for a platform person (#3708)",
-    ("services/role_addressing.py", "can_open_agent"):
+    ("services/role_addressing.py", "agent_reach"):
         "takes an email resolved from a role — a gate's approver (ent#881) or an ask's "
         "canon-role addressee (ent#1007) — a person, never a principal; "
-        "skill_gate_service._can_open delegates here",
+        "can_open_agent is its yes/no form (#4599) and skill_gate_service._can_open "
+        "delegates there",
 }
 _PREDICATES = {"can_user_access_agent", "can_user_share_agent"}
 #: `_may_reach_for_path` is files.py's reach plus the ent#596 skills-holder case.

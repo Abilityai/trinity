@@ -54,6 +54,8 @@ NOT_TOOLS = frozenset({
     "replaces_ended", "already_pending", "ask_ended", "invalid_id",
     "invalid_options", "invalid_title", "max_pending", "queue_full",
     "rate_limited",
+    # #4599: why a credential entry of the queue file is held
+    "invalid_credential", "no_person", "role_cannot_open_agent",
     # harness and template names
     "data_paths",
 })

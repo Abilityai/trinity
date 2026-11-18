@@ -379,8 +379,9 @@ def _can_open(agent_name: str, email: str) -> bool:
     `role_addressing.can_open_agent` (trinity-enterprise#881; moved there for
     trinity-enterprise#1007 so an ask to a canon role applies the same one).
     This name stays the gate's seam: `_approvers` reads it, and the tests
-    patch it."""
-    return role_addressing.can_open_agent(agent_name, email)
+    patch it. The answer is `role_addressing.agent_reach`'s: True, False, or
+    None when the platform could not check (#4599)."""
+    return role_addressing.agent_reach(agent_name, email)
 
 
 def _approvers(agent_name: str, role: str) -> List[str]:
@@ -391,7 +392,13 @@ def _approvers(agent_name: str, role: str) -> List[str]:
     role nobody is seated in), `approver_cannot_open_agent` when everyone it
     names is outside the agent. An approval raised to people who can never see
     it waits silently until it expires. The refusal names the role's label,
-    never a person."""
+    never a person.
+
+    #4599: when nobody is reachable because the platform could not check
+    (a `_can_open` answer of None; each person is read once), the refusal is the gate's own 503
+    `gate_unavailable`, marked `unchecked`. `approver_cannot_open_agent` is a
+    STANDING refusal — a room records the post as refused for good — and an
+    outage clears by itself, so it must be one a room delivers again."""
     people = _resolved_people(agent_name, role)
     if not people:
         raise SkillGateRefused(
@@ -399,13 +406,21 @@ def _approvers(agent_name: str, role: str) -> List[str]:
             f"Nobody fills the {role_addressing.role_label(role)} role for {agent_name}, "
             "so this gated request can't be approved. Ask the agent's owner to assign one.",
             role=role)
-    reachable = [p for p in people if _can_open(agent_name, p)]
+    reach = {p: _can_open(agent_name, p) for p in people}
+    reachable = [p for p in people if reach[p]]
     if not reachable:
+        if any(v is None for v in reach.values()):
+            refusal = SkillGateRefused(
+                503, "gate_unavailable",
+                f"Could not check who can open {agent_name} to approve this request; "
+                "nothing was run. Try again shortly.", role=role)
+            refusal.unchecked = True
+            raise refusal
         raise SkillGateRefused(
             422, "approver_cannot_open_agent",
             f"The {role_addressing.role_label(role)} for {agent_name} can't open {agent_name}, "
-            "so they would never see this approval. Ask the agent's owner to share "
-            f"{agent_name} with them.", role=role)
+            "so they would never see this approval. Ask the agent's owner or an admin to "
+            f"make sure {agent_name} is shared with them and that they can sign in.", role=role)
     return reachable
 
 
@@ -413,12 +428,15 @@ def approver_reason(agent_name: str, role: str) -> Optional[str]:
     """Why `role` reaches nobody on `agent_name`, for the Skills tab
     (trinity-enterprise#881): `unfilled` (it names nobody), `not_shared`
     (everyone it names is outside the agent), or None when it reaches someone.
-    Never raises; a failed lookup reads `unfilled`."""
+    Never raises; a failed lookup reads `unfilled`. A reach that could not be
+    checked (#4599) keeps reading `not_shared`, the label it had before that
+    arm got its own refusal: the tab's vocabulary has no third word."""
     try:
         _approvers(agent_name, role)
         return None
     except SkillGateRefused as e:
-        return "not_shared" if e.code == "approver_cannot_open_agent" else "unfilled"
+        cannot_open = e.code == "approver_cannot_open_agent" or getattr(e, "unchecked", False)
+        return "not_shared" if cannot_open else "unfilled"
     except Exception:  # noqa: BLE001
         return "unfilled"
 

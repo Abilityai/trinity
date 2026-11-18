@@ -205,13 +205,14 @@ describe("#1024 the project tools take agent_name too", () => {
     assert.equal(JSON.stringify(calls[0].body).includes("agent_name"), false);
   });
 
-  it("a user key without agent_name is told to pass it, and nothing is sent", async () => {
+  it("a user key without agent_name is told to use an agent's key, and nothing is sent", async () => {
     const calls: Call[] = [];
     const out = await run(createProjectTools(fakeClient(calls), false).create_project,
       { name: "Q4", goal: "ship" }, ctx("user"));
     assert.equal(calls.length, 0);
     assert.equal(out.success, false);
-    assert.match(out.error, /pass agent_name/);
+    assert.match(out.error, /agent-scoped key/);
+    assert.doesNotMatch(out.error, /pass agent_name/);
   });
 
   it("an agent key naming another agent is refused; naming none is unchanged", async () => {
