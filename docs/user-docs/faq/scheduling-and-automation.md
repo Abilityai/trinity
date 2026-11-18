@@ -4,7 +4,7 @@
 
 ## How do I schedule a recurring task for an agent?
 
-Open the agent's detail page, go to the Schedules section, and click **Create Schedule**. Give it a name, a cron expression (for example `0 9 * * 1-5` for weekdays at 9 AM), the message or task to send, a timezone, and an optional description. You can also pick a model override per schedule from the **Model** picker (Claude Opus 5.5, Fable 5.1, Sonnet 5, Haiku 4.5 and older models, or any model id you type); left empty, it uses the platform default. Each time the schedule fires, it creates an execution record with status, duration, response, and cost. See [Scheduling](../automation/scheduling.md).
+Open the agent's detail page, go to the Schedules section, and click **Create Schedule**. Give it a name, a cron expression (for example `0 9 * * 1-5` for weekdays at 9 AM), the message or task to send, a timezone, and an optional description. You can also pick a model override per schedule from the **Model** picker (Claude Opus 5.5, Fable 5.2, Sonnet 5.5, Haiku 5.5 and older models, or any model id you type); left empty, it uses the platform default. Each time the schedule fires, it creates an execution record with status, duration, response, and cost. See [Scheduling](../automation/scheduling.md).
 
 ## Can I set a timezone for my schedule?
 
