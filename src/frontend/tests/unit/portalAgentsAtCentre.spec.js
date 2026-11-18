@@ -526,6 +526,27 @@ describe('ent#468 — the answer confirmation', () => {
       .toBe('Sent — the agent is picking this up.')
   })
 
+  it('#4502: an agent that is not running is not "picking this up"', () => {
+    const woke = { status: 'answered', resume_requested: true }
+    expect(answerConfirmation(woke, 'scribe', { availability: 'stopped' })).toBe('Sent.')
+    expect(answerConfirmation(woke, 'scribe', { availability: 'unavailable' })).toBe('Sent.')
+    // The row already says the wake is owed: the same answer.
+    expect(answerConfirmation({ ...woke, wake_state: 'pending' }, 'scribe', { availability: 'ready' })).toBe('Sent.')
+    // Running, Docker not readable, or an agent the roster does not list: the
+    // dispatch is attempted, so the sentence stands.
+    for (const availability of ['ready', 'unknown', null, undefined]) {
+      expect(answerConfirmation(woke, 'scribe', { availability })).toBe('Sent — scribe is picking this up.')
+    }
+    expect(answerConfirmation({ ...woke, wake_state: 'woken' }, 'scribe', { availability: 'ready' }))
+      .toBe('Sent — scribe is picking this up.')
+    // A roster that was not just read is not evidence: without it, only "Sent.".
+    expect(answerConfirmation(woke, 'scribe', { availability: 'ready', verified: false })).toBe('Sent.')
+    expect(answerConfirmation(woke, 'scribe', { availability: null, verified: false })).toBe('Sent.')
+    expect(answerConfirmation(woke, 'scribe', { availability: 'ready', verified: true })).toBe('Sent — scribe is picking this up.')
+    // Availability never invents the sentence.
+    expect(answerConfirmation({ status: 'answered', resume_requested: false }, 'scribe', { availability: 'ready' })).toBe('Sent.')
+  })
+
   it('consumes BOTH new fields — the AC is either both or neither', () => {
     const ASKS = read('../../src/components/portal/PortalAsks.vue')
     const UTILS = read('../../src/components/portal/portalUtils.js')

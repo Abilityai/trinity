@@ -3,7 +3,9 @@
 
   An ASK renders through `PortalAsks` itself, filtered to that one ask and
   namespaced `inbox-ask` so it never shares an address with the Work tab's copy
-  of the same ask (D8). It stays selected after an answer and is drawn ended.
+  of the same ask (D8). The reader's own confirmed answer is handed to the
+  container (`notifyAnswered`), which opens the next ask; an ask that ends any
+  other way stays selected and is drawn ended.
 
   A CHAT renders its newest arrivals: one bounded history read (`limit 50`)
   shown from the first unread message onward, plus that chat's deliverables
@@ -171,6 +173,8 @@
           :thread-link="false"
           show-urgency
           :agent-label="agentLabel"
+          :notify-answered="notifyAnswered"
+          :hold-ms="holdMs"
           @open-thread="(t) => $emit('open-thread', t)"
         />
         <PortalAskContext
@@ -352,6 +356,12 @@ const props = defineProps({
   readFailed: { type: Boolean, default: false },
   // trinity-enterprise#959: agent name → label, for a room's senders.
   labels: { type: Object, default: () => ({}) },
+  // Answer, then next: the container's `onAnswered(askId)`, handed to the card.
+  // A function, not an emit — it must still run when this pane (keyed by the
+  // item) was unmounted while the answer was on the wire.
+  notifyAnswered: { type: Function, default: null },
+  // How long the card ignores input after an auto-advance opened it (0 = never).
+  holdMs: { type: Number, default: 0 },
 })
 const emit = defineEmits(['back', 'open-chat', 'reply', 'open-thread', 'rendered', 'mark-read', 'dismiss-read-error', 'open-canvas'])
 
