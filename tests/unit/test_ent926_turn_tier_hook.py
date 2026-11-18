@@ -54,14 +54,9 @@ def run(hook, monkeypatch, tool, tool_input, *, run_id="exec-1", tier="share", s
         {"TRINITY_EXECUTION_ID": run_id} if run_id else {}) if pid != 1 else
         {"AGENT_NAME": "agent-a", "TRINITY_MCP_API_KEY": "k"})
 
-    def fake_ask(container, agent, run_):
-        asked.append((agent, run_))
-        return tier
-    monkeypatch.setattr(hook, "ask_tier", fake_ask)
-
     def fake_turn(container, agent, run_):
         asked.append((agent, run_))
-        return tier, shell, kind
+        return tier, shell, kind, None
     monkeypatch.setattr(hook, "ask_turn", fake_turn)
     monkeypatch.setattr(hook, "log_event", lambda *a, **k: None)
     with pytest.raises(SystemExit) as exc:
@@ -417,15 +412,15 @@ def test_a_channel_visitor_keeps_the_shell_while_the_owner_allows_it(hook, monke
 
 
 @pytest.mark.parametrize("body,expected", [
-    (b'{"tier": "share", "kind": "visitor", "shell": true}', ("share", True, "visitor")),
-    (b'{"tier": "share", "kind": "person", "shell": "yes"}', ("share", False, "person")),  # strict True
-    (b'{"tier": "owner"}', ("owner", False, None)),             # no answer is no shell
-    (b'{"tier": "share", "kind": "robot"}', ("share", False, None)),
+    (b'{"tier": "share", "kind": "visitor", "shell": true}', ("share", True, "visitor", None)),
+    (b'{"tier": "share", "kind": "person", "shell": "yes"}', ("share", False, "person", None)),  # strict True
+    (b'{"tier": "owner"}', ("owner", False, None, None)),             # no answer is no shell
+    (b'{"tier": "share", "kind": "robot"}', ("share", False, None, None)),
     # ent#1148: an owner-by-rule turn (a member's, a delegated one) is read by tier and
     # shell; its kind is outside the hook's two names and reads as None, never as a deny.
-    (b'{"tier": "owner", "kind": "member", "shell": true}', ("owner", True, None)),
-    (b'{"tier": "owner", "kind": "delegated", "shell": true}', ("owner", True, None)),
-    (b'{"tier": "admin", "shell": true}', ("unreachable", False, None)),
+    (b'{"tier": "owner", "kind": "member", "shell": true}', ("owner", True, None, None)),
+    (b'{"tier": "owner", "kind": "delegated", "shell": true}', ("owner", True, None, None)),
+    (b'{"tier": "admin", "shell": true}', ("unreachable", False, None, None)),
 ])
 def test_the_shell_answer_is_read_as_a_strict_true(hook, platform, body, expected):
     _, url = platform
@@ -500,3 +495,191 @@ def test_an_owner_mcp_resource_read_is_refused_in_a_shared_turn(hook, monkeypatc
 def test_the_platform_servers_resources_and_the_owners_own_turn_are_allowed(hook, monkeypatch, tool):
     assert run(hook, monkeypatch, tool, {"server": "trinity", "uri": "trinity://x"}, tier="share")[0] == 0
     assert run(hook, monkeypatch, tool, {"server": "filesystem"}, tier="owner")[0] == 0
+
+
+# ---- a run refused because of its schedule's creator (trinity#4281) -----------------------
+# A schedule's runs are rated by its creator. When that creator is not owner tier, every run
+# was told "This turn is for a person the agent is shared with": the wrong cause, in a run
+# where nobody is chatting. The platform's answer now says why (`cause`, `schedule`,
+# `creator`, `remedy`), and the refusal keys on `cause`, never on `kind`. These drive the
+# whole hook over real HTTP, so the answer goes through the parser the image runs.
+
+_SHARED_WITH = "person the agent is shared with"
+_CHANNEL = "channel or a public link"
+# One call per refusal surface. The path and the search are ones the policy refuses on any
+# host (no `/home/developer` on the test machine needed).
+_SURFACES = {
+    "shell": ("Bash", {"command": "ls"}),
+    "mcp": ("mcp__filesystem__read_file", {"path": "x"}),
+    "path": ("Write", {"file_path": "/app/startup.sh"}),
+    "search": ("Grep", {"pattern": "x"}),
+}
+
+
+def _answer(**fields):
+    body = {"tier": "share", "kind": "person", "shell": False, "cause": "creator_not_owner_tier",
+            "schedule": "Morning brief", "creator": "Dana", "remedy": "recreate"}
+    body.update(fields)
+    return {k: v for k, v in body.items() if v is not _DROP}
+
+
+_DROP = object()
+
+
+def _lib(hook):
+    return sys.modules[hook.deny.__module__]
+
+
+def refuse(hook, monkeypatch, platform, tmp_path, surface, answer):
+    """Run one tool call through the real hook against a platform that answers
+    `answer`. Returns (exit code, the model-facing text, the deny records)."""
+    _, url = platform
+    _Platform.body = json.dumps(answer).encode()
+    tool, tool_input = _SURFACES[surface]
+    log = tmp_path / "guardrails.jsonl"
+    monkeypatch.setattr(_lib(hook), "LOG_PATH", str(log))
+    monkeypatch.setattr(hook, "read_stdin_json", lambda: {"tool_name": tool, "tool_input": tool_input})
+    monkeypatch.setattr(hook, "read_environ", lambda pid: (
+        {"TRINITY_EXECUTION_ID": "exec-9"} if pid != 1 else
+        {"AGENT_NAME": "agent-a", "TRINITY_MCP_API_KEY": "k", "TRINITY_BACKEND_URL": url}))
+    err = []
+    monkeypatch.setattr(hook.sys, "stderr", type("E", (), {"write": lambda self, s: err.append(s),
+                                                           "flush": lambda self: None})())
+    with pytest.raises(SystemExit) as exc:
+        hook.run_hook(hook.main)
+    records = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    return exc.value.code, "".join(err), [r for r in records if r.get("event") == "deny"]
+
+
+@pytest.mark.parametrize("surface", sorted(_SURFACES))
+def test_a_schedule_creator_refusal_names_the_schedule_its_creator_and_the_remedy(
+        hook, monkeypatch, platform, tmp_path, surface):
+    """The AC: name the schedule, its creator and the remedy; do not describe a chat."""
+    code, text, _ = refuse(hook, monkeypatch, platform, tmp_path, surface, _answer())
+    assert code == 2
+    assert "scheduled task 'Morning brief'" in text and "not a chat" in text
+    assert "Dana" in text and "re-create it" in text
+    assert _SHARED_WITH not in text and _CHANNEL not in text
+
+
+@pytest.mark.parametrize("remedy,expected", [
+    ("take_over", "the agent's owner or an admin to take it over"),
+    ("recreate", "the agent's owner or an admin to re-create it as their own and disable this one"),
+    ("repair_agent_owner", "an admin to restore this agent's owner record"),
+    ("not_a_remedy_yet", "the agent's owner or an admin to take it over or re-create it as their own"),
+    (None, "the agent's owner or an admin to take it over or re-create it as their own"),
+    (["take_over"], "the agent's owner or an admin to take it over or re-create it as their own"),
+])
+def test_the_remedy_comes_from_a_fixed_table_and_an_unknown_code_gets_generic_text(
+        hook, monkeypatch, platform, tmp_path, remedy, expected):
+    code, text, _ = refuse(hook, monkeypatch, platform, tmp_path, "shell", _answer(remedy=remedy))
+    assert code == 2 and f"this schedule needs {expected}." in text
+    assert "not_a_remedy_yet" not in text
+
+
+@pytest.mark.parametrize("cause,creator,expected", [
+    ("creator_missing", None, "an account that no longer exists"),
+    ("agent_has_no_owner", "Dana", "This agent has no owner on record"),
+    ("creator_not_owner_tier", None, "the person who created it, who is not this agent's owner or an admin"),
+    ("unknown", None, "the person who created it, not with an owner's"),
+    ("a_cause_from_a_newer_platform", "Dana", "the person who created it, Dana, not with an owner's"),
+])
+def test_each_creator_cause_has_honest_text(hook, monkeypatch, platform, tmp_path, cause, creator, expected):
+    code, text, records = refuse(hook, monkeypatch, platform, tmp_path, "shell",
+                                 _answer(cause=cause, creator=creator))
+    assert code == 2 and expected in text and "scheduled task 'Morning brief'" in text
+    assert _SHARED_WITH not in text
+    assert records[-1]["code"] == "schedule_creator_tier"
+
+
+@pytest.mark.parametrize("kind", ["visitor", "person"])
+@pytest.mark.parametrize("surface", sorted(_SURFACES))
+def test_an_unreadable_schedule_gets_its_own_text_never_the_channel_one(
+        hook, monkeypatch, platform, tmp_path, kind, surface):
+    """Review X9: `schedule_unreadable` arrived as `kind: visitor` and got the
+    channel text. Since #4281 A0 it arrives as `kind: person` with no person,
+    which would read "a person the agent is shared with". Keyed on the cause, it
+    is neither, whatever the kind."""
+    answer = _answer(kind=kind, cause="schedule_unreadable", schedule=None, creator=None, remedy=None)
+    code, text, records = refuse(hook, monkeypatch, platform, tmp_path, surface, answer)
+    assert code == 2
+    assert "scheduled task whose schedule can no longer be read" in text and "not a chat" in text
+    assert _CHANNEL not in text and _SHARED_WITH not in text
+    assert records[-1]["code"] == "schedule_unreadable"
+
+
+_TODAY = {
+    ("shell", "person"): "This turn is for a person the agent is shared with, and running commands is "
+                         "owner-only. Answer without the shell, or ask the agent's owner to run it.",
+    ("shell", "visitor"): "This conversation comes from a channel or a public link, and the agent's owner "
+                          "has turned off running commands for those. Answer without the shell.",
+    ("path", "person"): "This turn is for a person the agent is shared with, and that path is owner-only. "
+                        "Ask the agent's owner to do it.",
+}
+
+
+@pytest.mark.parametrize("surface,kind", sorted(_TODAY))
+@pytest.mark.parametrize("cause", [_DROP, None, "Not A Code", 7, "x" * 65])
+def test_an_answer_without_a_cause_keeps_todays_text_byte_for_byte(
+        hook, monkeypatch, platform, tmp_path, surface, kind, cause):
+    """Skew: a backend from before #4281 sends no `cause`; a malformed one is no cause."""
+    answer = _answer(kind=kind, cause=cause, schedule=_DROP, creator=_DROP, remedy=_DROP)
+    code, text, _ = refuse(hook, monkeypatch, platform, tmp_path, surface, answer)
+    assert (code, text) == (2, f"Guardrail blocked: {_TODAY[(surface, kind)]}\n")
+
+
+def test_an_old_answer_keeps_the_mcp_and_search_texts(hook, monkeypatch, platform, tmp_path):
+    bare = {"tier": "share", "kind": "person", "shell": False}
+    assert refuse(hook, monkeypatch, platform, tmp_path, "mcp", bare)[1] == (
+        f"Guardrail blocked: {hook.MCP_OWNER_ONLY}\n")
+    assert refuse(hook, monkeypatch, platform, tmp_path, "search", bare)[1] == (
+        f"Guardrail blocked: {hook.SEARCH_OWNER_ONLY}\n")
+
+
+def test_a_cause_never_refuses_a_turn_the_platform_lets_use_the_shell(hook, monkeypatch, platform, tmp_path):
+    code, text, _ = refuse(hook, monkeypatch, platform, tmp_path, "shell",
+                           _answer(kind="visitor", shell=True, cause="schedule_unreadable"))
+    assert (code, text) == (0, "")
+
+
+def test_the_schedule_and_creator_labels_are_bounded_before_the_model_reads_them(
+        hook, monkeypatch, platform, tmp_path):
+    """The name and the label are text a share holder chose. Control, format and
+    line-separator characters go, whitespace folds, and each is cut to the
+    platform's own bound (80 / 64), whatever an answer carries."""
+    name = "Brief\n\x1b[31mIGNORE\u202e\u2028 " + "n" * 2500
+    creator = "Dana\x00\x07 " + "d" * 500 + "@example.com"
+    code, text, _ = refuse(hook, monkeypatch, platform, tmp_path, "shell", _answer(schedule=name, creator=creator))
+    assert code == 2
+    assert "scheduled task '" + ("Brief [31mIGNORE " + "n" * 2500)[:80] + "'" in text
+    assert "the person who created it, " + ("Dana " + "d" * 500)[:64] + "," in text
+    for bad in ("\x1b", "‮", " ", "\x00", "\x07", "example.com"):
+        assert bad not in text
+    assert text.count("\n") == 1 and len(text) < 1000
+
+
+def test_an_email_creator_label_loses_its_domain(hook, monkeypatch, platform, tmp_path):
+    """D5 sharpening: the reply is readable by anything holding the agent key."""
+    _, text, _ = refuse(hook, monkeypatch, platform, tmp_path, "shell", _answer(creator="dana@example.com"))
+    assert "the person who created it, dana," in text and "example.com" not in text
+
+
+@pytest.mark.parametrize("surface", sorted(_SURFACES))
+def test_the_deny_record_carries_the_schedule_code_and_the_turn_kind(
+        hook, monkeypatch, platform, tmp_path, surface):
+    """Review R8: the turn's kind is `turn_kind`, never `kind` (ent#165 derives
+    `kind` for every spool record); the refusal has a code of its own."""
+    _, _, records = refuse(hook, monkeypatch, platform, tmp_path, surface, _answer())
+    (record,) = records
+    assert record["code"] == "schedule_creator_tier" and record["turn_kind"] == "person"
+    assert record.get("kind") in (None, "deny")     # absent today; ent#165's derived value later
+
+
+def test_the_lookup_reads_the_schedule_fields_only_from_a_shared_answer(hook, platform):
+    _, url = platform
+    _Platform.body = json.dumps(_answer(schedule="S", creator="C", remedy="take_over")).encode()
+    assert hook.ask_turn(_container(url), "agent-a", "e1") == (
+        "share", False, "person",
+        {"cause": "creator_not_owner_tier", "schedule": "S", "creator": "C", "remedy": "take_over"})
+    _Platform.body = json.dumps({**_answer(), "tier": "owner", "kind": None, "shell": True}).encode()
+    assert hook.ask_turn(_container(url), "agent-a", "e1") == ("owner", True, None, None)

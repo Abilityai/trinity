@@ -55,6 +55,16 @@
             {{ editingSchedule ? 'Edit Schedule' : 'Create Schedule' }}
           </h3>
 
+          <!-- #4281: a share holder's schedule runs with their access, not the
+               owner's. Say so before they save, not after a run fails. -->
+          <p
+            v-if="!editingSchedule && !ownerTier"
+            class="mb-4 rounded-md border border-status-warning-200 bg-status-warning-50 p-3 text-[12.5px] text-status-warning-700 dark:border-status-warning-500/30 dark:bg-status-warning-500/10 dark:text-status-warning-300"
+            data-testid="schedule-create-share-notice"
+          >
+            This agent is shared with you, so a schedule you create runs with your access: no shell commands and no tools the owner added. The agent's owner can take it over to give its runs the owner's access.
+          </p>
+
           <form @submit.prevent="saveSchedule" class="space-y-4">
             <div>
               <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Name</label>
@@ -363,7 +373,9 @@
       >
         <div class="flex justify-between items-start">
           <div class="flex-1">
-            <div class="flex items-center space-x-2">
+            <!-- #4281: wraps, so the run-tier badge drops below the name on a
+                 narrow row instead of pushing the action icons off screen. -->
+            <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
               <h4 class="font-medium text-gray-900 dark:text-white">{{ schedule.name }}</h4>
               <span
                 data-testid="schedule-status"
@@ -374,8 +386,39 @@
               >
                 {{ schedule.enabled ? 'Active' : 'Disabled' }}
               </span>
+              <!-- #4281: the server's rating of this schedule's runs. Nothing for
+                   `owner`, and nothing for null (not computed, never "owner"). -->
+              <BaseBadge
+                v-if="runTierView(schedule)"
+                variant="warning"
+                size="sm"
+                :title="runTierView(schedule).reason"
+                data-testid="schedule-runs-as-badge"
+              >{{ runTierView(schedule).badge }}</BaseBadge>
             </div>
             <p v-if="schedule.description" class="text-sm text-gray-500 dark:text-gray-400 mt-1">{{ schedule.description }}</p>
+            <!-- #4281: why, who created it (a name only when the read carries
+                 one: D5 keeps it to the owner tier), and the owner's remedy.
+                 Below `sm` the button goes under the text: side by side on a phone
+                 the text was left a few pixels wide. -->
+            <div
+              v-if="runTierView(schedule)"
+              class="mt-2 flex flex-col items-start gap-2 rounded-md border border-status-warning-200 bg-status-warning-50 px-3 py-2 dark:border-status-warning-500/30 dark:bg-status-warning-500/10 sm:flex-row sm:flex-wrap sm:justify-between"
+            >
+              <div class="min-w-0 sm:flex-1 text-[12.5px] text-status-warning-700 dark:text-status-warning-300">
+                <p data-testid="schedule-runs-as-reason">{{ runTierView(schedule).reason }}</p>
+                <!-- A creator's email is one unbreakable word: let it break, or it holds
+                     the row wider than a phone and pushes the action icons off. -->
+                <p v-if="runTierView(schedule).creatorLine" class="mt-0.5 font-medium [overflow-wrap:anywhere]" data-testid="schedule-created-by">{{ runTierView(schedule).creatorLine }}</p>
+              </div>
+              <BaseButton
+                v-if="schedule.can_take_over === true"
+                size="sm"
+                variant="secondary"
+                data-testid="schedule-take-over"
+                @click="openTakeOver(schedule)"
+              >Take over</BaseButton>
+            </div>
 
             <div class="flex items-center flex-wrap gap-x-4 gap-y-1 mt-2 text-xs text-gray-500 dark:text-gray-400">
               <span class="flex items-center">
@@ -502,10 +545,10 @@
 
           <div class="flex items-center space-x-2 ml-4">
             <button
-              @click="triggerSchedule(schedule)"
+              @click="requestRun(schedule)"
               :disabled="triggerLoading === schedule.id"
               class="p-1.5 text-gray-400 hover:text-action-primary-600 rounded transition-colors"
-              title="Run now"
+              :title="warnsOnRunNow(schedule, ownerTier) ? 'Run now (this one run has your access)' : 'Run now'"
             >
               <svg v-if="triggerLoading === schedule.id" class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -729,6 +772,7 @@
               v-for="exec in executions[schedule.id]"
               :key="exec.id"
               @click="viewExecutionDetail(exec)"
+              data-testid="schedule-exec-row"
               class="flex items-center justify-between text-xs p-2 bg-gray-50 dark:bg-gray-800/50 rounded hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer transition-colors"
             >
               <div class="flex items-center space-x-2">
@@ -748,6 +792,7 @@
                   {{ exec.triggered_by }}
                 </span>
                 <span v-if="exec.model_used" class="font-mono text-gray-500 dark:text-gray-400">{{ exec.model_used }}</span>
+                <RestrictedRunMarker :turn-integrity="exec.turn_integrity" testid="schedule-run-restricted" />
               </div>
               <div class="flex items-center space-x-3">
                 <!-- Context usage progress bar -->
@@ -852,6 +897,11 @@
 
           <!-- Content -->
           <div class="flex-1 overflow-y-auto p-4 space-y-4">
+            <RestrictedRunMarker
+              :turn-integrity="selectedExecution.turn_integrity"
+              variant="line"
+              testid="schedule-exec-restricted-line"
+            />
             <!-- Message Sent -->
             <div>
               <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Message Sent</h4>
@@ -916,7 +966,20 @@
       :message="confirmDialog.message"
       :confirm-text="confirmDialog.confirmText"
       :variant="confirmDialog.variant"
+      :confirm-variant="confirmDialog.confirmVariant"
       @confirm="confirmDialog.onConfirm"
+    />
+
+    <!-- #4281: the review before an owner adopts a share holder's schedule. -->
+    <ScheduleTakeOverDialog
+      v-model="takeOverOpen"
+      :schedule="takeOverTarget"
+      :webhook="takeOverWebhook"
+      :viewer-email="authStore.userEmail"
+      :busy="schedulesStore.takingOver !== null"
+      :error="takeOverError"
+      @confirm="submitTakeOver"
+      @dismiss-error="takeOverError = ''"
     />
   </div>
 </template>
@@ -944,6 +1007,13 @@ import {
 } from '../utils/cronValidation'
 import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
+import { useSchedulesStore } from '../stores/schedules'
+import BaseBadge from './base/BaseBadge.vue'
+import BaseButton from './base/BaseButton.vue'
+import RestrictedRunMarker from './RestrictedRunMarker.vue'
+import ScheduleTakeOverDialog from './ScheduleTakeOverDialog.vue'
+import { runTierView, warnsOnRunNow, takeOverRefusalText } from '../utils/scheduleRunTier'
+import { apiErrorCode } from '../utils/apiError'
 
 // Platform default model fetched from /api/settings/feature-flags (#831)
 const platformDefaultModel = ref('')
@@ -962,6 +1032,14 @@ const props = defineProps({
   autonomyEnabled: {
     type: Boolean,
     default: true
+  },
+  // #4281: the viewer is at the agent's owner tier (`agent.can_share`). Decides
+  // the share-holder notice on create and the D9 "Run now" warning; every
+  // per-schedule fact (badge, creator, take-over) comes from the read itself.
+  // Defaults true so a parent that doesn't pass it never shows a false notice.
+  ownerTier: {
+    type: Boolean,
+    default: true
   }
 })
 
@@ -969,6 +1047,7 @@ defineEmits(['enable-autonomy'])
 
 const authStore = useAuthStore()
 const executionsStore = useExecutionsStore()
+const schedulesStore = useSchedulesStore()
 
 // #1115: inline per-schedule stats. Same single aggregate the Overview uses
 // (cached in the executions store) — no per-row fetches. 7d window matches the
@@ -1204,6 +1283,7 @@ const confirmDialog = reactive({
   message: '',
   confirmText: 'Delete',
   variant: 'danger',
+  confirmVariant: 'danger',
   onConfirm: () => {}
 })
 
@@ -1392,7 +1472,9 @@ async function saveSchedule() {
     await loadSchedules()
     closeForm()
   } catch (error) {
-    formError.value = error.response?.data?.detail || 'Failed to save schedule'
+    // #4281: D2's 409 is a named refusal `{code, message}`; read its message
+    // rather than render the object.
+    formError.value = apiErrorMessage(error, 'Failed to save schedule')
   } finally {
     formLoading.value = false
   }
@@ -1446,6 +1528,7 @@ function deleteSchedule(schedule) {
   confirmDialog.message = `Are you sure you want to delete the schedule "${schedule.name}"?`
   confirmDialog.confirmText = 'Delete'
   confirmDialog.variant = 'danger'
+  confirmDialog.confirmVariant = 'danger'
   confirmDialog.onConfirm = async () => {
     deleteLoading.value = schedule.id
     clearActionError()
@@ -1493,6 +1576,96 @@ async function toggleSchedule(schedule) {
     reportActionFailure(error, `${wanted} the schedule "${schedule.name}"`)
   } finally {
     toggleLoading.value.delete(schedule.id)
+  }
+}
+
+// #4281 D9: an owner-tier person's Run now on a shared person's schedule runs
+// once with THEIR access (shell, every tool the owner added), not the access
+// its scheduled runs get. Ask first; every other Run now goes straight through.
+function requestRun(schedule) {
+  if (!warnsOnRunNow(schedule, props.ownerTier)) {
+    triggerSchedule(schedule)
+    return
+  }
+  confirmDialog.title = 'Run this schedule now?'
+  confirmDialog.message = `"${schedule.name}" was created by a person the agent is shared with, so its scheduled runs have no shell and no tools the owner added. You are starting this one, so this one run has your access: shell commands and every tool the owner added. Its scheduled runs keep the restricted access.`
+  confirmDialog.confirmText = 'Run once with my access'
+  confirmDialog.variant = 'warning'
+  confirmDialog.confirmVariant = 'primary'
+  confirmDialog.onConfirm = () => triggerSchedule(schedule)
+  confirmDialog.visible = true
+}
+
+// #4281 take-over (D4, D8). The dialog shows a COPY of the read the person
+// opened it on, so a list refresh while it is open cannot change what is sent.
+const takeOverOpen = ref(false)
+const takeOverTarget = ref(null)
+const takeOverWebhook = ref({ state: 'loading' })
+const takeOverError = ref('')
+let takeOverSeq = 0
+
+const snapshotOf = (schedule) => JSON.parse(JSON.stringify(schedule))
+
+// The refusals after which the version on screen is no longer the one that
+// exists: the review is reloaded. The delivery refusal is one of them, since
+// the server decides the delivery before it compares the version (a delivery
+// added after the open arrives as this code, not as `changed_since_review`).
+const TAKE_OVER_REVIEW_AGAIN = new Set([
+  'schedule_changed_since_review',
+  'schedule_not_restricted',
+  'schedule_delivers_to_another_person',
+  'schedule_not_found',
+])
+
+async function loadTakeOverWebhook(schedule) {
+  const seq = ++takeOverSeq
+  takeOverWebhook.value = { state: 'loading' }
+  try {
+    const status = await schedulesStore.fetchWebhookStatus(props.agentName, schedule.id)
+    if (seq !== takeOverSeq) return
+    takeOverWebhook.value = { state: status?.has_token ? 'live' : 'none' }
+  } catch (error) {
+    if (seq !== takeOverSeq) return
+    console.error('Failed to read the webhook state for a take-over review:', error)
+    takeOverWebhook.value = { state: 'failed' }
+  }
+}
+
+function openTakeOver(schedule) {
+  takeOverTarget.value = snapshotOf(schedule)
+  takeOverError.value = ''
+  takeOverOpen.value = true
+  loadTakeOverWebhook(schedule)
+}
+
+async function submitTakeOver(body) {
+  const target = takeOverTarget.value
+  takeOverError.value = ''
+  try {
+    await schedulesStore.takeOver(props.agentName, target.id, body)
+    takeOverOpen.value = false
+    await loadSchedules()
+  } catch (error) {
+    const code = apiErrorCode(error)
+    takeOverError.value = takeOverRefusalText(code, apiErrorMessage(error, "Couldn't take the schedule over. Nothing was changed — try again."))
+    if (TAKE_OVER_REVIEW_AGAIN.has(code) || error?.response?.status === 404) {
+      // Show the version that now exists, so the next confirm adopts what
+      // the person can see (or offers nothing when there is nothing to adopt).
+      await loadSchedules()
+      if (loadError.value) {
+        // The list read failed: what is on screen is the refused version.
+        takeOverError.value = "Nothing was changed, and Trinity couldn't load the current version of this schedule. Close this review and open it again once the list has loaded."
+        takeOverTarget.value = { ...target, can_take_over: false }
+        return
+      }
+      const fresh = schedules.value.find((s) => s.id === target.id)
+      if (fresh) {
+        takeOverTarget.value = snapshotOf(fresh)
+        loadTakeOverWebhook(fresh)
+      } else {
+        takeOverTarget.value = { ...target, can_take_over: false }
+      }
+    }
   }
 }
 

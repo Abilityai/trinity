@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict
 
 import pytz
@@ -20,6 +20,13 @@ from db_models import Schedule, ScheduleCreate
 from utils.helpers import utc_now_iso, parse_iso_timestamp
 
 logger = logging.getLogger("db.schedules")
+
+
+def _same_instant(stored: datetime, expected: datetime) -> bool:
+    """Equal as points in time; a naive value is UTC (`parse_iso_timestamp`'s rule)."""
+    def utc(value: datetime) -> datetime:
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return utc(stored) == utc(expected)
 
 class ScheduleCrudMixin:
     """Schedule CRUD + lifecycle operations."""
@@ -453,12 +460,22 @@ class ScheduleCrudMixin:
 
         values["updated_at"] = utc_now_iso()
 
+        # #4281: a creator's write lands only while they are still the creator.
+        # The check above and this UPDATE are two statements, so without the
+        # predicate an edit authorized just before a take-over would commit
+        # just after it, onto a schedule whose runs now have owner tier. An
+        # admin is allowed by role, not as the creator, so keeps its own rule.
+        where = [agent_schedules.c.id == schedule_id]
+        if user["role"] != "admin":
+            where.append(agent_schedules.c.owner_id == user["id"])
         with get_engine().begin() as conn:
-            conn.execute(
+            result = conn.execute(
                 update(agent_schedules)
-                .where(agent_schedules.c.id == schedule_id)
+                .where(and_(*where))
                 .values(**values)
             )
+            if result.rowcount == 0:
+                return None
 
         return self.get_schedule(schedule_id)
 
@@ -508,17 +525,109 @@ class ScheduleCrudMixin:
                 # idempotent success (router → 204).
                 return True
 
+            # #4281: bound to the creator it authorized, like `update_schedule`.
+            where = [agent_schedules.c.id == schedule_id, agent_schedules.c.deleted_at.is_(None)]
+            if user["role"] != "admin":
+                where.append(agent_schedules.c.owner_id == user["id"])
+            result = conn.execute(
+                update(agent_schedules)
+                .where(and_(*where))
+                .values(deleted_at=utc_now_iso())
+            )
+            return result.rowcount > 0
+
+    # ---- take-over in place (#4281, decision D4) --------------------------------
+
+    # A run in one of these states could switch from a shared person's tier to
+    # the owner's mid-run. A retry reuses its execution row, so `pending_retry`
+    # counts as in flight.
+    TAKE_OVER_IN_FLIGHT = ("queued", "running", "pending_retry")
+    # What the take-over write is pinned to: every column the caller's decision
+    # read. A change to any of them since that read refuses the write.
+    _TAKE_OVER_PINNED = (
+        "owner_id", "updated_at", "message", "allowed_tools", "model",
+        "validation_enabled", "validation_prompt", "deliver_to_workspace_email",
+    )
+
+    def _take_over_snapshot(self, schedule_id: str) -> Optional[Dict]:
+        """The live row the take-over compares, as stored (raw columns)."""
+        stmt = select(agent_schedules).where(
+            and_(agent_schedules.c.id == schedule_id, agent_schedules.c.deleted_at.is_(None))
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return dict(row) if row else None
+
+    def reassign_schedule_creator(
+        self,
+        schedule_id: str,
+        *,
+        new_owner_id: int,
+        expected_owner_id: int,
+        expected_updated_at: datetime,
+        expected: Dict,
+        clear_delivery: bool,
+    ) -> Dict:
+        """Make `new_owner_id` the schedule's creator, if it is still exactly
+        what the caller decided on.
+
+        `expected_updated_at` is compared as an instant (the column holds an
+        ISO string in whichever form wrote it; a reader sees a datetime), and
+        `expected` maps schedule fields (`Schedule` names and types: `message`,
+        `allowed_tools`, ...) to the values the caller reviewed. One UPDATE
+        pins the row to the snapshot those comparisons read, requires no run of
+        the schedule in flight, sets the creator, revokes the webhook (the
+        columns `revoke_webhook_token` clears) and, with `clear_delivery`,
+        removes the Workspace delivery. `owner_id` stays out of
+        `update_schedule`'s fields: this is its only writer after create.
+
+        Returns `{"outcome": ...}`: `taken_over` (with `webhook_revoked`),
+        `gone` (no live row), `changed` (differs from what was expected, or
+        changed while this ran) or `in_progress` (a run is in flight).
+        """
+        row = self._take_over_snapshot(schedule_id)
+        if row is None:
+            return {"outcome": "gone"}
+        current = self._row_to_schedule(row)
+        if row["owner_id"] != expected_owner_id or not _same_instant(
+                parse_iso_timestamp(row["updated_at"]), expected_updated_at):
+            return {"outcome": "changed"}
+        if any(getattr(current, field) != value for field, value in expected.items()):
+            return {"outcome": "changed"}
+
+        in_flight = (
+            select(schedule_executions.c.id)
+            .where(
+                and_(
+                    schedule_executions.c.schedule_id == schedule_id,
+                    schedule_executions.c.status.in_(self.TAKE_OVER_IN_FLIGHT),
+                )
+            )
+            .exists()
+        )
+        values = {"owner_id": new_owner_id, **self._webhook_revoked_values(), "updated_at": utc_now_iso()}
+        if clear_delivery:
+            values["deliver_to_workspace_email"] = None
+        pinned = [agent_schedules.c[col].is_not_distinct_from(row[col]) for col in self._TAKE_OVER_PINNED]
+        with get_engine().begin() as conn:
             result = conn.execute(
                 update(agent_schedules)
                 .where(
                     and_(
                         agent_schedules.c.id == schedule_id,
                         agent_schedules.c.deleted_at.is_(None),
+                        *pinned,
+                        ~in_flight,
                     )
                 )
-                .values(deleted_at=utc_now_iso())
+                .values(**values)
             )
-            return result.rowcount > 0
+            if result.rowcount:
+                return {"outcome": "taken_over", "webhook_revoked": row["webhook_token"] is not None}
+            busy = conn.execute(select(in_flight)).scalar()
+        if busy:
+            return {"outcome": "in_progress"}
+        return {"outcome": "changed" if self._take_over_snapshot(schedule_id) else "gone"}
 
     def purge_schedule(self, schedule_id: str) -> bool:
         """Hard-delete a soft-deleted schedule (#834 Phase 1b).

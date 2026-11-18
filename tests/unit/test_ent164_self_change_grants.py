@@ -154,13 +154,21 @@ def test_every_schedule_write_takes_the_schedules_fence_and_trigger_does_not():
         assert "capability_fence_schedules_manage" not in calls, key
     trigger = table[("/api/agents/{name}/schedules/{schedule_id}/trigger", "POST")]
     assert "capability_fence_schedules_manage" not in _calls(trigger)
+    # #4281: taking a schedule over is a grant, so a person only; no grant
+    # admits a key to it.
+    person_only = [("/api/agents/{name}/schedules/{schedule_id}/take-over", "POST")]
+    for key in person_only:
+        calls = _calls(table[key])
+        assert "require_person" in calls, key
+        assert "capability_fence_schedules_manage" not in calls, key
     # Derived from the router, not only the literal above (#3236 validation):
     # every schedule WRITE is either fenced, a webhook route or `trigger`, so a
     # write route added tomorrow without a gate fails here instead of staying green.
     writes = {k for k in table if k[1] in {"POST", "PUT", "DELETE", "PATCH"}
               and k[0].startswith("/api/agents/{name}/schedules")}
     assert writes == (set(fenced) | {k for k in webhooks if k[1] != "GET"}
-                      | {("/api/agents/{name}/schedules/{schedule_id}/trigger", "POST")})
+                      | {("/api/agents/{name}/schedules/{schedule_id}/trigger", "POST")}
+                      | set(person_only))
 
 
 def test_every_reconfigure_route_admits_only_a_person_or_a_holder():

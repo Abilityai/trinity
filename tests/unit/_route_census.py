@@ -995,7 +995,9 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
     "routers/schedules.py::disable_schedule": (
         "POST /api/agents/{name}/schedules/{schedule_id}/disable", "MCP disable_schedule", _SIB_SCHEDULES),
     "routers/schedules.py::trigger_schedule": (
-        "POST /api/agents/{name}/schedules/{schedule_id}/trigger", "MCP trigger_schedule (a manual run)",
+        "POST /api/agents/{name}/schedules/{schedule_id}/trigger",
+        "MCP trigger_schedule (a manual run); a schedule whose runs are a shared person's is refused to "
+        "every key (409 schedule_runs_as_shared_person, #4281 D9): a manual run has the caller's tier",
         "no capability fence ('trigger now' is exempt from schedules.manage, trinity-enterprise#164): a sibling "
         "triggers another agent's schedule only as an agent it spawned (OwnedAgent, the ent#629 manage reach)"),
     # trinity-enterprise#719: uses of what a person granted — a channel binding and its
