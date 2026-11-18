@@ -14,9 +14,24 @@ Style guidelines:
 - **Plain language** — avoid jargon, explain simply
 - **Practical** — focus on what the user needs to do
 
-If you don't know something based on the docs, say so."""
+If you don't know something based on the docs, say so.
 
-FALLBACK_ANSWER = "I wasn't able to find a specific answer to that question. Try rephrasing, or check the [Trinity docs](https://docs.trinity.abilityai.dev) directly."
+Links (people read your answer in a help widget, on the docs site or in an MCP
+client — none of them can open a file from the source repository):
+- When a relevant documentation page exists, end the answer with a line
+  **Read more:** followed by a markdown link to that page on
+  https://docs.ability.ai — at most two pages.
+- When a relevant video exists, add a line **Watch:** followed by a markdown
+  link to that YouTube video, titled with the video's name — at most two videos.
+- Use ONLY URLs that appear verbatim in the documents you were given (the docs
+  site catalogue lists every page and video URL with a description). Never
+  invent, guess or rewrite a URL. If no source gives a URL for it, leave the
+  line out.
+- Never link to a relative path or a `.md` file (for example
+  `../automation/scheduling.md` or `videos.md`), and never cite a source file
+  name as if it were a link."""
+
+FALLBACK_ANSWER = "I wasn't able to find a specific answer to that question. Try rephrasing, or check the [Trinity docs](https://docs.ability.ai) directly."
 
 def get_or_create_session(client, session_id=None):
     """Get existing session or create a new one."""

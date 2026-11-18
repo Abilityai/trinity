@@ -63,8 +63,9 @@ in-app Help widget (#391), and the standalone `trinity-docs-mcp` MCP server
 
 | File | Purpose |
 |------|---------|
-| `.github/workflows/sync-docs-to-vertex.yml` | Auto-sync docs to GCS on push |
+| `.github/workflows/sync-docs-to-vertex.yml` | Sync docs + docs-site catalogue to GCS (push to `main`, daily, manual) |
 | `scripts/ask-trinity.sh` | CLI tool for querying |
+| `scripts/ask-trinity-link-eval.py` | Fixed 10-question link-quality eval — doc/video link present, every URL HTTP 200, no relative `.md` links (ent#1285) |
 | `docs/onboarding/*.md` | Source documentation (onboarding) |
 | `docs/user-docs/**/*.md` | Source documentation (user docs incl. the 264-Q&A FAQ) |
 | `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md` | Source documentation (agent guide, #1459) |
@@ -74,9 +75,9 @@ in-app Help widget (#391), and the standalone `trinity-docs-mcp` MCP server
 
 ### Document Sync (GitHub Action)
 
-1. Push to `docs/onboarding/*.md` triggers workflow
+1. Triggers: push to `main` touching `docs/onboarding/**`, `docs/user-docs/**`, the agent guide or the workflow itself; a **daily schedule** (04:17 UTC — the docs-site catalogue changes when the docs site deploys, which is not a push here); manual dispatch
 2. Workflow authenticates via Workload Identity Federation
-3. Markdown files converted to `.txt` (Vertex AI requirement)
+3. Markdown files converted to `.txt` (Vertex AI requirement); `https://docs.ability.ai/llms.txt` downloaded, sanity-checked (≥50 page links, ≥10 video links — otherwise the step **fails**, because `rsync -d` + `reconciliationMode: FULL` would silently drop the catalogue from the index) and split per `## ` section into `docs-site-catalogue-<section>.txt`, each prefixed with the site header
 4. Files synced to `gs://trinity-docs-rag-*/txt/`
 5. Document re-import triggered via Discovery Engine API
 6. Vertex AI indexes and chunks documents
@@ -192,6 +193,7 @@ requirement) and syncs to GCS with a flattened name (`/` → `-`):
 | `docs/onboarding/*.md` | Welcome, getting started, use cases, workflows, troubleshooting |
 | `docs/user-docs/**/*.md` | Full user documentation — guides, API reference, integrations, operations, and the 264-Q&A FAQ |
 | `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md` | Agent authoring guide (`get_agent_requirements` source, #1459) |
+| `https://docs.ability.ai/llms.txt` → `docs-site-catalogue-<section>.txt` | The docs site's own catalogue: every page URL and YouTube video URL with a one-line description (ent#1285). The only indexed source that knows the site's routes — repo paths do not map to them (e.g. `/getting-started/deploying/digitalocean`) — and the only one carrying video URLs. Also the only coverage of site-only sections (Architecture, Cornelius, Claude Code Plugins), as one-line summaries |
 
 ## Limitations
 
