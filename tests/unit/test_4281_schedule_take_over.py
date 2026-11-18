@@ -556,10 +556,19 @@ def test_an_update_cannot_set_the_creator(client, world):
     assert stored(sid)["owner_id"] == world.mate.id
 
 
+def _globals_of(writer):
+    """The module dict the live `db.<writer>` resolves its globals in. A test
+    that evicts `sys.modules` entries (test_1595) leaves `import db.schedules.crud`
+    naming a fresh module the live `db` does not use, so patch the one that owns
+    the bound method."""
+    return getattr(db._schedule_ops, writer).__globals__
+
+
 def _land_a_take_over_inside(monkeypatch, module, attr, world, sid, writer):
     """Run the take-over at the first call of `module.attr` made by the db
-    method `writer`: after that write was authorized, before its UPDATE."""
-    original = getattr(module, attr)
+    method `writer`: after that write was authorized, before its UPDATE.
+    `module` may be a module or a module's globals dict."""
+    original = module[attr] if isinstance(module, dict) else getattr(module, attr)
     fired = []
     seen = db.get_schedule(sid)
 
@@ -580,7 +589,10 @@ def _land_a_take_over_inside(monkeypatch, module, attr, world, sid, writer):
             assert outcome["outcome"] == "taken_over", outcome
         return original(*a, **k)
 
-    monkeypatch.setattr(module, attr, hook)
+    if isinstance(module, dict):
+        monkeypatch.setitem(module, attr, hook)
+    else:
+        monkeypatch.setattr(module, attr, hook)
     return fired
 
 
@@ -588,10 +600,10 @@ def test_a_creators_update_authorized_before_the_take_over_cannot_land_after_it(
     client, world, monkeypatch
 ):
     sid = created(client, world)
-    import db.schedules.crud as crud
 
     fired = _land_a_take_over_inside(
-        monkeypatch, crud, "utc_now_iso", world, sid, "update_schedule"
+        monkeypatch, _globals_of("update_schedule"), "utc_now_iso", world, sid,
+        "update_schedule"
     )
 
     resp = call(
@@ -610,10 +622,10 @@ def test_a_creators_webhook_mint_authorized_before_the_take_over_cannot_land_aft
     client, world, monkeypatch
 ):
     sid = created(client, world)
-    import db.schedules.webhooks as webhooks
 
     fired = _land_a_take_over_inside(
-        monkeypatch, webhooks, "utc_now_iso", world, sid, "generate_webhook_token"
+        monkeypatch, _globals_of("generate_webhook_token"), "utc_now_iso", world, sid,
+        "generate_webhook_token"
     )
 
     resp = call(client, world, "mate", "POST", f"/{sid}/webhook")
@@ -644,10 +656,10 @@ def test_an_admins_update_keeps_its_own_rule(client, world, monkeypatch):
     """The predicate binds a creator's write to the creator; an admin may edit
     any schedule, before or after a take-over."""
     sid = created(client, world)
-    import db.schedules.crud as crud
 
     _land_a_take_over_inside(
-        monkeypatch, crud, "utc_now_iso", world, sid, "update_schedule"
+        monkeypatch, _globals_of("update_schedule"), "utc_now_iso", world, sid,
+        "update_schedule"
     )
     resp = call(
         client, world, "admin", "PUT", f"/{sid}", json={"message": "Admin edit"}

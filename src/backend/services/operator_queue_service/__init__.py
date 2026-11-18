@@ -271,8 +271,7 @@ _RESERVED_ID_PREFIXES = (
                          # must not be able to pre-create, and through
                          # create_item's ON CONFLICT silently suppress, the row
                          # that says its own queue is not moving
-    "schedule-restricted-",  # schedule_tier_alerts (#4281): the stem is the creator's
-                         # guessable user id, so no agent may pre-create and swallow it
+    "schedule-restricted-",  # schedule_tier_alerts (#4281): keyed by the creator's guessable id
     "poison-",           # lease_reaper_service poison-park (#1402)
     "cb-dormant-",       # agent_client circuit-breaker-dormant alert
     "sync-failing-",     # sync_health_service
@@ -364,10 +363,7 @@ _LEADER_KEY = "opqueue:leader"
 # notice the person who decided; `gate-` covers `gate-note-`). A subset of
 # `_RESERVED_ID_PREFIXES`, so no agent can mint a row into it.
 _ABOUT_A_PERSON_ID_PREFIXES = ("workspace-problem-", "portal-inbox-collision-", "gate-",
-                               # trinity-enterprise#631: who tagged whom, in what
-                               "mention-",
-                               # #4281: names the person whose schedules run restricted
-                               "schedule-restricted-")
+                               "mention-", "schedule-restricted-")  # mentions (ent#631), restricted schedules (#4281)
 
 
 # trinity-enterprise#815: the same tuple, public, for the SQL twin of
@@ -382,10 +378,7 @@ ABOUT_A_PERSON_ID_PREFIXES = _ABOUT_A_PERSON_ID_PREFIXES
 # and what they wrote — the facts `evaluations.py` already withholds from a
 # shared non-owner. Deliberately not the whole `_ABOUT_A_PERSON_ID_PREFIXES`:
 # a shared operator must still see and answer a skill gate's approval (`gate-`).
-OWNER_ONLY_ID_PREFIXES = ("workspace-problem-",
-                          # #4281: names a share holder and their schedules; who created
-                          # a schedule is for the owner tier only, never other share holders.
-                          "schedule-restricted-")
+OWNER_ONLY_ID_PREFIXES = ("workspace-problem-", "schedule-restricted-")  # #4281: names a share holder
 
 # trinity-enterprise#980: the gate asks that are their ADDRESSEE's alone (and
 # admins'). A project steward's proposal names people and tasks of a project

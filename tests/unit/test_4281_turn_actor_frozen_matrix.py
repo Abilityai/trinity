@@ -75,7 +75,8 @@ MATRIX = [
      ("share", "visitor", None), VS, None),
     # -- no user, no schedule: the trigger label ----------------------------------------
     *[(f"trigger/{t}", _run(trigger=t), OWNER_ROW, True, None)
-      for t in ("schedule", "system", "reminder", "loop", "validation", "webhook", "manual", "event")],
+      for t in ("schedule", "system", "reminder", "loop", "validation", "webhook", "manual", "event",
+                "project_steward")],
     ("trigger/schedule-id-__manual__", _run(sid="__manual__", trigger="reminder"), OWNER_ROW, True, None),
     ("trigger/schedule-id-empty", _run(sid="", trigger="schedule"), OWNER_ROW, True, None),
     ("trigger/__manual__-visitor", _run(sid="__manual__", trigger="slack"), ("share", "visitor", None),
