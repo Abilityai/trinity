@@ -1563,6 +1563,13 @@ function clearActionError() {
 // #1926 — one place that turns a failed verb into a persistent, named error.
 function reportActionFailure(error, what) {
   console.error(`Failed to ${what}:`, error)
+  // #4281: a named refusal ({code, message}) is the server saying no on
+  // purpose, so trying again cannot succeed. Its message is the reason.
+  if (apiErrorCode(error)) {
+    actionError.value = `Couldn't ${what}. ${apiErrorMessage(error, 'Request failed')}`
+    actionErrorDetail.value = ''
+    return
+  }
   actionError.value = `Couldn't ${what}. Nothing was changed — try again.`
   actionErrorDetail.value = apiErrorMessage(error, 'Request failed')
 }

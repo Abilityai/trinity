@@ -554,3 +554,35 @@ describe('a restricted run is marked in the history and its detail', () => {
     w.unmount()
   })
 })
+
+describe('Action errors on a row', () => {
+  const toggleWith = async (failure) => {
+    lists = [[restricted('a', { enabled: false })]]
+    const w = mountPanel()
+    await flush()
+    server.post = vi.fn(async () => { throw failure })
+    await rowOf(w, 'a').find('[data-testid="schedule-toggle"]').trigger('click')
+    await flush()
+    return w
+  }
+
+  it("a named refusal says the server's reason in the headline and never says 'try again'", async () => {
+    const w = await toggleWith(Object.assign(new Error('409'), { response: { status: 409, data: { detail: {
+      code: 'schedule_cannot_run_for_creator_on_runtime', message: 'Sentinel: this runtime cannot run it.', runtime: 'gemini-cli',
+    } } } }))
+    const bar = w.find('[data-testid="inline-error"]')
+    expect(bar.exists()).toBe(true)
+    expect(bar.text()).toContain('Couldn\'t enable the schedule "sched a".')
+    expect(bar.text()).toContain('Sentinel: this runtime cannot run it.')
+    expect(bar.text()).not.toContain('try again')
+    expect(bar.text()).not.toContain('schedule_cannot_run_for_creator_on_runtime')
+    w.unmount()
+  })
+
+  it("a failure with no named refusal (network, 5xx) still says nothing changed and to try again", async () => {
+    const w = await toggleWith(new Error('Network Error'))
+    const bar = w.find('[data-testid="inline-error"]')
+    expect(bar.text()).toContain('Couldn\'t enable the schedule "sched a". Nothing was changed — try again.')
+    w.unmount()
+  })
+})
