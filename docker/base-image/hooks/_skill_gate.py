@@ -817,9 +817,10 @@ def _fields(call) -> dict:
 # ---------------------------------------------------------------------------
 
 def _log(outcome: Outcome) -> None:
-    """To /logs/guardrails.jsonl (Vector) through the guardrails' own helper,
-    in a thread with a short join: a failing or blocking write never changes
-    the exit code and never holds the tool."""
+    """To /logs/guardrails.jsonl through the guardrails' own helper. The file
+    stays in the agent container: nothing collects it (Vector reads container
+    stdout and stderr only). In a thread with a short join: a failing or
+    blocking write never changes the exit code and never holds the tool."""
     if not outcome.event:
         return
 
