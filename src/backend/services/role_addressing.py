@@ -101,13 +101,31 @@ class RoleRefused(Exception):
     (nobody seated can open the agent); an ask to the ``approver`` kind
     (:func:`resolve_approver_for_ask`) names ``role_cannot_open_agent`` too,
     and so does a ``credential`` ask (:func:`resolve_credential_reader`).
-    ``message`` names the role's label, never a person."""
+    ``message`` names the role's label, never a person.
 
-    def __init__(self, code: str, role: str, message: str):
+    ``cause`` says WHY a ``role_cannot_open_agent`` refusal fired when that
+    changes the remedy (#4599): one of the ``CAUSE_*`` words, or None for the
+    plain arm (the seated people cannot open the agent: share it). It is read
+    by callers that word their own refusal (an admin's re-address) and is
+    never sent to an agent: the agent's remedy is in ``message``. It names a
+    shape of the roster, never a person's account state."""
+
+    def __init__(self, code: str, role: str, message: str, *, cause: Optional[str] = None):
         super().__init__(code)
         self.code = code
         self.role = role
         self.message = message
+        self.cause = cause
+
+
+#: The platform could not read who can open the agent. Clears by itself.
+CAUSE_UNCHECKED = "unchecked"
+#: Nobody is seated as primary and the owner, standing in, cannot open the agent.
+CAUSE_NO_PRIMARY = "no_primary"
+#: The owner IS the primary person (seated, or by default) and cannot open it.
+CAUSE_OWNER_IS_PRIMARY = "owner_is_primary"
+#: A system agent is on nobody's Workspace roster.
+CAUSE_SYSTEM_AGENT = "system_agent"
 
 
 @dataclass
@@ -314,66 +332,154 @@ def resolve_role_id(agent_name: str, role_id: str) -> Resolution:
     )
 
 
-def can_open_agent(agent_name: str, email: str) -> bool:
-    """Can this person reach a decision raised on ``agent_name``?
-    (trinity-enterprise#881)
+def _client_blocked(email: str) -> bool:
+    """Is this email blocked at the Workspace door (the client block)? Raises
+    when the block cannot be read: the caller decides what that means."""
+    from client_portal import db as portal_db
+    return bool(portal_db.is_client_blocked(email))
+
+
+def _workspace_only(user: dict) -> bool:
+    """Can this account decide in the Workspace only (below the operator
+    floor, ``dependencies.is_workspace_only_role``)?"""
+    from dependencies import is_workspace_only_role
+    return is_workspace_only_role(user.get("role"))
+
+
+def agent_reach(agent_name: str, email: str) -> Optional[bool]:
+    """Can this person reach a decision raised on ``agent_name``? True, False,
+    or None when the platform could not check (#4599).
 
     A decision is made in the Workspace (the agent on the person's roster:
     owned or shared) or in Operations (an operator or admin with access to the
     agent). A platform account is asked ``can_user_access_agent`` — owner,
     shared or admin, which covers both doors; an email with no account only has
-    the Workspace, so the agent must be shared with it. Fails closed: an
-    unreadable lookup is "cannot open", which refuses by name rather than waits
-    silently. The one rule for a gate's approver (``skill_gate_service._can_open``
-    delegates here), for an ask to a canon role (trinity-enterprise#1007) and
-    for an ask to the ``approver`` kind (#4501).
+    the Workspace, so the agent must be shared with it.
+
+    Two account states close a door whatever is shared (#4599):
+
+    * a deactivated account signs in nowhere (``get_current_user`` refuses it
+      on every credential kind), so it reaches nothing;
+    * the client block closes the Workspace only (``get_current_user`` does
+      not read it). So it stops an email with no account and an account that
+      can only use the Workspace; a blocked operator or admin still decides in
+      Operations and stays reachable.
+
+    None is "could not check": a lookup raised. :func:`can_open_agent` reads
+    it as "cannot open" (fail closed); a resolver that found nobody reachable
+    (:func:`reach_of`) refuses it with "try again" instead of "share the
+    agent".
     """
     try:
         user = db.get_user_by_email(email)
         if user:
+            if user.get("suspended_at"):
+                return False
+            if _workspace_only(user) and _client_blocked(email):
+                return False
             return bool(db.can_user_access_agent(user["username"], agent_name))
+        if _client_blocked(email):
+            return False
         from client_portal.service import agent_on_roster
         return bool(agent_on_roster(agent_name, email, include_owned=False))
     except Exception:  # noqa: BLE001
         logger.warning("[role_addressing] could not tell whether a person can open %s",
                        agent_name, exc_info=True)
-        return False
+        return None
 
 
-def reachable_people(agent_name: str, people: List[str]) -> List[str]:
-    """The people among ``people`` who can open ``agent_name``
-    (:func:`can_open_agent`), in order: the audience an ask whose answer is
-    fenced to its addressees may record."""
-    return [p for p in people if can_open_agent(agent_name, p)]
+def can_open_agent(agent_name: str, email: str) -> bool:
+    """Can this person reach a decision raised on ``agent_name``?
+    (trinity-enterprise#881)
+
+    :func:`agent_reach` as a yes or no, for a caller that only needs the
+    decision. Fails closed: an unreadable lookup is "cannot open", which
+    refuses by name rather than waits silently. :func:`agent_reach` is the one
+    rule for a gate's approver (``skill_gate_service._can_open``), for an ask
+    to a canon role (trinity-enterprise#1007) and for an ask to the
+    ``approver`` kind (#4501).
+    """
+    return agent_reach(agent_name, email) is True
 
 
-def on_workspace_roster(agent_name: str, email: str) -> bool:
+def reach_of(agent_name: str, people: List[str]) -> Dict[str, Optional[bool]]:
+    """:func:`agent_reach` for each of ``people``, read ONCE (#4599). A
+    resolver takes both its audience (the people who can open the agent) and
+    its refusal's cause (nobody can, or the platform could not check) from
+    this one read: asked twice, a lookup that failed and then recovered would
+    answer "cannot open" for a person who can, and that refusal is one a room
+    records for good."""
+    return {p: agent_reach(agent_name, p) for p in people}
+
+
+def could_not_check(agent_name: str, role: str, *, workspace: bool = False) -> RoleRefused:
+    """The ONE refusal for "the platform could not check who can open the
+    agent" (#4599). The code stays ``role_cannot_open_agent``, so a caller
+    that reads codes is unchanged; the sentence tells the agent to try again
+    rather than to get the agent shared. ``workspace`` is the credential door,
+    which is the Workspace alone."""
+    where = " in their Workspace" if workspace else ""
+    return RoleRefused(
+        "role_cannot_open_agent", role,
+        f"The platform could not check right now who can open {agent_name}{where}, so this ask "
+        "was not filed. Nothing is wrong with your request. Try again in a few minutes.",
+        cause=CAUSE_UNCHECKED,
+    )
+
+
+def workspace_reach(agent_name: str, email: str) -> Optional[bool]:
     """Can this person reach the Workspace secret field of a ``credential``
-    ask raised on ``agent_name``? (#4579)
+    ask raised on ``agent_name``? True, False, or None when the platform could
+    not check (#4579, #4599).
 
     That field is the ONE door that can end a credential ask
     (``ask_service.answer`` refuses every other answer), and it opens for the
     ask's reader only when the agent is on their Workspace roster: shared with
     them, or owned by them (``client_portal.asks.service._owned_ask``).
-    Narrower than :func:`can_open_agent` on purpose: that rule also counts an
+    Narrower than :func:`agent_reach` on purpose: that rule also counts an
     admin's access to any agent, because an approval can be decided in
     Operations. A credential cannot.
 
     ``include_owned=True`` for everyone: the owned read joins the account by
-    email, so an address with no account owns nothing. A deactivated account
-    signs in at no door (trinity-enterprise#1258), so it is not a reader
-    whatever is shared with it. Fails closed: an unreadable lookup is "not on
-    the roster", which hands the ask on or refuses it by name, never files it
-    for a reader nobody checked.
+    email, so an address with no account owns nothing. Two account states keep
+    a person out of the Workspace whatever is shared with them, so neither is
+    a reader: a deactivated account (trinity-enterprise#1258) and a blocked
+    email (#4599) — the Workspace door refuses a blocked platform account too,
+    so the block is read for everyone here.
+
+    The account is read with ``db.is_email_account_suspended``, which raises
+    when it cannot answer; ``client_portal.service.email_account_suspended``
+    answers "deactivated" instead, which would hide an outage as "not a
+    reader". None is that outage: :func:`resolve_credential_reader` refuses it
+    with "try again", never files the ask for a reader nobody checked.
     """
     try:
-        from client_portal.service import agent_on_roster, email_account_suspended
-        if email_account_suspended(email):
+        from client_portal.service import agent_on_roster
+        if db.is_email_account_suspended(email):
+            return False
+        if _client_blocked(email):
             return False
         return bool(agent_on_roster(agent_name, email, include_owned=True))
     except Exception:  # noqa: BLE001
-        logger.warning("[role_addressing] could not tell whether a person has %s on their "
+        logger.warning("[role_addressing] could not check whether a person has %s on their "
                        "Workspace roster", agent_name, exc_info=True)
+        return None
+
+
+def on_workspace_roster(agent_name: str, email: str) -> bool:
+    """:func:`workspace_reach` as a yes or no (#4579). Fails closed: "could
+    not check" is "not on the roster"."""
+    return workspace_reach(agent_name, email) is True
+
+
+def _is_system_agent(agent_name: str) -> bool:
+    """A system agent is excluded from both Workspace rosters, so nobody ever
+    has one. Unreadable ⇒ False: the refusal then keeps its plain remedy."""
+    try:
+        return bool(db.is_system_agent(agent_name))
+    except Exception:  # noqa: BLE001
+        logger.warning("[role_addressing] could not tell whether %s is a system agent",
+                       agent_name, exc_info=True)
         return False
 
 
@@ -384,7 +490,7 @@ def resolve_credential_reader(
 ) -> Resolution:
     """Resolve the ONE reader of a ``credential`` ask raised by ``agent_name``
     (#4579) — a chain, with the reach of the secret field checked at each step
-    (:func:`on_workspace_roster`):
+    (:func:`workspace_reach`):
 
     1. the agent's primary person (:func:`resolve_addressee`: the seated
        primary, else the owner standing in), when they can reach the field;
@@ -396,24 +502,78 @@ def resolve_credential_reader(
     ``to: primary`` may reach someone other than a message ``to: primary``
     does: a credential ask has a single door, so a seated primary who cannot
     open it is passed over rather than recorded as a reader who never sees
-    the ask while nobody else may fill it. The raise and a re-address
-    (``ask_service.readdress_role``) both read this rule, so they cannot
-    drift. The message names roles, never a person.
+    the ask while nobody else may fill it. The native raise, the queue-file
+    channel and a re-address (``ask_service.readdress_role``) all read this
+    rule, so they cannot drift. (A queue-file row carries no role: it is
+    addressed once, at ingest, and no re-address lists it.)
+
+    The refusal keeps one code and names its real cause (#4599), because the
+    remedy differs — ``cause`` on the exception, the sentence for the agent:
+
+    * a reach that could not be checked (:func:`could_not_check`) — try
+      again. A primary who could not be checked is NOT passed over for the
+      owner: nothing moves a filed ask back to them;
+    * a system agent — nobody has one in their Workspace;
+    * nobody is seated and the owner, standing in, cannot open it — assign a
+      primary person;
+    * the owner is the primary person (seated, or by default where no
+      assignments module answers) — an agent cannot be shared with its own
+      owner, so the owner's own access is the thing to check;
+    * otherwise a seated primary and the owner both cannot — the remedy names
+      what to check (the share, and that they can sign in), not which fails.
+
+    The message names roles, never a person, and never which account state
+    stops them.
     """
     lookup = owner_lookup or owner_email
     r = resolve_addressee(agent_name, "primary", owner_lookup=lookup)
-    if not r.single or on_workspace_roster(agent_name, r.single):
+    if not r.single:
         return r
+    reach = workspace_reach(agent_name, r.single)
+    if reach:
+        return r
+    if reach is None:
+        raise could_not_check(agent_name, "primary", workspace=True)
     owner = lookup(agent_name)
-    if owner and owner != r.single and on_workspace_roster(agent_name, owner):
-        logger.info("[role_addressing] the primary person for %s cannot open it in their "
-                    "Workspace; a credential ask goes to the agent's owner", agent_name)
-        return Resolution("primary", [owner], owner, True, stood_in=True)
+    owner_is_primary = bool(owner) and owner == r.single
+    if owner and not owner_is_primary:
+        owner_reach = workspace_reach(agent_name, owner)
+        if owner_reach:
+            logger.info("[role_addressing] the primary person for %s cannot open it in their "
+                        "Workspace; a credential ask goes to the agent's owner", agent_name)
+            return Resolution("primary", [owner], owner, True, stood_in=True)
+        if owner_reach is None:
+            raise could_not_check(agent_name, "primary", workspace=True)
+    code = "role_cannot_open_agent"
+    if _is_system_agent(agent_name):
+        raise RoleRefused(
+            code, "primary",
+            f"{agent_name} is a system agent, and a system agent is in nobody's Workspace, "
+            "so nobody could fill this ask. Ask an admin to set the credential on "
+            f"{agent_name} directly.",
+            cause=CAUSE_SYSTEM_AGENT,
+        )
+    if owner_is_primary and r.stood_in:
+        raise RoleRefused(
+            code, "primary",
+            f"{agent_name} has no primary person, and its owner cannot open {agent_name} in "
+            "their Workspace, so nobody would see this ask. Ask an admin to assign a primary "
+            f"person and share {agent_name} with them.",
+            cause=CAUSE_NO_PRIMARY,
+        )
+    if owner_is_primary:
+        raise RoleRefused(
+            code, "primary",
+            f"The primary person for {agent_name} is its owner, who cannot open {agent_name} "
+            "in their Workspace, so nobody would see this ask. Ask an admin to check the "
+            "owner's access to the Workspace.",
+            cause=CAUSE_OWNER_IS_PRIMARY,
+        )
     raise RoleRefused(
-        "role_cannot_open_agent", "primary",
+        code, "primary",
         f"Neither the primary person for {agent_name} nor its owner can open {agent_name} "
-        "in their Workspace, so nobody would see this ask. Ask an admin to share "
-        f"{agent_name} with its primary person.",
+        "in their Workspace, so nobody would see this ask. Ask an admin to make sure "
+        f"{agent_name} is shared with its primary person and that they can sign in.",
     )
 
 
@@ -424,7 +584,9 @@ def resolve_approver_for_ask(agent_name: str) -> Resolution:
 
     * ``role_unassigned`` — nobody fills the seat (:func:`resolve`'s own arm);
     * ``role_cannot_open_agent`` — everyone seated is outside the agent
-      (:func:`can_open_agent`), so they would never see the ask.
+      (:func:`can_open_agent`), so they would never see the ask; or the
+      platform could not check (:func:`could_not_check`, #4599), which says
+      "try again" under the same code.
 
     The answer to an ``approver`` ask is fenced to the people recorded at the
     raise (trinity-enterprise#1053), so a seated approver who cannot open the
@@ -434,16 +596,21 @@ def resolve_approver_for_ask(agent_name: str) -> Resolution:
     (``skill_gate_service._approvers``). The other kinds are not fenced and
     keep :func:`resolve_addressee`. Several reachable people are all recorded;
     ``single`` only when exactly one. The message names the role, never a
-    person, and its remedy is to share the agent — not to address someone
-    else, which would hand a separate approval to the owner.
+    person, and its remedy is to restore that person's reach (the share, and
+    that they can sign in: it never says which one fails, #4599) — not to
+    address someone else, which would hand a separate approval to the owner.
     """
     r = resolve(agent_name, "approver")
-    reachable = reachable_people(agent_name, r.people)
+    reach = reach_of(agent_name, r.people)
+    reachable = [p for p in r.people if reach[p]]
     if not reachable:
+        if None in reach.values():
+            raise could_not_check(agent_name, "approver")
         raise RoleRefused(
             "role_cannot_open_agent", "approver",
             f"The approver for {agent_name} cannot open {agent_name}, so they would "
-            f"never see this ask. Ask the agent's owner to share {agent_name} with them.",
+            "never see this ask. Ask the agent's owner or an admin to make sure "
+            f"{agent_name} is shared with them and that they can sign in.",
         )
     return Resolution("approver", reachable, reachable[0] if len(reachable) == 1 else None, True)
 
@@ -460,7 +627,8 @@ def resolve_role_id_for_ask(agent_name: str, role_id: str) -> Resolution:
       ``operator`` instead.
     * ``role_unassigned`` — the provider answered: nobody is seated.
     * ``role_cannot_open_agent`` — everyone seated is outside the agent
-      (:func:`can_open_agent`), so they would never see the ask.
+      (:func:`can_open_agent`), so they would never see the ask; or the
+      platform could not check (:func:`could_not_check`, #4599).
 
     No owner or operator fallback: a role id reaches the people it names, or
     nobody. Several reachable people are all recorded; ``single`` only when
@@ -485,12 +653,16 @@ def resolve_role_id_for_ask(agent_name: str, role_id: str) -> Resolution:
             f"Nobody fills the {label} role for this agent yet. Ask the agent's owner "
             "to seat someone, or address the ask to primary or operator.",
         )
-    reachable = reachable_people(agent_name, people)
+    reach = reach_of(agent_name, people)
+    reachable = [p for p in people if reach[p]]
     if not reachable:
+        if None in reach.values():
+            raise could_not_check(agent_name, role)
         raise RoleRefused(
             "role_cannot_open_agent", role,
             f"The {label} for {agent_name} cannot open {agent_name}, so they would "
-            f"never see this ask. Ask the agent's owner to share {agent_name} with them.",
+            "never see this ask. Ask the agent's owner or an admin to make sure "
+            f"{agent_name} is shared with them and that they can sign in.",
         )
     return Resolution(role, reachable, reachable[0] if len(reachable) == 1 else None, True)
 

@@ -9286,6 +9286,21 @@
         "github"
       ],
       "description": "The repo-scoped GitHub token seam: resolve_github_token walks per-agent PAT, per-user PAT, the registered provider, then the platform PAT; with no provider the answer equals resolve_github_pat's; an uncovered repo falls through; a provider failure on a covered repo raises and never yields the platform PAT; a malformed repo never reaches the provider; resolve_github_pat and its candidates never consult the provider; the provider credential setting is encrypted at rest, refused in cleartext and covered by key rotation."
+    },
+    {
+      "file": "unit/test_4599_credential_reader_doors.py",
+      "feature": "#4599",
+      "added": "2026-11-17",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "asks",
+        "role-addressing",
+        "credentials",
+        "skill-gate",
+        "security"
+      ],
+      "description": "#4599: the remaining doors a credential ask could be recorded through for a reader who cannot fill it. The queue-file channel reads the reader chain of the native raise (real poller, real DB, real secret-field door): the platform picks the reader, the owner can be it, the address the agent wrote is ignored, an entry nobody can fill or one that fails the kind's checks is held by name in platform.ingestion and files no row, a failed lookup holds without a marker, the chain is read once per cycle, and the next cycle keeps the row confirmed. A blocked email is not a reader in on_workspace_roster; in can_open_agent the block stops an email with no account and a Workspace-only account, a blocked operator or admin stays reachable, a deactivated account is not. Each refusal names its real cause under the same code: nobody seated, the owner is the primary, a system agent, a lookup that failed (credential, approver, role id; the skill gate answers 503 gate_unavailable), and an admin's re-address by rule."
     }
   ]
 }

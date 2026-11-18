@@ -111,7 +111,7 @@ def test_the_ask_sink_uses_the_same_rule(ra, monkeypatch):
     (#4501, pinned in test_4501_approver_reach.py); here both can."""
     from services import ask_service
 
-    monkeypatch.setattr(ra, "can_open_agent", lambda agent_name, email: True)
+    monkeypatch.setattr(ra, "agent_reach", lambda agent_name, email: True)
     _provide({"approver": [ALICE, BOB]})
     assert ask_service._address(AGENT, "approver") == ([ALICE, BOB], None, True)
     with pytest.raises(ask_service.AskRejected) as exc:

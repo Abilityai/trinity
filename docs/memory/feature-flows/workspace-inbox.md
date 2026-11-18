@@ -614,7 +614,11 @@ fence instead: the platform chose the addressee; the roster was never its fence.
   `viewer` → rows untouched (ent#1053), and so is an `approver` seat nobody
   in it can open (#4501: an agent's `approver` ask records only the seated
   approvers who can open the agent, refused `role_cannot_open_agent` when none
-  can); a credential row moves only to one
+  can; #4599: a lookup that failed is refused under the same code with a
+  "could not check, try again in a few minutes" message, a deactivated
+  account cannot open the agent, and the client block stops an email with no
+  account or a Workspace-only account but not an operator or admin); a
+  credential row moves only to one
   person (ent#1066). One audit row per changed row (`platform_readdressed`,
   ids and the reason), one agent-keyed `operator_queue_new` trigger per call.
   The Inbox has no WebSocket — the new addressee sees it on the next poll. The
