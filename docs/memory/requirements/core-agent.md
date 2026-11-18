@@ -3255,9 +3255,10 @@ to localStorage in the clear.
 - **AC-1 — curation is a policy dimension on the ONE catalog**: `workspace` +
   `workspace_tier` are appended to `ModelEntry` (`services/model_catalog.py`,
   §47.2 in `public-access.md`), never a second hand-typed list — the drift the
-  #2086 registry exists to prevent. Three entries carry it: `claude-opus-5`
-  ("Most capable"), `claude-sonnet-5` ("Balanced — fast and smart"),
-  `claude-haiku-4-5-20251001` ("Fastest"). Fable 5 is out (its `note` also reads
+  #2086 registry exists to prevent. Three entries carry it, one per tier, and
+  the id behind a tier moves with the lineup: today `claude-opus-5-5`
+  ("Most capable"), `claude-sonnet-5-5` ("Balanced — fast and smart"),
+  `claude-haiku-5-5` ("Fastest"). Fable 5 is out (its `note` also reads
   "Most capable"; Opus-vs-Fable is an operator distinction), and every "Legacy"
   entry is out — a client-facing surface offering "Claude Opus 4.6 — Legacy" *is*
   the combobox this reacts against. Two import-time assertions make the

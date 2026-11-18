@@ -29,9 +29,19 @@ export const MODEL_CATALOG = [
     "workspaceTier": ""
   },
   {
+    "id": "claude-fable-5-2",
+    "label": "Claude Fable 5.2",
+    "note": "Most capable — longest tasks (latest)",
+    "publicChannel": true,
+    "adminDefaultSelectable": true,
+    "recommended": false,
+    "workspace": false,
+    "workspaceTier": ""
+  },
+  {
     "id": "claude-fable-5-1",
     "label": "Claude Fable 5.1",
-    "note": "Most capable — longest tasks (latest)",
+    "note": "Most capable — longest tasks (prior point release)",
     "publicChannel": true,
     "adminDefaultSelectable": true,
     "recommended": false,
@@ -49,14 +59,24 @@ export const MODEL_CATALOG = [
     "workspaceTier": ""
   },
   {
-    "id": "claude-sonnet-5",
-    "label": "Claude Sonnet 5",
+    "id": "claude-sonnet-5-5",
+    "label": "Claude Sonnet 5.5",
     "note": "Fast + smart, 1M context (latest)",
     "publicChannel": true,
     "adminDefaultSelectable": true,
     "recommended": false,
     "workspace": true,
     "workspaceTier": "Balanced — fast and smart"
+  },
+  {
+    "id": "claude-sonnet-5",
+    "label": "Claude Sonnet 5",
+    "note": "Fast + smart, 1M context (prior point release)",
+    "publicChannel": true,
+    "adminDefaultSelectable": true,
+    "recommended": false,
+    "workspace": false,
+    "workspaceTier": ""
   },
   {
     "id": "claude-opus-4-8",
@@ -99,14 +119,24 @@ export const MODEL_CATALOG = [
     "workspaceTier": ""
   },
   {
-    "id": "claude-haiku-4-5-20251001",
-    "label": "Claude Haiku 4.5",
-    "note": "Fastest, cheapest",
+    "id": "claude-haiku-5-5",
+    "label": "Claude Haiku 5.5",
+    "note": "Fastest, cheapest (latest)",
     "publicChannel": true,
     "adminDefaultSelectable": false,
     "recommended": false,
     "workspace": true,
     "workspaceTier": "Fastest"
+  },
+  {
+    "id": "claude-haiku-4-5-20251001",
+    "label": "Claude Haiku 4.5",
+    "note": "Fastest, cheapest (prior generation)",
+    "publicChannel": true,
+    "adminDefaultSelectable": false,
+    "recommended": false,
+    "workspace": false,
+    "workspaceTier": ""
   },
   {
     "id": "claude-opus-4-5-20251101",
