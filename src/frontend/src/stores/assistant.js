@@ -30,6 +30,8 @@ const STEP_TIMEOUT_MS = 260000
 const BUILD_TIMEOUT_MS = 600000
 const MAX_STEPS = 40
 const JOB_POLL_MS = 4000
+const RUN_FIRST_POLL_MS = 1500   // a short run is over before the first slow poll
+const FOLLOWED = ['job', 'run']    // cards the page follows instead of asking about
 const JOB_POLL_LIMIT = 450 // 30 minutes
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -54,6 +56,17 @@ export const useAssistantStore = defineStore('assistant', {
     messages: [],        // { id, role: 'user' | 'assistant' | 'note', content, cards? }
     sending: false,
     activity: '',        // what is being looked at right now
+    steps: [],           // every step of the turn in hand, in order
+    saying: '',          // what it said it is about to do, while it does it
+    startedAt: 0,        // when the turn in hand began
+    panelOpen: false,    // set by the panel
+    unread: 0,           // answers that arrived while the panel was closed
+    held: '',            // the message the limit stopped, to ask again after subscribing
+    waiting: '',         // what the person wrote before agreeing to the terms; sent once they agree
+    agreeing: false,
+    agreeError: '',
+    termsText: '',       // the trial's terms, read when the person asks to see them
+    termsError: '',
     sendError: '',
     limit: null,         // the allowance, when the last answer was "limit"
     account: closedAccount(),
@@ -63,6 +76,10 @@ export const useAssistantStore = defineStore('assistant', {
   getters: {
     available: (state) => !state.absent && Boolean(state.status?.available),
     subscribed: (state) => state.status?.plan === 'pro',
+    /** Someone at this instance has agreed to the trial's terms. Nothing is sent before that. */
+    agreed: (state) => Boolean(state.status?.trial_terms?.accepted),
+    /** How many builds and runs are being followed right now. */
+    following: (state) => state.messages.reduce((n, m) => n + (m.cards || []).filter((c) => c.state === 'making').length, 0),
     /** One line for the header: the plan and what is left of the allowance. */
     planLine: (state) => {
       const s = state.status
@@ -124,6 +141,9 @@ export const useAssistantStore = defineStore('assistant', {
       this.messages.push({ id: newId(), role: shown ? 'user' : 'note', content: message })
       this.sending = true
       this.activity = ''
+      this.steps = []
+      this.saying = ''
+      this.startedAt = Date.now()
       try {
         const fleet = await this.refreshFleet()
         let { data } = await api.post(`${BASE}/turn`, {
@@ -136,6 +156,8 @@ export const useAssistantStore = defineStore('assistant', {
         for (let step = 0; data.status === 'working' && step < MAX_STEPS; step++) {
           this.conversationId = data.conversation_id
           this.activity = (data.activity || []).join(' · ')
+          this.steps.push(...(data.activity || []))
+          if (data.text) this.saying = data.text
           ;({ data } = await api.post(`${BASE}/turn/continue`,
             { conversation_id: data.conversation_id }, { timeout: STEP_TIMEOUT_MS }))
         }
@@ -144,8 +166,10 @@ export const useAssistantStore = defineStore('assistant', {
 
         if (data.status === 'limit') {
           this.limit = data.allowance || {}
+          if (shown) this.held = message          // never reached the assistant: asked again once there is room
           return
         }
+        this.held = ''
         if (data.status === 'working') {
           this.sendError = 'That took more steps than expected. Ask me to continue.'
           return
@@ -161,20 +185,31 @@ export const useAssistantStore = defineStore('assistant', {
           content: data.text || (cards.length ? '' : 'Done.'),
           cards: cards.map((card) => ({
             id: newId(), card, label: cardLabel(card, after), note: cardNote(card),
-            state: card.action === 'job' ? 'making' : 'open', reason: '', progress: '',
+            state: FOLLOWED.includes(card.action) ? 'making' : 'open', reason: '', progress: '',
+            since: Date.now(), fraction: null,
           })),
         }
         this.messages.push(reply)
+        if (!this.panelOpen) this.unread += 1
         for (const entry of reply.cards) {
           if (entry.card.action === 'job') this.followJob(reply.id, entry.id, route)
+          if (entry.card.action === 'run') this.followRun(reply.id, entry.id, route)
         }
       } catch (error) {
         const code = error?.response?.status
+        if (detail(error)?.code === 'terms_required') {     // the terms changed, or were never agreed to here
+          this.waiting = shown ? message : this.waiting
+          this.messages = this.messages.filter((m) => !(m.role === 'user' && m.content === message))
+          await this.loadStatus()
+          return
+        }
         if (code === 404 || code === 403) this.absent = true
         this.sendError = words(error, "Couldn't reach the assistant. Check your connection and try again.")
       } finally {
         this.sending = false
         this.activity = ''
+        this.steps = []
+        this.saying = ''
         if (!this.status?.contacted) this.loadStatus()
       }
     },
@@ -200,6 +235,7 @@ export const useAssistantStore = defineStore('assistant', {
         }
         entry.progress = seen.status === 'queued' ? 'Waiting for a builder'
           : `${seen.doing || 'Working'} (step ${Math.min(seen.steps_done + 1, seen.steps)} of ${seen.steps})`
+        entry.fraction = seen.steps ? Math.min(1, (seen.steps_done || 0) / seen.steps) : null
         if (seen.status === 'done' || seen.status === 'failed') break
       }
       const entry = find()
@@ -219,8 +255,97 @@ export const useAssistantStore = defineStore('assistant', {
           ? `That didn't work: making "${title}". ${seen.reason}. ${seen.detail || ''}`.trim()
           : `Not sure it worked: making "${title}". It did not finish in time.`
       }
+      await this.comeBack(line, route)
+    },
+
+    /**
+     * Follow a run on an agent until it ends, then tell the assistant, which
+     * reads the result and comes back to the person with it.
+     */
+    async followRun(messageId, cardId, route) {
+      const find = () => this.messages.find((m) => m.id === messageId)?.cards?.find((c) => c.id === cardId)
+      const { agent, execution_id: runId, title } = find()?.card || {}
+      let seen = null
+      for (let i = 0; i < JOB_POLL_LIMIT; i++) {
+        await wait(i < 5 ? RUN_FIRST_POLL_MS : JOB_POLL_MS)
+        const entry = find()
+        if (!entry || entry.state !== 'making') return
+        try {
+          seen = (await api.get(`${BASE}/runs/${encodeURIComponent(agent)}/${encodeURIComponent(runId)}`)).data
+        } catch {
+          continue
+        }
+        entry.progress = seen.status === 'queued' ? 'Waiting its turn' : 'Running'
+        if (seen.ended) break
+      }
+      const entry = find()
+      if (!entry || entry.state !== 'making') return
+      let line
+      if (seen?.ended && seen.ok) {
+        entry.state = 'done'
+        line = `The run "${title}" on ${agent} finished (execution ${runId}). Read its result and tell the person what it produced.`
+      } else if (seen?.ended) {
+        entry.state = 'refused'
+        entry.reason = seen.error || 'It failed.'
+        line = `The run "${title}" on ${agent} failed (execution ${runId}). ${seen.error || ''} Say what went wrong and what would fix it.`.replace(/\s+/g, ' ')
+      } else {
+        entry.state = 'unsure'
+        entry.reason = 'It is still going. Ask me about it later.'
+        line = `The run "${title}" on ${agent} is still going after half an hour (execution ${runId}). I have stopped watching it.`
+      }
+      await this.comeBack(line, route)
+    },
+
+    /** Something being followed ended: tell the assistant once it is free to hear it. */
+    async comeBack(line, route) {
       for (let i = 0; this.sending && i < 300; i++) await wait(1000)   // not in the middle of a turn
       await this.send(line, route, { shown: false })
+    },
+
+    /** The person asked to read the terms. Read once; a public page opens instead when there is one. */
+    async readTerms() {
+      if (this.termsText) return
+      this.termsError = ''
+      try {
+        const { data } = await api.get(`${BASE}/terms/trial`)
+        if (data?.url) this.status = { ...(this.status || {}), trial_terms: { ...(this.status?.trial_terms || {}), url: data.url } }
+        this.termsText = data?.text || ''
+        if (!this.termsText && !data?.url) this.termsError = "The terms couldn't be loaded. Try again in a moment."
+      } catch (error) {
+        this.termsError = words(error, "The terms couldn't be loaded. Check your connection and try again.")
+      }
+    },
+
+    /** What the person wrote before agreeing: kept, and sent the moment they agree. */
+    hold(message) {
+      this.waiting = message
+    },
+
+    /**
+     * The person pressed Agree. Called from that button and nowhere else: the
+     * page never agrees for them.
+     */
+    async agree(route) {
+      this.agreeing = true
+      this.agreeError = ''
+      try {
+        const { data } = await api.post(`${BASE}/terms/accept`, { accept: true })
+        this.status = { ...(this.status || {}), available: true, contacted: true, reachable: true, ...data }
+      } catch (error) {
+        this.agreeError = words(error, "Couldn't reach Trinity. Check your connection and try again.")
+        return
+      } finally {
+        this.agreeing = false
+      }
+      const waiting = this.waiting
+      this.waiting = ''
+      if (waiting && this.agreed) await this.send(waiting, route)
+    },
+
+    /** The panel was opened or closed. Opening it is reading it. */
+    setOpen(open) {
+      this.panelOpen = open
+      if (open) this.unread = 0
     },
 
     /** The person answered a card. Confirm makes the change as them. */
@@ -354,7 +479,13 @@ export const useAssistantStore = defineStore('assistant', {
         }
         this.account = closedAccount()
         this.limit = null
-        if (this.conversationId) await this.send(outcomeLine('done', 'Subscribe to Trinity Pro'), route, { shown: false })
+        // What they asked when the allowance ran out was never answered: answer
+        // it now, with the subscription said in the same breath.
+        const held = this.held
+        this.held = ''
+        const done = outcomeLine('done', 'Subscribe to Trinity Pro')
+        if (held) await this.send(`${done} Now answer what they asked just before, which the limit stopped: "${held}"`, route, { shown: false })
+        else if (this.conversationId) await this.send(done, route, { shown: false })
       } catch (error) {
         this.account.error = words(error, "Couldn't start the subscription. Try again.")
       } finally {
@@ -372,6 +503,7 @@ export const useAssistantStore = defineStore('assistant', {
       this.conversationId = null
       this.sendError = ''
       this.limit = null
+      this.held = ''
     },
   },
 })

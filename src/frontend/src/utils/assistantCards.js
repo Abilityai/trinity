@@ -182,6 +182,15 @@ export function validJob(raw) {
   return { action: 'job', job_id: raw.job_id, title: String(raw.title ?? '').slice(0, 120) || 'New agents' }
 }
 
+const RUN_ID = /^[A-Za-z0-9_-]{6,80}$/
+
+/** A run on one of this instance's agents that the page follows until it ends. */
+export function validRun(raw, fleet) {
+  if (!raw || raw.action !== 'run' || typeof raw.execution_id !== 'string' || !RUN_ID.test(raw.execution_id)) return null
+  if (!(fleet || []).some((a) => a.name === raw.agent)) return null
+  return { action: 'run', agent: raw.agent, execution_id: raw.execution_id, title: String(raw.title ?? '').slice(0, 120) || 'A run' }
+}
+
 const TOOL_NAME = /^[a-z0-9_]{2,80}$/
 
 /**
@@ -225,6 +234,7 @@ export function acceptCards(raw, fleet) {
     if (item?.action === 'build') card = validBuild(item)
     else if (item?.action === 'tool') card = validTool(item)
     else if (item?.action === 'job') card = validJob(item)
+    else if (item?.action === 'run') card = validRun(item, fleet)
     else if (item?.action === 'upgrade' && Object.keys(item).length === 1) card = { action: 'upgrade' }
     else card = validCard(item, fleet)
     const duplicate = card && cards.some((c) => JSON.stringify(c) === JSON.stringify(card))
@@ -235,6 +245,7 @@ export function acceptCards(raw, fleet) {
 
 export function cardLabel(card, fleet) {
   if (card.action === 'job') return `Making "${card.title}"`
+  if (card.action === 'run') return `${card.title} on ${card.agent}`
   if (card.action === 'build') return `Build "${card.design.title}"`
   if (card.action === 'upgrade') return 'Subscribe to Trinity Pro'
   if (card.action === 'tool') {
@@ -247,7 +258,8 @@ export function cardLabel(card, fleet) {
 
 /** The line under a card's title. Every change to an agent runs as the person. */
 export function cardNote(card) {
-  if (card.action === 'job') return 'Each agent is made with the standard tools and checked. This takes a few minutes; you can keep talking.'
+  if (card.action === 'job') return "Each agent is made with the standard tools and checked. This takes a few minutes. Keep talking or close this panel: I'll come back when it's ready."
+  if (card.action === 'run') return "Running on the agent. Keep talking or close this panel: I'll come back with the result."
   if (card.action === 'build') return 'Creates these agents on this instance, as you. Nothing is switched on.'
   if (card.action === 'tool') return 'This cannot be undone. It runs as you.'
   if (card.action === 'upgrade') return 'A larger allowance and bigger teams. You sign in with your email first.'

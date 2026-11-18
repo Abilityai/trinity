@@ -17,6 +17,7 @@ let turns        // answers to /turn and /turn/continue, in order
 let scheduleOn
 let verifyFails
 let jobs         // answers to the job's status, in order
+let runs = []    // answers to a run's status, in order
 
 vi.mock('@/api', () => {
   const respond = (method, url, body) => {
@@ -29,7 +30,10 @@ vi.mock('@/api', () => {
       return { agents: [{ name: 'shop-desk', created: true, files: 11, schedule: { id: 's9', name: 'Morning' }, problem: '' }] }
     }
     if (url === `/api/enterprise/assistant/jobs/${DESIGN_ID}`) return jobs.shift() || { status: 'running', steps_done: 0, steps: 3, doing: 'Working' }
+    if (url === '/api/enterprise/assistant/runs/issue-digest/exec-12345') return runs.shift() || { status: 'running', ended: false, ok: false, error: '' }
     if (url === '/api/enterprise/assistant/tools/confirm') return { ok: true, content: 'Agent scout deleted.' }
+    if (url === '/api/enterprise/assistant/terms/trial') return { version: 't0', url: '', text: '# Trial terms\n\nYour messages are sent to Ability AI.' }
+    if (url === '/api/enterprise/assistant/terms/accept') return { plan: 'free', email: null, allowance: ALLOWANCE, trial_terms: { version: 't0', url: '', accepted: 't0' } }
     if (url === '/api/enterprise/assistant/account/start') return { email: body.email, dev_code: '424242', terms: { version: 't1', url: '' } }
     if (url === '/api/enterprise/assistant/account/verify') {
       if (verifyFails) throw { response: { status: 400, data: { detail: { code: 'wrong_code', message: "That code didn't match." } } } }
@@ -80,7 +84,8 @@ describe('assistant panel', () => {
     scheduleOn = false
     verifyFails = false
     jobs = []
-    status = { available: true, contacted: false, reachable: null, plan: null, email: null, allowance: null }
+    runs = []
+    status = { available: true, contacted: true, reachable: true, plan: 'free', email: null, allowance: null, trial_terms: { version: 't0', url: '', accepted: 't0' } }
     setActivePinia(createPinia())
     wrapper = mount(AssistantWidget, {
       attachTo: document.body,
@@ -93,12 +98,66 @@ describe('assistant panel', () => {
 
   afterEach(() => wrapper.unmount())
 
-  it('opens ready to use, says where messages go, and has sent nothing', async () => {
+  it('opens ready to use and has sent nothing', async () => {
     await openPanel()
     expect(wrapper.get('[data-testid="assistant-welcome"]').text()).toContain("there's nothing to set up")
-    expect(wrapper.get('[data-testid="assistant-disclosure"]').text()).toContain('sent to Trinity')
     expect(wrapper.find('[data-testid="assistant-email"]').exists()).toBe(false)
     expect(calls.filter((c) => c.method !== 'get')).toEqual([])
+  })
+
+  it('takes several lines: Enter sends, Shift+Enter does not', async () => {
+    await openPanel()
+    const box = wrapper.get('[data-testid="assistant-input"]')
+    expect(box.element.tagName).toBe('TEXTAREA')
+    await box.setValue('first line')
+    await box.trigger('keydown', { key: 'Enter', shiftKey: true })
+    await flushPromises()
+    expect(sent(TURN)).toEqual([])
+    await box.setValue('first line\nsecond line')
+    await box.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(sent(TURN)[0].body.message).toBe('first line\nsecond line')
+    expect(box.element.value).toBe('')
+  })
+
+  describe('on an instance where nobody has agreed yet', () => {
+    beforeEach(async () => {
+      status = { available: true, contacted: false, reachable: null, plan: null, email: null, allowance: null, trial_terms: { version: null, url: '', accepted: null } }
+      const { useAssistantStore } = await import('@/stores/assistant')
+      await useAssistantStore().loadStatus()
+    })
+
+    it('says where the data goes and sends nothing until the person agrees; one click then sends what they wrote', async () => {
+      await openPanel()
+      const box = wrapper.get('[data-testid="assistant-terms-first"]')
+      expect(box.text()).toContain('sent to Ability AI')
+      // the terms are one click away, and reading them agrees to nothing
+      await wrapper.get('[data-testid="assistant-terms-link"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[data-testid="assistant-terms-text"]').text()).toContain('Your messages are sent to Ability AI.')
+      expect(calls.filter((c) => c.method !== 'get')).toEqual([])
+      expect(wrapper.find('[data-testid="assistant-email"]').exists()).toBe(false)
+      await say('how are my agents?')
+      expect(calls.filter((c) => c.method !== 'get')).toEqual([])
+      expect(wrapper.get('[data-testid="assistant-waiting"]').text()).toContain('how are my agents?')
+      expect(button('Agree and send')).toBeTruthy()
+
+      await wrapper.get('[data-testid="assistant-agree"]').trigger('click')
+      await flushPromises()
+      expect(sent('/api/enterprise/assistant/terms/accept')[0].body).toEqual({ accept: true })
+      expect(sent(TURN)[0].body.message).toBe('how are my agents?')
+      expect(wrapper.find('[data-testid="assistant-terms-first"]').exists()).toBe(false)
+    })
+
+    it('agreeing first is one click, and then messages just go', async () => {
+      await openPanel()
+      expect(button('Agree and start')).toBeTruthy()
+      await wrapper.get('[data-testid="assistant-agree"]').trigger('click')
+      await flushPromises()
+      expect(sent(TURN)).toEqual([])
+      await say('hello')
+      expect(sent(TURN)[0].body.message).toBe('hello')
+    })
   })
 
   it('keeps Ask one tab away', async () => {
@@ -206,6 +265,92 @@ describe('assistant panel', () => {
     vi.useRealTimers()
   })
 
+  it('follows a run on an agent, and brings the assistant back with the result when it ends', async () => {
+    vi.useFakeTimers()
+    runs = [{ status: 'running', ended: false, ok: false, error: '' }, { status: 'success', ended: true, ok: true, error: '' }]
+    turns = [final("It's running. I'll come back with the result.", [{ action: 'run', agent: 'issue-digest', execution_id: 'exec-12345', title: 'Weekly digest' }]),
+      final('The digest found three new issues.')]
+    await openPanel()
+    await say('run the digest now')
+    const card = wrapper.get('[data-testid="assistant-card"]')
+    expect(card.text()).toContain('Running')
+    expect(card.text()).toContain('Weekly digest on issue-digest')
+    expect(card.find('[role="progressbar"]').exists()).toBe(true)
+    await vi.advanceTimersByTimeAsync(1600)
+    await flushPromises()
+    expect(sent(TURN)).toHaveLength(1)                      // still going: the assistant is not disturbed
+    await vi.advanceTimersByTimeAsync(1600)
+    await flushPromises()
+    expect(sent(TURN)[1].body).toMatchObject({ counted: false })
+    expect(sent(TURN)[1].body.message).toContain('The run "Weekly digest" on issue-digest finished (execution exec-12345)')
+    expect(wrapper.findAll('.bubble').map((b) => b.text()).at(-1)).toBe('The digest found three new issues.')
+    expect(wrapper.find('[role="progressbar"]').exists()).toBe(false)
+    vi.useRealTimers()
+  })
+
+  it('does not follow a run on an agent this instance does not have', async () => {
+    turns = [final('Running.', [{ action: 'run', agent: 'someone-elses', execution_id: 'exec-12345', title: 'X' }])]
+    await openPanel()
+    await say('run it')
+    expect(wrapper.find('[data-testid="assistant-card"]').exists()).toBe(false)
+  })
+
+  it('shows each step of a long turn as it happens, with what it said it would do', async () => {
+    let release
+    const held = new Promise((resolve) => { release = resolve })
+    turns = [{ status: 'working', conversation_id: 'c1', text: "I'll check every agent's schedules.", activity: ['Looking at your agents'], cards: [], allowance: ALLOWANCE },
+      { status: 'working', conversation_id: 'c1', activity: ['List agent schedules: issue-digest'], cards: [], allowance: ALLOWANCE }]
+    const api = (await import('@/api')).default
+    const post = api.post.getMockImplementation()
+    let n = 0
+    api.post.mockImplementation(async (url, body) => {
+      if (url === `${TURN}/continue` && ++n === 2) { await held; return { data: final('Two schedules.') } }
+      return post(url, body)
+    })
+    await openPanel()
+    await say('what runs on a schedule?')
+    const working = wrapper.get('[data-testid="assistant-working"]')
+    expect(working.text()).toContain("I'll check every agent's schedules.")
+    expect(working.findAll('li').map((li) => li.text())).toEqual(['Looking at your agents', 'List agent schedules: issue-digest'])
+    release()
+    await flushPromises()
+    api.post.mockImplementation(post)
+    expect(wrapper.find('[data-testid="assistant-working"]').exists()).toBe(false)
+    expect(wrapper.findAll('.bubble').map((b) => b.text()).at(-1)).toBe('Two schedules.')
+  })
+
+  it('says on the launcher that an answer arrived while the panel was closed', async () => {
+    vi.useFakeTimers()
+    runs = [{ status: 'failed', ended: true, ok: false, error: 'Credit balance is too low' }]
+    turns = [final('Running.', [{ action: 'run', agent: 'issue-digest', execution_id: 'exec-12345', title: 'Weekly digest' }]),
+      final('It failed: the Claude account is out of credit.')]
+    await openPanel()
+    await say('run the digest now')
+    await wrapper.get('[aria-label="Close"], [aria-label="Close the assistant"], [data-testid="assistant-close"]').trigger('click')
+    expect(wrapper.get('[data-testid="assistant-launcher-busy"]').exists()).toBe(true)
+    await vi.advanceTimersByTimeAsync(1600)
+    await flushPromises()
+    expect(sent(TURN)[1].body.message).toContain('failed (execution exec-12345). Credit balance is too low')
+    expect(wrapper.get('[data-testid="assistant-launcher-unread"]').text()).toBe('1')
+    await openPanel()
+    expect(wrapper.find('[data-testid="assistant-launcher-unread"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="assistant-card"]').text()).toContain('Credit balance is too low')
+    vi.useRealTimers()
+  })
+
+  it('offers things to do for this fleet; one that needs finishing goes into the box, not out', async () => {
+    await openPanel()
+    const groups = wrapper.findAll('[data-testid="assistant-starters"]')
+    expect(groups.map((g) => g.find('p').text())).toEqual(['Check', 'Do', 'Build'])
+    await button('Ask an agent…').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="assistant-input"]').element.value).toBe('Ask issue-digest ')
+    expect(sent(TURN)).toEqual([])
+    await button('What runs on a schedule?').trigger('click')
+    await flushPromises()
+    expect(sent(TURN)[0].body.message).toBe('What runs on a schedule?')
+  })
+
   it('tells the assistant when the person says not now, and makes no change', async () => {
     turns = [final('Start it?', [{ action: 'start-agent', agent: 'issue-digest' }]), final('Fine.')]
     await openPanel()
@@ -243,7 +388,9 @@ describe('assistant panel', () => {
     await wrapper.get('[data-testid="assistant-subscribe"]').trigger('click')
     await flushPromises()
     expect(sent('/api/enterprise/assistant/subscription/start')).toHaveLength(1)
-    expect(sent(TURN)[1].body).toMatchObject({ message: 'Done: Subscribe to Trinity Pro.', counted: false })
+    // What the limit stopped is asked again, so subscribing answers their question and not just itself.
+    expect(sent(TURN)[1].body).toMatchObject({ counted: false })
+    expect(sent(TURN)[1].body.message).toBe('Done: Subscribe to Trinity Pro. Now answer what they asked just before, which the limit stopped: "one more thing"')
     expect(wrapper.find('[data-testid="assistant-account"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="assistant-limit"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="assistant-plan"]').text()).toBe('Trinity Pro')

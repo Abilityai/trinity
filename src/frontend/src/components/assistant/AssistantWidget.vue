@@ -5,10 +5,23 @@
     type="button"
     data-testid="assistant-launcher"
     class="fixed bottom-6 right-6 w-14 h-14 bg-action-primary-600 hover:bg-action-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-transform hover:scale-105 motion-reduce:transition-none motion-reduce:hover:scale-100 focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2 dark:focus:ring-offset-gray-900 z-50"
-    aria-label="Open the Trinity assistant"
+    :aria-label="store.unread ? 'Open the Trinity assistant: it has an answer for you' : busy ? 'Open the Trinity assistant: it is working' : 'Open the Trinity assistant'"
     @click="open"
   >
+    <!-- Working while closed: a slow ring. An answer waiting: a count. -->
+    <span
+      v-if="busy && !store.unread"
+      class="absolute inset-0 rounded-full ring-2 ring-action-primary-400 animate-ping motion-reduce:animate-none"
+      data-testid="assistant-launcher-busy"
+      aria-hidden="true"
+    ></span>
     <img src="../../assets/trinity-logo-white.svg" alt="" class="w-7 h-7" />
+    <span
+      v-if="store.unread"
+      class="absolute -top-1 -right-1 min-w-5 h-5 px-1 rounded-full bg-status-danger-600 text-white text-[11px] font-bold tabular-nums flex items-center justify-center ring-2 ring-white dark:ring-gray-900"
+      data-testid="assistant-launcher-unread"
+      aria-hidden="true"
+    >{{ store.unread }}</span>
   </button>
 
   <section
@@ -75,7 +88,8 @@
 
       <template v-else>
         <!-- Conversation -->
-        <div ref="messagesEl" class="flex-1 min-h-0 overflow-y-auto p-4 space-y-3 text-sm" aria-live="polite">
+        <!-- On the ground colour, so each reply (a surface) reads as its own box. -->
+        <div ref="messagesEl" class="flex-1 min-h-0 overflow-y-auto p-4 space-y-3 text-sm bg-gray-50 dark:bg-gray-900" aria-live="polite">
           <div v-if="store.messages.length === 0" class="space-y-3" data-testid="assistant-welcome">
             <p class="text-gray-900 dark:text-gray-100">
               I can look at your agents and tell you what's going on, fix what I can, and build new agents with you. It works right away: there's nothing to set up.
@@ -83,8 +97,11 @@
             <p class="text-[12.5px] text-gray-500 dark:text-gray-400">
               Anything that switches something on or gives access, I'll ask you to confirm first.
             </p>
-            <div class="flex flex-wrap gap-2">
-              <BaseButton v-for="s in starters" :key="s" variant="secondary" size="sm" @click="send(s)">{{ s }}</BaseButton>
+            <div v-for="g in starters" :key="g.heading" class="space-y-1.5" data-testid="assistant-starters">
+              <p class="font-mono text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">{{ g.heading }}</p>
+              <div class="flex flex-wrap gap-2">
+                <BaseButton v-for="s in g.items" :key="s.label" variant="secondary" size="sm" @click="pick(s)">{{ s.label }}</BaseButton>
+              </div>
             </div>
           </div>
 
@@ -94,7 +111,7 @@
               class="text-[12.5px] text-gray-500 dark:text-gray-400 text-center"
               data-testid="assistant-note"
             >{{ noteWords(m.content) }}</p>
-            <ChatBubble v-else-if="m.content" :role="m.role" :content="m.content" />
+            <ChatBubble v-else-if="m.content" :role="m.role" :content="m.content" boxed />
 
             <div
               v-for="c in m.cards || []"
@@ -103,7 +120,7 @@
               class="rounded-lg border p-3 space-y-2 border-action-primary-200 dark:border-action-primary-500/40 bg-action-primary-50 dark:bg-action-primary-500/16"
             >
               <p class="font-mono text-[11px] font-semibold uppercase tracking-wider text-action-primary-700 dark:text-action-primary-300">
-                {{ HEADING[c.card.action] || 'Needs your OK' }}
+                {{ heading(c) }}
               </p>
               <p class="font-medium text-gray-900 dark:text-gray-100">{{ c.label }}</p>
 
@@ -127,13 +144,29 @@
                   <dd class="min-w-0 break-words">{{ d.value }}</dd>
                 </div>
               </dl>
-              <p class="text-[12.5px] text-gray-600 dark:text-gray-300">{{ c.note }}</p>
+              <p v-if="!(FOLLOWED.includes(c.card.action) && c.state !== 'making')" class="text-[12.5px] text-gray-600 dark:text-gray-300">{{ c.note }}</p>
 
-              <p
-                v-if="c.state === 'making'"
-                class="text-[12.5px] font-medium text-action-primary-700 dark:text-action-primary-300 animate-pulse motion-reduce:animate-none"
-                data-testid="assistant-job"
-              >{{ c.progress || 'Starting' }}…</p>
+              <div v-if="c.state === 'making'" class="space-y-1.5" data-testid="assistant-job">
+                <!-- Steps known (a build): how far. Not known (a run): that it is alive. -->
+                <div
+                  class="h-1.5 rounded-full overflow-hidden bg-action-primary-100 dark:bg-action-primary-500/20"
+                  role="progressbar"
+                  :aria-label="c.label"
+                  :aria-valuenow="c.fraction == null ? undefined : Math.round(c.fraction * 100)"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                >
+                  <div
+                    class="h-full rounded-full bg-action-primary-600 dark:bg-action-primary-500 transition-[width] duration-500 motion-reduce:transition-none"
+                    :class="c.fraction == null ? 'w-full opacity-60 animate-pulse motion-reduce:animate-none' : ''"
+                    :style="c.fraction == null ? null : { width: Math.max(6, Math.round(c.fraction * 100)) + '%' }"
+                  ></div>
+                </div>
+                <p class="flex justify-between gap-2 text-[12.5px] font-medium text-action-primary-700 dark:text-action-primary-300">
+                  <span>{{ c.progress || 'Starting' }}…</span>
+                  <span class="tabular-nums flex-none">{{ elapsed(c.since) }}</span>
+                </p>
+              </div>
               <div v-else-if="c.state === 'open' || c.state === 'running'" class="flex flex-wrap gap-2 pt-1">
                 <BaseButton
                   size="sm"
@@ -155,14 +188,26 @@
                 :class="OUTCOME[c.state].tone"
               >
                 <svg class="w-4 h-4 flex-none mt-px" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path :d="OUTCOME[c.state].icon" /></svg>
-                <span>{{ OUTCOME[c.state].words }}<template v-if="c.reason"> {{ c.reason }}</template></span>
+                <span>{{ c.reason ? `${OUTCOME[c.state].words} ${c.reason}` : OUTCOME[c.state].words }}</span>
               </p>
             </div>
           </template>
 
-          <p v-if="store.sending" class="text-[12.5px] text-gray-500 dark:text-gray-400 animate-pulse motion-reduce:animate-none" data-testid="assistant-working">
-            {{ store.activity ? `${store.activity}…` : 'Thinking…' }}
-          </p>
+          <!-- The turn in hand: what it said it would do, each step so far, and how long -->
+          <div v-if="store.sending" class="space-y-1.5" data-testid="assistant-working">
+            <ChatBubble v-if="store.saying" role="assistant" :content="store.saying" boxed />
+            <ul v-if="store.steps.length" class="space-y-0.5 text-[12.5px] text-gray-600 dark:text-gray-300">
+              <li v-if="store.steps.length > SHOWN_STEPS" class="text-gray-500 dark:text-gray-400">{{ store.steps.length - SHOWN_STEPS }} earlier steps</li>
+              <li v-for="(step, i) in store.steps.slice(-SHOWN_STEPS)" :key="i" class="flex items-start gap-1.5">
+                <svg class="w-3.5 h-3.5 flex-none mt-0.5 text-status-success-700 dark:text-status-success-400" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 13l4 4L19 7" /></svg>
+                <span>{{ step }}</span>
+              </li>
+            </ul>
+            <p class="flex gap-2 text-[12.5px] text-gray-500 dark:text-gray-400">
+              <span class="animate-pulse motion-reduce:animate-none">{{ store.steps.length ? 'Working on the next step…' : 'Thinking…' }}</span>
+              <span v-if="now - store.startedAt >= 5000" class="tabular-nums">{{ elapsed(store.startedAt) }}</span>
+            </p>
+          </div>
         </div>
 
         <InlineError v-if="store.sendError" class="mx-4 mb-2" :message="store.sendError" />
@@ -256,39 +301,86 @@
         </div>
 
         <!-- Composer -->
-        <form class="flex items-start gap-2 px-3 pt-3 border-t border-gray-200 dark:border-gray-700 shrink-0" @submit.prevent="send(draft)">
-          <BaseInput
-            ref="inputEl"
+        <!-- Before the first message, once per instance: one button, no email -->
+        <div
+          v-if="needsAgreement"
+          class="mx-3 mb-1 mt-3 rounded-lg border p-3 space-y-2 border-action-primary-200 dark:border-action-primary-500/40 bg-action-primary-50 dark:bg-action-primary-500/16 shrink-0"
+          data-testid="assistant-terms-first"
+        >
+          <p class="text-[12.5px] text-gray-900 dark:text-gray-100">
+            To answer you, your messages and details of your agents are sent to Ability AI, the company behind Trinity. It's free to try, with no sign-up. By continuing you agree to the
+            <a
+              v-if="store.status?.trial_terms?.url"
+              :href="store.status.trial_terms.url"
+              target="_blank"
+              rel="noopener"
+              class="underline font-medium text-action-primary-700 dark:text-action-primary-300"
+              data-testid="assistant-terms-link"
+            >trial terms</a>
+            <button
+              v-else
+              type="button"
+              class="underline font-medium text-action-primary-700 dark:text-action-primary-300"
+              :aria-expanded="termsOpen"
+              data-testid="assistant-terms-link"
+              @click="toggleTerms"
+            >trial terms</button>.
+          </p>
+          <!-- The terms themselves, read here when there is no public page -->
+          <div
+            v-if="termsOpen"
+            class="max-h-48 overflow-y-auto rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2"
+            data-testid="assistant-terms-text"
+          >
+            <InlineError v-if="store.termsError" :message="store.termsError" retryable @retry="store.readTerms()" />
+            <div
+              v-else-if="store.termsText"
+              class="prose prose-sm dark:prose-invert max-w-none prose-headings:my-2 prose-p:my-1.5 prose-ul:my-1.5 prose-li:my-0 text-[12.5px]"
+              v-html="renderMarkdown(store.termsText)"
+            ></div>
+            <p v-else class="text-[12.5px] text-gray-500 dark:text-gray-400 animate-pulse motion-reduce:animate-none">Loading the terms…</p>
+          </div>
+          <p v-if="store.waiting" class="text-[12.5px] text-gray-600 dark:text-gray-300 truncate" data-testid="assistant-waiting">You wrote: {{ store.waiting }}</p>
+          <InlineError v-if="store.agreeError" :message="store.agreeError" />
+          <BaseButton size="sm" :loading="store.agreeing" loading-label="Starting…" data-testid="assistant-agree" @click="store.agree(route)">
+            {{ store.waiting ? 'Agree and send' : 'Agree and start' }}
+          </BaseButton>
+        </div>
+
+        <!-- Enter sends; Shift+Enter starts a new line -->
+        <form class="flex items-end gap-2 p-3 border-t border-gray-200 dark:border-gray-700 shrink-0" @submit.prevent="send(draft)">
+          <BaseTextarea
             v-model="draft"
             class="flex-1 min-w-0"
+            :rows="3"
             aria-label="Message the assistant"
             placeholder="Ask, or tell Trinity what to do"
             maxlength="4000"
-            autocomplete="off"
             data-testid="assistant-input"
+            @keydown.enter.exact.prevent="send(draft)"
           />
           <BaseButton type="submit" :disabled="store.sending || !draft.trim()">Send</BaseButton>
         </form>
-        <!-- Said before anything is sent, and every time after -->
-        <p class="px-3 pt-1.5 pb-2.5 text-[11.5px] text-gray-500 dark:text-gray-400 shrink-0" data-testid="assistant-disclosure">
-          Runs on Trinity's hosted model. Your messages and details of your agents are sent to Trinity.
-        </p>
       </template>
     </template>
   </section>
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import BaseButton from '../base/BaseButton.vue'
 import BaseInput from '../base/BaseInput.vue'
 import BaseSegmented from '../base/BaseSegmented.vue'
+import BaseTextarea from '../base/BaseTextarea.vue'
 import InlineError from '../InlineError.vue'
 import ChatBubble from '../chat/ChatBubble.vue'
 import HelpChatWidget from '../HelpChatWidget.vue'
 import { useAssistantStore } from '../../stores/assistant'
 import { toolWords } from '../../utils/assistantCards'
+import { describePage } from '../../utils/assistantContext'
+import { starterGroups } from '../../utils/assistantStarters'
+import { renderMarkdown } from '../../utils/markdown'
 
 defineProps({
   // A route may name tabs where the launcher would cover a page control (#3446).
@@ -307,9 +399,13 @@ const OUTCOME = Object.freeze({
   unsure: { words: 'Not sure it all worked.', tone: 'text-status-warning-700 dark:text-status-warning-400', icon: 'M12 8v5M12 16.5h.01' },
 })
 const CONFIRM = Object.freeze({ build: 'Build', upgrade: 'Continue' })
-const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made' })
+const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running' })
+const SHOWN_STEPS = 4
+const FOLLOWED = ['job', 'run']
+// A followed card's heading follows what happened to it.
+const ENDED = Object.freeze({ done: 'Finished', refused: "Didn't finish", unsure: 'Still going' })
+const heading = (c) => (FOLLOWED.includes(c.card.action) && c.state !== 'making' && ENDED[c.state]) || HEADING[c.card.action] || 'Needs your OK'
 
-const starters = ['How are my agents doing?', 'Build an agent with me', 'What can you do?']
 
 const route = useRoute()
 const store = useAssistantStore()
@@ -321,7 +417,34 @@ const code = ref('')
 const accepted = ref(false)
 const panelEl = ref(null)
 const messagesEl = ref(null)
-const inputEl = ref(null)
+
+// What the empty screen offers, for this page and this fleet.
+const starters = computed(() => starterGroups(describePage(route), store.fleet))
+
+// Nothing leaves this instance until someone here has agreed to the trial's terms.
+const needsAgreement = computed(() => Boolean(store.status) && !store.agreed)
+
+const termsOpen = ref(false)
+function toggleTerms() {
+  termsOpen.value = !termsOpen.value
+  if (termsOpen.value) store.readTerms()
+}
+
+// Something is going on that the person is waiting for.
+const busy = computed(() => store.sending || store.following > 0)
+
+// A clock for elapsed times, ticking only while there is something to time.
+const now = ref(Date.now())
+let clock = null
+watch(busy, (on) => {
+  clearInterval(clock)
+  clock = on ? setInterval(() => { now.value = Date.now() }, 1000) : null
+}, { immediate: true })
+onBeforeUnmount(() => clearInterval(clock))
+function elapsed(since) {
+  const s = Math.max(0, Math.round((now.value - since) / 1000))
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`
+}
 
 // When the allowance comes back, in the person's own words for time.
 const resetWords = computed(() => {
@@ -335,24 +458,36 @@ const resetWords = computed(() => {
 // A note is what the page told the assistant; the person needs only its first sentence.
 const noteWords = (content) => String(content || '').split(/(?<=[.!?])\s/)[0]
 
-const focusInput = () => nextTick(() => panelEl.value?.querySelector('[data-testid="assistant-input"] input, input[data-testid="assistant-input"]')?.focus())
+const focusInput = () => nextTick(() => panelEl.value?.querySelector('textarea[data-testid="assistant-input"]')?.focus())
 
 async function open() {
   isOpen.value = true
+  store.setOpen(true)
   focusInput()
+  // What the empty screen offers depends on the agents; reading them is local.
+  if (!store.messages.length) store.refreshFleet().catch(() => {})
   if (!store.status) await store.loadStatus()
   focusInput()
 }
 
 function close() {
   isOpen.value = false
+  store.setOpen(false)
 }
 
 function send(text) {
   const message = String(text || '').trim()
   if (!message || store.sending) return
   draft.value = ''
+  if (needsAgreement.value) return store.hold(message)     // kept until they agree; one click sends it
   store.send(message, route)
+}
+
+// A starter: sent as it stands, or put in the box for the person to finish.
+function pick(starter) {
+  if (!starter.fill) return send(starter.text)
+  draft.value = starter.text
+  focusInput()
 }
 
 function answer(messageId, cardId, confirm) {
@@ -367,7 +502,7 @@ watch(() => store.account.step, (step) => {
 })
 
 watch(
-  () => [store.messages.length, store.sending, store.activity, store.limit, store.account.step],
+  () => [store.messages.length, store.sending, store.steps.length, store.saying, store.limit, store.account.step],
   () => nextTick(() => {
     const el = messagesEl.value
     if (el) el.scrollTop = el.scrollHeight

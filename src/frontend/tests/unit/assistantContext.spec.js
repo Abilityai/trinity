@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildContext, buildFleet, describePage } from '@/utils/assistantContext'
+import { buildContext, buildFleet, describePage, localClock } from '@/utils/assistantContext'
 
 describe('assistant context: where the person is', () => {
   it('names a known page', () => {
@@ -40,11 +40,18 @@ describe('assistant context: the fleet', () => {
 describe('assistant context: what goes with a message', () => {
   it('sends the page and each agent by name and status, and nothing else about them', () => {
     const fleet = [{ name: 'scout', status: 'running', autonomy: true, schedules: [{ id: 's1', name: 'Daily' }] }]
-    expect(buildContext({ path: '/', params: {}, query: {} }, fleet))
+    expect(buildContext({ path: '/', params: {}, query: {} }, fleet, {}))
       .toEqual({ page: 'Dashboard', fleet: [{ name: 'scout', status: 'running' }] })
   })
 
   it('sends an empty fleet as empty, not missing', () => {
-    expect(buildContext({ path: '/agents', params: {}, query: {} }, [])).toEqual({ page: 'Agents list', fleet: [] })
+    expect(buildContext({ path: '/agents', params: {}, query: {} }, [], {})).toEqual({ page: 'Agents list', fleet: [] })
+  })
+
+  it("sends the person's time zone and their wall-clock time, so a schedule lands at their hour", () => {
+    const clock = localClock(new Date('2026-11-18T18:05:00Z'))
+    expect(clock.timezone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone)
+    expect(clock.local_time).toMatch(/2026/)
+    expect(buildContext({ path: '/', params: {}, query: {} }, [], clock)).toMatchObject(clock)
   })
 })

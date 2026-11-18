@@ -361,7 +361,7 @@
           </button>
         </div>
       </div>
-      <FleetGrid v-else ref="fleetGridRef" :agents="visibleAgents" :org-agents="ownerFilteredAgents" />
+      <FleetGrid v-else ref="fleetGridRef" :agents="visibleAgents" :org-agents="ownerFilteredAgents" :arrivals="arrivals" />
     </div>
 
     <!-- List View (trinity-enterprise#260) — the Agents page consolidated into
@@ -413,6 +413,7 @@
         v-else
         ref="listPanelRef"
         :agents="visibleAgents"
+        :arrivals="arrivals"
         :available-tags="availableTags"
         @tags-changed="fetchAvailableTags"
         @clear-chassis-filters="clearChassisFilters"
@@ -626,7 +627,8 @@ const {
   playbackPosition,
   timelineStart,
   timelineEnd,
-  currentTime
+  currentTime,
+  arrivals
 } = storeToRefs(networkStore)
 
 // Persisted state: Time range (default 24h, persisted to localStorage)

@@ -42,10 +42,25 @@ export function buildFleet(agents, autonomyByName, schedules) {
     }))
 }
 
-/** What goes with a message: the page, and each agent's name and status. */
-export function buildContext(route, fleet) {
+/** The person's time zone and wall-clock time, so "at 9" means their 9. */
+export function localClock(now = new Date()) {
+  try {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    if (!timezone) return {}
+    const local_time = new Intl.DateTimeFormat('en-GB', {
+      timeZone: timezone, weekday: 'short', year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+    }).format(now)
+    return { timezone, local_time }
+  } catch {
+    return {}                                   // no zone is better than a wrong one
+  }
+}
+
+/** What goes with a message: the page, each agent's name and status, and the person's clock. */
+export function buildContext(route, fleet, clock = localClock()) {
   return {
     page: describePage(route).label,
     fleet: (fleet || []).map((a) => ({ name: a.name, status: a.status })),
+    ...clock,
   }
 }
