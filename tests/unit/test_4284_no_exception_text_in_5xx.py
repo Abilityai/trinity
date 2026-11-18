@@ -1589,15 +1589,6 @@ _ALLOWED: Tuple[_Allowed, ...] = (
         "(a 409/503 body). " + _FAILURE_REASON,
         no_exception_text=_FAILURE_REASON_CLASSES,
     ),
-    # --- held unedited --------------------------------------------------------
-    _Allowed(
-        _BE + "routers/slack.py", "connect_slack", "HTTPException", frozenset({"e"}),
-        "routers/slack.py stays unchanged until after 2026-11-19, so the "
-        "code-scanning dismissals reviewed against its current source stay valid "
-        "until then. Fix it the #1917 way after that date and drop this entry "
-        "(abilityai/trinity#4339).",
-        expires=datetime.date(2026, 11, 19),
-    ),
 )
 
 # Constructions the A2A entry pins: each must carry this reason code, and the
@@ -2217,10 +2208,22 @@ def test_a_pin_covers_only_its_construction():
                                             strict=False)
 
 
-def test_the_slack_hold_ends_after_2026_11_19():
-    assert _expired_holds(datetime.date(2026, 11, 19)) == []
-    assert _expired_holds(datetime.date(2026, 11, 20)) == [
-        "src/backend/routers/slack.py connect_slack: held until 2026-11-19"]
+def test_a_hold_stands_through_its_date_and_ends_the_day_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No real entry is held (the slack hold ended with abilityai/trinity#4339),
+    # so the expiry check is pinned on a synthetic one: `>` vs `>=` decides
+    # which day the guard turns red.
+    held = _Allowed(
+        _BE + "routers/sample.py", "f", "HTTPException", frozenset({"e"}),
+        "A synthetic hold, so the expiry check stays pinned while no real entry "
+        "carries a date.",
+        expires=datetime.date(2030, 1, 1),
+    )
+    monkeypatch.setitem(_expired_holds.__globals__, "_ALLOWED", (held,))
+    assert _expired_holds(datetime.date(2030, 1, 1)) == []
+    assert _expired_holds(datetime.date(2030, 1, 2)) == [
+        "src/backend/routers/sample.py f: held until 2030-01-01"]
 
 
 # ---------------------------------------------------------------------------
