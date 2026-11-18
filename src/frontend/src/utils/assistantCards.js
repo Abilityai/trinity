@@ -176,6 +176,12 @@ export function validBuild(raw) {
   }
 }
 
+/** A build in the making: an id to ask about, and what it is called. */
+export function validJob(raw) {
+  if (!raw || raw.action !== 'job' || typeof raw.job_id !== 'string' || !DESIGN_ID.test(raw.job_id)) return null
+  return { action: 'job', job_id: raw.job_id, title: String(raw.title ?? '').slice(0, 120) || 'New agents' }
+}
+
 const TOOL_NAME = /^[a-z0-9_]{2,80}$/
 
 /**
@@ -218,6 +224,7 @@ export function acceptCards(raw, fleet) {
     let card = null
     if (item?.action === 'build') card = validBuild(item)
     else if (item?.action === 'tool') card = validTool(item)
+    else if (item?.action === 'job') card = validJob(item)
     else if (item?.action === 'upgrade' && Object.keys(item).length === 1) card = { action: 'upgrade' }
     else card = validCard(item, fleet)
     const duplicate = card && cards.some((c) => JSON.stringify(c) === JSON.stringify(card))
@@ -227,6 +234,7 @@ export function acceptCards(raw, fleet) {
 }
 
 export function cardLabel(card, fleet) {
+  if (card.action === 'job') return `Making "${card.title}"`
   if (card.action === 'build') return `Build "${card.design.title}"`
   if (card.action === 'upgrade') return 'Subscribe to Trinity Pro'
   if (card.action === 'tool') {
@@ -239,6 +247,7 @@ export function cardLabel(card, fleet) {
 
 /** The line under a card's title. Every change to an agent runs as the person. */
 export function cardNote(card) {
+  if (card.action === 'job') return 'Each agent is made with the standard tools and checked. This takes a few minutes; you can keep talking.'
   if (card.action === 'build') return 'Creates these agents on this instance, as you. Nothing is switched on.'
   if (card.action === 'tool') return 'This cannot be undone. It runs as you.'
   if (card.action === 'upgrade') return 'A larger allowance and bigger teams. You sign in with your email first.'

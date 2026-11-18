@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { CARD_ACTIONS, MAX_CARDS_PER_REPLY, acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, toolWords, validBuild, validCard, validTool } from '@/utils/assistantCards'
+import { CARD_ACTIONS, MAX_CARDS_PER_REPLY, acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, toolWords, validBuild, validCard, validJob, validTool } from '@/utils/assistantCards'
 
 const fleet = [
   { name: 'issue-digest', schedules: [{ id: 's1', name: 'Mondays 09:00' }] },
@@ -171,5 +171,14 @@ describe('assistant cards: a change that cannot be undone', () => {
     expect(validTool({ action: 'tool', tool: 'delete_agent', args: ['scout'] })).toBeNull()
     expect(validTool({ action: 'tool', tool: 'delete_agent', args: { name: 'x'.repeat(5000) } })).toBeNull()
     expect(acceptCards([{ action: 'tool', tool: 'delete_agent', args: { name: 'scout' } }], [])).toHaveLength(1)
+  })
+})
+
+describe('assistant cards: a build in the making', () => {
+  it('accepts a job by a well-formed id and names it', () => {
+    const card = validJob({ action: 'job', job_id: DESIGN_ID, title: 'Review summary', agents: 1 })
+    expect(card).toEqual({ action: 'job', job_id: DESIGN_ID, title: 'Review summary' })
+    expect(cardLabel(card)).toBe('Making "Review summary"')
+    expect(validJob({ action: 'job', job_id: '../x', title: 't' })).toBeNull()
   })
 })

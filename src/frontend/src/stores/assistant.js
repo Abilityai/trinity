@@ -20,7 +20,7 @@
 import { defineStore } from 'pinia'
 import api from '../api'
 import { buildContext, buildFleet } from '../utils/assistantContext'
-import { acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard } from '../utils/assistantCards'
+import { acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, validBuild } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
 
 export const FEATURE_ID = 'assistant'
@@ -29,6 +29,10 @@ const BASE = '/api/enterprise/assistant'
 const STEP_TIMEOUT_MS = 260000
 const BUILD_TIMEOUT_MS = 600000
 const MAX_STEPS = 40
+const JOB_POLL_MS = 4000
+const JOB_POLL_LIMIT = 450 // 30 minutes
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 let nextId = 1
 const newId = () => `m${nextId++}`
@@ -151,14 +155,19 @@ export const useAssistantStore = defineStore('assistant', {
         const after = await this.refreshFleet()
         useAgentsStore().fetchAgents().catch(() => {})
         const cards = acceptCards(data.cards, after)
-        this.messages.push({
+        const reply = {
           id: newId(),
           role: 'assistant',
           content: data.text || (cards.length ? '' : 'Done.'),
           cards: cards.map((card) => ({
-            id: newId(), card, label: cardLabel(card, after), note: cardNote(card), state: 'open', reason: '',
+            id: newId(), card, label: cardLabel(card, after), note: cardNote(card),
+            state: card.action === 'job' ? 'making' : 'open', reason: '', progress: '',
           })),
-        })
+        }
+        this.messages.push(reply)
+        for (const entry of reply.cards) {
+          if (entry.card.action === 'job') this.followJob(reply.id, entry.id, route)
+        }
       } catch (error) {
         const code = error?.response?.status
         if (code === 404 || code === 403) this.absent = true
@@ -168,6 +177,50 @@ export const useAssistantStore = defineStore('assistant', {
         this.activity = ''
         if (!this.status?.contacted) this.loadStatus()
       }
+    },
+
+    /**
+     * Follow a build in the making until it is a design or it has failed. When
+     * it is done the card becomes the design's own Build card; either way the
+     * assistant is told, once it is free to hear it.
+     */
+    async followJob(messageId, cardId, route) {
+      const find = () => this.messages.find((m) => m.id === messageId)?.cards?.find((c) => c.id === cardId)
+      const jobId = find()?.card.job_id
+      const title = find()?.card.title
+      let seen = null
+      for (let i = 0; i < JOB_POLL_LIMIT; i++) {
+        await wait(JOB_POLL_MS)
+        const entry = find()
+        if (!entry || entry.state !== 'making') return        // the conversation was cleared
+        try {
+          seen = (await api.get(`${BASE}/jobs/${encodeURIComponent(jobId)}`)).data
+        } catch {
+          continue                                            // a missed poll is not an outcome
+        }
+        entry.progress = seen.status === 'queued' ? 'Waiting for a builder'
+          : `${seen.doing || 'Working'} (step ${Math.min(seen.steps_done + 1, seen.steps)} of ${seen.steps})`
+        if (seen.status === 'done' || seen.status === 'failed') break
+      }
+      const entry = find()
+      if (!entry || entry.state !== 'making') return
+      const design = seen?.status === 'done' ? validBuild(seen.card) : null
+      let line
+      if (design) {
+        entry.card = design
+        entry.label = cardLabel(design)
+        entry.note = cardNote(design)
+        entry.state = 'open'
+        line = `The design "${design.design.title}" is made and passed the standard's check. The person now sees it with a Build button.`
+      } else {
+        entry.state = 'refused'
+        entry.reason = seen?.status === 'failed' ? 'It did not pass the check.' : 'It took too long.'
+        line = seen?.status === 'failed'
+          ? `That didn't work: making "${title}". ${seen.reason}. ${seen.detail || ''}`.trim()
+          : `Not sure it worked: making "${title}". It did not finish in time.`
+      }
+      for (let i = 0; this.sending && i < 300; i++) await wait(1000)   // not in the middle of a turn
+      await this.send(line, route, { shown: false })
     },
 
     /** The person answered a card. Confirm makes the change as them. */

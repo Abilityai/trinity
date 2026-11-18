@@ -103,7 +103,7 @@
               class="rounded-lg border p-3 space-y-2 border-action-primary-200 dark:border-action-primary-500/40 bg-action-primary-50 dark:bg-action-primary-500/16"
             >
               <p class="font-mono text-[11px] font-semibold uppercase tracking-wider text-action-primary-700 dark:text-action-primary-300">
-                {{ c.card.action === 'build' ? 'Ready to build' : c.card.action === 'tool' ? 'Cannot be undone' : 'Needs your OK' }}
+                {{ HEADING[c.card.action] || 'Needs your OK' }}
               </p>
               <p class="font-medium text-gray-900 dark:text-gray-100">{{ c.label }}</p>
 
@@ -129,7 +129,12 @@
               </dl>
               <p class="text-[12.5px] text-gray-600 dark:text-gray-300">{{ c.note }}</p>
 
-              <div v-if="c.state === 'open' || c.state === 'running'" class="flex flex-wrap gap-2 pt-1">
+              <p
+                v-if="c.state === 'making'"
+                class="text-[12.5px] font-medium text-action-primary-700 dark:text-action-primary-300 animate-pulse motion-reduce:animate-none"
+                data-testid="assistant-job"
+              >{{ c.progress || 'Starting' }}…</p>
+              <div v-else-if="c.state === 'open' || c.state === 'running'" class="flex flex-wrap gap-2 pt-1">
                 <BaseButton
                   size="sm"
                   :loading="c.state === 'running'"
@@ -302,6 +307,7 @@ const OUTCOME = Object.freeze({
   unsure: { words: 'Not sure it all worked.', tone: 'text-status-warning-700 dark:text-status-warning-400', icon: 'M12 8v5M12 16.5h.01' },
 })
 const CONFIRM = Object.freeze({ build: 'Build', upgrade: 'Continue' })
+const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made' })
 
 const starters = ['How are my agents doing?', 'Build an agent with me', 'What can you do?']
 

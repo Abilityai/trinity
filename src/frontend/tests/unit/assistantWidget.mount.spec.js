@@ -16,6 +16,7 @@ let status
 let turns        // answers to /turn and /turn/continue, in order
 let scheduleOn
 let verifyFails
+let jobs         // answers to the job's status, in order
 
 vi.mock('@/api', () => {
   const respond = (method, url, body) => {
@@ -27,6 +28,7 @@ vi.mock('@/api', () => {
     if (url === `/api/enterprise/assistant/designs/${DESIGN_ID}/build`) {
       return { agents: [{ name: 'shop-desk', created: true, files: 11, schedule: { id: 's9', name: 'Morning' }, problem: '' }] }
     }
+    if (url === `/api/enterprise/assistant/jobs/${DESIGN_ID}`) return jobs.shift() || { status: 'running', steps_done: 0, steps: 3, doing: 'Working' }
     if (url === '/api/enterprise/assistant/tools/confirm') return { ok: true, content: 'Agent scout deleted.' }
     if (url === '/api/enterprise/assistant/account/start') return { email: body.email, dev_code: '424242', terms: { version: 't1', url: '' } }
     if (url === '/api/enterprise/assistant/account/verify') {
@@ -77,6 +79,7 @@ describe('assistant panel', () => {
     turns = []
     scheduleOn = false
     verifyFails = false
+    jobs = []
     status = { available: true, contacted: false, reachable: null, plan: null, email: null, allowance: null }
     setActivePinia(createPinia())
     wrapper = mount(AssistantWidget, {
@@ -177,6 +180,30 @@ describe('assistant panel', () => {
     await flushPromises()
     expect(sent('/api/enterprise/assistant/tools/confirm')[0].body).toEqual({ tool: 'delete_agent', args: { name: 'scout' } })
     expect(sent(TURN)[1].body.message).toBe('Done: Delete agent: scout. Agent scout deleted.')
+  })
+
+  it('follows a build in the making and turns it into its Build card when it is done', async () => {
+    vi.useFakeTimers()
+    const design = { title: 'Review summary', summary: 'Summarises reviews.', to_do_after: [],
+      agents: [{ name: 'velofix-reviews', job: 'Summarise the reviews.', credentials: [], schedule: null, calls: [] }] }
+    jobs = [{ status: 'running', steps_done: 1, steps: 3, doing: 'Writing the playbook summarise' },
+      { status: 'done', steps_done: 3, steps: 3, card: { action: 'build', design_id: DESIGN_ID, design } }]
+    turns = [final('It is being made.', [{ action: 'job', job_id: DESIGN_ID, title: 'Review summary' }]), final('It is ready.')]
+    await openPanel()
+    await say('make me a review summariser')
+    expect(wrapper.get('[data-testid="assistant-card"]').text()).toContain('Being made')
+    await vi.advanceTimersByTimeAsync(4100)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="assistant-job"]').text()).toContain('Writing the playbook summarise (step 2 of 3)')
+    await vi.advanceTimersByTimeAsync(4100)
+    await flushPromises()
+    const card = wrapper.get('[data-testid="assistant-card"]').text()
+    expect(card).toContain('Ready to build')
+    expect(card).toContain('velofix-reviews')
+    expect(button('Build')).toBeTruthy()
+    expect(sent(TURN)[1].body).toMatchObject({ counted: false })
+    expect(sent(TURN)[1].body.message).toContain('passed the standard')
+    vi.useRealTimers()
   })
 
   it('tells the assistant when the person says not now, and makes no change', async () => {
