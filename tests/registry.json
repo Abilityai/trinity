@@ -9303,6 +9303,19 @@
       "description": "#4599: the remaining doors a credential ask could be recorded through for a reader who cannot fill it. The queue-file channel reads the reader chain of the native raise (real poller, real DB, real secret-field door): the platform picks the reader, the owner can be it, the address the agent wrote is ignored, an entry nobody can fill or one that fails the kind's checks is held by name in platform.ingestion and files no row, a failed lookup holds without a marker, the chain is read once per cycle, and the next cycle keeps the row confirmed. A blocked email is not a reader in on_workspace_roster; in can_open_agent the block stops an email with no account and a Workspace-only account, a blocked operator or admin stays reachable, a deactivated account is not. Each refusal names its real cause under the same code: nobody seated, the owner is the primary, a system agent, a lookup that failed (credential, approver, role id; the skill gate answers 503 gate_unavailable), and an admin's re-address by rule."
     },
     {
+      "file": "unit/test_4476_dev_proxy_host_urls.py",
+      "feature": "#4476",
+      "added": "2026-11-18",
+      "categories": [
+        "unit",
+        "backend",
+        "settings",
+        "mcp",
+        "webhooks"
+      ],
+      "description": "#4476: the URLs the backend hands a browser name the Host the dev proxy now delivers (its /api/ rule keeps the browser's Host; proxy half in src/frontend/tests/unit/viteApiProxyHost.spec.js). Real settings and schedules routers: the advertised MCP URL and default_url for localhost, a port-bearing host and another machine's address; an IPv6-literal Host keeps its brackets ([::1] reads as localhost); backend:8000 still yields backend:8080, so the fix belongs in the proxy; a loopback MCP_BIND_ADDRESS still wins; a minted or read webhook URL uses the delivered Host."
+    },
+    {
       "file": "unit/test_4635_queue_stall_reads.py",
       "feature": "#4635",
       "added": "2026-11-18",
