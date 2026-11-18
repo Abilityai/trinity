@@ -876,6 +876,8 @@ _ROW_ACCESSORS = frozenset({
     # abilityai/trinity-enterprise#1108 AC #4: the agent's own answered asks whose
     # wake is still owed — re-dispatched into its own turn on start.
     "list_operator_queue_pending_wakes",
+    # #4635: one platform emitter's own pending alerts, by subject prefix.
+    "list_pending_operator_queue_by_subject_prefix",
 })
 _NON_ROW_ACCESSORS = frozenset({
     "create_operator_queue_item", "create_operator_queue_item_with_outcome",   # ids (test_1677)
@@ -1017,9 +1019,10 @@ _ROW_READERS = {
     (_ALERTS, "clear"): ("internal", "ends a condition's pending row (#3246); returns a count"),
     (_ALERTS, "observe"): ("internal", "records a reading on a condition's row (#3246); returns an outcome"),
     (_ALERTS, "reconcile"): ("internal", "ends the rows whose condition cleared (#3246); returns a count"),
-    (_STALL, "_agents_with_pending_alerts"): (
-        "internal", "the agents whose stall row outlived its stalled head (#4257): the subject "
-                    "prefix and `agent_name` only, and a list of agent names is all that leaves"),
+    (_STALL, "_pending_alerts"): (
+        "internal", "the stall monitor's own pending rows (#4257, #4635): read to end the row "
+                    "of an agent whose queue drained and to compare a reading's priority with "
+                    "the row's; agent names and a priority decide, nothing leaves"),
     (_PROMPT, "_resolve_ended_asks"): (
         "agent", "the agent's own ended asks for its prompt: reserved prefixes excluded in SQL"),
     (_PROMPT, "_resolve_pending_asks"): (

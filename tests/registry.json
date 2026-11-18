@@ -9301,6 +9301,20 @@
         "security"
       ],
       "description": "#4599: the remaining doors a credential ask could be recorded through for a reader who cannot fill it. The queue-file channel reads the reader chain of the native raise (real poller, real DB, real secret-field door): the platform picks the reader, the owner can be it, the address the agent wrote is ignored, an entry nobody can fill or one that fails the kind's checks is held by name in platform.ingestion and files no row, a failed lookup holds without a marker, the chain is read once per cycle, and the next cycle keeps the row confirmed. A blocked email is not a reader in on_workspace_roster; in can_open_agent the block stops an email with no account and a Workspace-only account, a blocked operator or admin stays reachable, a deactivated account is not. Each refusal names its real cause under the same code: nobody seated, the owner is the primary, a system agent, a lookup that failed (credential, approver, role id; the skill gate answers 503 gate_unavailable), and an admin's re-address by rule."
+    },
+    {
+      "file": "unit/test_4635_queue_stall_reads.py",
+      "feature": "#4635",
+      "added": "2026-11-18",
+      "categories": [
+        "unit",
+        "backend",
+        "operator-queue",
+        "scheduling",
+        "database",
+        "reliability"
+      ],
+      "description": "#4635 / #4636: the queue stall monitor's reads on the real DatabaseManager facade and the real schema (SQLite; PostgreSQL on the schema-parity tier). The stall rows are found by subject prefix past 1,001 other pending asks and the prefix is matched exactly (no LIKE wildcard, no case folding, no ended rows); every new keyword reaches the ops through the facade, and every db call the monitor makes exists on it; a drained agent's alert ends end to end while 1,001 unrelated rows stay pending; a higher reading rewrites the pending row's priority, title and text in place while a same-or-lower one only counts; and the effective cap for many agents costs one roster read and one ceiling read."
     }
   ]
 }
