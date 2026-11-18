@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { CARD_ACTIONS, MAX_CARDS_PER_REPLY, acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, validBuild, validCard } from '@/utils/assistantCards'
+import { CARD_ACTIONS, MAX_CARDS_PER_REPLY, acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, toolWords, validBuild, validCard, validTool } from '@/utils/assistantCards'
 
 const fleet = [
   { name: 'issue-digest', schedules: [{ id: 's1', name: 'Mondays 09:00' }] },
@@ -150,5 +150,26 @@ describe('assistant cards: what the assistant is told', () => {
     const card = validCard(raw, fleet)
     expect(card).toEqual(raw)
     expect(card).not.toBe(raw)
+  })
+})
+
+describe('assistant cards: a change that cannot be undone', () => {
+  it('accepts a tool by name and arguments and words it for the person', () => {
+    const card = validTool({ action: 'tool', tool: 'delete_agent', args: { name: 'scout' } })
+    expect(card).toEqual({ action: 'tool', tool: 'delete_agent', args: { name: 'scout' } })
+    expect(toolWords(card)).toEqual({ title: 'Delete agent', details: [{ key: 'name', value: 'scout' }] })
+    expect(cardLabel(card)).toBe('Delete agent: scout')
+    expect(cardNote(card)).toBe('This cannot be undone. It runs as you.')
+  })
+
+  it('shows nothing the model wrote as the description of what will run', () => {
+    expect(validTool({ action: 'tool', tool: 'delete_agent', args: { name: 'scout' }, label: 'Tidy up harmlessly' })).toBeNull()
+  })
+
+  it('refuses a name that is not a tool name, arguments that are not an object, and oversized arguments', () => {
+    expect(validTool({ action: 'tool', tool: '../admin', args: {} })).toBeNull()
+    expect(validTool({ action: 'tool', tool: 'delete_agent', args: ['scout'] })).toBeNull()
+    expect(validTool({ action: 'tool', tool: 'delete_agent', args: { name: 'x'.repeat(5000) } })).toBeNull()
+    expect(acceptCards([{ action: 'tool', tool: 'delete_agent', args: { name: 'scout' } }], [])).toHaveLength(1)
   })
 })

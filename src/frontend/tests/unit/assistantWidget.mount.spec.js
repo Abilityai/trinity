@@ -27,6 +27,7 @@ vi.mock('@/api', () => {
     if (url === `/api/enterprise/assistant/designs/${DESIGN_ID}/build`) {
       return { agents: [{ name: 'shop-desk', created: true, files: 11, schedule: { id: 's9', name: 'Morning' }, problem: '' }] }
     }
+    if (url === '/api/enterprise/assistant/tools/confirm') return { ok: true, content: 'Agent scout deleted.' }
     if (url === '/api/enterprise/assistant/account/start') return { email: body.email, dev_code: '424242', terms: { version: 't1', url: '' } }
     if (url === '/api/enterprise/assistant/account/verify') {
       if (verifyFails) throw { response: { status: 400, data: { detail: { code: 'wrong_code', message: "That code didn't match." } } } }
@@ -162,6 +163,20 @@ describe('assistant panel', () => {
     await flushPromises()
     expect(sent(`/api/enterprise/assistant/designs/${DESIGN_ID}/build`)).toHaveLength(1)
     expect(sent(TURN)[1].body.message).toBe('Done: Build "Front desk". Built shop-desk (11 files, schedule "Morning" added switched off, id s9).')
+  })
+
+  it('runs a change that cannot be undone only on the click, showing exactly what will run', async () => {
+    turns = [final('This deletes scout and its files.', [{ action: 'tool', tool: 'delete_agent', args: { name: 'scout' } }]), final('Gone.')]
+    await openPanel()
+    await say('delete scout')
+    const card = wrapper.get('[data-testid="assistant-card"]').text()
+    expect(card).toContain('Cannot be undone')
+    expect(card).toContain('Delete agent: scout')
+    expect(sent('/api/enterprise/assistant/tools/confirm')).toHaveLength(0)
+    await button('Confirm').trigger('click')
+    await flushPromises()
+    expect(sent('/api/enterprise/assistant/tools/confirm')[0].body).toEqual({ tool: 'delete_agent', args: { name: 'scout' } })
+    expect(sent(TURN)[1].body.message).toBe('Done: Delete agent: scout. Agent scout deleted.')
   })
 
   it('tells the assistant when the person says not now, and makes no change', async () => {

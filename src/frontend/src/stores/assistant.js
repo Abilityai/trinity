@@ -189,6 +189,8 @@ export const useAssistantStore = defineStore('assistant', {
       let outcome
       if (entry.card.action === 'build') {
         outcome = await this.build(entry.card)
+      } else if (entry.card.action === 'tool') {
+        outcome = await this.confirmTool(entry.card, entry.label)
       } else {
         const result = await runCard(api, entry.card, this.fleet)
         outcome = { kind: result.kind, reason: result.reason || '', line: outcomeLine(result.kind, entry.label, result.reason) }
@@ -210,6 +212,21 @@ export const useAssistantStore = defineStore('assistant', {
         const reason = words(error, code ? `Trinity refused it (${code}).` : "Couldn't reach Trinity, so it may not have been built.")
         const kind = code && code < 500 ? 'refused' : 'unsure'
         return { kind, reason, line: outcomeLine(kind, cardLabel(card), reason) }
+      }
+    },
+
+    /** Run a change that cannot be undone, now that the person pressed the button. */
+    async confirmTool(card, label) {
+      try {
+        const { data } = await api.post(`${BASE}/tools/confirm`, { tool: card.tool, args: card.args }, { timeout: STEP_TIMEOUT_MS })
+        const said = String(data?.content || '').slice(0, 400)
+        if (data?.ok) return { kind: 'done', reason: '', line: `${outcomeLine('done', label)} ${said}`.trim() }
+        return { kind: 'refused', reason: said, line: outcomeLine('refused', label, said) }
+      } catch (error) {
+        const code = error?.response?.status
+        const reason = words(error, code ? `Trinity refused it (${code}).` : "Couldn't reach Trinity, so it may not have run.")
+        const kind = code && code < 500 ? 'refused' : 'unsure'
+        return { kind, reason, line: outcomeLine(kind, label, reason) }
       }
     },
 

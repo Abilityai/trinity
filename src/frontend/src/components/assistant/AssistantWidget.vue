@@ -103,7 +103,7 @@
               class="rounded-lg border p-3 space-y-2 border-action-primary-200 dark:border-action-primary-500/40 bg-action-primary-50 dark:bg-action-primary-500/16"
             >
               <p class="font-mono text-[11px] font-semibold uppercase tracking-wider text-action-primary-700 dark:text-action-primary-300">
-                {{ c.card.action === 'build' ? 'Ready to build' : 'Needs your OK' }}
+                {{ c.card.action === 'build' ? 'Ready to build' : c.card.action === 'tool' ? 'Cannot be undone' : 'Needs your OK' }}
               </p>
               <p class="font-medium text-gray-900 dark:text-gray-100">{{ c.label }}</p>
 
@@ -120,6 +120,13 @@
                   </li>
                 </ul>
               </template>
+              <!-- A change that cannot be undone: exactly what will run, in the page's own words -->
+              <dl v-if="c.card.action === 'tool'" class="text-[12.5px] text-gray-900 dark:text-gray-100 space-y-0.5" data-testid="assistant-tool">
+                <div v-for="d in toolWords(c.card).details" :key="d.key" class="flex gap-2">
+                  <dt class="text-gray-500 dark:text-gray-400 flex-none">{{ d.key }}</dt>
+                  <dd class="min-w-0 break-words">{{ d.value }}</dd>
+                </div>
+              </dl>
               <p class="text-[12.5px] text-gray-600 dark:text-gray-300">{{ c.note }}</p>
 
               <div v-if="c.state === 'open' || c.state === 'running'" class="flex flex-wrap gap-2 pt-1">
@@ -276,6 +283,7 @@ import InlineError from '../InlineError.vue'
 import ChatBubble from '../chat/ChatBubble.vue'
 import HelpChatWidget from '../HelpChatWidget.vue'
 import { useAssistantStore } from '../../stores/assistant'
+import { toolWords } from '../../utils/assistantCards'
 
 defineProps({
   // A route may name tabs where the launcher would cover a page control (#3446).

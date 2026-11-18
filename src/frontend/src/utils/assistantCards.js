@@ -176,6 +176,38 @@ export function validBuild(raw) {
   }
 }
 
+const TOOL_NAME = /^[a-z0-9_]{2,80}$/
+
+/**
+ * A change that cannot be undone, by tool name and arguments. The page shows
+ * exactly these, in its own words: nothing the model wrote is displayed as the
+ * description of what will run. The instance decides whether the tool is one
+ * that takes a confirmation at all.
+ */
+export function validTool(raw) {
+  if (!raw || raw.action !== 'tool' || typeof raw.tool !== 'string' || !TOOL_NAME.test(raw.tool)) return null
+  const args = raw.args
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return null
+  let size = 0
+  try {
+    size = JSON.stringify(args).length
+  } catch {
+    return null
+  }
+  if (size > 4000 || Object.keys(raw).some((k) => !['action', 'tool', 'args'].includes(k))) return null
+  return { action: 'tool', tool: raw.tool, args: JSON.parse(JSON.stringify(args)) }
+}
+
+/** `delete_agent` as words, and each argument as the person would read it. */
+export function toolWords(card) {
+  const words = card.tool.replace(/_/g, ' ')
+  const details = Object.entries(card.args).map(([key, value]) => ({
+    key: key.replace(/_/g, ' '),
+    value: typeof value === 'string' ? value : JSON.stringify(value),
+  }))
+  return { title: words.charAt(0).toUpperCase() + words.slice(1), details }
+}
+
 /**
  * The cards of one reply. `raw` is what the gateway sent; every entry is
  * checked here and anything that does not pass is dropped, silently.
@@ -185,6 +217,7 @@ export function acceptCards(raw, fleet) {
   for (const item of Array.isArray(raw) ? raw : []) {
     let card = null
     if (item?.action === 'build') card = validBuild(item)
+    else if (item?.action === 'tool') card = validTool(item)
     else if (item?.action === 'upgrade' && Object.keys(item).length === 1) card = { action: 'upgrade' }
     else card = validCard(item, fleet)
     const duplicate = card && cards.some((c) => JSON.stringify(c) === JSON.stringify(card))
@@ -196,12 +229,18 @@ export function acceptCards(raw, fleet) {
 export function cardLabel(card, fleet) {
   if (card.action === 'build') return `Build "${card.design.title}"`
   if (card.action === 'upgrade') return 'Subscribe to Trinity Pro'
+  if (card.action === 'tool') {
+    const { title, details } = toolWords(card)
+    const first = details.find((d) => ['name', 'agent name', 'agent'].includes(d.key)) || details[0]
+    return first ? `${title}: ${first.value.slice(0, 80)}` : title
+  }
   return CARD_ACTIONS[card.action].label(card, fleet)
 }
 
 /** The line under a card's title. Every change to an agent runs as the person. */
 export function cardNote(card) {
   if (card.action === 'build') return 'Creates these agents on this instance, as you. Nothing is switched on.'
+  if (card.action === 'tool') return 'This cannot be undone. It runs as you.'
   if (card.action === 'upgrade') return 'A larger allowance and bigger teams. You sign in with your email first.'
   return 'Runs as you, not as the assistant.'
 }
