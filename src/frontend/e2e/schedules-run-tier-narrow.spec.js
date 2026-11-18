@@ -12,6 +12,13 @@ import { test, expect } from '@playwright/test'
  * few pixels wide. Below `sm` the box now stacks — text, then the button —
  * and from `sm` up the desktop row is unchanged.
  *
+ * The run-tier badge never wraps, so the row's text column can't be narrower
+ * than it: 131px in DejaVu Sans (the CI runner's sans-serif), 115px in SF.
+ * Beside the icons that left 109px at 390px on Linux, whose classic scrollbar
+ * takes 15px of the width (8px in dark mode, 0 on macOS). The icons now wrap
+ * onto their own line when the text's narrowest form and the icons don't fit
+ * side by side. The long unbroken name below holds every platform to that.
+ *
  * HERMETIC, like `self-change-permissions-narrow.spec.js`: CI's e2e baseline
  * holds no user agents, so the agent and its schedules exist only in the route
  * stubs below. jsdom does no layout, so this is the only place the claim can
@@ -52,6 +59,8 @@ const SCHEDULES = [
     can_take_over: true,
   }),
   schedule({ id: 'e2e-owner', name: 'owner-weekly', cron_expression: '0 8 * * 1' }),
+  // No break opportunity anywhere in the name: it must break inside its row.
+  schedule({ id: 'e2e-long-name', name: 'quarterlyrevenuereconciliationforallregionalsubsidiaries', cron_expression: '0 7 1 * *' }),
 ]
 
 async function openPanel(page, { width, theme }) {
@@ -103,7 +112,7 @@ function measure(page) {
     }
     const rows = [...document.querySelectorAll('[data-testid="schedule-row"]')].map((row) => {
       const actions = row.querySelector(':scope > div > div:last-child')
-      return { id: row.dataset.scheduleId, row: box(row), actions: box(actions) }
+      return { id: row.dataset.scheduleId, row: box(row), actions: box(actions), nameInkRight: inkRight(row.querySelector('h4')) }
     })
     const reason = document.querySelector('[data-testid="schedule-runs-as-reason"]')
     const created = document.querySelector('[data-testid="schedule-created-by"]')
@@ -124,10 +133,7 @@ function measure(page) {
 const PX = 0.5
 
 for (const theme of ['light', 'dark']) {
-  // 390 only: at 320px every schedule row — an owner's plain row included —
-  // already ran its action icons past the card before #4281, so a 320 case
-  // here would measure that older layout, not this change.
-  for (const width of [390]) {
+  for (const width of [320, 390]) {
     test(`@smoke at ${width}px a restricted schedule's row stays on screen and its reason box stacks — ${theme}`, async ({ page }) => {
       await openPanel(page, { width, theme })
       const m = await measure(page)
@@ -136,6 +142,7 @@ for (const theme of ['light', 'dark']) {
       for (const r of m.rows) {
         // Every action icon (Delete is last) inside its own row.
         expect.soft(r.actions.right, `${r.id}: the action icons run ${Math.round(r.actions.right - r.row.right)}px past the row`).toBeLessThanOrEqual(r.row.right + PX)
+        expect.soft(r.nameInkRight, `${r.id}: the name runs ${Math.round(r.nameInkRight - r.row.right)}px past the row`).toBeLessThanOrEqual(r.row.right + PX)
       }
       // The email breaks inside the reason box instead of widening it.
       expect.soft(m.created.inkRight, `"Created by …" runs ${Math.round(m.created.inkRight - m.reasonBox.right)}px past the reason box`).toBeLessThanOrEqual(m.reasonBox.right + PX)

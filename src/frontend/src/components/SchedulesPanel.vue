@@ -371,12 +371,19 @@
         :data-schedule-id="schedule.id"
         class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 hover:shadow-sm transition-shadow"
       >
-        <div class="flex justify-between items-start">
+        <!-- #4281: the text and the action icons share a line only while both
+             fit. The text column can't shrink below its widest unbreakable
+             piece (the run-tier badge never wraps), so when that and the icons
+             don't fit side by side, the icons wrap onto their own line instead
+             of running off the card. Decided by content width, not breakpoint. -->
+        <div class="flex flex-wrap justify-between items-start gap-x-4 gap-y-2">
           <div class="flex-1">
             <!-- #4281: wraps, so the run-tier badge drops below the name on a
                  narrow row instead of pushing the action icons off screen. -->
             <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <h4 class="font-medium text-gray-900 dark:text-white">{{ schedule.name }}</h4>
+              <!-- A long name with no break opportunity breaks anywhere rather
+                   than holding the column wider than the card. -->
+              <h4 class="font-medium text-gray-900 dark:text-white [overflow-wrap:anywhere]">{{ schedule.name }}</h4>
               <span
                 data-testid="schedule-status"
                 :class="[
@@ -543,7 +550,7 @@
             </div>
           </div>
 
-          <div class="flex items-center space-x-2 ml-4">
+          <div class="flex items-center space-x-2 ml-auto">
             <button
               @click="requestRun(schedule)"
               :disabled="triggerLoading === schedule.id"
