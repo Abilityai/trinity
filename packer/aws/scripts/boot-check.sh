@@ -83,15 +83,19 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
+# Each flag is set BEFORE its create call: bash finishes a running command before it
+# runs a signal trap, so a flag set after the call can be empty when cleanup reads it,
+# and the resource leaks. Deleting a key pair or stack that was never made is harmless.
+KEY_CREATED=1
 aws ec2 create-key-pair --key-name "$RUN" --query KeyMaterial --output text > "${WORK}/key" \
     || fail "key pair create failed"
-KEY_CREATED=1
 chmod 600 "${WORK}/key"
 
 MY_IP="$(curl -fsS --max-time 10 https://checkip.amazonaws.com | tr -d '[:space:]')"
 [[ "$MY_IP" =~ ^[0-9.]+$ ]] || fail "could not read this machine's public address"
 
 say "creating stack ${RUN} from ${AMI}"
+STACK_CREATED=1
 aws cloudformation create-stack --stack-name "$RUN" \
     --template-body "file://${TEMPLATE}" \
     --tags "Key=purpose,Value=trinity-boot-check" \
@@ -99,7 +103,6 @@ aws cloudformation create-stack --stack-name "$RUN" \
                  "ParameterKey=KeyName,ParameterValue=${RUN}" \
                  "ParameterKey=SshCidr,ParameterValue=${MY_IP}/32" >/dev/null \
     || fail "stack create failed"
-STACK_CREATED=1
 aws cloudformation wait stack-create-complete --stack-name "$RUN" || fail "stack did not reach CREATE_COMPLETE"
 
 output() {
