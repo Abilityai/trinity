@@ -293,3 +293,80 @@ def test_the_stamped_rating_is_the_rating_the_turn_gets(world, shape):
     else:
         assert (rated.tier, rated.kind) == (tier, kind)
     assert (rated is not None and rated.tier != "owner") == (shape in ("share", "deleted"))
+
+
+# ---- a continuation of a restricted run (trinity-enterprise#1225) ----------------------------
+#
+# A continuation turn (`caller_wake`, `operator_response`, `operator_ending`,
+# `skill_gate`) is rated as the turn it continues. When that turn is a share
+# holder's schedule run, the continuation runs without the shell too, so its
+# refusal text names the schedule and its run is stamped, as the run it
+# continues is.
+
+def continuation_of(world, origin_id, trigger="caller_wake"):
+    from db.write_params import TaskExecutionFields
+    return db.create_task_execution(
+        agent_name=world.agent, message="the delegated run ended", triggered_by=trigger,
+        fields=TaskExecutionFields(continues_execution_id=origin_id),
+    ).id
+
+
+@pytest.mark.parametrize("trigger", sorted(turn_tier_service.CONTINUATION_TRIGGERS))
+def test_a_continuation_of_a_restricted_run_gets_the_schedule_text(world, trigger):
+    schedule = schedule_by(world, "mate")
+    origin = run_of(world, schedule)
+    cont = continuation_of(world, origin, trigger)
+
+    answer = turn_tier_service.turn_tier_answer(db, world.agent, cont)
+
+    assert answer == turn_tier_service.turn_tier_answer(db, world.agent, origin)
+    assert (answer["tier"], answer["kind"], answer["shell"]) == ("share", "person", False)
+    assert (answer["cause"], answer["remedy"]) == ("creator_not_owner_tier", "take_over")
+    assert answer["schedule"] == schedule.name
+    assert answer["creator"] == "Mate Shared"
+
+
+def test_a_continuation_of_a_restricted_run_is_stamped(world):
+    schedule = schedule_by(world, "mate")
+    cont = continuation_of(world, run_of(world, schedule))
+
+    result = apply(world, success(cont))
+
+    assert result.status == TaskExecutionStatus.SUCCESS
+    assert stored(cont) == {"restricted_turn": {
+        "tier": "share", "kind": "person", "cause": "creator_not_owner_tier",
+        "schedule_id": schedule.id, "creator_id": world.mate.id, "shell": False}}
+
+
+def test_a_continuation_of_an_owner_tier_run_is_not_stamped(world):
+    cont = continuation_of(world, run_of(world, schedule_by(world, "owner")))
+
+    apply(world, success(cont))
+
+    assert db.get_execution(cont).turn_integrity is None
+    answer = turn_tier_service.turn_tier_answer(db, world.agent, cont)
+    assert answer["tier"] == "owner" and answer["cause"] is None
+
+
+def test_a_continuation_of_a_persons_chat_names_no_schedule(world):
+    from db.write_params import TaskExecutionFields
+    chat = db.create_task_execution(world.agent, "hi", triggered_by="user",
+                                    fields=TaskExecutionFields(source_user_id=world.mate.id)).id
+    cont = continuation_of(world, chat)
+
+    apply(world, success(cont))
+
+    assert db.get_execution(cont).turn_integrity is None
+    answer = turn_tier_service.turn_tier_answer(db, world.agent, cont)
+    assert (answer["tier"], answer["cause"], answer["schedule"]) == ("share", None, None)
+
+
+def test_a_continuation_whose_turn_cannot_be_read_names_no_schedule(world):
+    cont = continuation_of(world, "exec-that-was-pruned")
+
+    apply(world, success(cont))
+
+    assert db.get_execution(cont).turn_integrity is None
+    answer = turn_tier_service.turn_tier_answer(db, world.agent, cont)
+    assert (answer["tier"], answer["kind"], answer["shell"]) == ("share", "person", False)
+    assert (answer["cause"], answer["schedule"], answer["remedy"]) == (None, None, None)
