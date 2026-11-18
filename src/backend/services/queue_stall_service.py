@@ -161,6 +161,11 @@ class StallObservation:
     claim_denied_count: int = 0
     leased_running: int = 0
     max_parallel: Optional[int] = 1  # None: the cap could not be read
+    # Which pool the agent has: a pilot's workers hold leases, a push agent's
+    # turns hold slots. `active_slots` is the push agent's slot meter (None
+    # when it could not be read, and always None on a pilot).
+    is_pilot: bool = True
+    active_slots: Optional[int] = None
     measured_at: str = ""
     # The episode marker: a person's ending snoozes re-reads of THIS episode
     # only (#3254 convention), and the episode is the admission of the head
@@ -179,6 +184,8 @@ class StallObservation:
             "claim_denied_count": self.claim_denied_count,
             "leased_running": self.leased_running,
             "max_parallel": self.max_parallel,
+            "is_pilot": self.is_pilot,
+            "active_slots": self.active_slots,
             # P5: the age was read a moment before the alert was filed. A claim
             # in between files one row that clears on the next tick; saying
             # when it was measured is what makes that readable rather than
@@ -282,6 +289,8 @@ def assess_stalls(
                 claim_denied_count=int(head.get("claim_denied_count") or 0),
                 leased_running=int(head.get("leased_running") or 0),
                 max_parallel=None if max_parallel is None else int(max_parallel or 1),
+                is_pilot=bool(head.get("is_pilot", True)),
+                active_slots=head.get("active_slots"),
                 measured_at=measured_at,
                 episode_started_at=str(head.get("episode_started_at") or queued_at),
             )
@@ -380,6 +389,15 @@ def describe(observation: StallObservation) -> Dict[str, str]:
         else f"last claim attempt {poll}s ago"
     )
     cap = "?" if observation.max_parallel is None else observation.max_parallel
+    # A pilot's pool is its leased workers; a push agent's is its slot meter.
+    # The lease count is always 0 on a push agent, so printing it there read
+    # "0/3 leased" above "Every slot on this agent is running work".
+    if observation.is_pilot:
+        pool_text = f"{observation.leased_running}/{cap} leased"
+    elif observation.active_slots is None:
+        pool_text = f"?/{cap} slots busy (the slot meter could not be read)"
+    else:
+        pool_text = f"{observation.active_slots}/{cap} slots busy"
     busy = BUSY_WAIT_TEXT.get(observation.wait_reason)
     busy_text = f"{busy}\n\n" if busy else ""
     title = (
@@ -391,7 +409,7 @@ def describe(observation: StallObservation) -> Dict[str, str]:
         f"'{observation.agent_name}' since {observation.queued_at} "
         f"({observation.age_seconds}s), with {observation.queued_count} row(s) "
         f"queued in total. Reason: **{observation.wait_reason}**. Pool: "
-        f"{observation.leased_running}/{cap} leased, "
+        f"{pool_text}, "
         f"{poll_text}, {observation.claim_denied_count} claim(s) refused by the "
         f"backend in the last day.\n\n"
         f"{busy_text}"
@@ -646,12 +664,12 @@ def _enrich_all(
             # asks — the slot meter is disjoint from pilot rows by
             # construction, so it would be a wrong answer rather than a slow
             # one.
+            active = None if is_pilot else meter.get(agent)
             slot_free = True
-            if not is_pilot and max_parallel is not None:
-                active = meter.get(agent)
-                if active is not None:
-                    slot_free = active < max(int(max_parallel), 1)
+            if active is not None and max_parallel is not None:
+                slot_free = active < max(int(max_parallel), 1)
             head["is_pilot"] = is_pilot
+            head["active_slots"] = active
             head["leased_running"] = leased_running
             head["max_parallel"] = max_parallel
             head["wait_reason"] = classify_wait(

@@ -614,6 +614,53 @@ def test_a_real_stall_never_says_the_wait_is_expected(reason):
     assert "expected" not in question
 
 
+# --- the pool line names the pool the agent actually has (#4636 eyeball) -----
+
+
+def test_a_push_agents_pool_line_reads_its_slot_meter():
+    """A push card read "Pool: 0/3 leased" — a pull-pilot lease count, always
+    0 on a push agent — right above "Every slot on this agent is running
+    work". A push agent's pool is its slot meter."""
+    stubs = _Stubs([_head(minutes_ago=45)])
+
+    _run(stubs, pilot=False, max_parallel=3, active_slots=3)
+
+    kwargs = stubs.alerts.observe.call_args.kwargs
+    assert "Pool: 3/3 slots busy, " in kwargs["question"]
+    assert "leased" not in kwargs["question"]
+    assert kwargs["context"]["active_slots"] == 3
+
+
+def test_an_unreadable_meter_says_so_instead_of_printing_zero():
+    stubs = _Stubs([_head(minutes_ago=45)])
+
+    _run(stubs, pilot=False, max_parallel=3, active_slots=None)
+
+    kwargs = stubs.alerts.observe.call_args.kwargs
+    assert "Pool: ?/3 slots busy (the slot meter could not be read), " in kwargs["question"]
+    assert "0/3" not in kwargs["question"]
+    assert kwargs["context"]["active_slots"] is None
+
+
+def test_a_push_agent_with_an_unknown_cap_still_shows_its_meter():
+    stubs = _Stubs([_head(minutes_ago=45)])
+
+    _run(stubs, pilot=False, active_slots=2,
+         caps={"side_effect": RuntimeError("roster unreadable")})
+
+    assert "Pool: 2/? slots busy, " in stubs.alerts.observe.call_args.kwargs["question"]
+
+
+def test_a_pilots_pool_line_still_counts_its_leases():
+    stubs = _Stubs([_head(minutes_ago=45)], leased=2)
+
+    _run(stubs, pilot=True, max_parallel=3)
+
+    question = stubs.alerts.observe.call_args.kwargs["question"]
+    assert "Pool: 2/3 leased, " in question
+    assert "slots busy" not in question
+
+
 # --- decision 2: a reading that worsens rewrites the row; one that does not counts
 
 
