@@ -117,7 +117,21 @@ OPT_OUT = {
 # Not opt-out values, but names that would detach every managed drop-in's `env`.
 DETACHING = ("CLAUDE_CODE_MANAGED_SETTINGS_PATH", "CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION")
 
-_CLI_VERIFIED = "2.1.281"
+# Re-captured on 2.1.322 (#4528), with 2.1.281 run beside it as the control:
+# one Read turn in the image on a network with no way out, every name resolved
+# to a local TLS sink that logs host, path and event names. With the drop-in:
+# no event-logging POST, no bootstrap / feature-flag / MCP-registry fetch, the
+# reply arrives, and an OTLP gRPC endpoint named as crud.py names it receives
+# `claude_code.cost.usage` and `claude_code.token.usage`. With the drop-in
+# removed: `tengu_file_operation` carries `contentHash` equal to the file's
+# SHA-256, so the capture can see what it is looking for. The agent blanking the
+# three names in its own settings files changes nothing; with only a process-env
+# value they do cancel it. Both detaching names are still dropped from settings
+# `env`, the managed path is still fixed, `claude --version` makes no request.
+# New since 2.1.281: the startup warm-up (`HEAD /api/hello`) is gone under the
+# opt-out. Not reproduced on either version: the third-party log intake, and an
+# MCP tool call under the opt-out (not run).
+_CLI_VERIFIED = "2.1.322"
 
 
 def _instructions() -> list[str]:

@@ -61,9 +61,12 @@ _STARTUP = (H.BASE / "startup.sh").read_text()
 _SKILL_GATE_DROP_IN = H.HOOKS / "managed-settings.d" / "50-skill-gate.json"
 _FIXTURES = _HERE / "fixtures" / "ent787"
 
-# The CLI build every fact in this file was read from (offsets in the 2.1.281
-# binary: hook spawn `_F`, prefix gate `Yt?n9(Yt,Pt):Pt`, Bash-tool `if(gt)`).
-_CLI_VERIFIED = "2.1.281"
+# The CLI build every fact in this file was last checked on. They were read
+# from the 2.1.281 binary (hook spawn `_F`, prefix gate `Yt?n9(Yt,Pt):Pt`,
+# Bash-tool `if(gt)`); on 2.1.322 (#4528) each was re-checked by running it in
+# the image against a stub API, with 2.1.281 beside it, not by re-reading the
+# binary, so the symbol names above are still 2.1.281's.
+_CLI_VERIFIED = "2.1.322"
 
 ROOT_READ_ONLY_CONFIG = "/opt/trinity/read-only-config.json"
 LEGACY_READ_ONLY_CONFIG = "/home/developer/.trinity/read-only-config.json"
@@ -147,7 +150,8 @@ def test_the_spawn_facts_were_read_from_the_cli_the_image_pins():
         f"The image now pins Claude Code {pinned}; the GUARD-002 registration facts were read "
         f"from {_CLI_VERIFIED}. Re-read in {pinned}: exec form (`args`) is spawned with no shell; "
         "CLAUDE_CODE_SHELL_PREFIX wraps only a hook with no `args` and only when truthy; policy "
-        "`env` beats user/project settings and the process env; one bad entry voids the file. "
+        "`env` beats user/project settings and the process env; one bad entry voids the file; "
+        "a shell command the Monitor tool starts still reaches the hooks registered for Bash. "
         "Then move _CLI_VERIFIED.")
 
 

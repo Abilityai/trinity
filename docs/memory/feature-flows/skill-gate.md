@@ -175,7 +175,7 @@ sweep (each a compare-and-set, after 5 min):
 ### 5. The in-container hook (trinity-enterprise#752, Claude Code only)
 
 ```
-claude --print (2.1.281)  PreToolUse Skill | Agent | Task
+claude --print (2.1.322)  PreToolUse Skill | Agent | Task
   └─ /usr/bin/env -i /usr/local/bin/python3 -I -S /opt/trinity/hooks/skill-gate.py      (exec form, no shell)
        └─ _skill_gate.main — clears its env; decides in a daemon thread under a 10 s deadline
             ├─ Skill → tool_input.skill (trim, strip one /)       ─┐ names: invoked, its last `:` segment, and every
