@@ -1,6 +1,6 @@
 <template>
   <!--
-    #4281 slice F (decisions D4, D8): the review an owner reads before taking a
+    #4281: the review an owner reads before taking a
     share holder's schedule over. A take-over is a grant: a prompt someone else
     wrote gets the owner's access on every later run. So the dialog shows what
     the runs will do (full prompt, tools, model, validation), where they deliver
@@ -130,7 +130,7 @@ const props = defineProps({
 
 const emit = defineEmits(['update:modelValue', 'confirm', 'dismiss-error'])
 
-// D8: another person's delivery defaults to "stop delivering". Reset to that
+// Another person's delivery defaults to "stop delivering". Reset to that
 // for every version shown, so a choice made on one version never carries
 // over to the next.
 const delivery = ref('clear')

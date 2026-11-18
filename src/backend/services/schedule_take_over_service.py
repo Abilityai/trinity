@@ -1,4 +1,4 @@
-"""Take over a share holder's schedule in place (#4281, decisions D4, D8).
+"""Take over a share holder's schedule in place (#4281).
 
 A schedule's runs are rated by its creator (`turn_tier_service`). A share
 holder's schedule therefore runs as a shared person: no shell, no tools the
@@ -13,7 +13,7 @@ taker adopts exactly the version they reviewed:
 * the webhook is revoked in the same write, so the former creator cannot fire
   owner-tier runs through a URL they hold;
 * a delivery to another person's Workspace is cleared unless the request
-  repeats its address (D8): owner-tier output must not reach a third party by
+  repeats its address: owner-tier output must not reach a third party by
   accident.
 """
 
@@ -81,7 +81,7 @@ def _email(value) -> str:
 
 
 def _clears_delivery(schedule, taker, body) -> bool:
-    """D8: whether the take-over removes the schedule's Workspace delivery.
+    """Whether the take-over removes the schedule's Workspace delivery.
 
     `clear` always does. A delivery to anyone but the taker must be decided:
     `keep` with the address repeated keeps it; anything else is refused."""

@@ -536,7 +536,7 @@ class ScheduleCrudMixin:
             )
             return result.rowcount > 0
 
-    # ---- take-over in place (#4281, decision D4) --------------------------------
+    # ---- take-over in place (#4281) ---------------------------------------------
 
     # A run in one of these states could switch from a shared person's tier to
     # the owner's mid-run. A retry reuses its execution row, so `pending_retry`

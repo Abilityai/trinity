@@ -1,7 +1,7 @@
 """What tier a schedule's runs get, and why: `schedule_run_tier` (#4281).
 
 One function answers it for every surface: the turn-tier answer the hook
-reads, every schedule read, and (later slices) the execution stamp and the
+reads, every schedule read, the execution stamp and the
 platform condition. `turn_actor` reads the same tier half, so the frozen
 matrix in `test_4281_turn_actor_frozen_matrix.py` pins that the rule did not
 move; this file pins the cause, the creator id, the memo the reads use, and
@@ -103,7 +103,7 @@ def test_a_tier_lookup_that_fails_raises_as_turn_actor_always_has():
 
 def test_the_cause_is_never_on_the_fence_path(monkeypatch):
     """The fences run `turn_actor` on every agent-key request; the cause's extra
-    lookups must not be a new way for that path to raise (review X2)."""
+    lookups must not be a new way for that path to raise."""
     t = _t()
 
     def boom(*a, **k):
@@ -218,7 +218,7 @@ def test_every_other_turn_answers_null_schedule_fields(run):
 
 
 def test_the_answer_never_carries_a_full_email():
-    """D5/R14: the answer is readable by anything holding the agent's key."""
+    """The answer is readable by anything holding the agent's key."""
     class _EmailOnly(World):
         def get_user_by_id(self, user_id):
             user = World.get_user_by_id(self, user_id)
@@ -278,7 +278,7 @@ def _worst_case_world():
 
 def test_the_worst_case_answer_fits_the_hooks_budget():
     """The hook reads at most 4096 bytes and denies on an unparseable answer;
-    the answer stays within 2048 bytes in any encoding (review X10)."""
+    the answer stays within 2048 bytes in any encoding."""
     from fastapi.responses import JSONResponse
     answer = _answer(_worst_case_world(), ORPHAN_AGENT)
     assert len(answer["schedule"]) == 80 and len(answer["creator"]) == 64

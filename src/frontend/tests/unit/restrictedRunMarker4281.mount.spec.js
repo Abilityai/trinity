@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 /**
- * #4281 slice F — a schedule run that did not run at owner tier says so,
+ * #4281 — a schedule run that did not run at owner tier says so,
  * MOUNTED: the marker itself, and its wiring into the Tasks list and the
  * execution page.
  *
- * The fact is slice C's `turn_integrity.restricted_turn` (codes only). A
+ * The fact is `turn_integrity.restricted_turn` (codes only). A
  * `success` is still a `success`; the marker says it ran without the shell
  * and why, worded by cause. Each surface has its own test id, so two of them
  * can never collide on one screen.

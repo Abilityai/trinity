@@ -11,9 +11,8 @@ disable and the admin fleet read carry:
   agent's owner tier and an agent key that is not acting for a shared person.
 
 On a Gemini or Codex agent a shared-person schedule could never run, so
-switching one on is refused with 409 `schedule_cannot_run_for_creator_on_runtime`
-(decision D2); on Claude Code it is allowed and the response says how it runs
-(D1).
+switching one on is refused with 409 `schedule_cannot_run_for_creator_on_runtime`;
+on Claude Code it is allowed and the response says how it runs.
 
 Real routes, the real `get_current_user`, real JWTs and a real agent key, on
 the unit conftest's SQLite. Only the runtime label and the ledger of running
@@ -197,7 +196,7 @@ def test_update_enable_and_disable_answer_the_rating(client, world):
             f"{verb}d", "shared_person", "creator_not_owner_tier", "Mate Shared")
 
 
-# ---- D2: a schedule that could never run is not switched on ------------------------------
+# ---- a schedule that could never run is not switched on ----------------------------------
 
 @pytest.mark.parametrize("runtime", ["gemini-cli", "codex"])
 def test_a_share_holders_schedule_is_refused_on_a_runtime_that_cannot_run_it(client, world, monkeypatch, runtime):

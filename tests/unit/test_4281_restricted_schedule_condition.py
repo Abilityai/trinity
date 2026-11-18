@@ -7,16 +7,16 @@ away: the schedule is fixed, deleted, disabled or taken over.
 
 What each test catches:
 * per-run or per-schedule alert spam (the #3246 class) and a person-driven
-  flood of the owner's queue (the #1677 criterion, review R4): many runs and
+  flood of the owner's queue (the #1677 criterion): many runs and
   many schedules by one creator are ONE row;
 * a stale row: every writer of `enabled` (the routes, the admin pause, resume
-  and emergency stop, review R5) decides the row again, and so do dispatch
+  and emergency stop) decides the row again, and so do dispatch
   (a run whose terminal never reaches `apply_result`, e.g. the watchdog's) and
   the winning terminal write;
-* a late run re-filing what a disable cleared (review X7);
-* a person's ending being re-filed by the same person's next brief, while a
+* a late run re-filing what a disable cleared;
+* a person's ending being re-filed by the same person's next schedule, while a
   new cause still files (`person_ending_is_final`, material key `cause`);
-* a creator disclosure to a share holder or a machine key (decision D5).
+* a creator disclosure to a share holder or a machine key.
 
 Real routes, the real `get_current_user`, real JWTs, the real seam and the
 unit conftest's SQLite.
@@ -293,7 +293,7 @@ def test_a_schedule_unreadable_mid_run_files_no_row(client, world):
     assert alerts(world) == []
 
 
-# ---- the admin pause, resume and emergency stop (review R5) -----------------------------------
+# ---- the admin pause, resume and emergency stop ----------------------------------------------
 
 def _ops(client, world, path, **params):
     return client.post(f"/api/ops/{path}", params=params,
@@ -399,7 +399,7 @@ def test_concurrent_readings_of_one_creator_are_one_row(client, world):
     assert len(alerts(world)) == 1
 
 
-# ---- who sees it (decision D5) --------------------------------------------------------------------
+# ---- who sees it ---------------------------------------------------------------------------------
 
 def _queue(client, who_jwt, world):
     resp = client.get("/api/operator-queue", params={"agent_name": world.agent, "status": "pending"},
@@ -439,13 +439,12 @@ def test_the_kind_is_registered_reserved_and_about_a_person():
 
 
 def test_the_alert_module_loads_once_take_over_replaces_recreate(monkeypatch):
-    """Slice D removes `turn_tier_service.REMEDY_RECREATE` when the remedy
-    becomes take-over. The two slices merge without a conflict on those lines,
-    so this module must not need that name at import, or every backend import
-    of it (the applier, the internal router) fails once both are in."""
+    """`turn_tier_service` has no `REMEDY_RECREATE` now that the remedy is
+    take-over, so this module must not need that name at import, or every
+    backend import of it (the applier, the internal router) fails."""
     import importlib.util
     from services import schedule_tier_alerts, turn_tier_service
-    # Already gone once both slices are in; the test must hold on either side.
+    # Already gone; the test holds whether or not the name exists.
     monkeypatch.delattr(turn_tier_service, "REMEDY_RECREATE", raising=False)
     spec = importlib.util.spec_from_file_location("_sta_without_recreate", schedule_tier_alerts.__file__)
     module = importlib.util.module_from_spec(spec)
@@ -453,7 +452,7 @@ def test_the_alert_module_loads_once_take_over_replaces_recreate(monkeypatch):
     assert module._REMEDY_TEXT["take_over"] == schedule_tier_alerts._REMEDY_TEXT["take_over"]
 
 
-# ---- take-over (slice D) ends the former creator's row ------------------------------------
+# ---- take-over ends the former creator's row ----------------------------------------------
 
 def take_over(client, world, sid, who="owner"):
     """The owner takes the schedule over, echoing the read they reviewed."""

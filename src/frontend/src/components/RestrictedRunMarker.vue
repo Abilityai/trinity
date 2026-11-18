@@ -1,6 +1,6 @@
 <template>
   <!--
-    "This schedule run did not run at owner tier" (#4281 slice C/F). The fact is
+    "This schedule run did not run at owner tier" (#4281). The fact is
     the run's `turn_integrity.restricted_turn` record, codes only; its status
     does not change, so a `success` that ran without the shell needs this mark.
     `badge` for a list row, `line` for a detail view. `testid` is required so

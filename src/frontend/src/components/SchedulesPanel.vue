@@ -398,7 +398,7 @@
             </div>
             <p v-if="schedule.description" class="text-sm text-gray-500 dark:text-gray-400 mt-1">{{ schedule.description }}</p>
             <!-- #4281: why, who created it (a name only when the read carries
-                 one: D5 keeps it to the owner tier), and the owner's remedy.
+                 one: the read keeps it to the owner tier), and the owner's remedy.
                  Below `sm` the button goes under the text: side by side on a phone
                  the text was left a few pixels wide. -->
             <div
@@ -1034,7 +1034,7 @@ const props = defineProps({
     default: true
   },
   // #4281: the viewer is at the agent's owner tier (`agent.can_share`). Decides
-  // the share-holder notice on create and the D9 "Run now" warning; every
+  // the share-holder notice on create and the "Run now" warning; every
   // per-schedule fact (badge, creator, take-over) comes from the read itself.
   // Defaults true so a parent that doesn't pass it never shows a false notice.
   ownerTier: {
@@ -1472,7 +1472,7 @@ async function saveSchedule() {
     await loadSchedules()
     closeForm()
   } catch (error) {
-    // #4281: D2's 409 is a named refusal `{code, message}`; read its message
+    // #4281: the runtime 409 is a named refusal `{code, message}`; read its message
     // rather than render the object.
     formError.value = apiErrorMessage(error, 'Failed to save schedule')
   } finally {
@@ -1579,7 +1579,7 @@ async function toggleSchedule(schedule) {
   }
 }
 
-// #4281 D9: an owner-tier person's Run now on a shared person's schedule runs
+// #4281: an owner-tier person's Run now on a shared person's schedule runs
 // once with THEIR access (shell, every tool the owner added), not the access
 // its scheduled runs get. Ask first; every other Run now goes straight through.
 function requestRun(schedule) {
@@ -1596,7 +1596,7 @@ function requestRun(schedule) {
   confirmDialog.visible = true
 }
 
-// #4281 take-over (D4, D8). The dialog shows a COPY of the read the person
+// #4281 take-over. The dialog shows a COPY of the read the person
 // opened it on, so a list refresh while it is open cannot change what is sent.
 const takeOverOpen = ref(false)
 const takeOverTarget = ref(null)

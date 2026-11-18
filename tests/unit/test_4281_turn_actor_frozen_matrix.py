@@ -1,16 +1,16 @@
-"""The frozen rating matrix of `turn_actor` (#4281, plan §7.1).
+"""The frozen rating matrix of `turn_actor` (#4281).
 
 #4281 moves the schedule half of `turn_actor` into `schedule_run_tier`, which
-the schedule reads, the turn-tier answer and the later slices share. The rule
-itself must not move (the ent#926 ruling, 2026-10-19, and #4281 A0 for a
-schedule that cannot be read). This file states the full input matrix once and
+the schedule reads, the turn-tier answer, the run stamp and the alert share.
+The rule itself must not move (the ent#926 ruling, 2026-10-19; since #4281 a
+schedule that cannot be read rates a shared person with no account). This file states the full input matrix once and
 pins, for every row and for both settings of the owner's `visitor_shell` switch:
 
 * the whole `turn_actor` triple, with NO person id on an owner row;
 * `shell_allowed`, `restricts_standing_work` and `turn_person`.
 
 It is a characterization test: it passed against the unmodified
-`turn_tier_service.py` at the base of the slice, and stays green after it. What
+`turn_tier_service.py` before #4281, and stays green after it. What
 makes it a guard is that every lookup comes from one table of users and one
 ownership map (`_turn_tier_world.World`), so a refactor that reads the tier
 through a different lookup, leaks the creator on an owner row, or swaps a share
@@ -95,7 +95,7 @@ MATRIX = [
     ("schedule/dangling-creator", _run(sid="s-dangling"), ("share", "person", DANGLING_ID), False,
      DANGLING_ID),
     ("schedule/no-recorded-creator", _run(sid="s-none"), OWNER_ROW, True, None),
-    # #4281 A0: a schedule that cannot be read is a shared person with no account.
+    # #4281: a schedule that cannot be read is a shared person with no account.
     ("schedule/soft-deleted", _run(sid="s-deleted"), ("share", "person", None), False, None),
     ("schedule/gone", _run(sid="s-never-existed"), ("share", "person", None), False, None),
     ("schedule/read-raises", _run(sid=BOOM, trigger="webhook"), ("share", "person", None), False, None),

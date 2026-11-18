@@ -224,7 +224,7 @@ def test_the_must_act_kinds_never_expire_and_only_the_collision_ending_is_final_
     assert pa.KINDS["poison"].budgeted_type is None
     assert pa.KINDS["validation_failed"].clears == pa.CLEARS_LIFETIME_ONLY
     # #4281: `schedule_runs_restricted` is the one hook kind whose ending is
-    # final (a person accepted that person's briefs running restricted).
+    # final (a person accepted that person's schedules running restricted).
     assert sorted(k.name for k in pa.KINDS.values() if k.person_ending_is_final) == [
         "portal_inbox_collision", "schedule_runs_restricted"]
     assert [k.name for k in person if k.person_ending_is_final] == ["portal_inbox_collision"]

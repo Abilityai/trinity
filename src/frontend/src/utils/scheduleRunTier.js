@@ -2,8 +2,8 @@
  * #4281 — how the page says what tier a schedule's runs get, what a take-over
  * sends back, and whether a run ran restricted.
  *
- * The server decides every fact (slices A, C, D): `runs_as`, `runs_as_reason`,
- * `created_by` (only on an owner-tier read, D5), `created_by_you`,
+ * The server decides every fact: `runs_as`, `runs_as_reason`,
+ * `created_by` (only on an owner-tier read), `created_by_you`,
  * `can_take_over`, and `turn_integrity.restricted_turn` on a run. This module
  * only words them, and builds the take-over body from the version the person
  * reviewed, never from a later read.
@@ -26,7 +26,7 @@ export function runTierView (schedule) {
 }
 
 /**
- * D9: an owner-tier person's "Run now" on a shared person's schedule runs once
+ * An owner-tier person's "Run now" on a shared person's schedule runs once
  * with THEIR access, not the schedule's. Only that case is warned about; a
  * share holder's own run has their own (shared) access.
  */
@@ -37,7 +37,7 @@ export function warnsOnRunNow (schedule, ownerTier) {
 const normEmail = (v) => String(v ?? '').trim().toLowerCase()
 
 /**
- * D8: `none` (no Workspace delivery), `own` (the viewer's own Workspace, left
+ * Delivery: `none` (no Workspace delivery), `own` (the viewer's own Workspace, left
  * alone) or `other` (another person's: the viewer must choose clear or keep).
  * An unknown viewer email is never taken as "own".
  */
@@ -97,7 +97,7 @@ export function takeOverRefusalText (code, fallback) {
 }
 
 /**
- * Slice C's record on a run, or null. `turn_integrity` arrives as the JSON
+ * The restricted-run record on a run, or null. `turn_integrity` arrives as the JSON
  * text of the column (or an object); a run without the key, or a column that
  * does not parse, has nothing to show.
  */

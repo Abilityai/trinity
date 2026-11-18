@@ -1,5 +1,5 @@
 /**
- * #4281 (D9) — trigger_agent_schedule answers "already running" only for the
+ * #4281 — trigger_agent_schedule answers "already running" only for the
  * scheduler's running-lock 409 (#1968). Every other 409 — the backend's
  * `schedule_runs_as_shared_person`, or one added later — is a refusal the
  * calling agent gets with the backend's code and message. Telling it to poll

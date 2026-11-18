@@ -204,7 +204,7 @@ class _ScheduleView:
         self.viewer_id = acting if acting is not None else getattr(current_user, "id", None)
         # The creator is named to the owner tier and to an agent key outside a
         # shared person's turn (whose tier reads as share, ent#926), not to a
-        # share holder (#4281, D5).
+        # share holder (#4281).
         self.show_creator = self.tier in (VIEWER_OWNER, VIEWER_KEY)
         # Who may take a schedule over: a person at the owner tier (#4281).
         self.owner_tier_person = self.tier == VIEWER_OWNER and _is_person(current_user)
@@ -246,7 +246,7 @@ def _schedule_response(schedule, agent_name: str, current_user: User,
     )
 
 
-# D2 (#4281): Gemini CLI and Codex run no turn-tier hook, so they refuse a
+# #4281: Gemini CLI and Codex run no turn-tier hook, so they refuse a
 # shared person's turn before it starts (`agent_server/services/turn_scope.py`).
 # A shared-person schedule switched on there would only ever fail.
 _CANNOT_RUN_ON_RUNTIME = "schedule_cannot_run_for_creator_on_runtime"
@@ -256,7 +256,7 @@ async def _refuse_if_it_could_never_run(name: str, schedule, view: _ScheduleView
     """409 when switching `schedule` on would give runs that cannot start: a
     shared-person rating on an agent that does not run on Claude Code.
 
-    On Claude Code it is allowed and the response says how it runs (D1). The
+    On Claude Code it is allowed and the response says how it runs. The
     runtime read never raises and falls back to Claude Code, so a Docker fault
     warns rather than refuses. A rating that cannot be computed refuses
     nothing here; the response shows it as not computed."""
@@ -732,7 +732,7 @@ async def disable_schedule(
             **_ScheduleView(name, current_user).run_tier_fields(schedule, name)}
 
 
-# D9 (#4281): a manual run carries the caller as its person, so it has the
+# #4281: a manual run carries the caller as its person, so it has the
 # caller's tier, not the creator's. For a person at owner tier that is a
 # deliberate act (the UI warns). For a key it would be a per-run take-over,
 # which the take-over route refuses keys for good.

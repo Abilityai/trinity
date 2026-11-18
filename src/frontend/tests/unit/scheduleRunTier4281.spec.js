@@ -1,9 +1,9 @@
 /**
- * #4281 slice F — the decidable rules behind the Schedules tab's run-tier
+ * #4281 — the decidable rules behind the Schedules tab's run-tier
  * badge, the take-over request and the restricted-run marker.
  *
  * Every value here comes from the server's schedule and execution reads
- * (slices A, C, D). The page decides only how to say it, and one thing the
+ * (the backend). The page decides only how to say it, and one thing the
  * server cannot: what the person reviewed is what the take-over sends back.
  */
 import { describe, it, expect } from 'vitest'
@@ -52,7 +52,7 @@ describe('runTierView: the badge follows runs_as only', () => {
     expect(runTierView({ ...shared(), runs_as: undefined })).toBeNull()
   })
 
-  it('a share holder gets "you created it" and no name (D5: the read carries none)', () => {
+  it('a share holder gets "you created it" and no name (the read carries none)', () => {
     const v = runTierView(shared({ created_by: null, created_by_you: true }))
     expect(v.creatorLine).toBe('You created this schedule')
   })
@@ -68,7 +68,7 @@ describe('runTierView: the badge follows runs_as only', () => {
   })
 })
 
-describe('warnsOnRunNow (D9): an owner-tier person on a shared_person schedule', () => {
+describe('warnsOnRunNow: an owner-tier person on a shared_person schedule', () => {
   it('warns the owner tier on a shared_person schedule only', () => {
     expect(warnsOnRunNow(shared(), true)).toBe(true)
     expect(warnsOnRunNow(shared({ runs_as: 'owner' }), true)).toBe(false)
@@ -80,7 +80,7 @@ describe('warnsOnRunNow (D9): an owner-tier person on a shared_person schedule',
   })
 })
 
-describe('deliveryDecision (D8)', () => {
+describe('deliveryDecision', () => {
   it('no delivery → none', () => {
     expect(deliveryDecision(shared(), 'owner@example.com')).toBe('none')
   })
@@ -152,7 +152,7 @@ describe('takeOverRefusalText: each 409 code in user words', () => {
   })
 })
 
-describe('restrictedTurnOf: the slice C record on turn_integrity', () => {
+describe('restrictedTurnOf: the restricted-run record on turn_integrity', () => {
   const record = { tier: 'share', kind: 'person', cause: 'creator_not_owner_tier', schedule_id: 's1', creator_id: 7, shell: false }
 
   it('reads the record from the JSON string the API sends', () => {

@@ -1,9 +1,9 @@
 /**
- * Schedule verbs added by #4281 slice F: taking a share holder's schedule over,
+ * Schedule verbs added by #4281: taking a share holder's schedule over,
  * and the webhook read its review needs.
  *
  * Domain-scoped (Invariant #6) and on the shared API client (Invariant #7).
- * The rest of `SchedulesPanel.vue` still calls axios directly (plan §11.7);
+ * The rest of `SchedulesPanel.vue` still calls axios directly;
  * this store holds only the new calls, and the in-flight flag lives here, not
  * in the panel.
  */

@@ -1,4 +1,4 @@
-"""An owner-tier person takes over a share holder's schedule in place (#4281, slice D).
+"""An owner-tier person takes over a share holder's schedule in place (#4281).
 
 A share holder's schedule runs as a shared person: no shell, no owner-added
 tools. The remedy is that the agent's owner (or an admin) adopts it, so its
@@ -13,10 +13,9 @@ gains the owner's access), so:
   at owner tier;
 * the webhook is revoked in the same statement;
 * the former creator's write authorized just before it cannot land after it
-  (review R5/R6);
 * a delivery to another person's Workspace is cleared unless the request
-  repeats the address (decision D8);
-* "Run now" on such a schedule is refused for agent keys (decision D9).
+  repeats the address;
+* "Run now" on such a schedule is refused for agent keys.
 
 Real routes, the real `get_current_user`, real JWTs and keys, on the unit
 conftest's SQLite. Only the scheduler hop and the audit sink are replaced.
@@ -269,7 +268,7 @@ def test_a_workspace_only_person_is_refused(client, world):
 
 
 def test_an_agent_with_no_owner_user_row_404s_for_an_admin_too(client, world):
-    """Review R3: `OwnedAgent` 404s there for everyone, so take-over is not its
+    """`OwnedAgent` 404s there for everyone, so take-over is not its
     remedy; the remedy stays `repair_agent_owner`."""
     sid = created(client, world)
     body = review(read(client, world, sid))
@@ -472,7 +471,7 @@ def test_a_finished_run_does_not_block_it(client, world):
 
 
 def test_an_owner_tier_schedule_is_not_taken_over(client, world):
-    """Review R10: one admin cannot strip another owner-tier creator's schedule
+    """One admin cannot strip another owner-tier creator's schedule
     (and its webhook)."""
     sid = created(client, world, who="owner")
     assert call(client, world, "owner", "POST", f"/{sid}/webhook").status_code == 200
@@ -668,7 +667,7 @@ def test_an_admins_update_keeps_its_own_rule(client, world, monkeypatch):
     assert stored(sid)["message"] == "Admin edit"
 
 
-# ---- delivery to another person's Workspace (D8) ----------------------------------------
+# ---- delivery to another person's Workspace ---------------------------------------------
 
 
 def _delivering(client, world):
@@ -793,7 +792,7 @@ def test_the_remedy_is_take_over(client, world):
     )
 
 
-# ---- "Run now" (D9) ---------------------------------------------------------------------
+# ---- "Run now" --------------------------------------------------------------------------
 
 
 def test_an_agent_key_cannot_run_a_shared_persons_schedule_now(client, world):
@@ -838,7 +837,7 @@ def _system_key(world):
 
 
 def test_the_system_key_cannot_run_a_shared_persons_schedule_now(client, world):
-    """D9 refuses every non-person principal, not only agent keys: the system
+    """Run now refuses every non-person principal, not only agent keys: the system
     key reaches this owner-tier route as an admin, and its run would have the
     admin's access."""
     sid = created(client, world)

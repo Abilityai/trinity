@@ -4791,7 +4791,7 @@ class ScheduleReviewed(BaseModel):
 
 
 class ScheduleTakeOverRequest(BaseModel):
-    """`POST /api/agents/{name}/schedules/{id}/take-over` (#4281, D4/D8).
+    """`POST /api/agents/{name}/schedules/{id}/take-over` (#4281).
 
     `expected_updated_at` is the reviewed response's `updated_at`, compared as
     an instant. `delivery` decides a delivery to another person's Workspace:

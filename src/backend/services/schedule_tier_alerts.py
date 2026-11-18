@@ -15,7 +15,7 @@ It reads that creator's live enabled schedules on the agent, rates them, and
 files (or updates) the row when any runs as a shared person, or ends it when
 none does. Because it always reads the live set, it is safe to call after any
 write: a run that ends after its schedule was disabled reads the schedule as
-disabled and files nothing (review X7). It never raises.
+disabled and files nothing. It never raises.
 
 Its callers, each after its own write committed: the schedule routes (create,
 update, enable, disable, delete), the admin pause / resume / emergency stop, the
@@ -45,8 +45,8 @@ MAX_NAMED = 5          # schedules the row's text names
 CLEARED = "cleared"
 
 # Keyed by the remedy codes as they go over the wire, not by turn_tier_service's
-# constants: `recreate` is the code until take-over exists, and the slice that
-# adds take-over removes that constant (a clean merge must still import).
+# constants, so this module needs none of them at import. The backend sends
+# `take_over`; `recreate` keeps a text for the code the hook also knows.
 _REMEDY_TEXT = {
     "recreate": ("To give them the owner's access, the agent's owner can create them again "
                           "as their own and disable these."),

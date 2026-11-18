@@ -217,7 +217,7 @@ _BUILTIN_KINDS = (
     # #4281: one row per agent x creator whose enabled schedules run as a shared
     # person. Bounded by the agent's share list (not budgeted: the cap would hide
     # a sixth person). A person's ending is final per cause, because the
-    # condition keeps reading true for a brief the owner decided to accept.
+    # condition keeps reading true for a schedule the owner decided to accept.
     Kind("schedule_runs_restricted", "schedule-restricted-", _N, CLEARS_HOOK,
          material_keys=("cause",), person_ending_is_final=True),
     Kind("alert_budget", "alert-budget-", _D, CLEARS_HOOK, material_keys=("filled_by",)),

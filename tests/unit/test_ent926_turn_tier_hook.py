@@ -596,8 +596,8 @@ def test_each_creator_cause_has_honest_text(hook, monkeypatch, platform, tmp_pat
 @pytest.mark.parametrize("surface", sorted(_SURFACES))
 def test_an_unreadable_schedule_gets_its_own_text_never_the_channel_one(
         hook, monkeypatch, platform, tmp_path, kind, surface):
-    """Review X9: `schedule_unreadable` arrived as `kind: visitor` and got the
-    channel text. Since #4281 A0 it arrives as `kind: person` with no person,
+    """`schedule_unreadable` once arrived as `kind: visitor` and got the
+    channel text. Since #4281 it arrives as `kind: person` with no person,
     which would read "a person the agent is shared with". Keyed on the cause, it
     is neither, whatever the kind."""
     answer = _answer(kind=kind, cause="schedule_unreadable", schedule=None, creator=None, remedy=None)
@@ -659,7 +659,7 @@ def test_the_schedule_and_creator_labels_are_bounded_before_the_model_reads_them
 
 
 def test_an_email_creator_label_loses_its_domain(hook, monkeypatch, platform, tmp_path):
-    """D5 sharpening: the reply is readable by anything holding the agent key."""
+    """The reply is readable by anything holding the agent key."""
     _, text, _ = refuse(hook, monkeypatch, platform, tmp_path, "shell", _answer(creator="dana@example.com"))
     assert "the person who created it, dana," in text and "example.com" not in text
 
@@ -667,7 +667,7 @@ def test_an_email_creator_label_loses_its_domain(hook, monkeypatch, platform, tm
 @pytest.mark.parametrize("surface", sorted(_SURFACES))
 def test_the_deny_record_carries_the_schedule_code_and_the_turn_kind(
         hook, monkeypatch, platform, tmp_path, surface):
-    """Review R8: the turn's kind is `turn_kind`, never `kind` (ent#165 derives
+    """The turn's kind is `turn_kind`, never `kind` (ent#165 derives
     `kind` for every spool record); the refusal has a code of its own."""
     _, _, records = refuse(hook, monkeypatch, platform, tmp_path, surface, _answer())
     (record,) = records

@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 /**
- * #4281 slice F — the Schedules tab says what tier a schedule's runs get,
+ * #4281 — the Schedules tab says what tier a schedule's runs get,
  * lets an owner take a share holder's schedule over, warns on "Run now" and
  * marks a restricted run. MOUNTED against the real panel.
  *
  * The server decides every fact (`runs_as`, `runs_as_reason`, `created_by`,
  * `created_by_you`, `can_take_over`, `turn_integrity.restricted_turn`). The
  * page renders what the read carries and nothing else, so a share holder can
- * never be shown another creator's name (D5). The take-over sends back the
+ * never be shown another creator's name. The take-over sends back the
  * exact version the owner reviewed (`expected_updated_at` + `reviewed`), and
  * each 409 is said in the dialog.
  */
@@ -179,7 +179,7 @@ describe('the create dialog tells a share holder before they save', () => {
     w.unmount()
   })
 
-  it("a named refusal from the save (D2's 409) shows its message, not the raw detail", async () => {
+  it("a named refusal from the save (the runtime 409) shows its message, not the raw detail", async () => {
     const w = mountPanel({ ownerTier: false })
     await flush()
     server.post = vi.fn(async () => {
@@ -233,7 +233,7 @@ describe('Take over', () => {
     w.unmount()
   })
 
-  it('sends back exactly the version reviewed, and clears another person’s delivery by default (D8)', async () => {
+  it('sends back exactly the version reviewed, and clears another person’s delivery by default', async () => {
     const s = restricted('a', { deliver_to_workspace_email: 'p@example.com' })
     lists = [[s], [schedule('a', { updated_at: '2026-12-01T00:00:00Z', message: 'a LATER prompt' })]]
     const w = mountPanel()
@@ -340,9 +340,9 @@ describe('Take over', () => {
     w.unmount()
   })
 
-  // Review of slice F: these pin the guards that a revert left green.
+  // These pin the guards that a revert left green.
 
-  it('a "keep" chosen on one version is not carried to the next (D8)', async () => {
+  it('a "keep" chosen on one version is not carried to the next', async () => {
     // The creator changes the delivery to someone else between the open and
     // the confirm. The next confirm must not keep that new address unasked.
     const later = restricted('a', { updated_at: '2026-12-01T00:00:00Z', deliver_to_workspace_email: 'q@example.com' })
@@ -503,7 +503,7 @@ describe('Take over', () => {
   })
 })
 
-describe('Run now on a share holder’s schedule (D9)', () => {
+describe('Run now on a share holder’s schedule', () => {
   const runNow = (w, id) => rowOf(w, id).find('button[title^="Run now"]')
 
   it('the owner tier is asked first, told this one run has their access', async () => {
