@@ -81,8 +81,10 @@ def run_restriction(db_, agent_name: str, execution) -> Tuple[Optional[tts.RunTi
         return None, None
     if rated is None or rated.tier == tts.OWNER:
         return rated, None
-    schedule_id = (execution.get("schedule_id") if isinstance(execution, dict)
-                   else getattr(execution, "schedule_id", None))
+    # A continuation is rated as the run it continues: name that run's schedule.
+    row = tts.rated_turn(db_, agent_name, execution)
+    schedule_id = (row.get("schedule_id") if isinstance(row, dict)
+                   else getattr(row, "schedule_id", None))
     record = execution_integrity.restricted_turn_record(
         tier=rated.tier, kind=rated.kind, cause=rated.cause,
         schedule_id=schedule_id, creator_id=rated.creator_id)

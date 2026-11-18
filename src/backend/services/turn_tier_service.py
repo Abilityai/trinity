@@ -377,10 +377,12 @@ def run_schedule(db, agent_name: str, execution) -> Tuple[bool, Optional[object]
     """`(True, schedule-or-None)` for a schedule-backed run of `agent_name`: no
     person started it (`source_user_id` is empty) and it names a schedule. The
     schedule is None when it cannot be read. `(False, None)` for any other run.
-    The same test `turn_actor` applies before it rates a run by its creator."""
+    The same test `turn_actor` applies before it rates a run by its creator,
+    on the same row: a continuation is the turn it continues (`rated_turn`)."""
     if execution is None or _field(execution, "agent_name") != agent_name:
         return False, None
-    if _field(execution, "source_user_id") is not None:
+    execution = rated_turn(db, agent_name, execution)
+    if execution is None or _field(execution, "source_user_id") is not None:
         return False, None
     return _schedule_of(db, agent_name, execution)
 
@@ -436,7 +438,10 @@ def turn_schedule_detail(db, agent_name: str, execution, tier: str) -> Dict[str,
     name), `creator` and `remedy` for a schedule-backed shared turn; all None
     for any other turn. Never raises."""
     detail: Dict[str, Optional[str]] = {"cause": None, "schedule": None, "creator": None, "remedy": None}
-    if tier != SHARE or _field(execution, "source_user_id") is not None:
+    if tier != SHARE:
+        return detail
+    execution = rated_turn(db, agent_name, execution)
+    if execution is None or _field(execution, "source_user_id") is not None:
         return detail
     has_schedule, schedule = _schedule_of(db, agent_name, execution)
     if not has_schedule:
@@ -627,6 +632,21 @@ def _continued_turn(db, agent_name: str, execution) -> Tuple[bool, Optional[dict
     if not origin or _field(origin, "agent_name") != agent_name:
         return True, None
     return True, origin
+
+
+def rated_turn(db, agent_name: str, execution):
+    """The row a turn is rated as: the turn itself, or for a continuation the
+    turn it continues, by the chain `_rate` follows (trinity-enterprise#1225).
+    None for a continuation `_rate` rates fail closed (its turn cannot be read
+    here, or the chain is too long): there is no row to read a schedule from."""
+    for _ in range(_MAX_CONTINUATION_HOPS + 1):
+        continuation, origin = _continued_turn(db, agent_name, execution)
+        if not continuation:
+            return execution
+        if origin is None:
+            return None
+        execution = origin
+    return None
 
 
 def continuation_origin(db, agent_name: str, execution_id: Optional[str]) -> Optional[str]:
