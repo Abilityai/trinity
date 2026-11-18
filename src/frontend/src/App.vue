@@ -34,8 +34,14 @@
 
     <!-- Help chat widget (authenticated users only; hidden on standalone
          client-facing surfaces like the portal where it overlaps the composer) -->
+    <!-- An entitled admin gets the assistant in the same corner; everyone
+         else keeps the help widget unchanged. -->
+    <AssistantWidget
+      v-if="showAssistant"
+      :hide-launcher="helpLauncherHidden"
+    />
     <HelpChatWidget
-      v-if="authStore.isAuthenticated && !route.meta.hideHelpWidget"
+      v-else-if="authStore.isAuthenticated && !route.meta.hideHelpWidget"
       :hide-launcher="helpLauncherHidden"
     />
   </div>
@@ -49,9 +55,24 @@ import { readStoredToken } from './utils/platformSession'
 import { useThemeStore } from './stores/theme'
 import { useWebSocket } from './utils/websocket'
 import HelpChatWidget from './components/HelpChatWidget.vue'
+import AssistantWidget from './components/assistant/AssistantWidget.vue'
+import { useEnterpriseStore } from './stores/enterprise'
+import { FEATURE_ID as ASSISTANT_FEATURE, useAssistantStore } from './stores/assistant'
 
 const route = useRoute()
 const authStore = useAuthStore()
+const enterpriseStore = useEnterpriseStore()
+const assistantStore = useAssistantStore()
+// The role in the store can be edited in localStorage, so it only counts once
+// the profile has been read from the server (#2198).
+const showAssistant = computed(() =>
+  authStore.isAuthenticated &&
+  !route.meta.hideHelpWidget &&
+  authStore.profileVerified &&
+  authStore.user?.role === 'admin' &&
+  enterpriseStore.isEntitled(ASSISTANT_FEATURE) &&
+  !assistantStore.absent
+)
 // #3446: a route may name tabs on which the floating launcher would cover one
 // of the page's own controls (the agent Chat composer's Send).
 const helpLauncherHidden = computed(() =>
