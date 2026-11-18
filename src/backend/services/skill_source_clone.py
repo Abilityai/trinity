@@ -438,7 +438,12 @@ class SkillSourceClone:
     def _update_branch(self) -> Dict[str, Any]:
         fetch = self._git(
             [
-                *_GIT_HTTP_UA_ARGS, "fetch", "origin",
+                *_GIT_HTTP_UA_ARGS, "fetch", "--no-tags", "origin",
+                # `--no-tags`: with a destination ref git would also auto-follow
+                # every upstream tag in the fetched history, and a tag named
+                # `origin/<ref>` would then win over the tracking ref in the
+                # reset, while a re-cut local tag would block a later repoint to
+                # that tag (its fetch is non-force).
                 # Explicit tracking ref: the clone's refspec covers only the ref
                 # it started on, so a plain `fetch origin <ref>` lands in
                 # FETCH_HEAD and `origin/<ref>` never exists after a ref change.
@@ -448,7 +453,7 @@ class SkillSourceClone:
         )
         if fetch.returncode != 0:
             return {"success": False, "error": f"fetch failed: {redact(fetch.stderr)}"}
-        reset = self._git(["reset", "--hard", f"origin/{self.ref}"])
+        reset = self._git(["reset", "--hard", f"refs/remotes/origin/{self.ref}"])
         if reset.returncode != 0:
             return {"success": False, "error": f"reset failed: {redact(reset.stderr)}"}
         return {"success": True, "action": "pulled"}

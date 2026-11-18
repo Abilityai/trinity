@@ -76,3 +76,57 @@ def test_ref_change_syncs(old, new, upstream, tmp_path):
 
     assert r2["success"], r2
     assert second.current_commit() == shas[new[0]][: len(second.current_commit())]
+
+
+def test_force_pushed_branch_syncs(upstream, tmp_path):
+    """The refspec's leading `+` lets a rewritten upstream branch sync."""
+    repo, _ = upstream
+    first = _clone_for(repo, tmp_path / "lib", "dev", "branch")
+    assert first.sync(str(repo))["success"]
+
+    _git(repo, "checkout", "-q", "dev")
+    _git(repo, "reset", "-q", "--hard", "main")
+    new_head = _commit(repo, "rewritten")
+    _git(repo, "checkout", "-q", "main")
+
+    second = _clone_for(repo, tmp_path / "lib", "dev", "branch")
+    r = second.sync(str(repo))
+    assert r["success"], r
+    assert second.current_commit() == new_head[: len(second.current_commit())]
+
+
+def test_tag_named_like_tracking_ref_does_not_win(upstream, tmp_path):
+    """An upstream tag called `origin/main` must not decide where `main` lands."""
+    repo, _ = upstream
+    first = _clone_for(repo, tmp_path / "lib", "main", "branch")
+    assert first.sync(str(repo))["success"]
+
+    _commit(repo, "four")
+    head = _commit(repo, "five")
+    _git(repo, "tag", "origin/main", "HEAD~1")
+
+    second = _clone_for(repo, tmp_path / "lib", "main", "branch")
+    r = second.sync(str(repo))
+    assert r["success"], r
+    assert second.current_commit() == head[: len(second.current_commit())]
+
+
+def test_repoint_to_recut_tag_syncs(upstream, tmp_path):
+    """Track main, upstream re-cuts v1, repoint to v1: a first sync of that tag."""
+    repo, _ = upstream
+    # file:// so `--depth 1` is honoured: a plain-path clone copies every tag.
+    url = f"file://{repo}"
+    first = _clone_for(repo, tmp_path / "lib", "main", "branch")
+    assert first.sync(url)["success"]
+
+    _commit(repo, "recut once")
+    _git(repo, "tag", "-f", "-a", "-m", "v1 recut", "v1")
+    # A later branch sync is where an auto-followed `v1` would land locally.
+    assert first.sync(url)["success"]
+    new_head = _commit(repo, "recut twice")
+    _git(repo, "tag", "-f", "-a", "-m", "v1 recut again", "v1")
+
+    second = _clone_for(repo, tmp_path / "lib", "v1", "tag")
+    r = second.sync(url)
+    assert r["success"], r
+    assert second.current_commit() == new_head[: len(second.current_commit())]
