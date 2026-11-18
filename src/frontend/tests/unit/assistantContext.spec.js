@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { MAX_HISTORY_TURNS, buildFleet, buildPrompt, describePage } from '@/utils/assistantContext'
+import { buildContext, buildFleet, describePage } from '@/utils/assistantContext'
 
 describe('assistant context: where the person is', () => {
   it('names a known page', () => {
@@ -19,7 +19,6 @@ describe('assistant context: where the person is', () => {
 
 describe('assistant context: the fleet', () => {
   const agents = [
-    { name: 'trinity-assistant', status: 'running' },
     { name: 'trinity-system', status: 'running', is_system: true },
     { name: 'scout', status: 'running' },
     { name: 'sage', status: 'stopped' },
@@ -29,8 +28,8 @@ describe('assistant context: the fleet', () => {
     { id: 's2', agent_name: 'other', name: 'X', enabled: true },
   ]
 
-  it('leaves out the assistant itself and the system agent, and joins schedules by agent', () => {
-    const fleet = buildFleet(agents, { scout: { autonomy_enabled: true } }, schedules, 'trinity-assistant')
+  it('leaves out the system agent and joins schedules by agent', () => {
+    const fleet = buildFleet(agents, { scout: { autonomy_enabled: true } }, schedules)
     expect(fleet).toEqual([
       { name: 'scout', status: 'running', autonomy: true, schedules: [{ id: 's1', name: 'Daily', enabled: true, cron: '0 9 * * *' }] },
       { name: 'sage', status: 'stopped', autonomy: null, schedules: [] },
@@ -38,30 +37,14 @@ describe('assistant context: the fleet', () => {
   })
 })
 
-describe('assistant context: the prompt for one turn', () => {
-  const page = { label: 'Dashboard', agent: null }
-
-  it('says there are no agents rather than leaving the fleet blank', () => {
-    const prompt = buildPrompt({ page, fleet: [], history: [], message: 'hi' })
-    expect(prompt).toBe('Page: Dashboard\n\nFleet:\n(no agents yet)\n\nCurrent message:\nhi')
+describe('assistant context: what goes with a message', () => {
+  it('sends the page and each agent by name and status, and nothing else about them', () => {
+    const fleet = [{ name: 'scout', status: 'running', autonomy: true, schedules: [{ id: 's1', name: 'Daily' }] }]
+    expect(buildContext({ path: '/', params: {}, query: {} }, fleet))
+      .toEqual({ page: 'Dashboard', fleet: [{ name: 'scout', status: 'running' }] })
   })
 
-  it('carries state, schedule ids and earlier turns, with the message last', () => {
-    const fleet = [{ name: 'scout', status: 'running', autonomy: false, schedules: [{ id: 's1', name: 'Daily', enabled: false, cron: '' }] }]
-    const prompt = buildPrompt({
-      page, fleet, message: 'turn it on',
-      history: [{ role: 'user', content: 'hello' }, { role: 'assistant', content: 'Hi.' }, { role: 'system', content: 'ignored' }],
-    })
-    expect(prompt).toContain('- scout: running, autonomy off, schedules: "Daily" id=s1 off')
-    expect(prompt).toContain('Conversation so far:\nPerson: hello\nYou: Hi.')
-    expect(prompt).not.toContain('ignored')
-    expect(prompt.endsWith('Current message:\nturn it on')).toBe(true)
-  })
-
-  it('keeps only the most recent turns', () => {
-    const history = Array.from({ length: MAX_HISTORY_TURNS + 5 }, (_, i) => ({ role: 'user', content: `m${i}` }))
-    const prompt = buildPrompt({ page, fleet: [], history, message: 'now' })
-    expect(prompt).not.toContain('Person: m4\n')
-    expect(prompt).toContain('Person: m5\n')
+  it('sends an empty fleet as empty, not missing', () => {
+    expect(buildContext({ path: '/agents', params: {}, query: {} }, [])).toEqual({ page: 'Agents list', fleet: [] })
   })
 })

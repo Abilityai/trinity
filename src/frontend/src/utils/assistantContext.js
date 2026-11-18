@@ -1,13 +1,10 @@
 /**
- * What the assistant is told with every message.
+ * What the assistant is told about where the person is.
  *
- * The task endpoint is stateless, so the page carries the conversation, and it
- * adds what the person is looking at and the state of their fleet — all read
- * with the person's own session. The assistant's own key sees none of this.
+ * Read with the person's own session and sent with each message: the page
+ * they are on and the agents they have. The page also keeps this reading to
+ * check every change the assistant proposes against it.
  */
-
-export const MAX_HISTORY_TURNS = 12
-const MAX_TURN_CHARS = 1500
 
 const PAGE_NAMES = Object.freeze({
   '/': 'Dashboard',
@@ -32,9 +29,9 @@ export function describePage(route) {
 }
 
 /** The fleet as the page read it, joined into one list the cards can validate against. */
-export function buildFleet(agents, autonomyByName, schedules, selfName) {
+export function buildFleet(agents, autonomyByName, schedules) {
   return (agents || [])
-    .filter((a) => a?.name && a.name !== selfName && !a.is_system)
+    .filter((a) => a?.name && !a.is_system)
     .map((a) => ({
       name: a.name,
       status: a.status || 'unknown',
@@ -45,35 +42,10 @@ export function buildFleet(agents, autonomyByName, schedules, selfName) {
     }))
 }
 
-function fleetLines(fleet) {
-  if (!fleet.length) return ['(no agents yet)']
-  return fleet.map((a) => {
-    const autonomy = a.autonomy === null ? 'autonomy unknown' : a.autonomy ? 'autonomy on' : 'autonomy off'
-    const schedules = a.schedules.length
-      ? a.schedules
-          .map((s) => `${JSON.stringify(s.name)} id=${s.id} ${s.enabled ? 'on' : 'off'}${s.cron ? ` cron=${JSON.stringify(s.cron)}` : ''}`)
-          .join('; ')
-      : 'no schedules'
-    return `- ${a.name}: ${a.status}, ${autonomy}, schedules: ${schedules}`
-  })
-}
-
-const clip = (text) => {
-  const s = String(text || '')
-  return s.length > MAX_TURN_CHARS ? `${s.slice(0, MAX_TURN_CHARS)}…` : s
-}
-
-/**
- * The full prompt for one turn. `history` is the turns BEFORE this message:
- * [{ role: 'user' | 'assistant', content }].
- */
-export function buildPrompt({ page, fleet, history, message }) {
-  const parts = ['Page: ' + page.label, '', 'Fleet:', ...fleetLines(fleet || [])]
-  const turns = (history || []).filter((m) => m.role === 'user' || m.role === 'assistant').slice(-MAX_HISTORY_TURNS)
-  if (turns.length) {
-    parts.push('', 'Conversation so far:')
-    for (const m of turns) parts.push(`${m.role === 'user' ? 'Person' : 'You'}: ${clip(m.content)}`)
+/** What goes with a message: the page, and each agent's name and status. */
+export function buildContext(route, fleet) {
+  return {
+    page: describePage(route).label,
+    fleet: (fleet || []).map((a) => ({ name: a.name, status: a.status })),
   }
-  parts.push('', 'Current message:', String(message || ''))
-  return parts.join('\n')
 }

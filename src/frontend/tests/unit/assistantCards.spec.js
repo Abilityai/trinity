@@ -1,63 +1,81 @@
 import { describe, it, expect, vi } from 'vitest'
-import { CARD_ACTIONS, MAX_CARDS_PER_REPLY, cardLabel, cardNote, outcomeLine, parseReply, runCard, validCard } from '@/utils/assistantCards'
+import { CARD_ACTIONS, MAX_CARDS_PER_REPLY, acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, validBuild, validCard } from '@/utils/assistantCards'
 
 const fleet = [
   { name: 'issue-digest', schedules: [{ id: 's1', name: 'Mondays 09:00' }] },
   { name: 'scout', schedules: [] },
 ]
-const block = (obj) => '```trinity-card\n' + JSON.stringify(obj) + '\n```'
+const DESIGN_ID = '8f8f7d58-8429-4c25-be28-1e6e6bfc82dc'
+const build = (over = {}) => ({
+  action: 'build', design_id: DESIGN_ID,
+  design: { title: 'Front desk', summary: 'Reads the inbox.', to_do_after: ['Add the mailbox credential.'],
+    agents: [{ name: 'shop-desk', job: 'Reads the inbox.', credentials: ['MAILBOX_READ_CREDENTIAL'], schedule: { name: 'Morning', cron: '0 8 * * 1-5' }, calls: [] }] },
+  ...over,
+})
 
 describe('assistant cards: what a reply may propose', () => {
-  it('turns a valid block into a card and takes it out of the text', () => {
-    const reply = `I added the schedule.\n\n${block({ action: 'schedule-on', agent: 'issue-digest', schedule_id: 's1' })}\n\nConfirm above.`
-    const { text, cards } = parseReply(reply, fleet)
+  it('accepts a listed change that names agents the page itself read', () => {
+    const cards = acceptCards([{ action: 'schedule-on', agent: 'issue-digest', schedule_id: 's1' }], fleet)
     expect(cards).toEqual([{ action: 'schedule-on', agent: 'issue-digest', schedule_id: 's1' }])
-    expect(text).toBe('I added the schedule.\n\nConfirm above.')
     expect(cardLabel(cards[0], fleet)).toBe('Turn on the schedule "Mondays 09:00" for issue-digest')
+    expect(cardNote(cards[0])).toBe('Runs as you, not as the assistant.')
   })
 
-  it.each([
-    ['an action outside the catalog', { action: 'delete-agent', agent: 'scout' }],
-    ['an inherited property name as the action', { action: 'constructor', agent: 'scout' }],
-    ['an agent the page did not read', { action: 'start-agent', agent: 'someone-elses' }],
-    ['a schedule that agent does not have', { action: 'schedule-on', agent: 'scout', schedule_id: 's1' }],
-    ['an extra field', { action: 'start-agent', agent: 'scout', force: 'yes' }],
-    ['a missing field', { action: 'share', agent: 'scout' }],
-    ['a non-string field', { action: 'start-agent', agent: ['scout'] }],
-    ['an address that is not an email', { action: 'share', agent: 'scout', email: 'everyone' }],
-    ['an agent calling itself', { action: 'allow-call', from: 'scout', to: 'scout' }],
-  ])('refuses %s, and still hides the block', (_, proposal) => {
-    const { text, cards } = parseReply(`Here.\n${block(proposal)}`, fleet)
-    expect(cards).toEqual([])
-    expect(text).toBe('Here.')
-  })
-
-  it('refuses a block that is not JSON without showing it', () => {
-    const { text, cards } = parseReply('Hi\n```trinity-card\n{not json\n```', fleet)
-    expect(cards).toEqual([])
-    expect(text).toBe('Hi')
+  it('drops an unknown action, an unknown agent, extra fields and anything that is not a list', () => {
+    expect(acceptCards([{ action: 'delete-agent', agent: 'scout' }], fleet)).toEqual([])
+    expect(acceptCards([{ action: 'start-agent', agent: 'nobody' }], fleet)).toEqual([])
+    expect(acceptCards([{ action: 'start-agent', agent: 'scout', also: 'x' }], fleet)).toEqual([])
+    expect(acceptCards('start-agent', fleet)).toEqual([])
+    expect(acceptCards(null, fleet)).toEqual([])
   })
 
   it('keeps at most the per-reply limit and drops an exact repeat', () => {
-    const a = block({ action: 'start-agent', agent: 'scout' })
-    const b = block({ action: 'autonomy-on', agent: 'scout' })
-    const c = block({ action: 'stop-agent', agent: 'issue-digest' })
-    expect(parseReply([a, a, b, c].join('\n'), fleet).cards).toHaveLength(MAX_CARDS_PER_REPLY)
-    expect(parseReply([a, a].join('\n'), fleet).cards).toHaveLength(1)
+    const start = { action: 'start-agent', agent: 'scout' }
+    const many = [start, start, { action: 'stop-agent', agent: 'scout' }, { action: 'autonomy-on', agent: 'scout' }, { action: 'autonomy-off', agent: 'scout' }]
+    expect(acceptCards(many, fleet)).toHaveLength(MAX_CARDS_PER_REPLY)
+    expect(acceptCards([start, start], fleet)).toHaveLength(1)
   })
 
-  it('accepts the upgrade card, which takes no fields, and refuses it with any', () => {
-    const ok = parseReply('Out of free builds.\n```trinity-card\n{"action": "upgrade"}\n```', fleet)
-    expect(ok.cards).toEqual([{ action: 'upgrade' }])
-    expect(cardLabel(ok.cards[0], fleet)).toBe('Upgrade this instance to Trinity Pro')
-    expect(cardNote(ok.cards[0])).toBe('Lifts the limit on agents Trinity builds for you.')
-    expect(cardNote({ action: 'start-agent', agent: 'scout' })).toBe('Runs as you, not as the assistant.')
-    expect(parseReply(block({ action: 'upgrade', plan: 'enterprise' }), fleet).cards).toEqual([])
+  it('accepts the subscription card only with no fields', () => {
+    expect(acceptCards([{ action: 'upgrade' }], fleet)).toEqual([{ action: 'upgrade' }])
+    expect(acceptCards([{ action: 'upgrade', plan: 'free-forever' }], fleet)).toEqual([])
+    expect(cardLabel({ action: 'upgrade' })).toBe('Subscribe to Trinity Pro')
+  })
+})
+
+describe('assistant cards: a design to build', () => {
+  it('accepts a design with a well-formed id and keeps only what the person is shown', () => {
+    const card = validBuild(build({ design: { ...build().design, files: { 'CLAUDE.md': 'x' }, agents: [{ ...build().design.agents[0], files: { a: 'b' } }] } }))
+    expect(card.design_id).toBe(DESIGN_ID)
+    expect(card.design.agents[0]).toEqual({ name: 'shop-desk', job: 'Reads the inbox.', credentials: ['MAILBOX_READ_CREDENTIAL'], schedule: { name: 'Morning', cron: '0 8 * * 1-5' }, calls: [] })
+    expect(JSON.stringify(card)).not.toContain('CLAUDE.md')
+    expect(cardLabel(card)).toBe('Build "Front desk"')
   })
 
-  it('leaves an ordinary code block alone', () => {
-    const reply = 'Run:\n```bash\nls\n```'
-    expect(parseReply(reply, fleet).text).toBe(reply)
+  it('refuses an id that could be a path, and a design with no agents', () => {
+    expect(validBuild(build({ design_id: '../../agents/x' }))).toBeNull()
+    expect(validBuild(build({ design: { title: 't', agents: [] } }))).toBeNull()
+    expect(acceptCards([build({ design_id: 'nope' })], fleet)).toEqual([])
+  })
+
+  it('tells the assistant what exists after a clean build, schedule id included', () => {
+    const out = buildOutcome(validBuild(build()), { agents: [{ name: 'shop-desk', created: true, files: 11, schedule: { id: 's9', name: 'Morning' }, problem: '' }] })
+    expect(out.kind).toBe('done')
+    expect(out.line).toBe('Done: Build "Front desk". Built shop-desk (11 files, schedule "Morning" added switched off, id s9).')
+  })
+
+  it('is unsure when some agents were built and some were not, and says which', () => {
+    const out = buildOutcome(validBuild(build()), { agents: [
+      { name: 'one', created: true, files: 3, problem: '' },
+      { name: 'two', created: false, files: 0, problem: 'the agent could not be created: name taken' }] })
+    expect(out.kind).toBe('unsure')
+    expect(out.line).toContain('Built one (3 files).')
+    expect(out.line).toContain('two: the agent could not be created: name taken')
+  })
+
+  it('is refused when nothing was built, and unsure when nothing was reported', () => {
+    expect(buildOutcome(validBuild(build()), { agents: [{ name: 'one', created: false, problem: 'no' }] }).kind).toBe('refused')
+    expect(buildOutcome(validBuild(build()), {}).kind).toBe('unsure')
   })
 })
 
@@ -95,16 +113,6 @@ describe('assistant cards: making a confirmed change', () => {
     expect((await runCard(h, card, fleet)).kind).toBe('unsure')
   })
 
-  it('upgrades through the instance, and is done only when the plan reads pro', async () => {
-    const h = http({ get: vi.fn(async () => ({ data: { plan: 'pro' } })) })
-    expect(await runCard(h, { action: 'upgrade' }, fleet)).toEqual({ kind: 'done' })
-    expect(h.post.mock.calls[0][0]).toBe('/api/enterprise/assistant/upgrade')
-    expect(h.get).toHaveBeenCalledWith('/api/enterprise/assistant/status')
-
-    const still = http({ get: vi.fn(async () => ({ data: { plan: 'free' } })) })
-    expect((await runCard(still, { action: 'upgrade' }, fleet)).kind).toBe('unsure')
-  })
-
   it('never calls anything for a card that is no longer valid', async () => {
     const h = http()
     const result = await runCard(h, { action: 'start-agent', agent: 'gone' }, fleet)
@@ -122,7 +130,7 @@ describe('assistant cards: making a confirmed change', () => {
   it('every action in the catalog has a route, a label and a read-back', () => {
     for (const [name, spec] of Object.entries(CARD_ACTIONS)) {
       const sample = Object.fromEntries(spec.fields.map((f) => [f, f === 'email' ? 'a@b.co' : 'x']))
-      expect(spec.call(sample)[1], name).toMatch(name === 'upgrade' ? /^\/api\/enterprise\/assistant\/upgrade$/ : /^\/api\/agents\/x/)
+      expect(spec.call(sample)[1], name).toMatch(/^\/api\/agents\/x/)
       expect(spec.label(sample, []), name).toBeTruthy()
       expect(typeof spec.held, name).toBe('function')
     }

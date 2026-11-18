@@ -1,42 +1,41 @@
 // @vitest-environment jsdom
 /**
- * The assistant panel, mounted: opening it provisions the agent, a message
- * carries the page and fleet, a proposed change becomes a card, and Confirm
- * makes the change with the page's own client before the assistant is told.
+ * The assistant panel, mounted. Nothing is sent until the person sends a
+ * message; a turn is followed step by step; a proposed change or a design
+ * becomes a card the person confirms; and when the allowance runs out the
+ * person signs in, accepts the terms themselves and subscribes.
  */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
+const DESIGN_ID = '8f8f7d58-8429-4c25-be28-1e6e6bfc82dc'
+const ALLOWANCE = { plan: 'free', period_hours: 24, messages_left: 24, messages_limit: 25, builds_left: 1, builds_limit: 1, reached: null, resets_at: null }
 const calls = []
-let reply = ''
-let scheduleOn = false
-// What the instance reports about itself; each test starts registered on the free plan.
-const FREE = { agent_name: 'trinity-assistant', exists: true, running: true, mode: 'gateway', gateway_configured: true,
-  registered: true, email: 'ada@example.com', gateway_reachable: true, plan: 'free', agents_built: 0, agent_limit: 2,
-  limit_reached: false, model_auth: 'passthrough', gateway_mock: true }
-let status = { ...FREE }
-let verifyFails = false
+let status
+let turns        // answers to /turn and /turn/continue, in order
+let scheduleOn
+let verifyFails
 
 vi.mock('@/api', () => {
   const respond = (method, url, body) => {
     calls.push({ method, url, body })
     if (url === '/api/enterprise/assistant/status') return { ...status }
-    if (url === '/api/enterprise/assistant/provision') return { agent_name: 'trinity-assistant', created: false, persona_installed: true }
-    if (url === '/api/enterprise/assistant/catalog') return { templates: [{ id: 'issue-digest', kind: 'template', name: 'Weekly issue digest', summary: 'Mondays.', added: '2026-11-10' }], playbooks: [] }
-    if (url === '/api/enterprise/assistant/register') return { status: 'code_sent', email: body.email, dev_code: '424242' }
-    if (url === '/api/enterprise/assistant/verify') {
-      if (verifyFails) throw { response: { status: 400, data: { detail: { code: 'code_wrong', message: "That code doesn't match." } } } }
-      status = { ...FREE }
-      return { ...status }
+    if (url === '/api/enterprise/assistant/turn' || url === '/api/enterprise/assistant/turn/continue') {
+      return turns.shift() || { status: 'final', conversation_id: 'c1', text: 'Done.', cards: [], allowance: ALLOWANCE }
     }
-    if (url === '/api/enterprise/assistant/mode') { status = { ...FREE, mode: body.mode, registered: false, plan: null, agent_limit: null }; return { ...status } }
-    if (url === '/api/enterprise/assistant/upgrade') { status = { ...status, plan: 'pro', agent_limit: null, limit_reached: false }; return { ...status } }
-    if (url === '/api/agents') return [{ name: 'trinity-assistant', status: 'running' }, { name: 'issue-digest', status: 'running' }]
+    if (url === `/api/enterprise/assistant/designs/${DESIGN_ID}/build`) {
+      return { agents: [{ name: 'shop-desk', created: true, files: 11, schedule: { id: 's9', name: 'Morning' }, problem: '' }] }
+    }
+    if (url === '/api/enterprise/assistant/account/start') return { email: body.email, dev_code: '424242', terms: { version: 't1', url: '' } }
+    if (url === '/api/enterprise/assistant/account/verify') {
+      if (verifyFails) throw { response: { status: 400, data: { detail: { code: 'wrong_code', message: "That code didn't match." } } } }
+      return { plan: 'free', email: body.email, terms_accepted: 't1' }
+    }
+    if (url === '/api/enterprise/assistant/subscription/start') return { plan: 'pro', billing: 'unbilled', checkout_url: null, email: 'ada@example.com' }
+    if (url === '/api/agents') return [{ name: 'trinity-system', status: 'running', is_system: true }, { name: 'issue-digest', status: 'running' }]
     if (url === '/api/agents/autonomy-status') return { 'issue-digest': { autonomy_enabled: false } }
     if (url === '/api/ops/schedules') return { schedules: [{ id: 's1', agent_name: 'issue-digest', name: 'Mondays', enabled: scheduleOn }] }
-    if (url === '/api/agents/trinity-assistant/task') return { execution_id: 'e1' }
-    if (url === '/api/agents/trinity-assistant/executions/e1') return { status: 'success', response: reply }
     if (url === '/api/agents/issue-digest/schedules/s1/enable') { scheduleOn = true; return {} }
     if (url === '/api/agents/issue-digest/schedules') return [{ id: 's1', enabled: scheduleOn }]
     return {}
@@ -54,205 +53,186 @@ vi.mock('@/stores/agents', () => ({ useAgentsStore: () => ({ fetchAgents: async 
 
 import AssistantWidget from '@/components/assistant/AssistantWidget.vue'
 
-const settle = async () => {
-  for (let i = 0; i < 6; i++) {
-    await vi.advanceTimersByTimeAsync(2100)
-    await flushPromises()
-  }
-}
+const final = (text, cards = [], allowance = ALLOWANCE) => ({ status: 'final', conversation_id: 'c1', text, cards, allowance })
+const sent = (url) => calls.filter((c) => c.url === url)
+const TURN = '/api/enterprise/assistant/turn'
 
 describe('assistant panel', () => {
   let wrapper
 
-  beforeEach(() => {
-    calls.length = 0
-    scheduleOn = false
-    status = { ...FREE }
-    verifyFails = false
-    vi.useFakeTimers()
-    setActivePinia(createPinia())
-    wrapper = mount(AssistantWidget, { attachTo: document.body, global: { stubs: { ChatBubble: { props: ['role', 'content'], template: '<div class="bubble" :data-role="role">{{ content }}</div>' } } } })
-  })
-
-  afterEach(() => {
-    wrapper.unmount()
-    vi.useRealTimers()
-  })
-
-  const open = async () => {
-    await wrapper.find('[data-testid="assistant-launcher"]').trigger('click')
+  const openPanel = async () => {
+    await wrapper.get('[data-testid="assistant-launcher"]').trigger('click')
     await flushPromises()
   }
   const say = async (text) => {
-    await wrapper.find('[data-testid="assistant-input"]').setValue(text)
-    await wrapper.find('form').trigger('submit')
-    await settle()
+    await wrapper.get('[data-testid="assistant-input"]').setValue(text)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
   }
+  const button = (words) => wrapper.findAll('button').find((b) => b.text() === words)
 
-  it('provisions on open and says what it can see', async () => {
-    expect(wrapper.find('[data-testid="assistant-panel"]').exists()).toBe(false)
-    await open()
-    expect(calls.map((c) => c.url).slice(0, 2)).toEqual(['/api/enterprise/assistant/status', '/api/enterprise/assistant/provision'])
-    expect(wrapper.find('[data-testid="assistant-context"]').text()).toBe('Sees what you see: Dashboard · 1 agent')
-    expect(wrapper.find('[data-testid="assistant-plan"]').text()).toBe('Free plan · 0 of 2 agents built')
-    expect(wrapper.find('[data-testid="assistant-recipes"]').text()).toContain('Weekly issue digest')
+  beforeEach(() => {
+    calls.length = 0
+    turns = []
+    scheduleOn = false
+    verifyFails = false
+    status = { available: true, contacted: false, reachable: null, plan: null, email: null, allowance: null }
+    setActivePinia(createPinia())
+    wrapper = mount(AssistantWidget, {
+      attachTo: document.body,
+      global: { stubs: {
+        ChatBubble: { props: ['role', 'content'], template: '<div class="bubble" :data-role="role">{{ content }}</div>' },
+        HelpChatWidget: { props: ['embedded'], template: '<div data-testid="ask-tab">ask</div>' },
+      } },
+    })
   })
 
-  it('sends the page, the fleet and the message, and shows the reply without the card block', async () => {
-    reply = 'Schedule added.\n```trinity-card\n{"action":"schedule-on","agent":"issue-digest","schedule_id":"s1"}\n```'
-    await open()
-    await say('turn on the schedule')
+  afterEach(() => wrapper.unmount())
 
-    const task = calls.find((c) => c.url === '/api/agents/trinity-assistant/task')
-    expect(task.body.message).toContain('Page: Dashboard')
-    expect(task.body.message).toContain('- issue-digest: running, autonomy off, schedules: "Mondays" id=s1 off')
-    expect(task.body.message.endsWith('Current message:\nturn on the schedule')).toBe(true)
-
-    const bubbles = wrapper.findAll('.bubble')
-    expect(bubbles.map((b) => b.attributes('data-role'))).toEqual(['user', 'assistant'])
-    expect(bubbles[1].text()).toBe('Schedule added.')
-    expect(wrapper.find('[data-testid="assistant-card"]').text()).toContain('Turn on the schedule "Mondays" for issue-digest')
+  it('opens ready to use, says where messages go, and has sent nothing', async () => {
+    await openPanel()
+    expect(wrapper.get('[data-testid="assistant-welcome"]').text()).toContain("there's nothing to set up")
+    expect(wrapper.get('[data-testid="assistant-disclosure"]').text()).toContain('sent to Trinity')
+    expect(wrapper.find('[data-testid="assistant-email"]').exists()).toBe(false)
+    expect(calls.filter((c) => c.method !== 'get')).toEqual([])
   })
 
-  it('makes nothing change until Confirm, then changes it once and tells the assistant', async () => {
-    reply = '```trinity-card\n{"action":"schedule-on","agent":"issue-digest","schedule_id":"s1"}\n```'
-    await open()
-    await say('turn on the schedule')
-    const enable = () => calls.filter((c) => c.url === '/api/agents/issue-digest/schedules/s1/enable')
-    expect(enable()).toHaveLength(0)
-
-    reply = 'It is on.'
-    await wrapper.findAll('[data-testid="assistant-card"] button')[0].trigger('click')
-    await settle()
-
-    expect(enable()).toHaveLength(1)
-    expect(wrapper.find('[data-testid="assistant-card"]').text()).toContain('Done.')
-    expect(wrapper.find('[data-testid="assistant-card"]').findAll('button')).toHaveLength(0)
-    const tasks = calls.filter((c) => c.url === '/api/agents/trinity-assistant/task')
-    expect(tasks[1].body.message.endsWith('Current message:\nDone: Turn on the schedule "Mondays" for issue-digest.')).toBe(true)
-    expect(wrapper.find('[data-testid="assistant-note"]').text()).toBe('Done: Turn on the schedule "Mondays" for issue-digest.')
+  it('keeps Ask one tab away', async () => {
+    await openPanel()
+    expect(wrapper.get('[data-testid="ask-tab"]').isVisible()).toBe(false)
+    await wrapper.findAll('[role="radio"]').find((b) => b.text() === 'Ask the docs').trigger('click')
+    expect(wrapper.get('[data-testid="ask-tab"]').isVisible()).toBe(true)
+    expect(wrapper.find('[data-testid="assistant-input"]').exists()).toBe(false)
   })
 
-  it('Not now changes nothing and says so to the assistant', async () => {
-    reply = '```trinity-card\n{"action":"schedule-on","agent":"issue-digest","schedule_id":"s1"}\n```'
-    await open()
-    await say('turn on the schedule')
-    reply = 'Left as is.'
-    await wrapper.findAll('[data-testid="assistant-card"] button')[1].trigger('click')
-    await settle()
-
-    expect(calls.some((c) => c.url.endsWith('/enable'))).toBe(false)
-    const tasks = calls.filter((c) => c.url === '/api/agents/trinity-assistant/task')
-    expect(tasks[1].body.message.endsWith('Current message:\nNot now: Turn on the schedule "Mondays" for issue-digest.')).toBe(true)
+  it('sends the message with the page and the agents, and follows a turn step by step', async () => {
+    turns = [{ status: 'working', conversation_id: 'c1', activity: ['Looking at your agents'], cards: [], allowance: ALLOWANCE },
+      final('You have one agent, and it is running.')]
+    await openPanel()
+    await say('how are my agents?')
+    const first = sent(TURN)[0].body
+    expect(first).toMatchObject({ message: 'how are my agents?', counted: true, conversation_id: null,
+      context: { page: 'Dashboard', fleet: [{ name: 'issue-digest', status: 'running' }] } })
+    expect(sent(`${TURN}/continue`)[0].body).toEqual({ conversation_id: 'c1' })
+    expect(wrapper.findAll('.bubble').map((b) => b.text())).toEqual(['how are my agents?', 'You have one agent, and it is running.'])
+    expect(wrapper.get('[data-testid="assistant-plan"]').text()).toBe('Free · 24 messages left today')
   })
 
-  it('a proposal for an agent the page did not read never becomes a card', async () => {
-    reply = 'Sure.\n```trinity-card\n{"action":"stop-agent","agent":"trinity-system"}\n```'
-    await open()
-    await say('stop the system agent')
+  it('carries the conversation on in the next message', async () => {
+    turns = [final('Hello.'), final('Yes.')]
+    await openPanel()
+    await say('hi')
+    await say('still there?')
+    expect(sent(TURN)[1].body.conversation_id).toBe('c1')
+  })
+
+  it('makes a confirmed change itself, reads it back, and tells the assistant without counting it', async () => {
+    turns = [final('I can turn that on.', [{ action: 'schedule-on', agent: 'issue-digest', schedule_id: 's1' }]), final('It is on.')]
+    await openPanel()
+    await say('turn on the Monday schedule')
+    expect(wrapper.get('[data-testid="assistant-card"]').text()).toContain('Turn on the schedule "Mondays" for issue-digest')
+    await button('Confirm').trigger('click')
+    await flushPromises()
+    expect(sent('/api/agents/issue-digest/schedules/s1/enable')).toHaveLength(1)
+    const outcome = sent(TURN)[1].body
+    expect(outcome.message).toBe('Done: Turn on the schedule "Mondays" for issue-digest.')
+    expect(outcome.counted).toBe(false)
+    expect(wrapper.get('[data-testid="assistant-card"]').text()).toContain('Done.')
+  })
+
+  it('shows nothing for a change it was not allowed to propose', async () => {
+    turns = [final('Deleting it.', [{ action: 'delete-agent', agent: 'issue-digest' }, { action: 'start-agent', agent: 'someone-else' }])]
+    await openPanel()
+    await say('delete it')
     expect(wrapper.find('[data-testid="assistant-card"]').exists()).toBe(false)
-    expect(wrapper.findAll('.bubble')[1].text()).toBe('Sure.')
   })
 
-  describe('at the door', () => {
-    beforeEach(() => {
-      status = { ...FREE, mode: null, registered: false, email: null, plan: null, agents_built: null, agent_limit: null }
-    })
-
-    it('asks for an email first and provisions nothing until a route is chosen', async () => {
-      await open()
-      expect(wrapper.find('[data-testid="assistant-door"]').exists()).toBe(true)
-      expect(wrapper.find('[data-testid="assistant-input"]').exists()).toBe(false)
-      expect(calls.some((c) => c.url.endsWith('/provision'))).toBe(false)
-    })
-
-    it('refuses a bad email in the page, with an example, before calling anything', async () => {
-      await open()
-      await wrapper.find('[data-testid="assistant-email"]').setValue('not-an-email')
-      await wrapper.find('form').trigger('submit')
-      await flushPromises()
-      expect(wrapper.find('[data-testid="assistant-door"]').text()).toContain('you@example.com')
-      expect(calls.some((c) => c.url.endsWith('/register'))).toBe(false)
-    })
-
-    it('registers by email and code, then opens the conversation on the free plan', async () => {
-      await open()
-      await wrapper.find('[data-testid="assistant-email"]').setValue('Ada@Example.com')
-      await wrapper.find('form').trigger('submit')
-      await flushPromises()
-      expect(calls.find((c) => c.url.endsWith('/register')).body).toEqual({ email: 'ada@example.com' })
-      expect(wrapper.find('[data-testid="assistant-dev-code"]').text()).toContain('424242')
-
-      await wrapper.find('[data-testid="assistant-code"]').setValue('424242')
-      await wrapper.find('form').trigger('submit')
-      await settle()
-      expect(calls.find((c) => c.url.endsWith('/verify')).body).toEqual({ email: 'ada@example.com', code: '424242' })
-      expect(calls.some((c) => c.url.endsWith('/provision'))).toBe(true)
-      expect(wrapper.find('[data-testid="assistant-door"]').exists()).toBe(false)
-      expect(wrapper.find('[data-testid="assistant-plan"]').text()).toBe('Free plan · 0 of 2 agents built')
-    })
-
-    it('keeps the door open and says why when the code is wrong', async () => {
-      verifyFails = true
-      await open()
-      await wrapper.find('[data-testid="assistant-email"]').setValue('ada@example.com')
-      await wrapper.find('form').trigger('submit')
-      await flushPromises()
-      await wrapper.find('[data-testid="assistant-code"]').setValue('000000')
-      await wrapper.find('form').trigger('submit')
-      await flushPromises()
-      expect(wrapper.find('[data-testid="assistant-door"]').text()).toContain("That code doesn't match.")
-      expect(calls.some((c) => c.url.endsWith('/provision'))).toBe(false)
-    })
-
-    it('the other door is the basic helper, with no registration', async () => {
-      await open()
-      await wrapper.find('[data-testid="assistant-own-claude"]').trigger('click')
-      await settle()
-      expect(calls.find((c) => c.url.endsWith('/mode')).body).toEqual({ mode: 'local' })
-      expect(calls.some((c) => c.url.endsWith('/register'))).toBe(false)
-      expect(wrapper.find('[data-testid="assistant-plan"]').text()).toBe('Basic helper · your own Claude')
-      expect(wrapper.find('[data-testid="assistant-recipes"]').exists()).toBe(false)
-      expect(wrapper.find('[data-testid="assistant-start-pro"]').exists()).toBe(true)
-    })
+  it('shows a design in plain words and builds it only when Build is pressed', async () => {
+    const design = { title: 'Front desk', summary: 'Reads your inbox each morning.', to_do_after: [],
+      agents: [{ name: 'shop-desk', job: 'Reads the inbox and drafts replies.', credentials: ['MAILBOX_READ_CREDENTIAL'], schedule: { name: 'Morning', cron: '0 8 * * 1-5' }, calls: [] }] }
+    turns = [final('Here it is.', [{ action: 'build', design_id: DESIGN_ID, design }]), final('It is built.')]
+    await openPanel()
+    await say('build me an inbox agent')
+    const card = wrapper.get('[data-testid="assistant-card"]').text()
+    expect(card).toContain('Reads the inbox and drafts replies.')
+    expect(card).toContain("You'll add: MAILBOX_READ_CREDENTIAL")
+    expect(card).toContain('added switched off')
+    expect(sent(`/api/enterprise/assistant/designs/${DESIGN_ID}/build`)).toHaveLength(0)
+    await button('Build').trigger('click')
+    await flushPromises()
+    expect(sent(`/api/enterprise/assistant/designs/${DESIGN_ID}/build`)).toHaveLength(1)
+    expect(sent(TURN)[1].body.message).toBe('Done: Build "Front desk". Built shop-desk (11 files, schedule "Morning" added switched off, id s9).')
   })
 
-  describe('at the limit', () => {
-    beforeEach(() => {
-      status = { ...FREE, agents_built: 2, limit_reached: true }
-    })
+  it('tells the assistant when the person says not now, and makes no change', async () => {
+    turns = [final('Start it?', [{ action: 'start-agent', agent: 'issue-digest' }]), final('Fine.')]
+    await openPanel()
+    await say('start it')
+    await button('Not now').trigger('click')
+    await flushPromises()
+    expect(sent('/api/agents/issue-digest/start')).toHaveLength(0)
+    expect(sent(TURN)[1].body.message).toBe('Not now: Start issue-digest.')
+  })
 
-    it('says the allowance is used, keeps the conversation open, and upgrades on one click', async () => {
-      reply = 'Welcome to Pro.'
-      await open()
-      const banner = wrapper.find('[data-testid="assistant-limit"]')
-      expect(banner.text()).toContain('2 of 2 agents built')
-      expect(banner.text()).toContain('no payment is taken')
-      expect(wrapper.find('[data-testid="assistant-input"]').exists()).toBe(true)
+  it('at the limit, signs the person in, takes their own tick on the terms, and subscribes', async () => {
+    turns = [{ status: 'limit', conversation_id: 'c1', text: '', cards: [],
+      allowance: { ...ALLOWANCE, messages_left: 0, reached: 'messages', resets_at: new Date(Date.now() + 5 * 3600000).toISOString() } }]
+    await openPanel()
+    await say('one more thing')
+    expect(wrapper.get('[data-testid="assistant-limit"]').text()).toContain('in about 5 hours')
+    await wrapper.get('[data-testid="assistant-upgrade"]').trigger('click')
+    await wrapper.get('[data-testid="assistant-email"]').setValue('ada@example.com')
+    await wrapper.get('[data-testid="assistant-account"] form').trigger('submit')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="assistant-dev-code"]').text()).toContain('424242')
 
-      await banner.find('button').trigger('click')
-      await settle()
-      expect(calls.filter((c) => c.url.endsWith('/upgrade'))).toHaveLength(1)
-      expect(wrapper.find('[data-testid="assistant-limit"]').exists()).toBe(false)
-      expect(wrapper.find('[data-testid="assistant-plan"]').text()).toBe('Trinity Pro')
-      const told = calls.filter((c) => c.url === '/api/agents/trinity-assistant/task').pop()
-      expect(told.body.message.endsWith('Current message:\nDone: Upgrade this instance to Trinity Pro.')).toBe(true)
-    })
+    await wrapper.get('[data-testid="assistant-code"]').setValue('424242')
+    await wrapper.get('[data-testid="assistant-account"] form').trigger('submit')
+    await flushPromises()
+    expect(sent('/api/enterprise/assistant/account/verify')).toHaveLength(0)   // the terms were not ticked
+    expect(wrapper.get('[data-testid="assistant-account"]').text()).toContain('Accept the terms to continue.')
 
-    it('an upgrade card from the assistant runs the same upgrade', async () => {
-      reply = 'The free allowance is used up.\n```trinity-card\n{"action": "upgrade"}\n```'
-      await open()
-      await say('build me another agent')
-      const card = wrapper.find('[data-testid="assistant-card"]')
-      expect(card.text()).toContain('Upgrade this instance to Trinity Pro')
-      expect(card.text()).toContain('Mock checkout: no payment is taken.')
-      // the banner offering the same upgrade steps aside while the card is open
-      expect(wrapper.find('[data-testid="assistant-limit"]').exists()).toBe(false)
-      reply = 'You are on Pro.'
-      await card.findAll('button')[0].trigger('click')
-      await settle()
-      expect(calls.filter((c) => c.url.endsWith('/upgrade'))).toHaveLength(1)
-      expect(wrapper.find('[data-testid="assistant-card"]').text()).toContain('Done.')
-    })
+    await wrapper.get('[data-testid="assistant-terms"]').setValue(true)
+    await wrapper.get('[data-testid="assistant-account"] form').trigger('submit')
+    await flushPromises()
+    expect(sent('/api/enterprise/assistant/account/verify')[0].body).toEqual({ email: 'ada@example.com', code: '424242', accept_terms: true, terms_version: 't1' })
+
+    turns = [final('You are on Trinity Pro now.', [], { ...ALLOWANCE, plan: 'pro', messages_left: 600 })]
+    await wrapper.get('[data-testid="assistant-subscribe"]').trigger('click')
+    await flushPromises()
+    expect(sent('/api/enterprise/assistant/subscription/start')).toHaveLength(1)
+    expect(sent(TURN)[1].body).toMatchObject({ message: 'Done: Subscribe to Trinity Pro.', counted: false })
+    expect(wrapper.find('[data-testid="assistant-account"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="assistant-limit"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="assistant-plan"]').text()).toBe('Trinity Pro')
+  })
+
+  it('says so when the code is wrong and stays on the code step', async () => {
+    verifyFails = true
+    turns = [final('Subscribe?', [{ action: 'upgrade' }])]
+    await openPanel()
+    await say('I want more')
+    await button('Continue').trigger('click')
+    await wrapper.get('[data-testid="assistant-email"]').setValue('ada@example.com')
+    await wrapper.get('[data-testid="assistant-account"] form').trigger('submit')
+    await flushPromises()
+    await wrapper.get('[data-testid="assistant-code"]').setValue('000000')
+    await wrapper.get('[data-testid="assistant-terms"]').setValue(true)
+    await wrapper.get('[data-testid="assistant-account"] form').trigger('submit')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="assistant-account"]').text()).toContain("That code didn't match.")
+    expect(wrapper.find('[data-testid="assistant-code"]').exists()).toBe(true)
+  })
+
+  it('refuses a malformed email before asking Trinity for anything', async () => {
+    turns = [final('Subscribe?', [{ action: 'upgrade' }])]
+    await openPanel()
+    await say('I want more')
+    await button('Continue').trigger('click')
+    await wrapper.get('[data-testid="assistant-email"]').setValue('not-an-email')
+    await wrapper.get('[data-testid="assistant-account"] form').trigger('submit')
+    await flushPromises()
+    expect(sent('/api/enterprise/assistant/account/start')).toHaveLength(0)
+    expect(wrapper.get('[data-testid="assistant-account"]').text()).toContain('full email address')
   })
 })

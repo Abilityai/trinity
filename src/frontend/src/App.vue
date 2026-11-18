@@ -71,8 +71,20 @@ const showAssistant = computed(() =>
   authStore.profileVerified &&
   authStore.user?.role === 'admin' &&
   enterpriseStore.isEntitled(ASSISTANT_FEATURE) &&
-  !assistantStore.absent
+  assistantStore.available
 )
+// Whether the assistant is offered is the instance's to say, so it is asked
+// once an admin on an entitled build is known. Until it answers, and whenever
+// the answer is no, the help widget stays.
+const mayHaveAssistant = computed(() =>
+  authStore.isAuthenticated &&
+  authStore.profileVerified &&
+  authStore.user?.role === 'admin' &&
+  enterpriseStore.isEntitled(ASSISTANT_FEATURE)
+)
+watch(mayHaveAssistant, (may) => {
+  if (may && !assistantStore.status && !assistantStore.absent) assistantStore.loadStatus()
+}, { immediate: true })
 // #3446: a route may name tabs on which the floating launcher would cover one
 // of the page's own controls (the agent Chat composer's Send).
 const helpLauncherHidden = computed(() =>

@@ -1,15 +1,18 @@
 /**
  * Confirm cards for the assistant panel.
  *
- * The assistant never changes a setting with its own key. It PROPOSES a change
- * as a fenced `trinity-card` block in its reply; the page turns that into a
- * card, and on Confirm makes the change through the same route the app's own
- * control uses, with the person's session. Then it reads the result back.
+ * The assistant cannot change a setting. It PROPOSES a change; the page turns
+ * the proposal into a card, and on Confirm makes the change through the same
+ * route the app's own control uses, with the person's session. Then it reads
+ * the result back.
  *
- * The reply is model-written text, so nothing in it is trusted: a proposal is
+ * A proposal is written by a model, so nothing in it is trusted: it is
  * accepted only when its action is in this catalog, it carries exactly the
  * fields that action takes, and every agent it names is one the page itself
  * read from the instance.
+ *
+ * Two cards are not in the catalog because the panel handles them itself:
+ * `build` (a design the person approves) and `upgrade` (the subscription).
  */
 
 const enc = encodeURIComponent
@@ -87,20 +90,7 @@ export const CARD_ACTIONS = Object.freeze({
       return data !== null && !permitted(data).includes(c.to)
     },
   },
-  // Takes no fields. Moves a registered free instance to Trinity Pro. (On an
-  // instance that has not registered, the panel opens the sign-up door
-  // instead of running this.)
-  upgrade: {
-    fields: [],
-    label: () => 'Upgrade this instance to Trinity Pro',
-    note: 'Lifts the limit on agents Trinity builds for you.',
-    call: () => ['post', UPGRADE_URL, {}],
-    held: async (http) => (await read(http, STATUS_URL))?.plan === 'pro',
-  },
 })
-
-export const STATUS_URL = '/api/enterprise/assistant/status'
-export const UPGRADE_URL = '/api/enterprise/assistant/upgrade'
 
 const AGENT_FIELDS = ['agent', 'from', 'to']
 
@@ -158,38 +148,62 @@ export function validCard(raw, fleet) {
   return card
 }
 
-const BLOCK = /```trinity-card\s*\n([\s\S]*?)```/g
-export const MAX_CARDS_PER_REPLY = 2
+export const MAX_CARDS_PER_REPLY = 3
+const DESIGN_ID = /^[0-9a-f-]{36}$/
+
+/** A design to build: an id and what the person is shown of it. */
+export function validBuild(raw) {
+  if (!raw || raw.action !== 'build' || typeof raw.design_id !== 'string' || !DESIGN_ID.test(raw.design_id)) return null
+  const d = raw.design
+  if (!d || typeof d !== 'object' || !Array.isArray(d.agents) || d.agents.length === 0) return null
+  const text = (v, max) => String(v ?? '').slice(0, max)
+  const list = (v, max) => (Array.isArray(v) ? v.slice(0, 12).map((x) => text(x, max)) : [])
+  return {
+    action: 'build',
+    design_id: raw.design_id,
+    design: {
+      title: text(d.title, 120) || 'New agents',
+      summary: text(d.summary, 1200),
+      to_do_after: list(d.to_do_after, 300),
+      agents: d.agents.slice(0, 20).map((a) => ({
+        name: text(a?.name, 60),
+        job: text(a?.job, 400),
+        credentials: list(a?.credentials, 80),
+        schedule: a?.schedule ? { name: text(a.schedule.name, 120), cron: text(a.schedule.cron, 60) } : null,
+        calls: list(a?.calls, 60),
+      })),
+    },
+  }
+}
 
 /**
- * Splits a reply into the words to show and the cards to offer. Every
- * `trinity-card` block leaves the text, valid or not: a refused proposal must
- * not show as raw JSON either.
+ * The cards of one reply. `raw` is what the gateway sent; every entry is
+ * checked here and anything that does not pass is dropped, silently.
  */
-export function parseReply(text, fleet) {
+export function acceptCards(raw, fleet) {
   const cards = []
-  const shown = String(text || '').replace(BLOCK, (_, body) => {
-    let raw = null
-    try {
-      raw = JSON.parse(body)
-    } catch {
-      raw = null
-    }
-    const card = validCard(raw, fleet)
+  for (const item of Array.isArray(raw) ? raw : []) {
+    let card = null
+    if (item?.action === 'build') card = validBuild(item)
+    else if (item?.action === 'upgrade' && Object.keys(item).length === 1) card = { action: 'upgrade' }
+    else card = validCard(item, fleet)
     const duplicate = card && cards.some((c) => JSON.stringify(c) === JSON.stringify(card))
     if (card && !duplicate && cards.length < MAX_CARDS_PER_REPLY) cards.push(card)
-    return ''
-  })
-  return { text: shown.replace(/\n{3,}/g, '\n\n').trim(), cards }
+  }
+  return cards
 }
 
 export function cardLabel(card, fleet) {
+  if (card.action === 'build') return `Build "${card.design.title}"`
+  if (card.action === 'upgrade') return 'Subscribe to Trinity Pro'
   return CARD_ACTIONS[card.action].label(card, fleet)
 }
 
 /** The line under a card's title. Every change to an agent runs as the person. */
 export function cardNote(card) {
-  return CARD_ACTIONS[card.action].note || 'Runs as you, not as the assistant.'
+  if (card.action === 'build') return 'Creates these agents on this instance, as you. Nothing is switched on.'
+  if (card.action === 'upgrade') return 'A larger allowance and bigger teams. You sign in with your email first.'
+  return 'Runs as you, not as the assistant.'
 }
 
 // A 4xx is Trinity refusing: nothing changed. No answer, or a 5xx, may have
@@ -231,4 +245,19 @@ export function outcomeLine(kind, label, reason) {
   if (kind === 'declined') return `Not now: ${label}.`
   if (kind === 'refused') return `That didn't work: ${label}. ${reason || ''}`.trim()
   return `Not sure it worked: ${label}. ${reason || ''}`.trim()
+}
+
+/** What a finished build is told to the assistant as: what exists now, and what does not. */
+export function buildOutcome(card, report) {
+  const label = cardLabel(card)
+  const rows = Array.isArray(report?.agents) ? report.agents : []
+  const made = rows.filter((r) => r.created && !r.problem)
+  const troubled = rows.filter((r) => r.problem)
+  if (!rows.length) return { kind: 'unsure', line: outcomeLine('unsure', label, 'The instance reported nothing.'), reason: 'The instance reported nothing.' }
+  const parts = made.map((r) => `${r.name} (${r.files} files${r.schedule ? `, schedule "${r.schedule.name}" added switched off, id ${r.schedule.id}` : ''})`)
+  const problems = troubled.map((r) => `${r.name}: ${r.problem}`).join('; ')
+  if (!troubled.length) return { kind: 'done', line: `${outcomeLine('done', label)} Built ${parts.join(', ')}.`, reason: '' }
+  const kind = made.length ? 'unsure' : 'refused'
+  const reason = made.length ? `Built ${parts.join(', ')}. Not finished: ${problems}.` : problems
+  return { kind, line: outcomeLine(kind, label, reason), reason }
 }

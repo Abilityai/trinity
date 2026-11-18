@@ -1,92 +1,82 @@
 /**
  * The assistant panel's store.
  *
- * One conversation with the instance's assistant agent, behind the
- * entitlement-gated `/api/enterprise/assistant/*`. On an OSS or unentitled
- * build those routes answer 404/403 and `absent` stays true, so the panel
- * never renders and the help widget stays as it is.
+ * The assistant runs on Trinity's side. This store carries one conversation
+ * to it through the instance's backend (`/api/enterprise/assistant/*`), which
+ * also runs whatever the assistant needs to look up, as the signed-in admin.
+ * On a build without those routes they answer 404/403, `absent` stays true and
+ * the panel is never offered.
  *
- * Before the first conversation the admin chooses who serves the assistant:
+ * Nothing is sent anywhere until the person sends a message. Reading the
+ * status does not contact Trinity for an instance that never has.
  *
- *   - Trinity (the gateway): they register this instance with their email and
- *     a one-time code. It works at once, with an allowance on the free plan.
- *   - their own Claude (the basic helper): no registration.
+ * A turn is a few short requests, not one long one: each answer is either the
+ * reply or "working", with a line saying what is being looked at.
  *
- * The plan and the allowance are whatever the gateway reports; nothing here
- * counts or caches them.
- *
- * The chat goes through the ordinary task endpoint with the person's session.
- * That endpoint is stateless, so each turn carries the page, the fleet and the
- * conversation (utils/assistantContext.js). The conversation lives in this
- * store only. A change the assistant proposes is a card the person confirms;
- * the page makes it and reads it back (utils/assistantCards.js).
+ * A change the assistant proposes is a card the person confirms; the page
+ * makes it and reads it back (utils/assistantCards.js). The allowance and the
+ * plan are whatever the gateway reports; nothing here counts or caches them.
  */
 import { defineStore } from 'pinia'
 import api from '../api'
-import { buildFleet, buildPrompt, describePage } from '../utils/assistantContext'
-import { STATUS_URL, cardLabel, cardNote, outcomeLine, parseReply, runCard } from '../utils/assistantCards'
+import { buildContext, buildFleet } from '../utils/assistantContext'
+import { acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
 
 export const FEATURE_ID = 'assistant'
 
 const BASE = '/api/enterprise/assistant'
-const POLL_MS = 2000
-const POLL_LIMIT = 450 // 15 minutes
-const PROVISION_TIMEOUT_MS = 180000
-const TERMINAL = ['success', 'failed', 'cancelled']
-
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const STEP_TIMEOUT_MS = 260000
+const BUILD_TIMEOUT_MS = 600000
+const MAX_STEPS = 40
 
 let nextId = 1
 const newId = () => `m${nextId++}`
 
+const detail = (error) => error?.response?.data?.detail
 const words = (error, fallback) => {
-  const detail = error?.response?.data?.detail
-  return (typeof detail === 'string' ? detail : detail?.message) || fallback
+  const d = detail(error)
+  return (typeof d === 'string' ? d : d?.message) || fallback
 }
+
+const closedAccount = () => ({ step: null, email: '', devCode: '', terms: null, busy: false, error: '' })
 
 export const useAssistantStore = defineStore('assistant', {
   state: () => ({
-    agentName: null,
     absent: false,       // 404/403 seen: no assistant on this build
     status: null,        // GET /status; null until first read
     statusError: '',
-    door: { step: 'email', email: '', devCode: '', busy: false, error: '', open: false },
-    catalog: { templates: [], playbooks: [] },
-    ready: false,        // the agent exists, is running and has its instructions
-    preparing: false,
-    prepareError: '',
+    conversationId: null,
     messages: [],        // { id, role: 'user' | 'assistant' | 'note', content, cards? }
     sending: false,
+    activity: '',        // what is being looked at right now
     sendError: '',
-    upgrading: false,
+    limit: null,         // the allowance, when the last answer was "limit"
+    account: closedAccount(),
     fleet: [],
   }),
 
   getters: {
-    mode: (state) => state.status?.mode || null,
-    /** The door shows until a mode is chosen, or when asked for from the basic helper. */
-    atDoor: (state) => Boolean(state.status) && (!state.status.mode || state.door.open),
-    onGateway: (state) => state.status?.mode === 'gateway',
-    limitReached: (state) => state.status?.mode === 'gateway' && Boolean(state.status?.limit_reached),
-    /** One line for the header: who is serving, and how much of the allowance is used. */
+    available: (state) => !state.absent && Boolean(state.status?.available),
+    subscribed: (state) => state.status?.plan === 'pro',
+    /** One line for the header: the plan and what is left of the allowance. */
     planLine: (state) => {
       const s = state.status
-      if (!s?.mode) return 'The agent that helps you run this instance'
-      if (s.mode === 'local') return 'Basic helper · your own Claude'
-      if (s.gateway_reachable === false) return "Trinity · can't reach the gateway"
+      if (!s?.contacted) return 'Ask it anything about this instance'
+      if (s.reachable === false) return "Can't reach Trinity right now"
+      const a = s.allowance
       if (s.plan === 'pro') return 'Trinity Pro'
-      if (s.agent_limit == null) return 'Free plan'
-      return `Free plan · ${s.agents_built ?? 0} of ${s.agent_limit} agents built`
+      if (!a) return 'Free'
+      const period = a.period_hours === 24 ? 'today' : a.period_hours === 168 ? 'this week' : 'for now'
+      return `Free · ${a.messages_left} ${a.messages_left === 1 ? 'message' : 'messages'} left ${period}`
     },
   },
 
   actions: {
     async loadStatus() {
       try {
-        const { data } = await api.get(STATUS_URL)
+        const { data } = await api.get(`${BASE}/status`)
         this.status = data
-        this.agentName = data.agent_name
         this.statusError = ''
       } catch (error) {
         const code = error?.response?.status
@@ -95,125 +85,6 @@ export const useAssistantStore = defineStore('assistant', {
           return
         }
         this.statusError = "Couldn't load the assistant. Check your connection and try again."
-      }
-    },
-
-    /** Step 1 of registering: the gateway sends a code to this email. */
-    async register(email) {
-      const address = String(email || '').trim().toLowerCase()
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) {
-        this.door.error = 'Enter a full email address, like you@example.com.'
-        return
-      }
-      this.door.busy = true
-      this.door.error = ''
-      try {
-        const { data } = await api.post(`${BASE}/register`, { email: address })
-        this.door.email = data.email || address
-        this.door.devCode = data.dev_code || ''
-        this.door.step = 'code'
-      } catch (error) {
-        this.door.error = words(error, "Couldn't send the code. Try again.")
-      } finally {
-        this.door.busy = false
-      }
-    },
-
-    /** Step 2: the code proves the email; the instance is now registered to it. */
-    async verify(code) {
-      const digits = String(code || '').trim()
-      if (!digits) {
-        this.door.error = 'Enter the code from the email.'
-        return
-      }
-      this.door.busy = true
-      this.door.error = ''
-      try {
-        const { data } = await api.post(`${BASE}/verify`, { email: this.door.email, code: digits })
-        this.status = data
-        this.enter()
-      } catch (error) {
-        this.door.error = words(error, "That code didn't work. Check it and try again.")
-      } finally {
-        this.door.busy = false
-      }
-    },
-
-    /** The other door: the basic helper on the instance's own Claude. */
-    async useOwnClaude() {
-      this.door.busy = true
-      this.door.error = ''
-      try {
-        const { data } = await api.post(`${BASE}/mode`, { mode: 'local' })
-        this.status = data
-        this.enter()
-      } catch (error) {
-        this.door.error = words(error, "Couldn't switch. Try again.")
-      } finally {
-        this.door.busy = false
-      }
-    },
-
-    /** Leave the door for the conversation, on whichever route was chosen. */
-    enter() {
-      this.door = { step: 'email', email: '', devCode: '', busy: false, error: '', open: false }
-      this.ready = false
-      this.messages = []
-      this.prepare()
-    },
-
-    backToEmail() {
-      this.door.step = 'email'
-      this.door.devCode = ''
-      this.door.error = ''
-    },
-
-    openDoor() {
-      this.door.open = true
-    },
-
-    closeDoor() {
-      this.door.open = false
-    },
-
-    /** Make sure the agent is there. Safe to call on every open. */
-    async prepare() {
-      if (this.ready || this.preparing || this.absent || !this.mode) return
-      this.preparing = true
-      this.prepareError = ''
-      try {
-        const { data } = await api.post(`${BASE}/provision`, {}, { timeout: PROVISION_TIMEOUT_MS })
-        this.agentName = data.agent_name
-        if (!data.persona_installed) {
-          this.prepareError = 'The assistant was created but is not running yet. Try again in a moment.'
-          return
-        }
-        this.ready = true
-        this.refreshFleet()
-        this.loadCatalog()
-      } catch (error) {
-        const status = error?.response?.status
-        if (status === 404 || status === 403) {
-          this.absent = true
-          return
-        }
-        this.prepareError = words(error, "Couldn't set up the assistant. Check that Trinity can create agents, then try again.")
-      } finally {
-        this.preparing = false
-      }
-    },
-
-    /** Recipe and playbook names from the gateway. Optional: a failed read shows none. */
-    async loadCatalog() {
-      if (!this.onGateway) {
-        this.catalog = { templates: [], playbooks: [] }
-        return
-      }
-      try {
-        const { data } = await api.get(`${BASE}/catalog`)
-        this.catalog = { templates: data.templates || [], playbooks: data.playbooks || [] }
-      } catch {
-        this.catalog = { templates: [], playbooks: [] }
       }
     },
 
@@ -232,131 +103,205 @@ export const useAssistantStore = defineStore('assistant', {
         read('/api/ops/schedules', {}),
       ])
       if (!Array.isArray(agents)) return this.fleet
-      this.fleet = buildFleet(agents, autonomy, schedules?.schedules || [], this.agentName)
+      this.fleet = buildFleet(agents, autonomy, schedules?.schedules || [])
       return this.fleet
     },
 
     /**
      * One turn. `shown` false sends a line the page wrote (a card's outcome):
-     * it shows as a short note, not as something the person said.
+     * it shows as a short note, not as something the person said, and it is
+     * not counted against their messages.
      */
     async send(text, route, { shown = true } = {}) {
       const message = String(text || '').trim()
-      if (!message || this.sending || !this.ready) return
+      if (!message || this.sending) return
       this.sendError = ''
-      const history = this.messages
-        .filter((m) => m.role !== 'note' || m.forAgent)
-        .map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }))
-      this.messages.push({ id: newId(), role: shown ? 'user' : 'note', content: message, forAgent: !shown })
+      this.limit = null
+      this.messages.push({ id: newId(), role: shown ? 'user' : 'note', content: message })
       this.sending = true
+      this.activity = ''
       try {
         const fleet = await this.refreshFleet()
-        const prompt = buildPrompt({ page: describePage(route), fleet, history, message })
-        const { data } = await api.post(`/api/agents/${encodeURIComponent(this.agentName)}/task`, {
-          message: prompt,
-          async_mode: true,
-        })
-        if (!data.execution_id) throw new Error('no execution id')
+        let { data } = await api.post(`${BASE}/turn`, {
+          conversation_id: this.conversationId,
+          message,
+          context: buildContext(route, fleet),
+          counted: shown,
+        }, { timeout: STEP_TIMEOUT_MS })
 
-        const execution = await this.awaitExecution(data.execution_id)
-        if (!execution) {
-          this.sendError = 'The assistant is taking longer than expected. Its reply will be in its Tasks list when it finishes.'
+        for (let step = 0; data.status === 'working' && step < MAX_STEPS; step++) {
+          this.conversationId = data.conversation_id
+          this.activity = (data.activity || []).join(' · ')
+          ;({ data } = await api.post(`${BASE}/turn/continue`,
+            { conversation_id: data.conversation_id }, { timeout: STEP_TIMEOUT_MS }))
+        }
+        this.conversationId = data.conversation_id || this.conversationId
+        if (data.allowance && this.status) this.status = { ...this.status, contacted: true, reachable: true, allowance: data.allowance, plan: data.allowance.plan }
+
+        if (data.status === 'limit') {
+          this.limit = data.allowance || {}
           return
         }
-        if (execution.status !== 'success') {
-          this.sendError = execution.error
-            ? `The assistant couldn't finish: ${execution.error}`
-            : "The assistant couldn't finish that. Try again."
+        if (data.status === 'working') {
+          this.sendError = 'That took more steps than expected. Ask me to continue.'
           return
         }
-        // It may have created or changed agents: read again before validating
-        // cards against the fleet, and let the page behind the panel catch up.
+        // It may have added a schedule: read again before checking cards
+        // against the fleet, and let the page behind the panel catch up.
         const after = await this.refreshFleet()
         useAgentsStore().fetchAgents().catch(() => {})
-        const { text: reply, cards } = parseReply(execution.response, after)
+        const cards = acceptCards(data.cards, after)
         this.messages.push({
           id: newId(),
           role: 'assistant',
-          content: reply || 'Done.',
+          content: data.text || (cards.length ? '' : 'Done.'),
           cards: cards.map((card) => ({
             id: newId(), card, label: cardLabel(card, after), note: cardNote(card), state: 'open', reason: '',
           })),
         })
       } catch (error) {
-        const status = error?.response?.status
-        this.sendError = status === 503
-          ? 'The assistant is not running. Start it from the Agents page, then try again.'
-          : "Couldn't reach the assistant. Check your connection and try again."
+        const code = error?.response?.status
+        if (code === 404 || code === 403) this.absent = true
+        this.sendError = words(error, "Couldn't reach the assistant. Check your connection and try again.")
       } finally {
         this.sending = false
-        // The gateway counts what was built during the turn; show its number.
-        if (this.onGateway) this.loadStatus()
+        this.activity = ''
+        if (!this.status?.contacted) this.loadStatus()
       }
-    },
-
-    async awaitExecution(executionId) {
-      const url = `/api/agents/${encodeURIComponent(this.agentName)}/executions/${encodeURIComponent(executionId)}`
-      for (let i = 0; i < POLL_LIMIT; i++) {
-        await wait(POLL_MS)
-        try {
-          const { data } = await api.get(url)
-          if (TERMINAL.includes(data?.status)) return data
-        } catch {
-          // a missed poll is not an outcome; keep waiting
-        }
-      }
-      return null
     },
 
     /** The person answered a card. Confirm makes the change as them. */
     async answerCard(messageId, cardId, confirm, route) {
       const entry = this.messages.find((m) => m.id === messageId)?.cards?.find((c) => c.id === cardId)
       if (!entry || entry.state !== 'open') return
-      // On an instance that has not registered, "upgrade" means "start": it
-      // opens the door rather than a checkout, and nothing is told to the agent.
-      if (confirm && entry.card.action === 'upgrade' && !this.status?.registered) {
+      if (!confirm) {
         entry.state = 'declined'
-        entry.reason = 'Enter your email to start.'
-        this.openDoor()
+        return this.send(outcomeLine('declined', entry.label), route, { shown: false })
+      }
+      if (entry.card.action === 'upgrade') {
+        // Not a change the page can make by itself: the person signs in first.
+        entry.state = 'declined'
+        entry.reason = 'Continue below.'
+        this.openAccount()
         return
       }
-      let kind = 'declined'
-      let reason = ''
-      if (confirm) {
-        entry.state = 'running'
+      entry.state = 'running'
+      let outcome
+      if (entry.card.action === 'build') {
+        outcome = await this.build(entry.card)
+      } else {
         const result = await runCard(api, entry.card, this.fleet)
-        kind = result.kind
-        reason = result.reason || ''
-        useAgentsStore().fetchAgents().catch(() => {})
-        if (entry.card.action === 'upgrade') await this.loadStatus()
+        outcome = { kind: result.kind, reason: result.reason || '', line: outcomeLine(result.kind, entry.label, result.reason) }
       }
-      entry.state = kind
-      entry.reason = reason
-      await this.send(outcomeLine(kind, entry.label, reason), route, { shown: false })
+      useAgentsStore().fetchAgents().catch(() => {})
+      entry.state = outcome.kind
+      entry.reason = outcome.reason
+      await this.send(outcome.line, route, { shown: false })
     },
 
-    /** The upgrade button outside a card: same route, same read-back. */
-    async upgrade(route) {
-      if (this.upgrading) return
-      this.upgrading = true
-      this.sendError = ''
+    /** Build an approved design. The instance creates the agents as this person. */
+    async build(card) {
       try {
-        const { data } = await api.post(`${BASE}/upgrade`, {})
-        this.status = data
-        if (data.plan === 'pro' && this.ready) {
-          await this.send(outcomeLine('done', 'Upgrade this instance to Trinity Pro'), route, { shown: false })
-        }
+        const { data } = await api.post(`${BASE}/designs/${encodeURIComponent(card.design_id)}/build`, {},
+          { timeout: BUILD_TIMEOUT_MS })
+        return buildOutcome(card, data)
       } catch (error) {
-        this.sendError = words(error, "Couldn't upgrade. Try again.")
-      } finally {
-        this.upgrading = false
+        const code = error?.response?.status
+        const reason = words(error, code ? `Trinity refused it (${code}).` : "Couldn't reach Trinity, so it may not have been built.")
+        const kind = code && code < 500 ? 'refused' : 'unsure'
+        return { kind, reason, line: outcomeLine(kind, cardLabel(card), reason) }
       }
+    },
+
+    // -- signing in and subscribing ---------------------------------------
+    openAccount() {
+      this.account = { ...closedAccount(), step: this.status?.email ? 'subscribe' : 'email' }
+    },
+
+    closeAccount() {
+      this.account = closedAccount()
+    },
+
+    /** Step 1: Trinity sends a code to this email. */
+    async startAccount(email) {
+      const address = String(email || '').trim().toLowerCase()
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) {
+        this.account.error = 'Enter a full email address, like you@example.com.'
+        return
+      }
+      this.account.busy = true
+      this.account.error = ''
+      try {
+        const { data } = await api.post(`${BASE}/account/start`, { email: address })
+        this.account = { ...this.account, step: 'code', email: data.email || address, devCode: data.dev_code || '', terms: data.terms || null }
+      } catch (error) {
+        this.account.error = words(error, "Couldn't send the code. Try again.")
+      } finally {
+        this.account.busy = false
+      }
+    },
+
+    /**
+     * Step 2: the code proves the email. `accepted` is the person's own tick
+     * on the terms; it is passed on as given and never set here.
+     */
+    async verifyAccount(code, accepted) {
+      const digits = String(code || '').trim()
+      if (!digits) {
+        this.account.error = 'Enter the code from the email.'
+        return
+      }
+      if (!accepted) {
+        this.account.error = 'Accept the terms to continue.'
+        return
+      }
+      this.account.busy = true
+      this.account.error = ''
+      try {
+        const { data } = await api.post(`${BASE}/account/verify`, {
+          email: this.account.email, code: digits, accept_terms: true, terms_version: this.account.terms?.version || '',
+        })
+        this.status = { ...this.status, ...data }
+        this.account.step = 'subscribe'
+      } catch (error) {
+        this.account.error = words(error, "That code didn't work. Check it and try again.")
+      } finally {
+        this.account.busy = false
+      }
+    },
+
+    /** Step 3: start the subscription. A checkout address, when there is one, opens in a new tab. */
+    async subscribe(route) {
+      this.account.busy = true
+      this.account.error = ''
+      try {
+        const { data } = await api.post(`${BASE}/subscription/start`, {})
+        this.status = { ...this.status, ...data }
+        if (data.checkout_url) {
+          window.open(data.checkout_url, '_blank', 'noopener')
+          this.account.step = 'checkout'
+          return
+        }
+        this.account = closedAccount()
+        this.limit = null
+        if (this.conversationId) await this.send(outcomeLine('done', 'Subscribe to Trinity Pro'), route, { shown: false })
+      } catch (error) {
+        this.account.error = words(error, "Couldn't start the subscription. Try again.")
+      } finally {
+        this.account.busy = false
+      }
+    },
+
+    backToEmail() {
+      this.account = { ...closedAccount(), step: 'email' }
     },
 
     newConversation() {
       if (this.sending) return
       this.messages = []
+      this.conversationId = null
       this.sendError = ''
+      this.limit = null
     },
   },
 })
