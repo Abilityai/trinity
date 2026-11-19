@@ -326,5 +326,6 @@ async def validate_mcp_api_key_http_endpoint(request: Request):
         "user_email": result.get("user_email"),
         "key_name": result.get("key_name"),
         "agent_name": result.get("agent_name"),  # Agent-to-agent collaboration
-        "scope": result.get("scope", "user")  # 'user' or 'agent'
+        "scope": result.get("scope", "user"),  # 'user' or 'agent'
+        "user_role": result.get("user_role", "user"),
     }
