@@ -1000,7 +1000,7 @@
 - **GitHub Issue**: abilityai/trinity-enterprise#706, abilityai/trinity-enterprise#707
 
 ### 11.20 Repo-Scoped Token Seam (trinity-enterprise#1277)
-- **Status**: ✅ Implemented (seam only; no call site uses it yet)
+- **Status**: ✅ Implemented (used by 11.21)
 - **Priority**: P1
 - **Description**: An open-core seam through which a registered provider can supply a short-lived GitHub token scoped to one repository. With no provider registered, resolution is PAT-only and unchanged.
 - **Requirements**:
@@ -1013,5 +1013,24 @@
   - **FR-7 — Scrubbers**: installation tokens (`ghs_<appid>_<JWT>`, about 390 characters, containing `.`, `-`, `_`) are redacted whole by `utils/credential_sanitizer.py` (backend and agent-server copies), `src/frontend/src/utils/scrub.js` and `components/reports/reportSummary.js`.
 - **Tests**: `tests/unit/test_ent1277_github_token_resolver.py`, `tests/unit/test_credential_sanitizer_{backend,agent}.py`, `tests/unit/test_ec_input_hardening_properties.py`, `src/frontend/tests/unit/reportSummary.spec.js`
 - **GitHub Issue**: abilityai/trinity-enterprise#1277
+
+### 11.21 Use-Time Git Token for Agent Containers (trinity-enterprise#1278)
+- **Status**: ✅ Implemented
+- **Priority**: P1
+- **Description**: When a registered repo-token provider (11.20) covers an agent's repo, the agent's container holds no long-lived GitHub token. It fetches a short-lived, repo-scoped token from the backend for each git or `gh` operation. With no provider registered nothing changes.
+- **Requirements**:
+  - **FR-1 — Broker flag**: a container in this mode carries `TRINITY_GIT_TOKEN_BROKER=1` and no `GITHUB_PAT`, `GH_TOKEN` or `GITHUB_TOKEN`. Repo and sync variables are baked as before.
+  - **FR-2 — One mode decision**: `github_token_provider.wants_broker` decides the mode for agent creation, the recreate matcher (`check_github_pat_env_matches`) and the recreate env writer (`_apply_git_env_from_db`). The flag stands only where the platform PAT would have been baked. A per-agent PAT outranks the provider. A container that was deliberately given no credential stays without one.
+  - **FR-3 — Unknown coverage**: `github_token_provider.coverage(repo)` answers True, False, or None when the provider cannot answer within 5 seconds. On None a container keeps the mode it has; a new agent gets the PAT and converts at its next start.
+  - **FR-4 — Leaving the mode**: when the repo stops being covered, the next start recreates the container with the platform PAT.
+  - **FR-5 — Token route**: `GET /api/agents/{name}/git/token`. Only the agent's own key may call it; a person or another agent's key gets 403. It answers 200 `{token, expires_at}` with `Cache-Control: no-store` for a broker-mode container whose repo resolves to the provider tier, 204 otherwise, and 503 when the provider covers the repo and cannot produce a token or the container cannot be read. It never returns a PAT. The route is on the own-runtime allowlists (`_EPHEMERAL_ALLOWED_ROUTES`), so an ephemeral agent's key and an agent owned by a Workspace-only person can reach it.
+  - **FR-6 — Credential helper**: with the flag set, `git-credential-trinity` asks the route first, sending the agent key to `curl` on stdin. 200 yields the token with username `oauth2`. 204 continues to the existing sources. Any other outcome, including a missing backend URL, agent key or agent name, yields no credential and the stderr marker `TRINITY_GIT_NO_CREDENTIAL host=<host> broker=<status>`; the existing sources are skipped.
+  - **FR-7 — `gh`**: `/usr/local/bin/gh` wraps the real `gh`. In broker mode with no token in the environment it asks the credential helper on every call and sets `GH_TOKEN` for that call. The token covers what the provider grants, which can be narrower than a PAT.
+  - **FR-8 — Boot**: `startup.sh` treats the flag as a resolving credential without a network call, and removes `GITHUB_PAT`, `GH_TOKEN` and `GITHUB_TOKEN` lines from the workspace `.env`, which the agent server re-reads at every spawn.
+  - **FR-9 — Rotation**: a platform PAT rotation skips broker-mode containers (reported as `skipped_no_pat`).
+  - **FR-10 — Narrower reach**: a converted agent's token covers one repo. Private plugin marketplaces, submodules in other repos and `gh` calls against other repos lose the access the platform PAT gave them.
+  - **FR-11 — Harvest**: the credential harvest file never stores a `ghs_` token.
+- **Tests**: `tests/unit/test_ent1278_git_token_broker.py`, `tests/unit/test_ent109_git_env_seam.py::TestBrokerMode`, `tests/unit/test_ent123_tokenless_clone.py`, `tests/unit/test_ent615_token_free_remotes.py`
+- **GitHub Issue**: abilityai/trinity-enterprise#1278
 
 ---

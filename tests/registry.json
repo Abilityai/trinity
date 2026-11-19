@@ -9328,6 +9328,19 @@
         "reliability"
       ],
       "description": "#4635 / #4636: the queue stall monitor's reads on the real DatabaseManager facade and the real schema (SQLite; PostgreSQL on the schema-parity tier). The stall rows are found by subject prefix past 1,001 other pending asks and the prefix is matched exactly (no LIKE wildcard, no case folding, no ended rows); every new keyword reaches the ops through the facade, and every db call the monitor makes exists on it; a drained agent's alert ends end to end while 1,001 unrelated rows stay pending; a higher reading rewrites the pending row's priority, title and text in place while a same-or-lower one only counts; and the effective cap for many agents costs one roster read and one ceiling read."
+    },
+    {
+      "file": "unit/test_ent1278_git_token_broker.py",
+      "feature": "trinity-enterprise#1278",
+      "added": "2026-11-19",
+      "categories": [
+        "unit",
+        "backend",
+        "agent",
+        "security",
+        "github"
+      ],
+      "description": "Use-time git token for agent containers: wants_broker truth table; tri-state coverage including a slow provider; the recreate matcher asks for a recreate only when the mode changes; the token route serves the calling agent's own broker-mode container, refuses a person and another agent's key, and never returns a PAT; the real credential helper script against a local HTTP server uses the route first, continues on 204 only, and gives no credential on 503/403/500/unreachable; the gh wrapper fetches per call; startup.sh treats the flag as credentialed with no network call and ignores a stale .env PAT; PAT rotation skips broker containers; AST pin that coverage reaches both env writers and the matcher. Mutation: 12 mutations, each turns a named test red."
     }
   ]
 }

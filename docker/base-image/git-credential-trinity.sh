@@ -111,6 +111,38 @@ _read_env_value() {
     printf '%s' "${_value}"
 }
 
+# trinity-enterprise#1278: broker mode. The container holds no long-lived
+# token; the backend hands out a short-lived one for this agent's own repo, per
+# operation. The agent key goes to curl on stdin (`-K -`), never argv.
+#   200  the token
+#   204  not in broker mode for this repo: use the sources below
+#   else no credential. The sources below are NOT consulted: they can hold a
+#        wider token than the one that was asked for.
+if [ "${TRINITY_GIT_TOKEN_BROKER:-}" = "1" ]; then
+    _code=""
+    _reply=""
+    # A broker container missing what the fetch needs gets no credential. It
+    # does not drop to the sources below.
+    if [ -n "${TRINITY_BACKEND_URL:-}" ] && [ -n "${TRINITY_MCP_API_KEY:-}" ] && [ -n "${AGENT_NAME:-}" ]; then
+        _reply=$(printf 'header = "Authorization: Bearer %s"\n' "${TRINITY_MCP_API_KEY}" \
+            | curl -sS -K - --max-time "${TRINITY_GIT_TOKEN_TIMEOUT:-5}" -w '\n%{http_code}' \
+                "${TRINITY_BACKEND_URL%/}/api/agents/${AGENT_NAME}/git/token" 2>/dev/null) || _reply=""
+        _code=$(printf '%s' "${_reply}" | tail -n1)
+    fi
+    if [ "${_code}" = "200" ]; then
+        _token=$(printf '%s' "${_reply}" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+        if [ -n "${_token}" ]; then
+            printf 'username=oauth2\n'
+            printf 'password=%s\n' "${_token}"
+            exit 0
+        fi
+    fi
+    if [ "${_code}" != "204" ]; then
+        echo "TRINITY_GIT_NO_CREDENTIAL host=${req_host} broker=${_code:-unreachable}" >&2
+        exit 0
+    fi
+fi
+
 pat=$(_read_env_value "${ENV_FILE}" GITHUB_PAT) || pat=""
 
 if [ -z "${pat}" ]; then

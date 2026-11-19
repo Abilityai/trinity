@@ -50,6 +50,7 @@ from services.template_plugins import normalize_declared_plugins
 from services import metric_registry
 from services import agent_model_seed
 from services import git_service
+from services import github_token_provider
 from services.settings_service import get_anthropic_api_key, resolve_github_pat, resolve_github_pat_candidates, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
 from services import rate_limiter
@@ -389,6 +390,9 @@ class _TemplateResolution:
     github_repo_for_agent: Optional[str] = None
     github_pat_for_agent: Optional[str] = None
     github_pat_tier: str = "none"  # ent#162: per_user/fork → persist per-agent PAT
+    # trinity-enterprise#1278: bake the token-broker flag where the platform
+    # PAT would have been baked.
+    git_token_broker: bool = False
     git_instance_id: Optional[str] = None
     git_working_branch: Optional[str] = None
     fork_upstream_repo: Optional[str] = None
@@ -2417,6 +2421,7 @@ def _apply_github_env(
     github_pat_for_agent: Optional[str],
     fork_upstream_repo: Optional[str],
     git_working_branch: Optional[str],
+    token_broker: bool = False,
 ) -> None:
     """Bake the GitHub sync env (#1574/#93/#389) for a GitHub-native agent —
     repo/PAT/gh-CLI tokens, upstream remote, auto-sync heartbeat flag, and
@@ -2424,7 +2429,11 @@ def _apply_github_env(
     public-template clone) gets repo + sync flags but NO token vars."""
     if github_repo_for_agent:
         env_vars['GITHUB_REPO'] = github_repo_for_agent
-        if github_pat_for_agent:
+        if token_broker:
+            # trinity-enterprise#1278: no token is baked. The credential
+            # helper fetches a short-lived one per git operation.
+            env_vars[github_token_provider.BROKER_ENV] = '1'
+        elif github_pat_for_agent:
             env_vars['GITHUB_PAT'] = github_pat_for_agent
             # #1574: the SAME managed token also authenticates the `gh` CLI
             # and the REST API (which read GH_TOKEN/GITHUB_TOKEN), not just
@@ -2505,6 +2514,7 @@ def _build_env_vars(
         tr.github_pat_for_agent,
         tr.fork_upstream_repo,
         tr.git_working_branch,
+        token_broker=tr.git_token_broker,
     )
 
     # #946 / #1081 Phase 2: opt an allowlisted pilot agent into the pull worker
@@ -4009,6 +4019,21 @@ async def create_agent_internal(
     # (a rollback handle, rolled back in the except below).
     agent_mcp_key, trinity_mcp_url = _mint_agent_mcp_key(config, current_user)
 
+    # trinity-enterprise#1278: a covered repo takes the broker flag only where
+    # the platform PAT would have been baked. Unknown coverage bakes the PAT;
+    # the next start's drift check converts the container. The container
+    # authenticates its token fetch with the agent key, so no key means no
+    # broker.
+    tr.git_token_broker = github_token_provider.wants_broker(
+        coverage=(
+            await github_token_provider.coverage(tr.github_repo_for_agent)
+            if tr.github_repo_for_agent and tr.github_pat_tier == "global" and agent_mcp_key
+            else False
+        ),
+        carried_flag=False,
+        would_bake_pat=bool(tr.github_pat_for_agent),
+        has_own_pat=False,
+    )
     env_vars, auto_assigned_subscription_id = _build_env_vars(
         config, agent_mcp_key, trinity_mcp_url, tr
     )

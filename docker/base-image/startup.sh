@@ -107,7 +107,23 @@ fi
 # recreate. An ops-path raw restart re-runs this script with the tokenless
 # baked env — without this fallback the origin rewrite below would scrub the
 # working credential. Baked env wins when both are set.
-if [ -z "${GITHUB_PAT}" ] && [ -f /home/developer/.env ]; then
+# trinity-enterprise#1278: a broker container holds no PAT by design. A
+# GITHUB_PAT line left in the workspace .env from before the switch is not
+# adopted, or it would come back as GH_TOKEN/GITHUB_TOKEN below.
+if [ "${TRINITY_GIT_TOKEN_BROKER:-}" = "1" ] && [ -f /home/developer/.env ]; then
+    # The platform PAT a rotation wrote here before the switch would otherwise
+    # reach every turn (the agent server re-reads .env per spawn) and the
+    # credential helper's fallback. The file is on the workspace volume, so
+    # no recreate removes it.
+    if grep -q -E '^[[:space:]]*(GITHUB_PAT|GH_TOKEN|GITHUB_TOKEN)=' /home/developer/.env; then
+        _ENV_TMP=$(mktemp /home/developer/.env.XXXXXX) && \
+            { grep -v -E '^[[:space:]]*(GITHUB_PAT|GH_TOKEN|GITHUB_TOKEN)=' /home/developer/.env > "${_ENV_TMP}" || true; } && \
+            chmod 600 "${_ENV_TMP}" && mv "${_ENV_TMP}" /home/developer/.env && \
+            echo "Broker mode: removed stale GitHub token lines from workspace .env"
+        unset _ENV_TMP
+    fi
+fi
+if [ -z "${GITHUB_PAT}" ] && [ "${TRINITY_GIT_TOKEN_BROKER:-}" != "1" ] && [ -f /home/developer/.env ]; then
     _ENV_PAT=$(grep -m1 '^GITHUB_PAT=' /home/developer/.env | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
     if [ -n "${_ENV_PAT}" ]; then
         echo "Using GITHUB_PAT from workspace .env (live-injected, not yet baked)"
@@ -252,6 +268,10 @@ if [ -n "${GITHUB_REPO}" ]; then
     # `git credential fill` PRINTS the credential on stdout, and this script's
     # output is the container log.
     credential_resolves() {
+        # trinity-enterprise#1278: broker mode is credentialed by definition.
+        # Answered without a network call: the backend may not be reachable
+        # yet at boot, and a "no" here blackholes the push remote.
+        [ "${TRINITY_GIT_TOKEN_BROKER:-}" = "1" ] && return 0
         [ -x /usr/local/bin/git-credential-trinity ] || return 1
         printf 'protocol=%s\nhost=%s\n\n' "${GIT_SCHEME}" "${GIT_HOSTPORT}" \
             | git credential fill >/dev/null 2>&1

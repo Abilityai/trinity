@@ -20,12 +20,21 @@ per operation and never persist it or bake it into a container environment.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Protocol
 
 logger = logging.getLogger(__name__)
+
+# Container env flag: "this agent fetches its git credential from the backend
+# at use time" (trinity-enterprise#1278). A container carrying it holds no
+# baked GITHUB_PAT.
+BROKER_ENV = "TRINITY_GIT_TOKEN_BROKER"
+
+# Ceiling on the coverage lookup made while an agent starts.
+_COVERAGE_TIMEOUT = 5
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
@@ -94,3 +103,42 @@ async def token_for_repo(
                      normalized, type(e).__name__)
         raise GithubTokenUnavailable(
             f"GitHub token provider failed for {normalized}") from None
+
+
+async def coverage(repo: str) -> Optional[bool]:
+    """Does the provider cover ``repo``? True, False, or None for unknown.
+
+    None means the provider could not answer (GitHub unreachable, a failed
+    mint, a slow lookup). Callers keep whatever mode a container already has.
+    """
+    if _provider is None:
+        return False
+    try:
+        return await asyncio.wait_for(token_for_repo(repo), _COVERAGE_TIMEOUT) is not None
+    except (GithubTokenUnavailable, asyncio.TimeoutError):
+        return None
+
+
+def wants_broker(
+    *,
+    coverage: Optional[bool],
+    carried_flag: bool,
+    would_bake_pat: bool,
+    has_own_pat: bool,
+) -> bool:
+    """Should this agent's container carry :data:`BROKER_ENV`?
+
+    The single decision shared by agent creation, the recreate matcher and the
+    recreate env writer, so they cannot disagree.
+
+    * A per-agent PAT outranks the provider.
+    * Unknown coverage keeps the mode the container already has.
+    * A covered repo uses the broker only where a platform PAT would have been
+      baked (``would_bake_pat``) or the broker is already in use. A container
+      that was deliberately given no credential stays that way.
+    """
+    if has_own_pat:
+        return False
+    if coverage is None:
+        return carried_flag
+    return bool(coverage) and (carried_flag or would_bake_pat)

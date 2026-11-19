@@ -430,11 +430,12 @@ async def start_agent_internal(agent_name: str, *, allow_key_mint: bool = True) 
     # apart and neither is healed for a caller that may not mint.
     if not mcp_key_match and not allow_key_mint:
         _refuse_key_mint("key_drift")
+    git_coverage = await _git_token_coverage(agent_name)
     needs_recreation = (
         not shared_folder_match or
         not check_public_folder_mount_matches(container, agent_name) or
         not check_api_key_env_matches(container, agent_name) or
-        not check_github_pat_env_matches(container, agent_name) or
+        not check_github_pat_env_matches(container, agent_name, git_coverage) or
         not check_resource_limits_match(container, agent_name) or
         not check_full_capabilities_match(container, agent_name) or
         not check_guardrails_env_matches(container, agent_name) or
@@ -801,13 +802,37 @@ _GIT_ENV_KEYS = (
 )
 
 
+async def _git_token_coverage(agent_name: str) -> Optional[bool]:
+    """The repo-token provider's coverage answer for this agent's repo
+    (trinity-enterprise#1278): True, False, or None for unknown. False with no
+    provider registered, so the PAT-only path makes no network call."""
+    from services import github_token_provider
+
+    git_config = db.get_git_config(agent_name)
+    repo = (
+        git_config.get("github_repo") if isinstance(git_config, dict)
+        else getattr(git_config, "github_repo", None)
+    )
+    if not repo:
+        return False
+    return await github_token_provider.coverage(repo)
+
+
 def _apply_git_env_from_db(
     agent_name: str,
     env_vars: dict,
     *,
     pat_gate: Literal["effective", "per_agent_only"],
+    coverage: Optional[bool] = False,
 ) -> None:
     """Single owner of the GitHub-sync env block across BOTH rebuild paths.
+
+    ``coverage`` (trinity-enterprise#1278): the repo-token provider's answer
+    for this agent's repo, awaited by the async caller (`_git_token_coverage`).
+    When `github_token_provider.wants_broker` says so, the container gets
+    `TRINITY_GIT_TOKEN_BROKER=1` in place of `GITHUB_PAT` and fetches a
+    short-lived token per git operation. The default False is the PAT-only
+    behaviour, so a caller that passes nothing can never enter broker mode.
 
     Before ent#109 this block existed only in `_apply_persisted_auth_env`
     (`recreate_missing_container`, the rebuild-from-nothing path).
@@ -887,6 +912,11 @@ def _apply_git_env_from_db(
 
     repo = _gc("github_repo")
 
+    from services.github_token_provider import BROKER_ENV, wants_broker
+
+    # Read-and-clear: the flag is re-derived below, never carried forward.
+    carried_flag = env_vars.pop(BROKER_ENV, None) == "1"
+
     if not repo:
         # No git binding — clear every var this helper owns rather than
         # stranding stale ones in a carried-forward dict.
@@ -906,11 +936,32 @@ def _apply_git_env_from_db(
         # Kept inlined via `db` rather than importing
         # `helpers.needs_per_agent_pat_injection`, so a test stubbing
         # `services.agent_service.helpers` cannot break this module (#1271 CI).
-        _pat_allowed = bool(env_vars.get("GITHUB_PAT")) or bool(
+        # trinity-enterprise#1278: a broker container stood where a platform
+        # PAT would have been baked, so it keeps the right to one when its
+        # repo stops being covered.
+        _pat_allowed = bool(env_vars.get("GITHUB_PAT")) or carried_flag or bool(
             db.get_agent_github_pat(agent_name)
         )
     else:
         raise ValueError(f"unknown pat_gate: {pat_gate!r}")
+
+    # --- broker mode (trinity-enterprise#1278) ------------------------------
+    # Decided on the CARRIED env, before the block below rewrites it. On the
+    # rebuild-from-nothing path "would a PAT be baked" is "does one resolve".
+    _broker = False
+    if carried_flag or coverage:
+        if pat_gate == "effective":
+            from routers.git import get_github_pat_for_agent as _effective_pat
+
+            _would_bake = bool(_effective_pat(agent_name))
+        else:
+            _would_bake = bool(env_vars.get("GITHUB_PAT"))
+        _broker = wants_broker(
+            coverage=coverage,
+            carried_flag=carried_flag,
+            would_bake_pat=_would_bake,
+            has_own_pat=bool(db.get_agent_github_pat(agent_name)),
+        )
 
     # --- Correct what is carried; never INTRODUCE the block -----------------
     # Config-drift only. The repo half is gated on the REPO (ent#123) while the
@@ -943,7 +994,10 @@ def _apply_git_env_from_db(
     env_vars["GITHUB_REPO"] = repo
     env_vars["GIT_SYNC_ENABLED"] = "true"
 
-    if _pat_allowed:
+    if _broker:
+        env_vars[BROKER_ENV] = "1"
+        env_vars.pop("GITHUB_PAT", None)
+    elif _pat_allowed:
         from routers.git import get_github_pat_for_agent
 
         _pat = get_github_pat_for_agent(agent_name)
@@ -1148,7 +1202,10 @@ async def recreate_container_with_updated_config(
     # and it stays in sync with the recreate matcher
     # (`helpers.needs_per_agent_pat_injection`) so the two converge in one pass
     # instead of looping.
-    _apply_git_env_from_db(agent_name, env_vars, pat_gate="per_agent_only")
+    _apply_git_env_from_db(
+        agent_name, env_vars, pat_gate="per_agent_only",
+        coverage=await _git_token_coverage(agent_name),
+    )
     # #1574: mirror the resolved PAT onto GH_TOKEN/GITHUB_TOKEN so the `gh` CLI +
     # REST API authenticate too — always tracking the final GITHUB_PAT, and never
     # set when no token resolved (identical gating, no empty/broken credential).
@@ -1825,7 +1882,9 @@ async def recreate_missing_container(agent_name: str):
 
     # Auth env (subscription token / platform key), GitHub PAT, guardrails,
     # stall-limit, per-agent auth token — reuse the exact create/recreate rules.
-    _apply_persisted_auth_env(agent_name, env_vars, runtime)
+    _apply_persisted_auth_env(
+        agent_name, env_vars, runtime, await _git_token_coverage(agent_name)
+    )
 
     # #3590: the pull worker opt-in. This path re-derives the env from nothing
     # and was the one assembler that forgot it — a pilot rebuilt here ran no
@@ -1888,7 +1947,9 @@ async def recreate_missing_container(agent_name: str):
     )
 
 
-def _apply_persisted_auth_env(agent_name: str, env_vars: dict, runtime: str) -> None:
+def _apply_persisted_auth_env(
+    agent_name: str, env_vars: dict, runtime: str, git_coverage: Optional[bool] = False
+) -> None:
     """Set auth-related env from persisted DB state, mirroring the refresh block
     in `recreate_container_with_updated_config` (subscription token vs platform
     key, per-agent GitHub PAT, guardrails, stall-limit, derived agent token)."""
@@ -1915,7 +1976,9 @@ def _apply_persisted_auth_env(agent_name: str, env_vars: dict, runtime: str) -> 
     # always used: there is no old container to inherit a token from, so a
     # rebuild-from-nothing needs *something*, and the git-config row's own
     # existence is the opt-in.
-    _apply_git_env_from_db(agent_name, env_vars, pat_gate="effective")
+    _apply_git_env_from_db(
+        agent_name, env_vars, pat_gate="effective", coverage=git_coverage
+    )
 
     guardrails_override = db.get_guardrails_config(agent_name)
     if guardrails_override:

@@ -831,6 +831,10 @@ ADMIN_WIDENED: Dict[str, Tuple[str, Tuple[str, ...], str]] = {
 # changes what the agent itself may do is person-only however it is fenced.
 # key -> ("METHOD /full/path", reason)
 AGENT_CALLABLE_SELF: Dict[str, Tuple[str, str]] = {
+    "routers/git.py::get_git_token": (
+        "GET /api/agents/{agent_name}/git/token",
+        "the in-container credential helper fetches a short-lived token for the agent's OWN repo "
+        "(trinity-enterprise#1278); a person or another agent's key gets 403, and a PAT is never returned"),
     "routers/agent_memory.py::get_retrieval_memory_endpoint": (
         "GET /api/agents/{agent_name}/retrieval-memory",
         "a READ of the agent's own retrieval-memory status (trinity-enterprise#1022): on/off, available, counts. "

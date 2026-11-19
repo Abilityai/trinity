@@ -8,13 +8,14 @@ Provides API endpoints for:
 - Viewing commit history
 - Pulling from GitHub
 """
+import asyncio
 import contextlib
 import hashlib
 import logging
 import uuid
 from typing import Dict, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from models import (
     AutoSyncToggle,
@@ -30,7 +31,9 @@ from models import (
 )
 from database import db
 from dependencies import (
+    OWN_AGENT_DETAIL,
     assert_agent_owner,
+    assert_own_agent,
     capability_fence,
     get_current_user,
     reject_agent_principal,
@@ -1252,6 +1255,52 @@ async def get_bind_to_own_repo_status(agent_name: AuthorizedAgentByName):
         # the bind is the documented fix; it is idempotent.
         "origin_in_sync": in_sync,
     }
+
+
+# ============================================================================
+# Use-time git token (trinity-enterprise#1278)
+# ============================================================================
+
+
+@router.get("/{agent_name}/git/token")
+async def get_git_token(agent_name: str, current_user: User = Depends(get_current_user)):
+    """A short-lived token for the calling agent's own repo.
+
+    Called by the in-container credential helper on every git operation.
+    Self-only: the caller must be this agent's own key. Serves only a
+    container that was started in broker mode, and only a repo-scoped provider
+    token, never a PAT. 204 tells the helper to use its other sources.
+    """
+    assert_own_agent(current_user, agent_name)
+    if not current_user.agent_name:
+        # Agents only: a person has no use for this token, and letting one in
+        # would hand it to anyone who names an agent.
+        raise HTTPException(status_code=403, detail=OWN_AGENT_DETAIL)
+
+    from services import github_token_provider
+    from services.docker_service import get_agent_container
+    from services.settings_service import resolve_github_token
+
+    container = await asyncio.to_thread(get_agent_container, agent_name)
+    if container is None:
+        # Unreadable is not "not in broker mode": 204 would send the helper to
+        # its PAT sources.
+        raise HTTPException(status_code=503, detail="Agent container unavailable")
+    env = container.attrs.get("Config", {}).get("Env") or []
+    config = db.get_git_config(agent_name)
+    repo = getattr(config, "github_repo", None) if config else None
+    if f"{github_token_provider.BROKER_ENV}=1" not in env or not repo:
+        return Response(status_code=204)
+    try:
+        token, tier, expires_at = await resolve_github_token(repo, agent_name=agent_name)
+    except github_token_provider.GithubTokenUnavailable:
+        raise HTTPException(status_code=503, detail="GitHub token unavailable")
+    if tier != "app":
+        return Response(status_code=204)
+    return JSONResponse(
+        {"token": token, "expires_at": expires_at},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # ============================================================================

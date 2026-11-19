@@ -354,6 +354,17 @@ class TestValidateGithubAccessTokenless:
 # _apply_github_env
 # ---------------------------------------------------------------------------
 class TestApplyGithubEnv:
+    def test_broker_env_carries_the_flag_and_no_token(self, crud_env):
+        """trinity-enterprise#1278: the flag stands where the PAT would be baked."""
+        crud, _ = crud_env
+        cfg = AgentConfig(name="a1", template="github:o/r", source_mode=False)
+        env = {}
+        crud._apply_github_env(cfg, env, "o/r", "ghp_platform", None, "trinity/a1/x", token_broker=True)
+        assert env[crud.github_token_provider.BROKER_ENV] == "1"
+        assert env["GIT_SYNC_AUTO"] == "true"  # auto-sync still armed
+        for var in ("GITHUB_PAT", "GH_TOKEN", "GITHUB_TOKEN"):
+            assert var not in env
+
     def test_tokenless_env_has_no_token_vars(self, crud_env):
         crud, _ = crud_env
         cfg = AgentConfig(name="a1", template="github:o/r", source_mode=True)

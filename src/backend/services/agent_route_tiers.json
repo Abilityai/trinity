@@ -1081,6 +1081,12 @@
   "reason": "legacy",
   "tier": "accessor"
  },
+ "git.py::get_git_token": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/git/token",
+  "reason": "the agent's own key only (assert_own_agent, then the agents-only refusal): the in-container credential helper fetches a short-lived token for its own repo",
+  "tier": "self"
+ },
  "git.py::get_pull_sync_config": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/git/pull-sync",

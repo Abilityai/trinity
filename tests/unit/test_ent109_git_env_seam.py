@@ -616,3 +616,80 @@ class TestIdempotence:
 
         assert env == first
         assert "GITHUB_PAT" not in env
+
+
+# ---------------------------------------------------------------------------
+# Broker mode (trinity-enterprise#1278): the flag stands where the platform
+# PAT would have been baked, and nowhere else.
+# ---------------------------------------------------------------------------
+_FLAG = "TRINITY_GIT_TOKEN_BROKER"
+
+
+class TestBrokerMode:
+    @pytest.fixture
+    def bound(self, lc_env):
+        lc, db, rg = lc_env
+        db.get_git_config.return_value = _row()
+        db.get_agent_github_pat.return_value = None
+        rg.get_github_pat_for_agent.return_value = "ghp_GLOBAL_PLATFORM"
+        return lc, db, rg
+
+    def test_default_coverage_never_enters_broker_mode(self, bound):
+        lc, _, _ = bound
+        env = _carried(GITHUB_PAT="ghp_GLOBAL_PLATFORM")
+        lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only")
+        assert _FLAG not in env and env["GITHUB_PAT"] == "ghp_GLOBAL_PLATFORM"
+
+    def test_covered_repo_swaps_the_baked_pat_for_the_flag(self, bound):
+        lc, _, _ = bound
+        env = _carried(GITHUB_PAT="ghp_GLOBAL_PLATFORM")
+        lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only", coverage=True)
+        assert env[_FLAG] == "1" and "GITHUB_PAT" not in env
+
+    def test_tokenless_container_stays_tokenless_on_a_covered_repo(self, bound):
+        lc, _, _ = bound
+        env = _carried()
+        lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only", coverage=True)
+        assert _FLAG not in env and "GITHUB_PAT" not in env
+
+    def test_unknown_coverage_keeps_the_carried_mode(self, bound):
+        lc, _, _ = bound
+        broker = _carried(**{_FLAG: "1"})
+        lc._apply_git_env_from_db("a1", broker, pat_gate="per_agent_only", coverage=None)
+        assert broker[_FLAG] == "1" and "GITHUB_PAT" not in broker
+
+        pat = _carried(GITHUB_PAT="ghp_GLOBAL_PLATFORM")
+        lc._apply_git_env_from_db("a1", pat, pat_gate="per_agent_only", coverage=None)
+        assert _FLAG not in pat and pat["GITHUB_PAT"] == "ghp_GLOBAL_PLATFORM"
+
+    def test_uncovered_repo_gets_its_platform_pat_back(self, bound):
+        lc, _, _ = bound
+        env = _carried(**{_FLAG: "1"})
+        lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only", coverage=False)
+        assert _FLAG not in env and env["GITHUB_PAT"] == "ghp_GLOBAL_PLATFORM"
+
+    def test_a_per_agent_pat_outranks_the_provider(self, bound):
+        lc, db, rg = bound
+        db.get_agent_github_pat.return_value = "ghp_PER_AGENT"
+        rg.get_github_pat_for_agent.return_value = "ghp_PER_AGENT"
+        env = _carried(**{_FLAG: "1"})
+        lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only", coverage=True)
+        assert _FLAG not in env and env["GITHUB_PAT"] == "ghp_PER_AGENT"
+
+    def test_rebuild_from_nothing_uses_the_broker_only_where_a_pat_resolves(self, bound):
+        lc, _, rg = bound
+        env = {}
+        lc._apply_git_env_from_db("a1", env, pat_gate="effective", coverage=True)
+        assert env[_FLAG] == "1" and "GITHUB_PAT" not in env
+
+        rg.get_github_pat_for_agent.return_value = None  # no platform PAT at all
+        env = {}
+        lc._apply_git_env_from_db("a1", env, pat_gate="effective", coverage=True)
+        assert _FLAG not in env and "GITHUB_PAT" not in env
+
+    def test_flag_is_cleared_with_the_binding(self, bound):
+        lc, db, _ = bound
+        db.get_git_config.return_value = None
+        env = _carried(**{_FLAG: "1"})
+        lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only", coverage=True)
+        assert env == {}

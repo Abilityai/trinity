@@ -171,6 +171,7 @@ The per-agent VoIP config + voice-picker UI lives in the agent Settings/Channels
 |--------|------|-------------|
 | GET/PUT/DELETE | `/api/agents/{name}/github-pat` | PAT config status / set per-agent PAT (validated, encrypted) / clear (revert to global) |
 | GET/PUT | `/api/agents/{name}/git/auto-sync` | Per-agent 15-min auto-sync heartbeat flag |
+| GET | `/api/agents/{name}/git/token` | Short-lived repo-scoped git token for the calling agent's own container (agent's own key only; 204 when not in broker mode) |
 | GET/PUT | `/api/agents/{name}/git/pull-sync` | Per-agent pull-cycle flag, read live by the agent (trinity-enterprise#703) |
 | GET/PUT | `/api/agents/{name}/git/freeze-schedules-if-failing` | Freeze-on-sync-failure flag |
 | GET | `/api/agents/{name}/git/sync-state` | Persisted sync-state row plus the policy verdict (ent#706) |
