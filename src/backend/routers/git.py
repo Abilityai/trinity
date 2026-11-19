@@ -1272,8 +1272,9 @@ async def get_git_token(agent_name: str, current_user: User = Depends(get_curren
     token, never a PAT. 204 tells the helper to use its other sources.
     """
     assert_own_agent(current_user, agent_name)
-    if current_user.agent_name != agent_name:
-        # A person or a non-agent key: this route serves the agent itself only.
+    if not current_user.agent_name:
+        # Agents only: a person has no use for this token, and letting one in
+        # would hand it to anyone who names an agent.
         raise HTTPException(status_code=403, detail=OWN_AGENT_DETAIL)
 
     from services import github_token_provider

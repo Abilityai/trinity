@@ -361,6 +361,7 @@ REQUESTS = {
     "routers/event_subscriptions.py::emit_event_for_agent": {
         "json": {"event_type": "work.done"}
     },
+    "routers/git.py::get_git_token": {},
     "routers/metric_points.py::record_metric_points": {
         "json": {"points": [{"metric": "jobs_done", "value": 1}]}
     },
