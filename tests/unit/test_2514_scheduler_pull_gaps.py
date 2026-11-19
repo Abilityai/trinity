@@ -64,7 +64,15 @@ def _make_db(tmp_path, *, status, claim_token=None):
 
     path = tmp_path / "trinity.db"
     conn = sqlite3.connect(path)
+    conn.execute(TABLES["agent_schedules"])
     conn.execute(TABLES["schedule_executions"])
+    conn.execute(
+        "INSERT INTO agent_schedules "
+        "(id, agent_name, name, cron_expression, message, owner_id, created_at, updated_at) "
+        "VALUES ('sched-1', ?, 'nightly', '0 0 * * *', 'm', 1, "
+        "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        (PILOT,),
+    )
     conn.execute(
         "INSERT INTO schedule_executions (id, schedule_id, agent_name, status, "
         "started_at, message, triggered_by, claim_token) "

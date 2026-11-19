@@ -959,15 +959,16 @@ class SchedulerService:
                 logger.error(f"Failed to create execution record for schedule {schedule_id}")
                 return
 
-        # #1472: advance the run-time projection ONCE, at fire time, regardless of
-        # the eventual outcome — the single "this window was consumed" write. It
-        # replaces the per-branch advances in _dispatch_and_record_outcome
-        # (success + dispatched) and covers the failure and dispatch-exception
-        # paths, which previously left next_run_at stale. Placed after the
-        # create_execution guard so a genuine INSERT failure doesn't advance.
-        _fire_now = datetime.utcnow()
+        # #1472: advance next_run_at ONCE at fire time so the window is marked
+        # consumed even if dispatch fails. last_run_at is intentionally written
+        # later, inside _dispatch_and_record_outcome, only after the backend
+        # confirms it accepted the run — a dispatch exception (queue full,
+        # container unavailable, network error) must not advance last_run_at or
+        # liveness monitors will see a "healthy" schedule that never reached the
+        # model (#4655). Placed after the create_execution guard so a genuine
+        # INSERT failure doesn't advance.
         _fire_next = self._get_next_run_time(schedule.cron_expression, schedule.timezone)
-        self.db.update_schedule_run_times(schedule.id, last_run_at=_fire_now, next_run_at=_fire_next)
+        self.db.update_schedule_run_times(schedule.id, next_run_at=_fire_next)
 
         # Broadcast execution started
         await self._publish_event({
@@ -1117,17 +1118,20 @@ class SchedulerService:
                 deliver_to_workspace_email=schedule.deliver_to_workspace_email,
             )
 
+            # #4655: backend returned a response — it accepted the run. Write
+            # last_run_at now. A dispatch exception (network error, container
+            # unavailable) skips this, leaving last_run_at unchanged so
+            # liveness monitors can detect phantom fires.
+            self.db.update_schedule_run_times(schedule.id, last_run_at=datetime.utcnow())
+
             status = result.get("status", ExecutionStatus.FAILED)
             error_msg = result.get("error")
 
             # Issue #132: Handle fire-and-forget dispatch mode.
             # When status == "dispatched", the backend accepted the task and a
-            # background poll task is running. Update last_run_at immediately
-            # (to ensure missed schedule detection works on restart) and return.
-            # The background task will handle completion events.
+            # background poll task is running. The background task will handle
+            # completion events.
             if status == "dispatched":
-                # #1472: run-time projection already advanced at fire time in
-                # _execute_schedule_with_lock; the background poll finalizes.
                 logger.info(
                     f"Schedule {schedule.name} dispatched (fire-and-forget), "
                     f"execution_id={execution.id}, background poll running"
@@ -1135,7 +1139,6 @@ class SchedulerService:
                 return  # Background task handles completion events
 
             if status == ExecutionStatus.SUCCESS:
-                # #1472: run-time projection already advanced at fire time.
                 logger.info(f"Schedule {schedule.name} executed successfully")
 
                 # Broadcast execution completed
@@ -1181,7 +1184,10 @@ class SchedulerService:
             # caught a connection error or polling timeout.
             current = self.db.get_execution(execution.id)
             if current and current.status not in _NON_TERMINAL_POLL_STATES:
-                # Backend already finalized — don't overwrite with 'failed'
+                # Backend already finalized — it ran, so advance last_run_at
+                # (#4655: the exception was a scheduler-side timeout, not a
+                # failed dispatch; the model DID receive and process the run).
+                self.db.update_schedule_run_times(schedule.id, last_run_at=datetime.utcnow())
                 logger.info(
                     f"Schedule {schedule.name} execution {execution.id} already finalized "
                     f"as '{current.status}' — not overwriting with 'failed'"
@@ -1194,14 +1200,17 @@ class SchedulerService:
                 expected_status=ExecutionStatus.RUNNING,
                 require_unclaimed=True,
             ):
-                # Genuinely failed — nothing else owns the row
+                # Genuinely failed — the backend never received the dispatch
+                # (network error, container unavailable). last_run_at stays
+                # unchanged (#4655: the model never accepted the run).
                 actual_status = ExecutionStatus.FAILED
             else:
                 # #2514: the row is `queued` or claimed — the backend handed it
                 # to the durable queue before the dispatch call failed, and a
                 # pull worker owns it (or it finished between the read and the
-                # write). Poll it to its real terminal, which publishes the
-                # completion and runs retry/validation.
+                # write). The backend did accept the run, so advance last_run_at
+                # (#4655), then poll to the real terminal.
+                self.db.update_schedule_run_times(schedule.id, last_run_at=datetime.utcnow())
                 logger.info(
                     f"Schedule {schedule.name} execution {execution.id} is owned by "
                     f"the pull queue ('{current.status}') — polling for its terminal"
