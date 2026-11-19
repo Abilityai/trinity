@@ -181,6 +181,8 @@ services:
       - NOTION_CLIENT_SECRET=${NOTION_CLIENT_SECRET}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}  # For Gemini-powered agents
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}  # OpenCode agents: OpenRouter key fallback (Settings takes precedence)
+      - OPENCODE_DEFAULT_PROVIDER_BASE_URL=${OPENCODE_DEFAULT_PROVIDER_BASE_URL:-}  # OpenCode agents: default provider (Ollama) root URL fallback
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # For platform image generation (IMG-001)
       # Gemini model overrides (#1130) — mirrors docker-compose.yml; without these
       # lines the env knobs are inert in prod (#1039 packaging-gap class). Non-empty
