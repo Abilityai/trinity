@@ -9328,6 +9328,97 @@
         "reliability"
       ],
       "description": "#4635 / #4636: the queue stall monitor's reads on the real DatabaseManager facade and the real schema (SQLite; PostgreSQL on the schema-parity tier). The stall rows are found by subject prefix past 1,001 other pending asks and the prefix is matched exactly (no LIKE wildcard, no case folding, no ended rows); every new keyword reaches the ops through the facade, and every db call the monitor makes exists on it; a drained agent's alert ends end to end while 1,001 unrelated rows stay pending; a higher reading rewrites the pending row's priority, title and text in place while a same-or-lower one only counts; and the effective cap for many agents costs one roster read and one ceiling read."
+    },
+    {
+      "file": "unit/test_2981_opencode_platform_default.py",
+      "feature": "#2981",
+      "added": "2026-11-02",
+      "categories": [
+        "agents",
+        "backend"
+      ],
+      "description": "An OpenCode agent gets its own platform default model, never the Claude fleet default (ported from Abilityai/lilu#652). `settings_service.get_platform_default_model(runtime=\"opencode\")` reads `platform_default_model_opencode`, returns None when unset or blank, and applies a write on the next call (uncached). `task_execution_service._default_model_for` returns the OpenCode default for an OpenCode agent and None when it is unset (the regression: it returned the bare Claude id, which OpenCode refuses); Claude Code keeps the fleet default and Codex/Gemini keep None."
+    },
+    {
+      "file": "unit/test_lilu257_opencode_backend_registration.py",
+      "feature": "Abilityai/lilu#257",
+      "added": "2026-09-23",
+      "categories": [
+        "backend",
+        "agents"
+      ],
+      "description": "Backend-side acceptance of the `opencode` runtime (Abilityai/lilu#257 step 1) — the four places the backend must know about a fourth runtime, each failing silently and differently if missed. KNOWN_RUNTIME_NAMES (a missing entry turns a valid `runtime: opencode` into a 400 at create time; unknown values still 400). validate_runtime_model (OpenCode's `-m` takes `provider/model`; a bare id would otherwise surface as a failed turn INSIDE the container long after creation reported success — the 400 must name both the rejected value and what a valid id looks like, and the rule must not leak onto Codex/Claude where it would reject every valid `gpt-*` or `sonnet`). is_claude_runtime (a True here would assign a Claude OAuth subscription to an OpenCode agent, #1187 decision 7). RUNTIMES_WITHOUT_SESSION_TAB_RESUME (OpenCode has no cached-UUID --resume, so the Session tab must not claim continuity it cannot deliver). Two parity assertions rather than assumptions: the backend Session-tab gate is checked against the runtime's own capabilities(), and validate_runtime_model is checked against the agent-side validate_provider_model over a shared case list — the backend cannot import the base image, so the two shape rules are a parity pair."
+    },
+    {
+      "file": "unit/test_lilu257_opencode_mcp_prompt.py",
+      "feature": "Abilityai/lilu#257",
+      "added": "2026-09-23",
+      "categories": [
+        "agents",
+        "docker",
+        "mcp"
+      ],
+      "description": "Trinity MCP + the platform prompt inside an OpenCode turn (Abilityai/lilu#257 step 2). The prompt half pins the `instructions:` carrier: `opencode run` has NO system-prompt flag, so the composed prompt (platform instructions + custom prompt + execution context + the MEM-001 memory block, already folded into the one `system_prompt` the backend sends) is written to a per-turn file that must EXIST, hold the composed text verbatim, and be listed FIRST — OpenCode reads `instructions` in order, so an entry appended after a template author's would be outranked by it — while remaining ADDITIVE, because dropping a template's declared reading list on a runtime switch is a silent capability loss. A turn with no platform prompt must not fabricate an empty entry. The MCP half pins the translation: `.mcp.json` stays the SINGLE store (Claude's, the Trinity injector's, the credential-injection path's) and is translated per turn, so a re-injected key can never reach one file and not the other. Shapes are asserted against the published v1.18.32 schema — Claude's `type: http` + headers becomes `type: remote`; Claude's `command` + `args` becomes OpenCode's single `command` ARRAY and `env` becomes `environment`; `url` is the discriminator, not `type`, because Claude makes `type` optional and Trinity's own template omits it. An entry with neither url nor command is SKIPPED with a named warning rather than emitted half-formed, which would fail OpenCode's config parse and take down a turn that had nothing to do with MCP; a missing or corrupt `.mcp.json` degrades to no servers, never a failed turn; an operator-declared server wins, matching the provider block's precedence. The turn config is asserted 0600 because it now carries the Trinity bearer token. Tool NAMING in the platform prompt is measured, not assumed: a real turn on `ollama/gemma4:12b` emitted `tool: trinity_list_agents`, so OpenCode is a third naming scheme — the Claude `mcp__trinity__` prefix is REWRITTEN to the server-scoped `trinity_`, since both the Claude spelling and the Codex bare spelling are unknown tools to it, and Claude/Codex naming is fenced against regression."
+    },
+    {
+      "file": "unit/test_lilu257_opencode_provider.py",
+      "feature": "Abilityai/lilu#257, Abilityai/lilu#272",
+      "added": "2026-09-23",
+      "categories": [
+        "agents",
+        "docker"
+      ],
+      "description": "OpenCode custom-provider block + turn watchdog (Abilityai/lilu#257 step 6, the DGX-Ollama path). The provider half asserts the emitted `opencode.json` VERBATIM, because the failure mode is silent: a misshapen `provider.ollama` does not crash, it makes OpenCode fall back to its own default model on a turn the operator believes is running locally. `runtime: {type: opencode, model: \"ollama/gemma4:12b\"}` plus OPENCODE_OLLAMA_BASE_URL is sufficient on its own — the pinned model is always declared, so nobody maintains a parallel model list to use the model they already pinned; OPENCODE_OLLAMA_MODELS adds the extras. Base URL normalisation is idempotent (an operator who wrote /v1 does not get /v1/v1) and a non-http(s) value fails with a NAMED reason carrying the env var (quality bar 6), never a silent skip that degrades into OpenCode's own \"unknown provider\". Unset base URL emits no `provider` key at all, so the Anthropic/OpenRouter agent is untouched (graceful degradation); a foreign provider's model can never leak into the ollama model map; an operator-declared block wins on npm/options while its models are UNIONED, so a customised config can never be missing the model the turn was launched with; other providers survive the merge. The wiring is proven on disk through `_prepare_turn_config`, not just in the pure function. The watchdog half pins F6: the window before the first `step_start` is SILENT and was measured at 7.2s–59.3s for byte-identical configs on a real DGX (the variance is the provider's own model load), so the 300s default is ~5x the worst measured floor and is clamped to never exceed the turn timeout; a bad override falls back rather than disabling, because '0 means off' would let a typo remove the protection. A stall gets exactly ONE retry on a FRESH session (resuming the wedged session would reproduce the wedge) reusing the execution_id so the ledger shows one execution, not a phantom pair; a second stall is 504 and NEVER a success; a non-stall failure is not retried, since re-running a 500 would double every real error. The `step_start` event name is asserted against the real v1.18.32 stream — a rename would make the watchdog kill every healthy turn. Abilityai/lilu#272 adds the DERIVED default: with OPENCODE_OLLAMA_BASE_URL unset and the turn pinned to `ollama/…`, no block was emitted and OpenCode died in 1.6s with the opaque ref `err_411e3b55` — while the only value that works, the container's default gateway (host Ollama answers there; localhost is refused in 0ms), appeared in no config and no env and was unknowable without inspecting the host. The gateway is now parsed per turn from /proc/net/route, whose Gateway word is LITTLE-ENDIAN — the fixture pins 01001CAC -> 172.28.0.1, because read in string order it decodes to the plausible-looking, wrong 1.0.28.172. It is derived, never stored: the address belongs to the network the container is attached to, so a config key holding it would be wrong the first time the agent network is renumbered. The env var still wins (an operator pointing at a remote DGX is not redirected to their own host), a non-ollama turn with no env still emits NO provider key even when a gateway exists, and when neither path resolves the turn fails at the `-m` boundary — before any subprocess — with a reason naming OPENCODE_OLLAMA_BASE_URL rather than an `err_*` ref. The boundary guard refuses only the unrunnable: an operator-declared baseURL in the shared config satisfies it with no default route present. The `no default route` cases are asserted against fixture route files, never the host's own table, which would assert nothing inside any real container."
+    },
+    {
+      "file": "unit/test_lilu257_opencode_runtime.py",
+      "feature": "Abilityai/lilu#257",
+      "added": "2026-09-23",
+      "categories": [
+        "agents",
+        "docker"
+      ],
+      "description": "Agent-side OpenCode runtime (Abilityai/lilu#257 step 1), mirroring the Codex suite over the pure pieces of opencode_runtime.py; the subprocess is stubbed and `opencode` is never spawned. Load-bearing cases: an EMPTY FINAL TEXT IS A FAILED TURN (#520) — live on qwen3.6:27b via Ollama, which answers in a non-standard `reasoning` field with `content: \"\"` while reporting success, so exit 0 is not proof of a completed turn; the reasoning is never promoted into the response (a scratchpad is not an answer, and promoting it launders a failed turn into a plausible success), while a tool-only turn stays a success at \"(Task completed)\" for Codex parity. No cost double-count: `tokens.reasoning` ⊂ `tokens.output` and `tokens.cache.read` ⊂ `tokens.input`, both recorded separately and added to nothing; cost is NATIVE so a static check asserts no pricing table or `calculate_*` exists at all (#2207). Final text is the LAST step's text, not every text emitted. Error mapping: auth 503, rate 429, generic 500 (NOT 503 — that is the backend's AUTH signal and the dispatch breaker counts AUTH only), pipe drop 502, timeout 504, with anchored auth patterns so an incidental 401 in tool output is not read as the agent's credential failing. Factory resolves `opencode` case-insensitively (#1187 casing trap) and still RAISES on an unknown value. `provider/model` shape validated with a named 400 at the runtime boundary. Per-turn XDG_CONFIG_HOME carries the system prompt via `instructions:` (there is no system-prompt flag on `opencode run`, verified against the real --help), turn configs do not collide under parallel /api/task, cleanup unlinks rather than recursing into the symlinked provider tree, and a traversal-shaped execution_id cannot escape the turn root."
+    },
+    {
+      "file": "unit/test_lilu257_runtime_seam_hygiene.py",
+      "feature": "Abilityai/lilu#257",
+      "added": "2026-09-23",
+      "categories": [
+        "agents",
+        "docker"
+      ],
+      "description": "Runtime seam hygiene ahead of the OpenCode runtime (Abilityai/lilu#257 step 0) — two defects the Codex runtime already had and a fourth runtime would inherit verbatim. (1) `plugins_reinstall` ran on EVERY runtime, and every subprocess it runs is `claude plugin ...`: on a codex/gemini agent that is two guaranteed-failing execs per boot plus a `withheld:` state file describing a capability that runtime does not have. It is now gated on `is_claude_runtime()` and records a NAMED `skipped_runtime` status, so 'off because this runtime has no Claude plugins' cannot be mistaken for 'it broke' (the #1929 contract). (2) The Codex `CLAUDE.md -> AGENTS.md` mirror was a one-shot `cp` guarded by `[ ! -f AGENTS.md ]`, so it never ran again — every later CLAUDE.md edit (git sync, skill install, operator change) left Codex reading a frozen snapshot of the agent's identity, silently. Now a relative symlink that re-resolves on every read, with a three-case upgrade path off the copy-era image: absent/wrong-symlink relinks, a byte-identical regular file is adopted (provably our own mirror), and a DIFFERING regular file is left alone but warned about loudly. The mirror tests execute the shipped startup.sh block itself against a tmpdir $HOME, not a re-typed copy. Also pins the predicate: case-insensitive (the #1187 casing trap) and importable BOTH as a package member and standalone, because `plugins_reinstall` is a `python3 -m` boot hook — hence the zero-dependency `agent_server/runtime_names.py` leaf, since an import fallback degrading to 'assume Claude' would be a gate that silently does nothing. No Docker, no live backend."
+    },
+    {
+      "file": "unit/test_lilu263_base_image_arch.py",
+      "feature": "Abilityai/lilu#263",
+      "added": "2026-09-23",
+      "categories": [
+        "docker",
+        "agents"
+      ],
+      "description": "Build-time architecture resolution in docker/base-image/Dockerfile (Abilityai/lilu#263). The image pinned two x86-only artifacts by name and so could not be built on the arm64 DGX it is built for, and the two halves fail in OPPOSITE directions — which is why a single static check is not enough. `opencode-linux-x64@<ver>` is a DIRECT npm target, so arm64 rejects it LOUDLY (EBADPLATFORM, 4.8s into step 11/40); being a direct target is exactly the property #257 wanted against npm's silent-optional path, so the explicit platform-package naming is asserted to SURVIVE and only its NAME to be resolved. `go1.23.4.linux-amd64.tar.gz` fails SILENTLY: on arm64 that URL exists, downloads and untars with no error, spending 641s installing a toolchain that cannot execute — so the in-layer `go version` assertion against the RESOLVED `linux/${goarch}` is pinned, in the SAME RUN as the download, because a separate layer would still cache and publish the bad install. The mapping is not re-typed: the `case \"$(uname -m)\"` blocks are EXTRACTED from the shipped Dockerfile and EXECUTED under a `uname` shell-function stub (a function shadows the external command and is inherited by command substitution, so no executable stub file is needed on a noexec /tmp), asserting x86_64 and aarch64 resolve to the artifacts verified to exist upstream and that an unmapped machine EXITS NON-ZERO naming the architecture rather than defaulting — a default is how #263 happened. npm and Go spell x86 differently (x64 vs amd64) and arm64 identically, so the two mappings are asserted independently rather than shared. Also fences the reverse regression (swapping one hardcoded arch for the other) and pins `uname -m` over `TARGETARCH`, which is EMPTY under the classic builder — the same silently-wrong-artifact class — and whose in-stage ARG would sit above the Go layer and bust the cached upper layers that make a DGX retry cheap. Never builds an image; no Docker daemon required (gap:engineer-no-docker-daemon)."
+    },
+    {
+      "file": "unit/test_lilu627_agents_md_mirror.py",
+      "feature": "Abilityai/lilu#627",
+      "added": "2026-10-26",
+      "categories": [
+        "agents",
+        "docker"
+      ],
+      "description": "AGENTS.md is a refreshed copy of CLAUDE.md, not a link (ent#819 forbids links in an agent home). Codex and OpenCode refresh it at every turn; a sha256 provenance record decides ours-vs-authored: no file is copied, our stale copy is refreshed, an authored (or author-edited) file is never overwritten, a leftover lilu#257 symlink becomes a copy."
+    },
+    {
+      "file": "unit/test_lilu659_opencode_part_and_images.py",
+      "feature": "Abilityai/lilu#659",
+      "added": "2026-11-02",
+      "categories": [
+        "agents",
+        "docker"
+      ],
+      "description": "OpenCode telemetry under `part` (Abilityai/lilu#659) and the per-provider images capability (Abilityai/lilu#660). #659: the pinned 1.18.32 binary nests step/tool payloads under `part`; a REAL step_finish line captured on the DGX must read input 56913 / output 63 / cost 0.0, a 4-step tool turn must report the LAST step's input (57229, not the sum) and the real tool id `bash` (never \"Tool\"), and the legacy flat shape must still parse. Cost decision: a native `cost: 0` stays 0.0; None only when no cost field arrived. #660: 1.18.32 swaps an image part for an \"ERROR: Cannot read …\" text part unless the model's `modalities.input` lists \"image\"; `OPENCODE_PROVIDER_<ID>_IMAGES` defaults off for ollama / URL-declared OpenAI-compatible providers and on for openrouter/anthropic/openai, is surfaced as `capabilities().image_input`, writes `modalities` (with \"text\" kept) into the provider block when true, and an undeliverable image is never a silent text-only turn: no `-f`, the model is told, a `metadata.warnings` entry, a sentence prepended to the response, and a log line."
     }
   ]
 }
