@@ -8,6 +8,7 @@ which retries with backoff on a background thread.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import threading
 from pathlib import Path
@@ -221,3 +222,12 @@ def test_a_thread_that_cannot_start_is_a_failed_attempt(docker_down, monkeypatch
     assert ds.get_docker_client() is None
     assert ds._docker_connect_lock.acquire(blocking=False), "lock was left held"
     ds._docker_connect_lock.release()
+
+
+def test_docker_still_unreachable_logs_at_info(docker_down, caplog):
+    """An install that runs without Docker on purpose logs this once a minute,
+    so it is INFO, not WARNING (#4406 review)."""
+    caplog.set_level(logging.DEBUG, logger=ds.logger.name)
+    assert ds.get_docker_client() is None
+    records = [r for r in caplog.records if "Docker still unreachable" in r.getMessage()]
+    assert [r.levelno for r in records] == [logging.INFO]

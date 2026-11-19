@@ -30,7 +30,7 @@ _last_socket_warn_monotonic: Optional[float] = None
 _last_warn_monotonic: Dict[str, float] = {}
 
 
-def _warn_throttled(slot: str, message: str, *args) -> None:
+def _warn_throttled(slot: str, message: str, *args, level: int = logging.WARNING) -> None:
     """WARN at most once per `_SOCKET_WARN_THROTTLE_S` per `slot` (#2196).
 
     Same rationale as `list_all_agents_fast`'s throttle: a denied socket is a
@@ -42,7 +42,7 @@ def _warn_throttled(slot: str, message: str, *args) -> None:
     last = _last_warn_monotonic.get(slot)
     if last is None or now - last >= _SOCKET_WARN_THROTTLE_S:
         _last_warn_monotonic[slot] = now
-        logger.warning(message, *args)
+        logger.log(level, message, *args)
 
 
 # Initialize Docker client
@@ -114,7 +114,9 @@ def _attempt_docker_connect() -> None:
             # From when the attempt failed, so a slow failure still waits out the delay.
             _next_docker_attempt_monotonic = time.monotonic() + _docker_retry_delay_s
             _docker_retry_delay_s = min(_docker_retry_delay_s * 2, _DOCKER_RETRY_MAX_S)
-            _warn_throttled("docker_connect", "Docker still unreachable: %s", e)
+            # INFO: an install that runs without Docker on purpose (demo mode) logs
+            # this once a minute while something polls the roster (#4406 review).
+            _warn_throttled("docker_connect", "Docker still unreachable: %s", e, level=logging.INFO)
             return
         docker_client = client
         _docker_retry_delay_s = _DOCKER_RETRY_INITIAL_S
