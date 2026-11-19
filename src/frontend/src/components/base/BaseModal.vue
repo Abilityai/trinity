@@ -5,7 +5,7 @@
       ref="overlay"
       v-bind="$attrs"
       tabindex="-1"
-      class="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-gray-900/60 p-4"
+      class="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-gray-900/60 p-4"
       role="dialog"
       aria-modal="true"
       :aria-label="ariaLabel || undefined"
@@ -14,8 +14,13 @@
       @keydown="onKeydown"
     >
       <!-- The panel. Consumers keep their own inner markup; this owns only the
-           overlay, the keyboard contract, and the footprint. -->
-      <div :class="panelClass" @click.stop>
+           overlay, the keyboard contract, and the footprint.
+           #3571: centred by `my-auto`, not by the overlay's `items-center`. A
+           centred flex child taller than its scroll container overflows at the
+           top as well as the bottom, and the top overflow cannot be scrolled
+           to. Auto margins centre a short panel and collapse to zero on a tall
+           one, so it starts at the top and the overlay scrolls through it. -->
+      <div :class="['my-auto', panelClass]" @click.stop>
         <slot />
       </div>
     </div>
