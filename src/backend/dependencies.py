@@ -1139,6 +1139,10 @@ _EPHEMERAL_ALLOWED_ROUTES = (
     ("POST", re.compile(r"^/api/notifications$")),
     ("GET", re.compile(r"^/api/agents/(?P<name>[^/]+)$")),
     ("GET", re.compile(r"^/api/agents/(?P<name>[^/]+)/info$")),
+    # trinity-enterprise#1278: the in-container credential helper's fetch of
+    # a short-lived token for the agent's own repo. A broker-mode container
+    # holds no baked token, so without this route it has no git credential.
+    ("GET", re.compile(r"^/api/agents/(?P<name>[^/]+)/git/token$")),
 )
 
 

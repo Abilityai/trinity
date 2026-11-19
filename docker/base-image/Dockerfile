@@ -477,7 +477,9 @@ RUN mkdir -p /var/lib/trinity && \
 # confidentiality either — the agent can still read its own `GITHUB_PAT`. The
 # structural fix is trinity-enterprise#558 (AAuth).
 COPY --chown=root:root ./git-credential-trinity.sh /usr/local/bin/git-credential-trinity
-RUN chmod 0755 /usr/local/bin/git-credential-trinity && \
+# trinity-enterprise#1278: `gh` wrapper, ahead of /usr/bin/gh on PATH.
+COPY --chown=root:root ./gh-trinity.sh /usr/local/bin/gh
+RUN chmod 0755 /usr/local/bin/git-credential-trinity /usr/local/bin/gh && \
     git config --system --replace-all credential.helper trinity
 
 USER developer

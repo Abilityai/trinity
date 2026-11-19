@@ -94,6 +94,10 @@ def _agent_has_write_credentials(agent_name: str, container) -> bool:
         for entry in env_list:
             if entry.startswith("GITHUB_PAT=") and len(entry) > len("GITHUB_PAT="):
                 return True
+            # trinity-enterprise#1278: a broker container fetches a write
+            # token per operation.
+            if entry == "TRINITY_GIT_TOKEN_BROKER=1":
+                return True
         return bool(db.get_agent_github_pat(agent_name))
     except Exception as exc:  # noqa: BLE001 — guard must never break push
         logger.warning(

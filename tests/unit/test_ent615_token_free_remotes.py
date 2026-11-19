@@ -1590,3 +1590,14 @@ class TestOwnerMaintenance:
         report = asyncio.run(gs.scrub_git_remote_tokens("a1", git_dir="/home/developer", seed_pat="synthetic-private-seed"))
         assert report["success"] is False
         assert "synthetic-private-seed" not in caplog.text
+
+
+def test_an_installation_token_is_never_harvested(sweep, helper_env, tmp_path):
+    """trinity-enterprise#1278: a `ghs_` token expires within the hour and is
+    fetched per operation, so the harvest file never holds one."""
+    repo = _mkrepo(tmp_path / "apptoken", "https://oauth2:ghs_FAKEINSTALLATION@github.com/acme/agent.git")
+    env = dict(helper_env.env)
+    env.pop("GITHUB_PAT", None)
+    report, _ = sweep(repo, **env)
+    assert report["harvested"] == 0
+    assert not (Path(env["TRINITY_AGENT_HOME"]) / ".trinity" / "git-credential").exists()

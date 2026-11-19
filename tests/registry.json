@@ -9286,6 +9286,19 @@
         "github"
       ],
       "description": "The repo-scoped GitHub token seam: resolve_github_token walks per-agent PAT, per-user PAT, the registered provider, then the platform PAT; with no provider the answer equals resolve_github_pat's; an uncovered repo falls through; a provider failure on a covered repo raises and never yields the platform PAT; a malformed repo never reaches the provider; resolve_github_pat and its candidates never consult the provider; the provider credential setting is encrypted at rest, refused in cleartext and covered by key rotation."
+    },
+    {
+      "file": "unit/test_ent1278_git_token_broker.py",
+      "feature": "trinity-enterprise#1278",
+      "added": "2026-11-19",
+      "categories": [
+        "unit",
+        "backend",
+        "agent",
+        "security",
+        "github"
+      ],
+      "description": "Use-time git token for agent containers: wants_broker truth table; tri-state coverage including a slow provider; the recreate matcher asks for a recreate only when the mode changes; the token route serves the calling agent's own broker-mode container, refuses a person and another agent's key, and never returns a PAT; the real credential helper script against a local HTTP server uses the route first, continues on 204 only, and gives no credential on 503/403/500/unreachable; the gh wrapper fetches per call; startup.sh treats the flag as credentialed with no network call and ignores a stale .env PAT; PAT rotation skips broker containers; AST pin that coverage reaches both env writers and the matcher. Mutation: 12 mutations, each turns a named test red."
     }
   ]
 }

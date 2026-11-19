@@ -52,6 +52,7 @@ it, but its job flipped: it places the credential (writing `.env` over
 credential-less, refusing to touch the URL if nothing resolves.
 """
 import asyncio
+import asyncio
 import logging
 import re
 from typing import List
@@ -63,6 +64,7 @@ from models import AgentPropagationStatus, GithubPatPropagationResult
 from services import agent_env_read
 from services.agent_auth import build_agent_auth_headers
 from services.docker_service import list_all_agents_fast, get_agent_container
+from services.github_token_provider import BROKER_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -378,6 +380,16 @@ async def propagate_github_pat(new_pat: str) -> GithubPatPropagationResult:
                 AgentPropagationStatus(
                     agent_name=agent.name, status="skipped_per_agent_pat"
                 )
+            )
+            continue
+        # trinity-enterprise#1278: a broker container fetches a repo-scoped
+        # token per operation. Writing the platform PAT into its `.env` would
+        # hand it the wider credential it was started without.
+        container = await asyncio.to_thread(get_agent_container, agent.name)
+        env = (container.attrs.get("Config", {}).get("Env") or []) if container else []
+        if f"{BROKER_ENV}=1" in env:
+            pre_skipped.append(
+                AgentPropagationStatus(agent_name=agent.name, status="skipped_no_pat")
             )
             continue
         targets.append(agent.name)

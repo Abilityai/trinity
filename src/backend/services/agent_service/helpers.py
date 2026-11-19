@@ -895,18 +895,38 @@ def needs_per_agent_pat_injection(agent_name: str) -> bool:
     return bool(db.get_agent_github_pat(agent_name)) and bool(db.get_git_config(agent_name))
 
 
-def check_github_pat_env_matches(container, agent_name: str) -> bool:
+def check_github_pat_env_matches(
+    container, agent_name: str, coverage: Optional[bool] = False
+) -> bool:
     """
     Check if container's GITHUB_PAT env var matches the effective PAT for this agent.
     Returns True if env matches (or agent has no PAT), False if recreation needed.
     Checks per-agent PAT first, then falls back to platform PAT.
     """
     from routers.git import get_github_pat_for_agent
+    from services.github_token_provider import BROKER_ENV, wants_broker
 
     env_list = container.attrs.get("Config", {}).get("Env", [])
     env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
 
     container_pat = env_dict.get("GITHUB_PAT")
+    # trinity-enterprise#1278: `coverage` is the repo-token provider's answer
+    # for this agent's repo (True, False, None for unknown). A broker-mode
+    # container holds no PAT, so there is nothing to compare; it needs a
+    # recreate only when the mode itself should change. `wants_broker` is the
+    # same function the recreate env writer uses.
+    carried_flag = env_dict.get(BROKER_ENV) == "1"
+    if carried_flag or coverage:
+        want = wants_broker(
+            coverage=coverage,
+            carried_flag=carried_flag,
+            would_bake_pat=bool(container_pat),
+            has_own_pat=bool(db.get_agent_github_pat(agent_name)),
+        )
+        if want != carried_flag:
+            return False
+        if want:
+            return True
     if not container_pat:
         # #1264: a tokenless container needs a recreate ONLY when a per-agent PAT
         # is configured (so creation/recreate will inject it). A global-only PAT
