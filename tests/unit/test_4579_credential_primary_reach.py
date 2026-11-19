@@ -288,8 +288,13 @@ class TestChain:
 
     def test_nobody_seated_and_an_owner_off_the_roster_is_refused(self, agent, owner):
         """Was a dead end too: the owner stood in and the field refused them
-        (a system agent is on nobody's roster)."""
-        assert _refused(agent).code == CODE
+        (a system agent is on nobody's roster). The owner is the primary
+        person here, and an agent cannot be shared with its own owner, so the
+        refusal does not tell anyone to share it (#4599)."""
+        refusal = _refused(agent)
+        assert refusal.code == CODE
+        assert "its primary person" not in refusal.message
+        assert "share" not in refusal.message.lower()
         assert _rows(agent) == []
 
     def test_two_seated_primaries_are_still_no_person(self, agent, people, shared):
@@ -323,7 +328,10 @@ class TestChain:
         monkeypatch.setattr(portal_service, "agent_on_roster", boom)
         _seat(primary=[people["alice"]])
         with caplog.at_level(logging.INFO):
-            assert _refused(agent).code == CODE
+            refusal = _refused(agent)
+        assert refusal.code == CODE
+        # #4599: the code is kept; the sentence names the outage, not a share.
+        assert "could not check" in refusal.message and "share" not in refusal.message.lower()
         assert _rows(agent) == []
         logged = " ".join(r.getMessage() for r in caplog.records)
         assert agent in logged

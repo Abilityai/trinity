@@ -245,6 +245,7 @@
   - **MKT-003**: `mp-submit.sh` refuses a snapshot without a boot-check pass record, and refuses unless `mp-status.sh` exits 0. Submission needs operator confirmation in the release run.
   - **MKT-004**: `mp-status.sh` separates clear (0), queued (3), rejected or unknown (4) and API failure (1). A queued listing keeps the snapshot for a later submit without a rebuild.
   - **MKT-005**: A failed build deletes only its own run-tagged droplet. Tokens and generated passwords stay out of argv.
+  - **MKT-006** (AWS, trinity-enterprise#710): the same three rules hold for the AMI. The Packer build never submits. `packer/aws/scripts/boot-check.sh <ami-id> <tag>` creates a stack from `trinity.cfn.yaml`, proves `/setup` refuses a wrong instance ID and accepts the right one, checks the security group's rules, the `aws-marketplace` provenance and that containers cannot reach the metadata service while the host can, then deletes the stack and its key pair on every trappable exit. `packer/aws/scripts/mp-submit.sh <ami-id>` refuses an AMI without a pass record, sends a dry run unless `TRINITY_AWS_SUBMIT=apply`, and titles the version with the tag the boot check recorded. The checks common to both clouds live once, in `packer/digitalocean/scripts/boot-lib.sh`.
 
 ## 12. Platform Operations
 

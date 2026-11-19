@@ -11,6 +11,13 @@
   D8/D11): a chat that was just READ keeps its place with no count, and an ask
   that ENDED while selected keeps its place drawn ended — both until the
   selection moves on.
+
+  The one row that does leave: an ask the reader just answered themselves
+  ("answer, then next", `crossing`). It holds its ended badge for a beat
+  (`done`), then its height collapses (`leaving`) and the rows below follow it
+  up. The container owns the timing and drops the row when the collapse is over;
+  here it is two class arms on that one row, so nothing else in the list moves
+  (principle 29: a height transition, not a snap; no motion when reduced).
 -->
 <template>
   <div class="flex flex-col min-h-0 h-full">
@@ -29,8 +36,29 @@
     <!-- `relative`: each ask row's spoken kind is `sr-only` (absolute). With no
          positioned ancestor it escaped this scroll box and stretched the PAGE
          to the list's full height, so the whole shell scrolled away (sign-off). -->
-    <ul class="relative flex-1 min-h-0 overflow-y-auto px-2 pb-2 space-y-1" :aria-label="label" data-testid="inbox-list">
-      <li v-for="it in items" :key="it.key">
+    <!-- The 4px between rows is each row's own `pb-1`, INSIDE the collapsing
+         track, so it goes with the row; a sibling margin (`space-y`) would stay
+         behind and jump when the row is removed. The list's bottom pad is `pb-1`
+         for the same total. -->
+    <ul class="relative flex-1 min-h-0 overflow-y-auto px-2 pb-1" :aria-label="label" data-testid="inbox-list">
+      <!-- One track, 1fr → 0fr: the height an `auto` row cannot animate. The
+           wrapper is the grid item (min-h-0, so the track can reach zero) and
+           clips ONLY while leaving — clipped all the time it would cut the
+           focus ring. `duration-200` is the container's ANSWER_COLLAPSE_MS
+           (it drops the row when that has passed). Both motion-reduce classes:
+           `transition-none` alone leaves the duration set. A leaving row is
+           inert: it is on its way out, not a target. -->
+      <li
+        v-for="it in items"
+        :key="it.key"
+        class="grid transition-[grid-template-rows,opacity] duration-200 ease-out motion-reduce:transition-none motion-reduce:duration-0"
+        :class="leaving(it) ? 'grid-rows-[0fr] opacity-0' : 'grid-rows-[1fr]'"
+        :inert="leaving(it) ? '' : undefined"
+        :aria-hidden="leaving(it) ? 'true' : undefined"
+        :data-crossing="crossing[it.key] || undefined"
+      >
+        <div class="min-h-0 min-w-0" :class="leaving(it) ? 'overflow-hidden' : ''">
+        <div class="pb-1">
         <button
           type="button"
           class="w-full text-left rounded-lg px-3 py-2.5 flex items-start gap-3 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40"
@@ -172,6 +200,8 @@
             </span>
           </span>
         </button>
+        </div>
+        </div>
       </li>
     </ul>
     <div
@@ -218,10 +248,14 @@ const props = defineProps({
   // agent name → the human-facing label (the roster's display_label).
   labels: { type: Object, default: () => ({}) },
   label: { type: String, default: 'Inbox items' },
+  // Answer, then next: the rows the reader's own answer is crossing off —
+  // key → 'done' (the beat: drawn ended, still in place) | 'leaving' (collapsing).
+  crossing: { type: Object, default: () => ({}) },
 })
 defineEmits(['open', 'show-more'])
 
 const labelFor = (name) => props.labels[name] || name || ''
+const leaving = (it) => props.crossing[it.key] === 'leaving'
 const relative = (iso) => relativeTime(iso)
 
 // Principle 22: relative for recency, absolute + timezone on hover.

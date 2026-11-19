@@ -534,7 +534,7 @@ class ScheduleQueueMixin:
     # ------------------------------------------------------------------
 
     def count_active_leased_by_agent(
-        self, agent_names: List[str]
+        self, agent_names: List[str], unexpired_at: Optional[str] = None
     ) -> Dict[str, int]:
         """Count active pull-leased `running` rows per agent (one grouped query).
 
@@ -543,6 +543,11 @@ class ScheduleQueueMixin:
         are still counted — the lease-reaper converges those, and excluding them
         would make the meter briefly under-report. Read-only.
 
+        ``unexpired_at`` (ISO-Z, `utc_now_iso` format) counts only leases that
+        run past it. The queue-stall monitor asks that question (#4635): an
+        expired lease has no worker behind it until the reaper requeues the row,
+        so counting it would read a dead pool as full (canary B-02's rule).
+
         Returns:
             ``{agent_name: count}`` for agents in ``agent_names`` that have at
             least one leased row; agents with none are absent (caller treats
@@ -550,18 +555,19 @@ class ScheduleQueueMixin:
         """
         if not agent_names:
             return {}
+        conditions = [
+            schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+            schedule_executions.c.lease_expires_at.isnot(None),
+            schedule_executions.c.agent_name.in_(agent_names),
+        ]
+        if unexpired_at is not None:
+            conditions.append(schedule_executions.c.lease_expires_at > unexpired_at)
         stmt = (
             select(
                 schedule_executions.c.agent_name,
                 func.count().label("c"),
             )
-            .where(
-                and_(
-                    schedule_executions.c.status == TaskExecutionStatus.RUNNING,
-                    schedule_executions.c.lease_expires_at.isnot(None),
-                    schedule_executions.c.agent_name.in_(agent_names),
-                )
-            )
+            .where(and_(*conditions))
             .group_by(schedule_executions.c.agent_name)
         )
         with get_engine().connect() as conn:
@@ -641,15 +647,71 @@ class ScheduleQueueMixin:
             row = conn.execute(stmt).mappings().first()
         return int(row["c"]) if row else 0
 
-    def oldest_queued_head_per_agent(self) -> List[Dict]:
+    def oldest_queued_head_per_agent(
+        self,
+        agent_names: Optional[List[str]] = None,
+        *,
+        claimable: bool = False,
+    ) -> List[Dict]:
         """One row per agent with queued work: its oldest queued row (#4257).
 
-        The stall monitor's single read. Returns, per agent,
+        The stall monitor's head read. Returns, per agent,
         ``{agent_name, execution_id, queued_at, conversation_key,
         triggered_by, redelivery_count, queued_count}`` for the row with the
-        smallest `(queued_at, id)`. An agent whose queued rows all carry a
-        NULL `queued_at` is absent — there is no age to measure. Read-only.
+        smallest `(queued_at, id)`, agents in name order. An agent whose queued
+        rows all carry a NULL `queued_at` is absent — there is no age to
+        measure. Read-only.
+
+        One statement (#4635): a grouped subquery — `MIN(queued_at)` and
+        `COUNT(*)` per agent — joined back to the table on the agent and that
+        instant, so one row per agent comes back (two or more only on an exact
+        tie, broken on `id` below) instead of every queued row. The database
+        still counts every queued row; both halves can use the
+        `idx_executions_queued` partial index. One statement reads one
+        snapshot, so the head and its count always agree. The join re-applies
+        the whole predicate: a claim keeps `queued_at` (#4257), so a `running`
+        row can carry the head's very instant.
+
+        ``agent_names`` narrows the read (an empty list reads nothing).
+        ``claimable`` keeps only the rows a pull worker could claim right now,
+        by the claim's own #2843 rule — no `running` row of the same agent
+        carries the row's `conversation_key`; a row without one always
+        qualifies — and `queued_count` then counts those rows.
         """
+        if agent_names is not None and not agent_names:
+            return []
+
+        def admitted(table):
+            conditions = [
+                table.c.status == TaskExecutionStatus.QUEUED,
+                table.c.queued_at.isnot(None),
+            ]
+            if agent_names is not None:
+                conditions.append(table.c.agent_name.in_(agent_names))
+            if claimable:
+                running = aliased(schedule_executions)
+                conditions.append(
+                    ~exists().where(
+                        and_(
+                            running.c.agent_name == table.c.agent_name,
+                            running.c.status == TaskExecutionStatus.RUNNING,
+                            running.c.conversation_key == table.c.conversation_key,
+                        )
+                    )
+                )
+            return and_(*conditions)
+
+        queued = aliased(schedule_executions)
+        heads = (
+            select(
+                queued.c.agent_name.label("agent_name"),
+                func.min(queued.c.queued_at).label("head_at"),
+                func.count().label("queued_count"),
+            )
+            .where(admitted(queued))
+            .group_by(queued.c.agent_name)
+            .subquery("heads")
+        )
         c = schedule_executions.c
         stmt = (
             select(
@@ -659,52 +721,63 @@ class ScheduleQueueMixin:
                 c.conversation_key,
                 c.triggered_by,
                 c.redelivery_count,
+                heads.c.queued_count,
             )
-            .where(
-                and_(
-                    c.status == TaskExecutionStatus.QUEUED,
-                    c.queued_at.isnot(None),
+            .select_from(
+                schedule_executions.join(
+                    heads,
+                    and_(
+                        c.agent_name == heads.c.agent_name,
+                        c.queued_at == heads.c.head_at,
+                    ),
                 )
             )
-            .order_by(c.agent_name.asc(), c.queued_at.asc(), c.id.asc())
+            .where(admitted(schedule_executions))
+            .order_by(c.agent_name.asc(), c.id.asc())
         )
-        heads: Dict[str, Dict] = {}
-        counts: Dict[str, int] = {}
+        out: Dict[str, Dict] = {}
         with get_engine().connect() as conn:
             for row in conn.execute(stmt).mappings():
                 agent = row["agent_name"]
-                counts[agent] = counts.get(agent, 0) + 1
-                if agent not in heads:
-                    heads[agent] = {
-                        "agent_name": agent,
-                        "execution_id": row["id"],
-                        "queued_at": row["queued_at"],
-                        "conversation_key": row["conversation_key"],
-                        "triggered_by": row["triggered_by"],
-                        "redelivery_count": int(row["redelivery_count"] or 0),
-                    }
-        for agent, head in heads.items():
-            head["queued_count"] = counts.get(agent, 1)
-        return list(heads.values())
+                if agent in out:
+                    continue  # an exact tie at the head instant: the smaller id won
+                out[agent] = {
+                    "agent_name": agent,
+                    "execution_id": row["id"],
+                    "queued_at": row["queued_at"],
+                    "conversation_key": row["conversation_key"],
+                    "triggered_by": row["triggered_by"],
+                    "redelivery_count": int(row["redelivery_count"] or 0),
+                    "queued_count": int(row["queued_count"]),
+                }
+        return list(out.values())
 
-    def agents_with_running_conversation(self, agent_name: str) -> List[str]:
-        """Conversation keys this agent currently has a `running` row for (#4257).
+    def running_conversation_keys_by_agent(
+        self, agent_names: List[str]
+    ) -> Dict[str, List[str]]:
+        """Conversation keys each agent currently has a `running` row for.
 
-        The read half of the #2843 claim guard: a queued head whose
+        The read half of the #2843 claim guard: a queued row whose
         `conversation_key` appears here cannot be claimed until that row
         terminates, which is a distinct reason for a wait from "no worker
-        polled". Read-only.
+        polled". One query for every agent the caller names (#4635); agents with
+        no such row are absent; empty input ⇒ ``{}``. Read-only.
         """
+        if not agent_names:
+            return {}
         c = schedule_executions.c
-        stmt = select(c.conversation_key).where(
+        stmt = select(c.agent_name, c.conversation_key).where(
             and_(
-                c.agent_name == agent_name,
+                c.agent_name.in_(agent_names),
                 c.status == TaskExecutionStatus.RUNNING,
                 c.conversation_key.isnot(None),
             )
         ).distinct()
+        keys: Dict[str, List[str]] = {}
         with get_engine().connect() as conn:
-            return [row["conversation_key"] for row in conn.execute(stmt).mappings()]
+            for row in conn.execute(stmt).mappings():
+                keys.setdefault(row["agent_name"], []).append(row["conversation_key"])
+        return keys
 
     def get_queued_count(self, agent_name: str) -> int:
         """Count queued backlog items for an agent."""

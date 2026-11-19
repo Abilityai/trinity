@@ -51,7 +51,7 @@
           data-testid="portal-agent-picker"
           @click="pickerOpen = !pickerOpen"
         >
-          <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="26" />
+          <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="26" />
           <span class="font-semibold truncate">{{ agentDisplayName(agent) }}</span>
           <svg class="w-4 h-4 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
         </button>
@@ -65,7 +65,7 @@
             class="w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-800"
             @click="pickAgent(a)"
           >
-            <PortalAvatar :name="a.name" :avatar-url="a.avatar_url" :size="28" />
+            <PortalAvatar :name="agentDisplayName(a)" :avatar-url="a.avatar_url" :size="28" />
             <span class="min-w-0">
               <span class="block text-sm font-medium truncate">
                 {{ a.name === agent.name ? agentDisplayName(a) : `New chat with ${agentDisplayName(a)}` }}
@@ -313,7 +313,7 @@
              background ask never reaches this loop — its home is the Inbox. -->
         <div v-if="item.kind === 'ask'" :data-ask-id="item.ask.id">
           <div v-if="item.mode === 'card'" class="flex items-start gap-2.5" data-testid="portal-chat-ask-tile">
-            <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
+            <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
             <!-- `relative`: each card's sr-only text stays inside the thread's scroll box. -->
             <div class="relative min-w-0 flex-1 max-w-[min(85%,40rem)]">
               <PortalAsks
@@ -385,7 +385,7 @@
               :data-message-id="t.id || undefined"
               data-testid="portal-voice-turn"
             >
-              <PortalAvatar v-if="t.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="24" class="mt-0.5" />
+              <PortalAvatar v-if="t.role !== 'user'" :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="24" class="mt-0.5" />
               <div
                 v-if="t.role === 'user'"
                 class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-2 text-sm leading-relaxed whitespace-pre-wrap bg-action-primary-600 text-white"
@@ -408,7 +408,7 @@
           data-testid="portal-system-line"
         >{{ item.message.content }}</p>
         <div v-else :class="item.message.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'">
-          <PortalAvatar v-if="item.message.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
+          <PortalAvatar v-if="item.message.role !== 'user'" :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <div v-if="item.message.role === 'user'" class="max-w-[85%] flex flex-col items-end gap-1">
             <!-- ent#610 round 8: what this message replied to (this visit —
                  the stored row keeps only what was typed). Removable only while
@@ -533,7 +533,7 @@
              (ent#155) and Open in Work. The feed's row wins once it has the
              turn — matched by execution id, never "latest running". -->
         <div v-if="sending" class="flex items-start gap-2.5">
-          <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
+          <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <PortalWorkCard
             :item="liveCardItem"
             :live-step="liveStepLine"
@@ -553,7 +553,7 @@
              exactly as the red message does. Success collapses into the
              reply — the reply IS the outcome. "Ask about it" is a prefill. -->
         <div v-else-if="terminalCardItem" class="flex items-start gap-2.5" data-testid="portal-work-terminal">
-          <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
+          <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <PortalWorkCard
             :item="terminalCardItem"
             show-open-in-work

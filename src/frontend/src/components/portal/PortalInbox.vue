@@ -19,6 +19,10 @@
 -->
 <template>
   <div ref="rootEl" class="flex-1 min-h-0 flex flex-col" data-testid="inbox" :data-layout="layout.mode" @keydown.esc="onEsc">
+    <!-- Answer, then next: what just happened, for a reader who cannot see the
+         row leave. One persistent polite region (the card that would have said
+         "Sent" is unmounted by the advance). -->
+    <p class="sr-only" role="status" aria-live="polite" data-testid="inbox-announce">{{ announcement }}</p>
     <!-- §3g L5: over a STACKED pane the Inbox's own title, subtitle and tabs
          step aside (~130px back at 390) — the pane's Back is the way out. -->
     <header class="shrink-0 flex items-start gap-3 px-4 pt-4 pb-2" :class="overPane ? 'hidden' : ''" data-testid="inbox-header">
@@ -157,6 +161,7 @@
           :selected-key="selectedKey"
           :labels="labels"
           :label="`${tabLabel} items`"
+          :crossing="crossing"
           @open="open"
         >
           <!-- trinity-enterprise#856: Action's order — Newest by default,
@@ -194,6 +199,8 @@
           :canvas-count="canvasCount"
           @open-canvas="$emit('open-canvas')"
           :read-failed="readFailedKey === selectedItem.key"
+          :notify-answered="onAnswered"
+          :hold-ms="heldKey === selectedItem.key ? ANSWER_HOLD_MS : 0"
           @rendered="(k) => { renderedKey = k }"
           @mark-read="readNow(selectedItem)"
           @dismiss-read-error="readFailedKey = null"
@@ -205,6 +212,19 @@
         <!-- #3060: while the list has no verdict there is nothing to pick yet —
              the pane's placeholder, as the stage skeleton draws it. -->
         <PortalInboxSkeleton v-else-if="view.state === 'loading' && !stacked" part="pane" />
+        <!-- The reader answered the last ask and only ended rows are left:
+             never one of those, and never "Pick something" — the empty state's
+             own words and next action, here where the ask just was. -->
+        <div v-else-if="caughtUpNow && !noRows" class="m-auto px-6 text-center" data-testid="inbox-caught-up">
+          <p class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ empty.title }}</p>
+          <p v-if="empty.body" class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-300">{{ empty.body }}</p>
+          <router-link
+            v-if="empty.link"
+            :to="empty.link.to"
+            class="mt-3 inline-block text-sm text-action-primary-600 dark:text-action-primary-400 hover:underline"
+            data-testid="inbox-caught-up-link"
+          >{{ empty.link.label }}</router-link>
+        </div>
         <p v-else-if="!noRows" class="m-auto px-6 text-center text-sm text-gray-600 dark:text-gray-300" data-testid="inbox-pane-none">
           Pick something on the left to read it here.
         </p>
@@ -235,6 +255,8 @@ import {
   markAllLabel, markAllConfirm, allFooterNotes, pageWindow, PAGE_SIZE, inboxLayout, listHeadExact,
   INBOX_TAB_SHELL, agentFacets, filterByAgent, activeAgentFilter, normalizeFrom, FROM_ALL,
   inboxSortFor, normalizeInboxSort, loadInboxSort, saveInboxSort, isChatItem, isMemberRoom, roomAgentsLabel,
+  dropFromVisit, nextPendingAsk, answeredAnnouncement, itemKey,
+  ANSWER_BEAT_MS, ANSWER_COLLAPSE_MS, ANSWER_HOLD_MS,
 } from './portalInbox'
 import { safeStorage } from '@/utils/safeStorage'
 import { resolveLayoutIdentity } from '@/composables/useColumnResize'
@@ -466,7 +488,9 @@ onBeforeUnmount(() => emit('update:preview', null))
 
 // Principle 5 (§3g S1): the rows of one TAB VISIT keep their place — a row
 // that leaves stays as a ghost drawn read / ended, a poll never re-sorts, and a
-// new row goes in beside its neighbour (`stableRows`). The visit is keyed by
+// new row goes in beside its neighbour (`stableRows`). The one exception is the
+// reader's own answer, which crosses its row off ("answer, then next", below):
+// that rule is about changes the reader did not cause. The visit is keyed by
 // tab, so a tab change starts a new one by construction; clicking the active
 // tab again and a completed bulk read start one explicitly. Not reactive
 // itself: the computed returns the next visit, which is kept here (re-applying
@@ -475,7 +499,19 @@ onBeforeUnmount(() => emit('update:preview', null))
 // new visit, so the narrowed rows start in their own order.
 let visit = { tab: null, ...emptyVisit() }
 const visitEpoch = ref(0)
-function newVisit() { visit = { tab: null, ...emptyVisit() }; visitEpoch.value++ }
+// "Answer, then next" (wired further down, with the selection it moves).
+const crossing = ref({})        // key → 'done' | 'leaving', for the list
+const caughtUp = ref(false)     // the reader's own answer left nothing pending
+const heldKey = ref(null)       // the ask an advance just opened: its card holds input
+const announcement = ref('')
+// A cross-off in flight belongs to the visit it started in: a new one ends it,
+// and "All caught up" with it (that is said of the visit the reader finished).
+function newVisit() {
+  visit = { tab: null, ...emptyVisit() }
+  visitEpoch.value++
+  endCrossing()
+  caughtUp.value = false
+}
 // trinity-enterprise#856: and so is the sort (Action only — null elsewhere): a
 // sort change re-sorts the rows on the click, then they hold still again.
 const visitKey = computed(() => `${tab.value}|${activeFrom.value || ''}|${sort.value || ''}`)
@@ -580,15 +616,22 @@ const empty = computed(() => {
     }
   }
   if (tab.value === 'action') {
+    // Right after the reader's own last answer the title says so; the body and
+    // the next action are the empty state's. A client has no Operations door,
+    // so theirs is what came back — only when something did.
+    const title = caughtUpNow.value ? 'All caught up' : 'Nothing needs your answer'
     return props.isPlatform
       ? {
-          title: 'Nothing needs your answer',
+          title,
           body: 'Questions and approvals your agents address to you land here. Asks for the operator live in Operations.',
           link: { to: '/operations', label: 'Open Operations' },
         }
       : {
-          title: 'Nothing needs your answer',
+          title,
           body: 'When an agent you work with needs a decision from you, it lands here.',
+          ...(caughtUpNow.value && counts.value.came > 0
+            ? { link: { to: { path: route.path, query: { tab: 'unread' } }, label: 'See what came back' } }
+            : {}),
         }
   }
   if (tab.value === 'unread') {
@@ -661,6 +704,9 @@ watch([readIntent, renderedKey], ([want, done]) => {
 let pushedKey = null
 async function open(it) {
   clickedKey = it.key
+  caughtUp.value = false
+  heldKey.value = null
+  announcement.value = ''
   returnIndex = Math.max(0, shownItems.value.findIndex((x) => x.key === it.key))
   if (it.type === 'mention') {
     // Same rule as a chat: a card already on screen (the desktop preview) is
@@ -699,6 +745,7 @@ async function open(it) {
 function onTab(next) {
   droppedFrom.value = null
   keptFrom.value = null
+  announcement.value = ''
   if (next === tab.value) { newVisit(); return }
   replaceQuery({ tab: next, item: undefined, from: undefined, sort: undefined })
 }
@@ -726,11 +773,18 @@ async function focusRowAfterBack(key) {
   await nextTick()
   const col = listColEl.value
   if (!col) return
-  const rows = [...col.querySelectorAll('[data-inbox-row]')]
+  // Never a row that is collapsing out (it is inert: focus() there is a no-op
+  // and the reader would be left on <body>).
+  const rows = liveRowEls()
   const el = rows.find((r) => r.getAttribute('data-inbox-row') === key)
     || rows[Math.min(index, rows.length - 1)]
     || col
   el.focus?.()
+}
+function liveRowEls() {
+  return listColEl.value
+    ? [...listColEl.value.querySelectorAll('[data-inbox-row]')].filter((r) => !r.closest('[inert]'))
+    : []
 }
 // An item leaving the URL while STACKED — the pane's Back, the hardware Back,
 // or the open chat deleted under it — puts the reader back on the list, on the
@@ -766,12 +820,190 @@ watch(selectedItem, (it, prev) => {
 // pop in on the first click. Never on phone (a landing there costs no feed),
 // never in the URL, and never as a READ — a preview is not the person opening
 // the chat (§3g S5).
-watch([() => view.value.state, () => shownItems.value.length, routeItem, previewKey, tab, stacked], () => {
+watch([() => view.value.state, () => shownItems.value.length, routeItem, previewKey, tab, stacked,
+  () => caughtUp.value, () => liveItems.value.length], () => {
   if (stacked.value || routeItem.value) return
   if (view.value.state !== 'ready' || !shownItems.value.length) return
+  if (caughtUp.value) {
+    // The reader answered everything: an ended row is never auto-selected.
+    // An ask that arrives is — it is what needs them now.
+    const fresh = shownItems.value.find((it) => !isGhost(it))
+    if (!fresh) return
+    caughtUp.value = false
+    previewFor.value = { tab: tab.value, key: fresh.key }
+    return
+  }
   if (previewKey.value && shownItems.value.some((it) => it.key === previewKey.value)) return
   previewFor.value = { tab: tab.value, key: shownItems.value[0].key }
 }, { immediate: true })
+
+// ---- Answer, then next (the one exception to principle 5) -------------------------
+// The reader's own answer, confirmed by the server, crosses its row off: the
+// ended badge holds for a beat, the next pending ask opens while the row
+// collapses, and then the row leaves the visit. `onAnswered` is called by the
+// card on its success path only (a function prop — it still runs when the pane
+// was unmounted mid-request), never from the data: an ask a poll brings back
+// ended, even by this reader in another tab, keeps its ghost and its selection.
+//   Action  the row leaves; the selection goes to the next pending ask.
+//   All     the row stays (an ended ask is a member for 7 days); only the
+//           selection moves, and stays put when no pending ask is left.
+// Rules in `portalInbox.js`: nextPendingAsk, dropFromVisit, answeredAnnouncement.
+// (Its state is declared with the visit, above: the watchers before this read it.)
+// Only while nothing is waiting: an ask that arrives ends it on its own.
+const caughtUpNow = computed(() => caughtUp.value && liveItems.value.length === 0)
+// The beat and the collapse. A wait that is cancelled (`endCrossing`: a new
+// visit, an unmount) never resolves, so the sequence simply stops there; with
+// reduced motion there is no timer at all.
+const crossTimers = new Set()
+const wait = (ms) => (ms <= 0
+  ? Promise.resolve()
+  : new Promise((resolve) => { crossTimers.add(setTimeout(resolve, ms)) }))
+function setCrossing(key, phase) {
+  const next = { ...crossing.value }
+  if (phase) next[key] = phase
+  else delete next[key]
+  crossing.value = next
+}
+function endCrossing() {
+  crossTimers.forEach(clearTimeout)
+  crossTimers.clear()
+  if (Object.keys(crossing.value).length) crossing.value = {}
+}
+// `onAnswered` is a function prop, so a confirm can arrive after this Inbox
+// itself is gone (the reader opened a chat while the answer was on the wire):
+// it must do nothing then — its router write would land on that other page.
+let unmounted = false
+onBeforeUnmount(() => { unmounted = true; endCrossing() })
+// A new visit (the tab, the agent filter or the sort changed; `newVisit` for a
+// click on the active tab or a bulk read) has no such row: the sequence stops.
+watch(visitKey, () => { endCrossing(); caughtUp.value = false })
+const reducedMotion = () => typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+  && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+function focusInside() {
+  const active = typeof document !== 'undefined' ? document.activeElement : null
+  return !active || active === document.body || !!rootEl.value?.contains(active)
+}
+// Said twice in a row, the same sentence is not read again: clear, then set.
+function announce(text) {
+  announcement.value = ''
+  nextTick(() => { announcement.value = text })
+}
+function scrollToRow(key) {
+  const row = listColEl.value
+    ? [...listColEl.value.querySelectorAll('[data-inbox-row]')].find((r) => r.getAttribute('data-inbox-row') === key)
+    : null
+  row?.scrollIntoView?.({ block: 'nearest' })
+}
+
+async function onAnswered(askId) {
+  if (unmounted) return
+  const key = itemKey('ask', askId)
+  if (crossing.value[key]) return                          // one confirm, one advance
+  const live = store.asks.find((a) => a.id === askId)
+  if (live && live.status === 'pending') return            // the server does not call it answered
+  // Not a row of this view (a deep link on another tab, outside the filter):
+  // it stays selected, drawn ended. The card is still there; say it landed.
+  if (!shownItems.value.some((it) => it.key === key)) { announce(answeredAnnouncement()); return }
+  const onAction = tab.value === 'action'
+  const calm = reducedMotion()
+  if (onAction) setCrossing(key, 'done')                   // the ghost already draws the ended badge
+  await wait(calm ? 0 : ANSWER_BEAT_MS)
+  const scrollTo = advanceFrom(key, onAction)
+  // All: the row stays, so nothing collapses — a far next ask is shown now.
+  if (!onAction) { crossTimers.clear(); if (scrollTo) nextTick(() => scrollToRow(scrollTo)); return }
+  handFocusOff(key)
+  // The collapse exists to bring the rows below up smoothly. The ONLY row has
+  // none: it goes at once, so the empty state is not held back behind a list
+  // column that would change width around a fading row.
+  if (shownItems.value.length > 1) {
+    setCrossing(key, 'leaving')
+    await wait(calm ? 0 : ANSWER_COLLAPSE_MS)
+  }
+  setCrossing(key, null)
+  visit = { tab: visit.tab, ...dropFromVisit(visit, key) }
+  visitEpoch.value++
+  if (!Object.keys(crossing.value).length) crossTimers.clear()   // all fired
+  if (scrollTo) nextTick(() => scrollToRow(scrollTo))
+}
+
+// Move the selection off the answered ask. Returns a key to scroll to once the
+// row is gone (a next ask that was not the adjacent row), else null.
+function advanceFrom(key, onAction) {
+  const list = shownItems.value
+  const at = list.findIndex((it) => it.key === key)
+  const next = nextPendingAsk(list, key)
+  const wasSelected = selectedKey.value === key
+  const fromLabel = activeFrom.value ? labelOf(activeFrom.value) : null
+  if (onAction && !next) {
+    caughtUp.value = true
+    // The reader's own answers emptied this filter: it is kept (they clear it
+    // with "Show all agents"), not dropped under them by the watcher above.
+    if (fromQuery.value && activeFrom.value === fromQuery.value) keptFrom.value = fromQuery.value
+  }
+  // The reader moved on while the answer was on the wire (or during the beat):
+  // the row is crossed off, and nothing else moves.
+  if (!wasSelected) { announce(answeredAnnouncement()); return null }
+  if (next) {
+    announce(answeredAnnouncement({ next }))
+    return selectNext(next, key, Math.abs(list.findIndex((it) => it.key === next.key) - at) === 1)
+  }
+  if (!onAction) { announce(answeredAnnouncement()); return null }   // All: stays on the ask
+  announce(answeredAnnouncement({ caughtUp: true, fromLabel }))
+  clearSelection()
+  return null
+}
+
+// Opens `next` the way the answered ask was held, without a history entry:
+// always `?item=` by replace (also from a preview), so a reload lands on it.
+function selectNext(next, answeredKey, adjacent) {
+  const inside = focusInside()
+  heldKey.value = next.key
+  previewFor.value = { tab: tab.value, key: next.key }
+  // The row is where the reader is looking, and scrolling while its neighbour
+  // collapses would move the list twice; a far row is scrolled to afterwards.
+  scrolledTo = next.key
+  if (stacked.value) {
+    // §3g A6: the entry OUR open pushed is still the only one; it now names
+    // `next`, so the pane's Back pops it and focus returns to that row.
+    if (pushedKey === answeredKey) pushedKey = next.key
+    returnKey = next.key
+    returnIndex = Math.max(0, shownItems.value.filter((it) => it.key !== answeredKey)
+      .findIndex((it) => it.key === next.key))
+  }
+  const navigated = replaceQuery({ tab: tab.value, item: next.key })
+  if (inside) {
+    Promise.resolve(navigated).then(() => nextTick()).then(() => paneEl.value?.focusHeading?.())
+  }
+  return adjacent ? null : next.key
+}
+
+// Nothing pending is left: no row is selected (never an ended one).
+function clearSelection() {
+  const inside = focusInside()
+  previewFor.value = { tab: null, key: null }
+  if (stacked.value) {
+    // AC 6: back to the list. The answered row is leaving, so it is not where
+    // focus returns to (the watcher takes the row now in its place, else the list).
+    returnKey = null
+    back()
+    return
+  }
+  if (!routeItem.value) { if (inside) listColEl.value?.focus?.({ preventScroll: true }); return }
+  Promise.resolve(replaceQuery({ item: undefined })).then(() => nextTick()).then(() => {
+    if (inside) listColEl.value?.focus?.({ preventScroll: true })
+  })
+}
+
+// A row that holds focus as it starts to leave goes inert under it: hand the
+// focus to the row that takes its place, else the list.
+function handFocusOff(key) {
+  const active = typeof document !== 'undefined' ? document.activeElement : null
+  if (!active || active.getAttribute?.('data-inbox-row') !== key) return
+  const rows = liveRowEls()
+  const at = rows.indexOf(active)
+  const target = rows[at + 1] || rows[at - 1] || listColEl.value
+  target?.focus?.({ preventScroll: true })
+}
 
 // ---- Mark all read (D11, §3g A9) ------------------------------------------------
 const markingAll = ref(false)

@@ -94,8 +94,9 @@ async function checkAgentAccess(
     return { allowed: true };
   }
 
-  // 3. Admin bypass (check if caller is admin user)
-  if (callerOwner === "admin" || authContext.userId === "admin") {
+  // 3. Admin bypass — check the role, not the username (#4654: a renamed admin
+  //    would lose access; a user named "admin" without the role would gain it)
+  if (authContext.userRole === "admin") {
     return { allowed: true };
   }
 

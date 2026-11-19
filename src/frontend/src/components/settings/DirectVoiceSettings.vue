@@ -16,11 +16,12 @@
         Speech provider
         <BaseSelect
           :model-value="state.provider"
-          :options="PROVIDERS"
           :disabled="saving"
           data-testid="direct-voice-provider"
           @update:model-value="save({ provider: $event })"
-        />
+        >
+          <option v-for="p in PROVIDERS" :key="p.value" :value="p.value">{{ p.label }}</option>
+        </BaseSelect>
       </label>
     </div>
     <p

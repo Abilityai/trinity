@@ -669,7 +669,11 @@ new claim starts its own walk. Between attempts the worker holds the turn as
 pending in its process registry, so a terminate that lands while a refusal is
 being reported skips the next attempt and reports `cancelled`. A worker
 that cannot follow (older image, non-Claude runtime, a restarted worker
-resending from disk) keeps the pre-#3487 path. The #1085 governor is not
+resending from disk) keeps the pre-#3487 path. The periodic resend tick
+never sends a result the worker is still delivering itself (#4635): it
+resends as a worker that cannot follow a retry, and the sink would answer
+that with a terminal FAILED, so a refused credential lost its walk
+whenever the tick landed inside the 90 s in-loop window. The #1085 governor is not
 consulted — push has no such gate, and its pause is armed by several agents
 failing on shared credentials, the case the walk is for.
 

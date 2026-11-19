@@ -85,9 +85,17 @@ export default defineConfig({
       // Trailing slash matters: `/api` (no slash) is a prefix that captures
       // the SPA route `/api-keys` and forwards it to the backend → 404. Use
       // `/api/` so only proper API paths are proxied.
+      //
+      // changeOrigin:false keeps the browser's Host (#4476), as prod nginx does
+      // with `Host $host`. The backend builds the URLs it hands back from that
+      // Host — the advertised MCP URL, a schedule's webhook URL — so with the
+      // Host rewritten they named the container (`http://backend:8080/mcp`).
+      // No X-Forwarded-* here: with X-Forwarded-Proto the backend advertises
+      // `<origin>/mcp`, and this dev server does not proxy /mcp.
+      // Guard: tests/unit/viteApiProxyHost.spec.js.
       '/api/': {
         target: `http://${backendHost}:8000`,
-        changeOrigin: true,
+        changeOrigin: false,
         ws: true,
       },
       '/token': {
@@ -103,11 +111,10 @@ export default defineConfig({
       '/a2a/': {
         target: `http://${backendHost}:8000`,
         changeOrigin: false,
-        // routers/public.py::_get_client_ip (#181) trusts X-Real-IP from this
-        // proxy's container (it sits inside _get_trusted_networks()) and keys
-        // the public-route rate limits on it. Overwrite it from the socket, as
-        // prod nginx does with $remote_addr — a client-sent value passed through
-        // would let a dev-mode client pick its own rate-limit bucket.
+        // Overwrite X-Real-IP from the socket, as prod nginx does with
+        // $remote_addr (#181). Belt-and-braces since trinity-enterprise#873: the
+        // backend keys rate limits on the address utils/client_ip.py resolves,
+        // which never reads X-Real-IP and treats this proxy as a plain peer.
         configure: (proxy) => {
           proxy.on('proxyReq', (proxyReq, req) => {
             proxyReq.setHeader('X-Real-IP', req.socket.remoteAddress || '')

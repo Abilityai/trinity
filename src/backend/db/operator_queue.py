@@ -812,6 +812,27 @@ class OperatorQueueOperations:
             row = self._find_pending_by_subject(conn, agent_name, subject)
         return self._row_to_item(row) if row else None
 
+    def list_pending_by_subject_prefix(self, subject_prefix: str) -> List[Dict]:
+        """Every pending row whose `subject` starts with `subject_prefix`, any
+        agent (#4635) — a platform emitter's view of its own open alerts, e.g.
+        `"dispatch_queue_stalled:"`. Platform-internal: never route-exposed.
+
+        Matched with `substr`, which is exact and case-sensitive on SQLite and
+        PostgreSQL alike; a LIKE pattern would treat each `_` as a wildcard and,
+        on SQLite, ignore case. No limit: the partial unique index keeps one
+        pending row per subject, so a kind's prefix returns at most one row per
+        key. (The stall monitor's reconcile used to read 1,000 pending rows of
+        every kind and filter them here in Python, which missed its own rows on
+        a busy queue.)"""
+        stmt = select(*self._SELECT_COLS).where(and_(
+            operator_queue.c.status == "pending",
+            operator_queue.c.subject.isnot(None),
+            func.substr(operator_queue.c.subject, 1, len(subject_prefix)) == subject_prefix,
+        ))
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_item(r) for r in rows]
+
     def _find_pending_by_subject(self, conn, agent_name: str, subject: str):
         return conn.execute(
             select(*self._SELECT_COLS).where(and_(
