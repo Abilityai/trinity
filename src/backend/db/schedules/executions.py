@@ -108,6 +108,9 @@ class ScheduleExecutionsMixin:
             # Verified AAuth peer of an inbound A2A call (ent#862); NULL otherwise.
             a2a_caller_identity=row["a2a_caller_identity"]
                 if "a2a_caller_identity" in row_keys else None,
+            # The platform-recorded turn this row continues (ent#1225).
+            continues_execution_id=row["continues_execution_id"]
+                if "continues_execution_id" in row_keys else None,
         )
 
     # =========================================================================
@@ -209,11 +212,37 @@ class ScheduleExecutionsMixin:
             ).scalar()
         return int(value or 0)
 
+    def get_deepest_running_chain_row(self, agent_name: str) -> Optional[Dict]:
+        """The RUNNING row of `agent_name` that `get_max_running_chain_depth` reads (#4357).
+
+        Read only when a hop is refused, so the refusal can name the execution
+        that exhausted the depth. Roots (NULL depth) are skipped — PostgreSQL
+        sorts NULLs first in DESC — and only the four columns the refusal
+        reports are read: never a person, a channel or message text. None when
+        no running row carries a depth.
+        """
+        c = schedule_executions.c
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(c.id, c.chain_depth, c.triggered_by, c.source_agent_name)
+                .where(
+                    and_(
+                        c.agent_name == agent_name,
+                        c.status == TaskExecutionStatus.RUNNING,
+                        c.chain_depth.is_not(None),
+                    )
+                )
+                .order_by(c.chain_depth.desc().nulls_last())
+                .limit(1)
+            ).first()
+        return dict(row._mapping) if row is not None else None
+
     def get_running_turn_attribution(self, agent_name: str) -> List[Dict]:
         """Who each of `agent_name`'s RUNNING turns is for (trinity-enterprise#926).
 
-        The columns `turn_tier_service` rates a turn by, for every running
-        row — a Workspace turn by its channel and email. Like the chain-depth
+        The columns `turn_tier_service` rates a turn by (its `LEDGER_COLUMNS`),
+        for every running row — a Workspace turn by its channel and email, a
+        delegated turn by the agent that dispatched it. Like the chain-depth
         read, only `running` counts: every row is inserted RUNNING, so a turn
         whose process could be making a request is always here.
         """
@@ -226,6 +255,8 @@ class ScheduleExecutionsMixin:
                 schedule_executions.c.triggered_by,
                 schedule_executions.c.source_channel,
                 schedule_executions.c.source_user_email,
+                schedule_executions.c.source_agent_name,
+                schedule_executions.c.continues_execution_id,
             )
             .where(and_(
                 schedule_executions.c.agent_name == agent_name,
@@ -856,6 +887,20 @@ class ScheduleExecutionsMixin:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_schedule_execution(row) if row else None
 
+    def get_turn_attribution(self, execution_id: str) -> Optional[Dict]:
+        """One execution's rating columns (`turn_tier_service.LEDGER_COLUMNS`)
+        and its `status`, or None — the turn a continuation follows
+        (trinity-enterprise#1225), without the row's response and log."""
+        c = schedule_executions.c
+        stmt = select(
+            c.id, c.agent_name, c.source_user_id, c.schedule_id, c.triggered_by,
+            c.source_channel, c.source_user_email, c.source_agent_name,
+            c.continues_execution_id, c.status,
+        ).where(c.id == execution_id)
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return dict(row) if row else None
+
     def get_execution_gate_state(self, execution_id: str) -> Optional[tuple]:
         """`(agent_name, status)` of one execution, or None — the two columns
         the skill-gate hook's check needs (trinity-enterprise#752), without
@@ -1033,6 +1078,32 @@ class ScheduleExecutionsMixin:
                 select(schedule_executions.c.chat_session_id)
                 .where(schedule_executions.c.id == execution_id)
             ).scalar()
+
+    def stamp_model_used_if_null(self, execution_id: str, model: Optional[str]) -> bool:
+        """Record the resolved model on a row created elsewhere (ent#1202).
+
+        ``model_used`` is written at INSERT, and the standalone scheduler
+        pre-creates reminder, schedule and loop rows before it dispatches with
+        ``execution_id`` — so ``execute_task``'s own stamp (inside
+        ``if not execution_id:``) never runs for them and a turn that named no
+        model left the row NULL while it ran on the resolved one.
+
+        Guarded on ``model_used IS NULL``: it only ever FILLS a blank. A row
+        stamped at creation with an explicit model is never rewritten. Returns
+        whether the stamp landed.
+        """
+        if not execution_id or not model:
+            return False
+        stmt = (
+            update(schedule_executions)
+            .where(and_(
+                schedule_executions.c.id == execution_id,
+                schedule_executions.c.model_used.is_(None),
+            ))
+            .values(model_used=model)
+        )
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount > 0
 
     def stamp_execution_channel_context(
         self,

@@ -51,6 +51,7 @@ from services.capacity_manager import (
 from services.dispatch_breaker import DispatchBreaker
 from services.execution_integrity import derive_turn_integrity
 from services import event_dispatch_service
+from services import execution_attribution  # ent#1105
 from services import channel_completion_report
 from services import peer_skill_policy, skill_gate_service
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
@@ -193,10 +194,15 @@ def _default_model_for(agent_name: str) -> Optional[str]:
     it. A Codex or Gemini agent gets ``None`` and runs on its own model
     (``AGENT_RUNTIME_MODEL`` from its template, or the CLI default): handed
     ``claude-sonnet-4-6``, Codex is refused by OpenAI with a 404.
+
+    ent#1202: a Claude Code agent's own ``default_model`` comes first when this
+    instance can run it — one resolver, ``agent_model_service``, for every rung.
     """
-    if _resolve_agent_runtime(agent_name) != "claude-code":
-        return None
-    return settings_service.get_platform_default_model()
+    from services.agent_model_service import resolve_default_model
+
+    return resolve_default_model(
+        agent_name, runtime=_resolve_agent_runtime(agent_name), db_ops=db, settings=settings_service,
+    ).model
 
 
 def _resolve_agent_runtime(agent_name: str) -> str:
@@ -329,9 +335,13 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # trinity-enterprise#1102: `caller_wake` is the `operator_ending` shape for
     # a delegation — the platform wakes the agent that delegated a run when
     # that run ends, from the terminal fan-out, with nobody reading its reply.
+    #
+    # trinity-enterprise#1236: `project_steward` is the platform waking a
+    # project's steward agent, the turn a schedule used to start, with nobody
+    # reading its reply.
     {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
      "a2a", "operator_response", "operator_ending", "retry", "self_task",
-     "skill_gate", "caller_wake"}
+     "skill_gate", "caller_wake", "project_steward"}
 )
 
 
@@ -1496,11 +1506,39 @@ def _with_switch(
 _TIMEOUT_ATTRIBUTION_GRACE_S = 30
 
 
-# The phrases the execution error's readers match, case and all: the sync
-# /task mapper (`chat_execution_service._map_task_failure`), the public and
-# inline-auth chats and the client portal answer 429 on "at capacity" and 504
-# on "timed out".
-_READER_PHRASES = ("timed out", "at capacity")
+# The phrases the execution error's status readers match. The sync /task
+# mapper (`chat_execution_service._map_task_failure`) and the public and
+# inline-auth chats answer 429 on "at capacity" and 504 on "timed out", case
+# and all; the client portal does the same after lowercasing. The scheduler
+# lowercases and doubles its retry delay on "429", "rate limit" or "too many
+# requests". The chat panel's banner and the public chat's refusal check read
+# the error too, but on words this path does not pass on ("usage limit", the
+# refusal sentences), so they do not fire on it (#4360).
+_READER_PHRASES = ("timed out", "at capacity", "429", "rate limit", "too many requests")
+
+# "429" only as a number of its own: not the digits inside 14290, 1.429 or 429s,
+# which would read as a rate limit to the scheduler and to anyone reading the
+# error (#4352).
+_HTTP_429 = re.compile(r"(?<![\w.])429(?!\w|\.\d)")
+
+
+def _phrase_as_said(phrase: str, text: str) -> str | None:
+    """``phrase`` in a fixed spelling when ``text`` holds it, else None.
+
+    The lowercase spelling when the text holds it, so a reader that matches
+    case and all still matches. Otherwise the title-case spelling when the
+    lowercased text holds it, so a reader that lowercases first still matches
+    and one that does not still misses, as each did on the text. Neither
+    spelling comes from the text, so its own letters never reach the error
+    (#4284, #4352).
+    """
+    if phrase == "429":
+        return phrase if _HTTP_429.search(text) else None
+    if phrase in text:
+        return phrase
+    if phrase in text.lower():
+        return phrase.title()
+    return None
 
 
 def _exception_words(exc: BaseException) -> str:
@@ -1508,11 +1546,12 @@ def _exception_words(exc: BaseException) -> str:
 
     The text itself stays in the log (abilityai/trinity#4284): this message is
     the execution's error, which the sync routes answer at 5xx. A reader phrase
-    survives exactly as the readers match it, so each answers the status it
-    gave the exception's own text.
+    survives in a fixed spelling, so each status reader in `_READER_PHRASES`
+    answers the status it gave the exception's own text ("429" aside, which
+    counts only as a number of its own).
     """
     text = str(exc)
-    said = [phrase for phrase in _READER_PHRASES if phrase in text]
+    said = [w for w in (_phrase_as_said(p, text) for p in _READER_PHRASES) if w]
     return type(exc).__name__ + (f": {', '.join(said)}" if said else "")
 
 
@@ -1613,7 +1652,8 @@ def _log_retry_budget(
 # wrote on the row it pre-created. `/api/internal/execute-task` sends neither the
 # schedule id nor the person who pressed Run now — both live on the row.
 _ROW_ATTRIBUTION = ("source_user_id", "source_user_email", "source_agent_name",
-                    "source_mcp_key_id", "source_mcp_key_name", "schedule_id")
+                    "source_mcp_key_id", "source_mcp_key_name", "schedule_id",
+                    "continues_execution_id")
 
 
 def _with_row_attribution(fields: dict, execution_id: Optional[str]) -> dict:
@@ -1718,6 +1758,11 @@ class TaskExecutionService:
         # whether or not the agent is a pull pilot. Off, the #2391 pilot gate
         # alone decides. See `build_pull_queue_payload`.
         queue_on_capacity: bool = False,
+        # trinity-enterprise#1225: the turn this run continues, recorded by a
+        # platform producer through `turn_tier_service.continuation_origin`.
+        # A continuation trigger is rated as that turn. Ignored when
+        # `execution_id` is given (the producer wrote the row).
+        continues_execution_id: Optional[str] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1753,6 +1798,14 @@ class TaskExecutionService:
         # hardcode in base-image.
         if model is None:
             model = _default_model_for(agent_name)
+            # ent#1202: a row created elsewhere (the scheduler's reminder,
+            # schedule and loop rows) was stamped before this resolution, so
+            # record what the turn actually runs on. Fills a blank only.
+            if execution_id and model:
+                try:
+                    db.stamp_model_used_if_null(execution_id, model)
+                except Exception as e:  # noqa: BLE001 — never fail a turn over the stamp
+                    logger.warning(f"[ent#1202] model_used stamp failed for {execution_id}: {type(e).__name__}")
 
         # Dispatch circuit breaker (#526): combined global master-switch AND
         # per-agent opt-in. Drives the acquire() gate (this path), the
@@ -1810,9 +1863,13 @@ class TaskExecutionService:
                     source_channel_client=source_channel_client,
                     source_channel_agent=source_channel_agent,
                     chain_depth=chain_depth,
+                    continues_execution_id=continues_execution_id,
                 ),
             )
             execution_id = execution.id if execution else None
+            # ent#1105: an edition may attribute this execution to a project
+            # from the row alone (e.g. a room turn). Inert in OSS; never raises.
+            execution_attribution.record_row(execution)
 
         # #678/#792 call-attempt bookkeeping, shared with the exception
         # handlers below (they read what the retries wrote). Created BEFORE the
@@ -1889,6 +1946,7 @@ class TaskExecutionService:
                         source_channel_thread=source_channel_thread,
                         source_channel_client=source_channel_client,
                         max_turns=max_turns,
+                        continues_execution_id=continues_execution_id,
                     ),
                 )
 
@@ -2198,6 +2256,8 @@ class TaskExecutionService:
                 schedule_name=(schedule_context or {}).get("name"),
                 loop_id=loop_id,
             )
+            replay = dict(gate_replay or {})
+            request_parts = replay.pop(skill_gate_service.REQUEST_PARTS, None)
             frozen = skill_gate_service.frozen_dispatch(
                 triggered_by=triggered_by,
                 **{k: v for k, v in fields.items() if k != "schedule_id"})
@@ -2214,8 +2274,9 @@ class TaskExecutionService:
                 triggered_by=triggered_by,
                 occurrence_key=execution_id,
                 origin_execution_id=execution_id,
-                dispatch={**frozen, **(gate_replay or {})},
+                dispatch={**frozen, **replay},
                 gates=gates,
+                request_parts=request_parts,
             )
             # Only reachable with a producer-supplied, proven `gate_requester`.
             # trinity-enterprise#752: the row this call created or was given is

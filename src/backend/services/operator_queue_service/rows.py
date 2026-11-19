@@ -95,6 +95,27 @@ def is_addressee_reach(item: dict) -> bool:
             and str(candidate).strip().lower().startswith(_oq.ADDRESSEE_REACH_ID_PREFIXES))
 
 
+def is_project_reach(item: dict, email: Optional[str]) -> bool:
+    """Does this row reach `email` by address as its project's steward or
+    creator (trinity-enterprise#1134)? Four conditions: the row was addressed
+    `to: project` (`to_role`), by an agent (`raised_by` on the column itself),
+    it carries the platform's project stamp as a TOP-LEVEL key of its parsed
+    context (a nested look-alike matches the list's SQL prefilter, not this),
+    and `email` is its addressee. The Python twin of the project arm in
+    `db/operator_queue._list_conditions` — the platform chose this addressee,
+    so the agent's roster is not their fence."""
+    if item.get("to_role") != "project" or item.get("raised_by") != "agent":
+        return False
+    context = item.get("context")
+    if isinstance(context, str):
+        try:
+            context = json.loads(context)
+        except ValueError:
+            context = None
+    pid = context.get(_oq._WORKSPACE_PROJECT_ID_KEY) if isinstance(context, dict) else None
+    return isinstance(pid, str) and bool(pid) and is_addressed_to(item, email)
+
+
 def is_addressed_to(item: dict, email: Optional[str]) -> bool:
     """Is `email` this row's addressee — its single `addressed_to_email` or one
     of its `resolved_to` — compared case-insensitively? The Python twin of the

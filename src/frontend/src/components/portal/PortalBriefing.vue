@@ -1,7 +1,7 @@
 <template>
   <div id="portal-briefing" class="py-8 sm:py-12 text-center">
-    <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="64" class="mx-auto" />
-    <h1 class="mt-4 text-xl font-semibold tracking-tight">{{ agent.name }}</h1>
+    <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="64" class="mx-auto" />
+    <h1 class="mt-4 text-xl font-semibold tracking-tight">{{ agentDisplayName(agent) }}</h1>
     <!-- #2163: the briefing is hydrated AFTER the roster (it used to ship with
          it, which is what made the Workspace's first paint wait for the slowest
          agent in the fleet). So this zone shows a placeholder keyed on the
@@ -24,7 +24,10 @@
     <div class="mt-1.5 mx-auto max-w-2xl min-h-[6.5rem]">
     <PortalSkeleton v-if="zone.state === 'pending'" variant="briefing" />
     <template v-else>
-    <p v-if="agent.description" class="mx-auto max-w-lg text-sm text-gray-500 dark:text-gray-400">
+    <!-- ent#1172: for a share-tier viewer of a member agent, suppress the
+         description, skill hints, suggestions and error line — the clean
+         briefing (avatar + display label) IS the welcome surface. -->
+    <p v-if="agent.description && !isMemberViewer" class="mx-auto max-w-lg text-sm text-gray-500 dark:text-gray-400">
       {{ agent.description }}
     </p>
     <!-- ONE element, two sentences. A failed hydration must say so — an agent
@@ -32,7 +35,7 @@
          offer (ent#380's "never silently empty", and the same "looks complete"
          class `playbooks_total` guards one tier over). Reusing the element
          rather than adding a second keeps the raw-gray count flat. -->
-    <p v-else class="text-sm text-gray-400">{{ fallbackLine }}</p>
+    <p v-else-if="!isMemberViewer" class="text-sm text-gray-400">{{ fallbackLine }}</p>
 
     <!-- Capability hints as clickable cards (pre-fill the composer, no auto-run).
          Exposed playbooks when the operator curated a set; the template's
@@ -40,7 +43,7 @@
          #2101: bounded — described-first order, first 6 collapsed, counted toggle
          expands IN PLACE (no nested scroll region: the chat pane stays the single
          scroll axis, and the set itself is belted server-side at ≤24). -->
-    <div v-if="playbooks.length" class="mt-7">
+    <div v-if="playbooks.length && !isMemberViewer" class="mt-7">
       <div class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2 text-left">Things you can ask</div>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
         <button
@@ -78,16 +81,10 @@
       </button>
     </div>
 
-    <!-- ent#465: the shell's per-viewer suggestions (top 3). BELOW the hints:
-         the hints are static (they arrive with the briefing, under the skeleton
-         that already holds their footprint), while suggestions are dynamic —
-         their own fetch, 0–3 rows, dismissible — so above the hints every
-         arrival or dismissal shoved the "Things you can ask" grid up and down.
-         Down here a late row grows into the empty pane (the composer is pinned
-         to the bottom of the column), and nothing the reader is looking at
-         moves. A slot, so this component stays the briefing and the
-         suggestions keep their own store, verbs and door. -->
-    <slot name="after-hints" />
+    <!-- ent#465: the shell's per-viewer suggestions (top 3). BELOW the hints.
+         ent#1172: suppressed for share-tier member viewers (the slot wrapping
+         element ensures the slot content is not rendered). -->
+    <slot v-if="!isMemberViewer" name="after-hints" />
     </template>
     </div>
   </div>
@@ -99,6 +96,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
 import { planHintDisplay, starterFor, hintLine } from './portalUtils'
 import { briefingZone } from './portalBriefingState'
+import { agentDisplayName } from '@/utils/agentName'
 
 const props = defineProps({
   agent: { type: Object, required: true },
@@ -106,6 +104,12 @@ const props = defineProps({
 defineEmits(['use-playbook'])
 
 const playbooks = computed(() => props.agent.playbooks || [])
+
+// ent#1172: a share-tier viewer of a member agent sees only avatar + display
+// label; description, skill hints, suggestions and error line are suppressed.
+const isMemberViewer = computed(() =>
+  Boolean(props.agent.is_member_agent) && !props.agent.owned
+)
 
 // #2163 — presentational: the fetch is driven by `Portal.vue`'s active-agent
 // watcher, not from here. This component renders only in the conversation's

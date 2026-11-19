@@ -403,11 +403,32 @@ export interface DepthRefusal {
   agent: string;
   depth?: number;
   max_depth?: number;
+  /**
+   * #4357: the hop that set the depth — the caller's deepest running execution
+   * (`execution_id`, `chain_depth`, `triggered_by`, `source_agent`) or
+   * `{kind: "event_claim", chain_depth}`. `null` when the backend could not
+   * read it; absent from a backend that predates the field.
+   */
+  exhausted_by?: Record<string, unknown> | null;
+  /** #4357: what lowers the depth, in one fixed sentence. */
+  resets: string;
   retryable: false;
   message: string;
 }
 
 export const INTER_AGENT_DEPTH_EXCEEDED = "inter_agent_depth_exceeded";
+
+/**
+ * #4357: mirrors the backend's `InterAgentDepthExceeded.RESETS`. Used when the
+ * refusal body carries no `resets` of its own. Kept equal to the backend's by
+ * `tests/unit/test_4357_depth_resets_parity.py`.
+ */
+export const DEPTH_RESETS =
+  "The depth falls when that execution finishes: every call you make counts " +
+  "from the deepest of your executions still running. A turn a person starts " +
+  "(a chat, an answered or cancelled ask) and a reminder start no depth of " +
+  "their own, and a wake when a run you delegated ends stands where you stood " +
+  "when you delegated.";
 
 /**
  * #3244: a 429 from `/chat` that is NOT the admission refusal. Only
@@ -506,17 +527,27 @@ export function parseDepthRefusal(
     const parsed = JSON.parse(body) as unknown;
     const d = ((parsed as { detail?: unknown })?.detail ?? parsed) as Record<string, unknown>;
     if (d?.error !== INTER_AGENT_DEPTH_EXCEEDED) return undefined;
+    const hop = d.exhausted_by;
+    const resets = typeof d.resets === "string" && d.resets ? d.resets : DEPTH_RESETS;
     return {
       status: INTER_AGENT_DEPTH_EXCEEDED,
       agent,
       depth: typeof d.depth === "number" ? d.depth : undefined,
       max_depth: typeof d.max_depth === "number" ? d.max_depth : undefined,
+      exhausted_by:
+        hop === null
+          ? null
+          : hop && typeof hop === "object" && !Array.isArray(hop)
+            ? (hop as Record<string, unknown>)
+            : undefined,
+      resets,
       retryable: false,
       message:
         typeof d.message === "string" && d.message
           ? d.message
           : "Inter-agent chain depth limit reached. Do not retry this call or route it " +
-            "through another agent; finish your turn and report back to your caller.",
+            "through another agent; finish your turn and report back to your caller. " +
+            resets,
     };
   } catch {
     return undefined;
@@ -1322,7 +1353,9 @@ export class TrinityClient {
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
     idempotencyKey?: string,
-    turn?: string
+    turn?: string,
+    /** ent#1105: the project to attribute the execution to; sent only when set. */
+    projectId?: string
   ): Promise<
     | Replayable<ChatResponse>
     | { error: string; queue_status: "busy" | "queue_full"; retry_after: number; agent: string; details?: Record<string, unknown> }
@@ -1394,7 +1427,7 @@ export class TrinityClient {
       response = await turnFetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/chat`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ message }),
+        body: JSON.stringify(projectId ? { message, project_id: projectId } : { message }),
         signal: controller.signal,
       });
     } catch (err) {
@@ -1626,6 +1659,8 @@ export class TrinityClient {
       // ent#224: the CALLER's execution id, so the delegated task inherits the
       // originating channel/thread and its completion can be reported back.
       parent_execution_id?: string;
+      // ent#1105: the project to attribute the execution to; sent only when set.
+      project_id?: string;
     },
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
@@ -1692,6 +1727,7 @@ export class TrinityClient {
       inject_result: options?.inject_result,
       chat_session_id: options?.chat_session_id,
       parent_execution_id: options?.parent_execution_id,   // ent#224
+      ...(options?.project_id ? { project_id: options.project_id } : {}),  // ent#1105
     };
 
     // #2661: sync mode is bounded by the MCP-server ceiling, not the platform
@@ -1991,6 +2027,8 @@ export class TrinityClient {
       system_prompt?: string;
       allowed_tools?: string[];
       async_mode?: boolean;
+      // ent#1105: the project to attribute the batch's executions to.
+      project_id?: string;
     },
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
@@ -2042,6 +2080,9 @@ export class TrinityClient {
     }
     if (options?.async_mode) {
       body.async_mode = true;
+    }
+    if (options?.project_id) {
+      body.project_id = options.project_id;  // ent#1105: only when set
     }
 
     // #2670: bounded by OUR ceiling, not the backend's. The old
@@ -4363,9 +4404,10 @@ export class TrinityClient {
     return this.projectRequest("GET", this.projectPath(projectId), turn);
   }
 
-  async listProjectTasks(projectId: string, status = "open", turn?: string): Promise<Array<Record<string, unknown>>> {
+  async listProjectTasks(projectId: string, status = "open", turn?: string, view?: string): Promise<Array<Record<string, unknown>>> {
+    const viewQuery = view ? `&view=${encodeURIComponent(view)}` : "";
     const res = await this.projectRequest<{ tasks: Array<Record<string, unknown>> }>(
-      "GET", this.projectPath(projectId, `/tasks?status=${encodeURIComponent(status)}`), turn);
+      "GET", this.projectPath(projectId, `/tasks?status=${encodeURIComponent(status)}${viewQuery}`), turn);
     return res.tasks;
   }
 
@@ -4387,6 +4429,37 @@ export class TrinityClient {
     return res.entries;
   }
 
+  /** trinity-enterprise#1193: one budget-sized part of a brief marked for agents. */
+  async readProjectContext(projectId: string, itemId: string, offset = 0, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("GET",
+      this.projectPath(projectId, `/context/${encodeURIComponent(itemId)}?offset=${offset}`), turn);
+  }
+
+  // trinity-enterprise#1237: the platform's file spaces (`<kind>:<id>`), agent door.
+  private spaceFilesPath(space: string, name?: string): string {
+    const base = `/api/enterprise/files/agent/spaces/${encodeURIComponent(space)}/files`;
+    return name === undefined ? base : `${base}/${encodeURIComponent(name)}`;
+  }
+
+  async listPlatformFiles(space: string, cursor?: string, turn?: string): Promise<Record<string, unknown>> {
+    const q = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+    return this.projectRequest("GET", this.spaceFilesPath(space) + q, turn);
+  }
+
+  async readPlatformFile(space: string, name: string, offset = 0, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("GET", `${this.spaceFilesPath(space, name)}?offset=${offset}`, turn);
+  }
+
+  async writePlatformFile(space: string, name: string, content: string, ifRevision?: number, turn?: string): Promise<Record<string, unknown>> {
+    const body: Record<string, unknown> = { content };
+    if (ifRevision !== undefined) body.if_revision = ifRevision;
+    return this.projectRequest("PUT", this.spaceFilesPath(space, name), turn, body);
+  }
+
+  async removePlatformFile(space: string, name: string, ifRevision: number, turn?: string): Promise<void> {
+    await this.projectRequest("DELETE", `${this.spaceFilesPath(space, name)}?if_revision=${ifRevision}`, turn);
+  }
+
   async addProjectLogEntry(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
     return this.projectRequest("POST", this.projectPath(projectId, "/log"), turn, body);
   }
@@ -4406,6 +4479,36 @@ export class TrinityClient {
     return this.projectRequest("POST", this.projectPath(projectId, "/health"), turn, body);
   }
 
+  /**
+   * trinity-enterprise#1105: a project's runs, newest first. Only the filters
+   * that are set go on the query string; the cursor is opaque and passed back as-is.
+   */
+  async listProjectExecutions(
+    projectId: string,
+    filters: Record<string, string | number | undefined> = {},
+    turn?: string,
+  ): Promise<Record<string, unknown>> {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(filters)) {
+      if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+    }
+    const tail = qs.toString() ? `/executions?${qs.toString()}` : "/executions";
+    return this.projectRequest("GET", this.projectPath(projectId, tail), turn);
+  }
+
+  /**
+   * trinity-enterprise#1235: the steward starts a task's run on a named agent.
+   * `idempotencyKey` is derived by the tool from its arguments (Invariant #18).
+   */
+  async startProjectTask(projectId: string, taskId: string, agent: string, turn?: string,
+                         idempotencyKey?: string): Promise<Record<string, unknown>> {
+    const headers: Record<string, string> = {};
+    if (turn) headers["X-Trinity-Execution-Id"] = turn;
+    if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+    return this.request("POST", this.projectPath(projectId, `/tasks/${encodeURIComponent(taskId)}/runs`),
+      { agent }, false, undefined, headers);
+  }
+
   /** trinity-enterprise#588: create a project on the agent's OWNER's behalf (projects.manage). */
   async createProjectAsAgent(body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
     return this.projectRequest("POST", "/api/enterprise/projects/agent/projects", turn, body);
@@ -4413,6 +4516,7 @@ export class TrinityClient {
 
   /** trinity-enterprise#588: import one of the agent's OWN folder projects (projects.manage). */
   async importProjectAsAgent(path: string, turn?: string): Promise<Record<string, unknown>> {
+    // No steward: another agent as steward needs an approval (propose_project_changes, #1194 ruling).
     return this.projectRequest("POST", "/api/enterprise/projects/agent/projects/import", turn, { path });
   }
 

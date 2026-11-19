@@ -37,7 +37,7 @@ Each card carries a type pill — **Needs approval**, **Question**, or **Heads u
 
 An ask an agent addressed to a role that several people fill goes to every one of them: the first answer ends it, and the others' Workspace shows who answered.
 
-The page reads one capped page of 200 items; pending items come by priority and, within a priority, the longest-waiting first, so a queue past the cap drops the newest asks rather than the ones that have waited longest.
+The page reads every pending item you can see, ordered by priority. Counts are never taken from a partial list: the tab badge, the navigation badge, the fleet-grid chips and the agent Overview's *needs attention* count all read the full total. If the read cannot finish, the subtitle says so, for example *703 pending responses (500 shown)*. The **Resolved** tab shows the most recent window and states the total, for example *340 resolved · latest 200 shown*. **Clear All** over more than 500 items runs in batches, one per agent, so each agent hears about its cancelled asks once.
 
 If the item stopped being pending while you were answering — another operator's response or Clear All landed first, or it expired — your response is **not recorded** and the page says so.
 
@@ -66,11 +66,13 @@ The upgrades that introduced this collapse an existing backlog: for each subject
 
 #### Flood guard
 
-Each agent may hold at most 25 pending items of its own (`OPERATOR_QUEUE_MAX_PENDING_PER_AGENT`), and creates are rate-limited per agent and fleet-wide. Platform alerts filed *about* an agent do not count toward its own budget. When an agent goes over the cap, Trinity files one **Heads up** flood alert per episode — not one per cooldown window while the condition lasts — and files the next only after the agent has dropped back under the cap (`OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS`, default 300, is the minimum spacing between episodes). Acknowledging a flood alert quiets that episode only: if the flood clears and starts again, the new episode files a new alert. Requests the agent wrote to its queue file but that were held are not lost silently: the agent's file gets a `platform.ingestion` note saying why (`queue_full`, `rate_limited`, `invalid_id`, or `invalid_options` / `invalid_title` for an ask over the option or title limits — see [Approvals](../automation/approvals.md)), and the note is removed once nothing is held.
+Each agent may hold at most 25 pending items of its own (`OPERATOR_QUEUE_MAX_PENDING_PER_AGENT`), and creates are rate-limited per agent and fleet-wide. Platform alerts filed *about* an agent do not count toward its own budget. When an agent goes over the cap, Trinity files one **Heads up** flood alert per episode — not one per cooldown window while the condition lasts — and files the next only after the agent has dropped back under the cap (`OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS`, default 300, is the minimum spacing between episodes). Acknowledging a flood alert quiets that episode only: if the flood clears and starts again, the new episode files a new alert. Requests the agent wrote to its queue file but that were held are not lost silently: the agent's file gets a `platform.ingestion` note saying why (`queue_full`, `rate_limited`, `invalid_id`, `invalid_options` / `invalid_title` for an ask over the option or title limits, or `role_cannot_open_agent` / `no_person` / `invalid_credential` for a credential request that cannot be filed — see [Approvals](../automation/approvals.md)), and the note is removed once nothing is held. Held credential requests do not raise a flood alert.
 
 ### Notifications Tab
 
 Consolidated view of agent notifications (replaces the former standalone Events page).
+
+On **Needs Response**, **Notifications**, **Executions** and **Resolved**, the list fills the window and scrolls inside its own region; the header, tabs, stats and filters stay in view, and **Load more** is the last thing in the list. Below a minimum height the page scrolls by the shortfall only. Bulk actions on Notifications sit in the list's header row.
 
 - Filter by agent, type, priority, or status; optionally show dismissed items.
 - Stats cards display **Pending** (every pending notification you can see, whatever the filters), **Acknowledged** and **Shown** (the rows loaded below), and **Agents**. The Pending figure, the tab badge and the navigation badge always count every pending notification; filtering the list never changes them.
@@ -151,7 +153,7 @@ A walk's guarantee has one stated bound: a change that ends an item (an answer, 
 |------|-------------|
 | `ask_operator` | Raise an approval, question, or alert from inside an agent (see [Approvals](../automation/approvals.md)) |
 | `list_operator_queue` / `get_operator_queue_item` | Read queue items you can access |
-| `respond_to_operator_queue` | Answer an item — works only with a person's user-scoped key; agent- and system-scoped keys are refused (403 `person_required`) |
+| `respond_to_operator_queue` | Answer an item — shown only to a person's user-scoped key; agent- and system-scoped keys are not shown it, and the backend refuses them (403 `person_required`) |
 | `get_my_ask` | From inside an agent: how one of its own asks ended |
 | `withdraw_ask` | From inside an agent: end one of its own pending asks that no longer needs an answer, with a one-line reason (see [Approvals](../automation/approvals.md)) |
 | `send_notification` | Send a notification to the Notifications tab from within an agent |

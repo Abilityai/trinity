@@ -275,7 +275,7 @@
   proxy timeout can resolve the outcome). Orchestration lives in
   `services/agent_service/repo_binding.py` (Invariant #1); the router is a thin
   HTTP mapper over domain errors.
-- **The token (#3164).** `github_pat` is optional on both fork-to-own (`ForkToOwnRequest`) and the repo binding (`BindAgentRepoRequest`); a supplied token wins. Omitted, the write identity is the user's **saved personal** GitHub token (Settings → MCP Keys → Personal GitHub Token): at create the resolver's `per_user` tier (`crud._apply_fork_to_own`), at bind the caller's own row read by user id (`db.get_user_github_pat` — never the agent's current per-agent token). It is persisted as the agent's per-agent PAT with tier `fork` exactly as a typed one. The **platform/global token is never a fork or bind identity**: with no personal token the request is a named 400 `FORK_PAT_REQUIRED` pointing at Settings — the destination would otherwise belong to the platform account, and the per-agent row would bake in the global PAT (ent#162 Decision 2). A token refusal raised while using the saved token says so (`token_source: "saved"`, message naming Settings). The UI reads presence only (`GET /api/users/me/github-pat` → `configured`) and shows "Using your saved GitHub token" with an explicit "Use a different token" override (`SavedGithubTokenField.vue`).
+- **The token (#3164).** `github_pat` is optional on both fork-to-own (`ForkToOwnRequest`) and the repo binding (`BindAgentRepoRequest`); a supplied token wins. Omitted, the write identity is the user's **saved personal** GitHub token (Settings → MCP Keys → Personal GitHub Token): at create the resolver's `per_user` tier (`crud._apply_fork_to_own`), and only from a signed-in session, because the fork makes it the new agent's token (a credential bind, INTERACTIVE; any key is the named 400 `FORK_PAT_REQUIRED`, trinity-enterprise#719), at bind the caller's own row read by user id (`db.get_user_github_pat` — never the agent's current per-agent token). It is persisted as the agent's per-agent PAT with tier `fork` exactly as a typed one. The **platform/global token is never a fork or bind identity**: with no personal token the request is a named 400 `FORK_PAT_REQUIRED` pointing at Settings — the destination would otherwise belong to the platform account, and the per-agent row would bake in the global PAT (ent#162 Decision 2). A token refusal raised while using the saved token says so (`token_source: "saved"`, message naming Settings). The UI reads presence only (`GET /api/users/me/github-pat` → `configured`) and shows "Using your saved GitHub token" with an explicit "Use a different token" override (`SavedGithubTokenField.vue`).
 
 - **FR-1 — Supported row states are an explicit table; the unclassified is
   refused by name, never guessed.** Partitioned by `source_mode`, which is the
@@ -501,9 +501,10 @@
   trinity-enterprise#1007, a `fork_to_own: {destination_repo, private?}` block — the
   same `ForkToOwnRequest` the REST body takes, minus `github_pat` (MCP tool args land
   in transcripts, so a PAT arg would persist there in plaintext; the audit row records
-  the tool, outcome and target agent, never the arguments themselves). The fork therefore spends
-  the caller's saved personal token (#3164); under an agent key it is the named 400
-  `FORK_PAT_REQUIRED`, unchanged. REST behaviour and the `agents.manage` create gate
+  the tool, outcome and target agent, never the arguments themselves). The fork would
+  therefore spend the caller's saved personal token (#3164), which the backend does only for
+  a signed-in session (trinity-enterprise#719), so over MCP every key gets the named 400
+  `FORK_PAT_REQUIRED` and a fork is created from the web UI. REST behaviour and the `agents.manage` create gate
   are unchanged (`tests/unit/test_ent1007_mcp_fork_body.py` validates the MCP body
   through `AgentConfig`). Fork-scope failures name the alternative intents (never
   silent auto-degrade). `fork_to_own: required` catalog templates reject non-fork intents.
@@ -997,5 +998,20 @@
 - **Source of truth**: `services/sync_freeze_policy.py` (+ scheduler mirror), `services/sync_health_service.py`, `services/sync_health_view.py`, `db/sync_state.py`, `src/scheduler/database.py::sync_freeze_reason`; #707: `routers/monitoring.py::get_fleet_status`, `services/fleet_audit_service.py`, MCP `tools/monitoring.ts`, `utils/syncHealth.js::formatSyncSummary`.
 - **Flow**: `docs/memory/feature-flows/git-sync-health.md`
 - **GitHub Issue**: abilityai/trinity-enterprise#706, abilityai/trinity-enterprise#707
+
+### 11.20 Repo-Scoped Token Seam (trinity-enterprise#1277)
+- **Status**: ✅ Implemented (seam only; no call site uses it yet)
+- **Priority**: P1
+- **Description**: An open-core seam through which a registered provider can supply a short-lived GitHub token scoped to one repository. With no provider registered, resolution is PAT-only and unchanged.
+- **Requirements**:
+  - **FR-1 — Seam**: `services/github_token_provider.py`. `register_provider(provider)`; `await provider.token_for_repo(repo, permissions=None)` returns a `RepoToken(token, expires_at)`, or `None` when the provider does not cover the repo.
+  - **FR-2 — Per-operation resolver**: `await settings_service.resolve_github_token(repo, agent_name, owner_id, permissions) -> (token, tier, expires_at)`. Order: `per_agent` PAT, `per_user` PAT, provider (`app`), `global` PAT, `none`. PAT tiers return `expires_at = None`.
+  - **FR-3 — Separate from the create path**: `resolve_github_pat`, `resolve_github_pat_candidates` and `get_github_pat_for_agent` never consult the provider. Their answers are persisted or baked into a container environment, and an `app` token expires within the hour.
+  - **FR-4 — No PAT fallback on failure**: when the provider covers the repo and cannot produce a token it raises `GithubTokenUnavailable`, and so does the resolver. The platform PAT is used only when the provider answers "not covered".
+  - **FR-5 — Repo form**: only `owner/repo` reaches the provider, with a trailing `.git` removed. A URL, a third segment or a `.`/`..` segment skips the provider tier.
+  - **FR-6 — Credential setting**: the provider's credential document, `github_app_credentials`, is a member of `SECRET_SETTING_KEYS`: encrypted at rest, refused in cleartext by the sink guard, included in key rotation.
+  - **FR-7 — Scrubbers**: installation tokens (`ghs_<appid>_<JWT>`, about 390 characters, containing `.`, `-`, `_`) are redacted whole by `utils/credential_sanitizer.py` (backend and agent-server copies), `src/frontend/src/utils/scrub.js` and `components/reports/reportSummary.js`.
+- **Tests**: `tests/unit/test_ent1277_github_token_resolver.py`, `tests/unit/test_credential_sanitizer_{backend,agent}.py`, `tests/unit/test_ec_input_hardening_properties.py`, `src/frontend/tests/unit/reportSummary.spec.js`
+- **GitHub Issue**: abilityai/trinity-enterprise#1277
 
 ---

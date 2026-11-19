@@ -341,6 +341,12 @@ DOORS = {
         "POST", f"/api/agents/{a}/operator-queue/{r}/withdraw", {"reason": "moot"})),
 }
 EXEMPT = {
+    _Q + "readdress_queue_item": (
+        "trinity-enterprise#1096: `require_admin` + `require_person` refuse every machine principal "
+        "before the row is read (an agent key at the admin gate, the system key at the person rule — "
+        "two different refusals, so no one recipe fits), driven per principal by "
+        "test_1096_readdress_route.py::TestReaddressAuth; it returns ids, people and a seat to an "
+        "admin person only"),
     _Q + "clear_resolved_queue_items": (
         "a count, pinned exactly by TestTheClearResolvedTrigger::test_the_trigger_is_the_count_only. "
         "Not driven here: it writes cleared_at across the agent's resolved rows, and "
@@ -870,6 +876,8 @@ _ROW_ACCESSORS = frozenset({
     # abilityai/trinity-enterprise#1108 AC #4: the agent's own answered asks whose
     # wake is still owed — re-dispatched into its own turn on start.
     "list_operator_queue_pending_wakes",
+    # #4635: one platform emitter's own pending alerts, by subject prefix.
+    "list_pending_operator_queue_by_subject_prefix",
 })
 _NON_ROW_ACCESSORS = frozenset({
     "create_operator_queue_item", "create_operator_queue_item_with_outcome",   # ids (test_1677)
@@ -918,10 +926,16 @@ _ROW_READERS = {
         "addressee", "the ask a chat discusses: addressed to the viewer in SQL, then the roster"),
     (_PORTAL_ASKS, "_linked_request_id"): (
         "addressee", "the linked row's request_id only, when this ask's addressee could already see it"),
+    (_PORTAL_ASKS, "_notices_in"): (
+        "internal", "trinity-enterprise#1134 AC4: a chat's own fallen-to-the-operators asks as notices "
+                    "with no content — id, agent, kind, status, created_at, chat id and the reason enum, "
+                    "never a title, question, options or context — shown only to the chat's owner "
+                    "(`get_portal_session`, then the roster)"),
     (_PORTAL_ASKS, "_owned_ask"): (
         "addressee", "the viewer's own ask (`_is_addressed_to`, visible kinds, then the roster — or, for "
-                     "the reserved reach family the gate raised about them, trinity-enterprise#981, the "
-                     "address alone), else the uniform 404"),
+                     "the reserved reach family the gate raised about them, trinity-enterprise#981, or an "
+                     "agent's ask `to: project`, trinity-enterprise#1134, the address alone), else the "
+                     "uniform 404"),
     (_PORTAL_ASKS, "_recent_answers"): (
         "addressee", "the viewer's own recent answers: addressed to the viewer in SQL"),
     (_PORTAL_ASKS, "discuss_ask"): (
@@ -932,14 +946,27 @@ _ROW_READERS = {
                  "names no person)"),
     (_PORTAL_ASKS, "list_asks_page"): (
         "addressee", "the Workspace inbox: addressed to the viewer in SQL, before the limit; the roster "
-                     "set OR the reserved reach family the gate raised about them (trinity-enterprise#981), "
-                     "both in the same SQL for the page and its count"),
+                     "set OR the reserved reach family the gate raised about them (trinity-enterprise#981) "
+                     "OR an agent's ask `to: project` (trinity-enterprise#1134), all in the same SQL for "
+                     "the page and its count"),
     (_ROUTER_FILE, "bulk_cancel_queue_items"): ("door", "§6: person only"),
     (_ROUTER_FILE, "cancel_queue_item"): ("door", "§6: person only"),
     (_ROUTER_FILE, "get_agent_queue_items"): ("door", "§6: `_for_principal`, the exclusion in SQL"),
     (_ROUTER_FILE, "get_my_ask"): ("door", "§6: the predicate's 404"),
     (_ROUTER_FILE, "get_queue_item"): ("door", "§6: `_for_principal`"),
     (_ROUTER_FILE, "respond_to_queue_item"): ("door", "§6: person only"),
+    (_ROUTER_FILE, "readdress_queue_item"): ("door", "§6: admin + person only (trinity-enterprise#1096)"),
+    (_ASKS, "admin_readdress"): (
+        "person", "an admin person's re-address (trinity-enterprise#1096): the row's address read to "
+                  "rewrite it; the id, the people it now waits on and the seat return to that admin, "
+                  "the audit carries ids, the reason code and `has_reason`"),
+    (_ASKS, "_address_unchanged"): (
+        "internal", "a fenced row's stored address, compared to the caller's read before an ending "
+                    "(trinity-enterprise#1096, R5); the raw columns feed the ending's compare-and-set, "
+                    "nothing leaves"),
+    (_ASKS, "_ending_expectation"): (
+        "person", "a fenced row re-read when a re-address moved it; the row returns only inside "
+                  "the `AskConflict` the person's own ending door already maps (trinity-enterprise#1096)"),
     (_ASKS, "_predecessor"): (
         "internal", "a re-ask's link: the agent's own expired ask, or one uniform refusal"),
     (_ASKS, "_refuse_unlinked_reask"): (
@@ -992,9 +1019,10 @@ _ROW_READERS = {
     (_ALERTS, "clear"): ("internal", "ends a condition's pending row (#3246); returns a count"),
     (_ALERTS, "observe"): ("internal", "records a reading on a condition's row (#3246); returns an outcome"),
     (_ALERTS, "reconcile"): ("internal", "ends the rows whose condition cleared (#3246); returns a count"),
-    (_STALL, "_agents_with_pending_alerts"): (
-        "internal", "the agents whose stall row outlived its stalled head (#4257): the subject "
-                    "prefix and `agent_name` only, and a list of agent names is all that leaves"),
+    (_STALL, "_pending_alerts"): (
+        "internal", "the stall monitor's own pending rows (#4257, #4635): read to end the row "
+                    "of an agent whose queue drained and to compare a reading's priority with "
+                    "the row's; agent names and a priority decide, nothing leaves"),
     (_PROMPT, "_resolve_ended_asks"): (
         "agent", "the agent's own ended asks for its prompt: reserved prefixes excluded in SQL"),
     (_PROMPT, "_resolve_pending_asks"): (
@@ -1042,6 +1070,10 @@ _ENDING_OBSERVERS = {
         "operator_resume_service._wakes_on_ending",
     ("services/skill_gate_service.py", "on_ending"):
         "the gate consumes its own asks' endings (`resolve`, ruled above)",
+    ("shared_sessions/service.py", "on_ask_ending"):
+        "abilityai/trinity-enterprise#1135: one system line in the room the ask was raised in; "
+        "who ended it renders as the actor's seated room identity, else a role word, never a "
+        "non-member's email, and never the answer, the notes or a cancel reason",
 }
 _TABLE_HOMES = frozenset({"db.tables", "db.operator_queue", "db.queue_mentions"})
 _RAW_SQL = re.compile(r"\b(FROM|JOIN|UPDATE|INTO)\s+operator_queue\b", re.IGNORECASE)

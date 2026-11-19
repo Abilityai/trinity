@@ -1034,6 +1034,10 @@
                   </p>
                 </div>
 
+                <!-- trinity-enterprise#1240: which GitHub owners' private repos
+                     Projects may read with the platform token above. -->
+                <ProjectsGithubReadOwnersSetting v-if="enterpriseStore.isEntitled('projects')" />
+
                 <!-- ent#582: the email-provider and Gemini keys — the same field
                      the first-run flow uses, so a key set there is managed here. -->
                 <PlatformKeyField provider="resend" class="mt-6" />
@@ -1482,6 +1486,18 @@ Example:
                the shipped default is in force whether or not anyone edited it. -->
           <div v-if="activeTab === 'access'" class="mb-6">
             <TermsPanel />
+          </div>
+
+          <!-- A new member's first message (trinity-enterprise#1170); the panel
+               renders only where the member-agents entitlement is on. -->
+          <div v-if="activeTab === 'access'" class="mb-6">
+            <MemberWelcomePanel />
+          </div>
+
+          <!-- The models member agents run on (trinity-enterprise#1202); read-only,
+               renders only where the member-agents entitlement is on. -->
+          <div v-if="activeTab === 'access'" class="mb-6">
+            <MemberAgentModelPanel />
           </div>
 
           <!-- Email Whitelist Section (Phase 12.4) -->
@@ -2377,6 +2393,8 @@ import AutonomyDialPanel from '../components/settings/AutonomyDialPanel.vue'
 import BackupStatusPanel from '../components/settings/BackupStatusPanel.vue'
 import InvitesPanel from '../components/settings/InvitesPanel.vue'
 import TermsPanel from '../components/settings/TermsPanel.vue'
+import MemberWelcomePanel from '../components/settings/MemberWelcomePanel.vue'
+import MemberAgentModelPanel from '../components/settings/MemberAgentModelPanel.vue'
 import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_TEXT_INPUT_CLASS } from '../components/settings/fieldStyles'
 // #2691: one home for what the Public URL buys, what must be true first, and
 // what saving it re-points — shared with the first-run step so the explanation
@@ -2393,6 +2411,7 @@ import AAuthPanel from '../components/settings/AAuthPanel.vue'
 import A2AEndpointsPanel from '../components/settings/A2AEndpointsPanel.vue'
 import NeverminedOrganizationPanel from '../components/settings/NeverminedOrganizationPanel.vue'
 import PlatformKeyField from '../components/settings/PlatformKeyField.vue'
+import ProjectsGithubReadOwnersSetting from '../components/settings/ProjectsGithubReadOwnersSetting.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import BaseBadge from '../components/base/BaseBadge.vue'
 import BaseButton from '../components/base/BaseButton.vue'
@@ -2401,6 +2420,7 @@ import DirectVoiceSettings from '../components/settings/DirectVoiceSettings.vue'
 import { WORKSPACE_ONLY_ROLE_LABEL, existingAccountNotice } from '../utils/workspaceOnly'
 import { HELP_CLASS } from '../components/base/fieldClasses'
 import InlineError from '../components/InlineError.vue'
+import { unitsAgo } from '../utils/timestamps'
 
 const router = useRouter()
 const route = useRoute()
@@ -3665,7 +3685,7 @@ function formatDate(dateString) {
   if (diffInDays === 0) return 'Today'
   if (diffInDays === 1) return 'Yesterday'
   if (diffInDays < 7) return `${diffInDays} days ago`
-  if (diffInDays < 30) return `${Math.floor(diffInDays / 7)} weeks ago`
+  if (diffInDays < 30) return unitsAgo(Math.floor(diffInDays / 7), 'week')
 
   return date.toLocaleDateString()
 }

@@ -24,12 +24,18 @@ A room row in the Workspace sidebar shows its participants' avatars and can be s
 
 **Starting a room.** Two ways:
 
-- **New chat** → pick **two or more** agents.
+- **New room** in the sidebar → pick one or more agents. A room is created even for one agent, so colleagues can be seated in it later. (The agent picker opened for a new chat is single-select: a chat is always one-to-one.)
 - **`@mention` from an existing 1:1** — type `@` and another agent's name in a one-to-one chat, and the Workspace opens a room containing both agents and posts your message there. The original 1:1 is left untouched.
 
 An `@name` that isn't one of your agents stays plain text rather than erroring.
 
 **Tagging people.** Once you type a name after `@`, the list also offers people who can reach one of the room's agents. Tagging a person puts the room in their Workspace Inbox; it never wakes an agent, and an agent's own `post_to_room` mentions wake agents only. Your own messages show each tag you placed and whether it was read. See [Tagging a person](../sharing-and-access/workspace.md#tagging-a-person).
+
+**People in a room.** Where your install lets a room's moderator seat other people, the room header carries a **People · N** control that opens **People in this room**: each person, with *(you)* beside your own name. The moderator adds someone with **Add a person** (*Search your team by name or email*); they join as a collaborator who can read and talk in the room, but cannot approve, spend or reassign. A person seated mid-conversation reads the room from the point they joined, until the moderator presses **Show earlier messages** for them — the same applies to a tag from that room in their Inbox. Removing someone asks first (**Remove from this room?**). Every person can **Leave room**; leaving ends your access, and the room drops out of your list. A person who left or was removed sees *You're no longer in this room* with a way back to their chats. Once two or more people are in a room, each agent it wakes is told who they are and what a collaborator may decide, and approvals still go to the agent's primary contact. An `@mention` of a seated person tags them; it never wakes an agent. On installs without seating, the panel says *To let a colleague read along, @mention them in a message.*
+
+**Unread and the Inbox.** A room you are in counts as unread when an agent posts after you last read it: the room's sidebar row shows the count, and the room is a row in the Inbox's **Unread** and **All** tabs. Only agents' messages count, and a room you have open is read as messages arrive. See [Workspace → The Inbox](../sharing-and-access/workspace.md#the-inbox).
+
+**Asks raised in a room.** When an agent raises an approval or question during its room turn, the room shows one line — *{agent} asked: "{title}" — waiting on {who}* — and another when it ends (answered, cancelled, dismissed, expired, replaced or withdrawn). The lines name a person only when they are seated in the room, and never show the answer, a note or a cancellation reason. Once the ask is answered, the agent picks it up **in that room**: it gets a room turn with the ending and its reply posts there, as long as the room is open, the agent is still in it and the room is under budget. Otherwise the agent is woken the usual way. See [Approvals](../automation/approvals.md#asks-addressed-to-a-workspace-user).
 
 Topic, scribe, and a per-room budget are set through the API or MCP tools rather than the Workspace UI.
 
@@ -49,13 +55,17 @@ Topic, scribe, and a per-room budget are set through the API or MCP tools rather
 - **What an agent replies** — a turn's reply always lands as one message, up to 100,000 characters. A longer reply is trimmed, not dropped: it keeps the beginning and the last part around a marker saying how much was cut, never splits an `@mention`, and closes a code block it cuts. Keeping the end matters because a reply often closes with its conclusion and the `@next` hand-off. For a long deliverable, agents are nudged to share a file and post a summary.
 - **A reply that cannot land** — if a reply cannot be posted, or arrives after the room closed, the room shows a line saying so (*{agent}'s reply could not be posted…* / *{agent}'s reply arrived after the room closed and was not posted.*) instead of going quiet. A failure further down a mention chain costs only that agent its turn; the agents before it and your own message are unaffected.
 - **What a woken agent reads** — the unread slice handed to an agent is capped at 240,000 characters. Trinity keeps whole messages from the newest backwards, always keeps the newest message and the latest one mentioning that agent, and replaces each omitted stretch with one line.
-- **Mention chains** — one human message can set off at most 8 agent-to-agent hand-offs. Past that the room posts *Mention chain stopped at depth 8* and wakes no one else.
+- **Mention chains** — one human message can set off at most 8 agent-to-agent hand-offs. Past that the agents pause and wait for a person; see [When the agents pause](#when-the-agents-pause).
 - **Wake limit** — each participant can wake agents at most 30 times in 5 minutes. Mentions past it join the transcript without waking anyone, and the room says how many did not wake.
 - **Participants** — a room holds up to 12 agents.
 
+### When the agents pause
+
+Agents in a room can hand the conversation to each other, but one message from a person sets off at most 8 hand-offs. When they reach that, the room says *The agents paused after 8 hand-offs and are waiting for a person. {agent} was next.* and wakes no one else, so a loop between agents cannot run up cost on its own. Under the transcript the Workspace shows *Continue lets {agent} carry on, or send a message.* and a **Continue** button. **Continue** wakes the agent that was next, as your action, and starts a fresh count of 8; the room records *{you} asked {agent} to carry on.* Sending a message carries on too, and it starts a fresh count in the same way. Continue is offered once per pause: it goes away when someone continues, when anyone posts, or when the room closes. A double click wakes the agent once. Any person in the room can press it; an agent cannot continue its own chain. The room's message and cost budgets still apply — if the room has reached one, Continue says so and nothing is woken. Pressing Continue does not count as a message.
+
 ### Budget defaults (admin)
 
-**Settings → Retention → Room budgets** sets the limits applied to every room started from the Workspace: **Messages** (up to 500), **Cost cap (USD)** (empty means no cap), and **Expires after** N hours (up to 168; `0` means no expiry). Changes apply to rooms created from then on. A room closes with a visible reason when it reaches one. A platform caller creating a room over the API or MCP may still pass its own budget; a Workspace client's values are ignored and the defaults apply.
+**Settings → Retention → Room budgets** sets the limits applied to every room started from the Workspace: **Messages** (up to 500), **Cost cap (USD)** (empty means no cap), and **Expires after** N hours (up to 168; `0` means no expiry). Changes apply to rooms created from then on. A room closes with a visible reason when it reaches one. A caller with an operator role or above, creating a room over the API or MCP, may still pass its own budget, up to 500 messages, a $1,000 cost cap and 168 hours (`0` for no expiry). Anyone else — a Workspace client, a Workspace-only account, or a key such an account owns — has its values ignored, and the defaults apply. A stored cost default above $1,000 is treated as $1,000.
 
 ## For Agents
 
@@ -83,7 +93,9 @@ These endpoints back the tools above. See the [API reference](http://localhost:8
 | `/api/rooms` | GET | List your rooms |
 | `/api/rooms/{room_id}?since=<seq>` | GET | Read transcript + participants (incremental with `since`) |
 | `/api/rooms/{room_id}/messages` | POST | Post a message |
+| `/api/rooms/{room_id}/continue` | POST | Wake the agents a paused mention chain left waiting — `{seq}` (the room's `paused_chain.seq`); a person only, not an agent or system-scoped key. Optional `Idempotency-Key` |
 | `/api/rooms/{room_id}` | PATCH | Rename the room — `{name}` (any human member) |
+| `/api/rooms/{room_id}/leave` | POST | Leave the room — a person only; afterwards the room is a uniform `404` for you |
 | `/api/rooms/{room_id}/close` | POST | Close the room (a person: the moderator, or an admin; not an agent or system-scoped key) |
 | `/api/rooms/{room_id}/participants` | POST | Add an agent — `{agent_name, role?}` (a person: the moderator, or an admin; not an agent or system-scoped key) |
 | `/api/rooms/{room_id}/participants/{agent_name}` | DELETE | Remove an agent (a person: the moderator, or an admin; not an agent or system-scoped key) |
@@ -95,7 +107,6 @@ These endpoints back the tools above. See the [API reference](http://localhost:8
 - **Roles are advisory for posting.** A scribe designation is recorded but does not change who may post. The moderator role does gate managing the room (close, add, remove).
 - **Reading a room is not paginated.** `GET /api/rooms/{room_id}` and `read_room` return the whole transcript unless you pass `since`, so a room with many long messages makes a large response. Pass `since` to read only what is new.
 - **Turn chains run synchronously.** A mention triggers the mentioned agent's turn inline, so a long chain of hand-offs can run longer than a single HTTP request.
-- **Rooms show no unread badge** in the Workspace sidebar. Starring works for rooms; unread counts currently cover one-to-one chats only.
 - **Live cards and Stop are for platform users.** A Workspace client in a room sees *… is thinking…* and cannot stop a turn.
 - **One person's files per turn.** A woken agent is told about the files of the person whose message woke it. In a room with two people, the other person's files go unmentioned for that turn.
 

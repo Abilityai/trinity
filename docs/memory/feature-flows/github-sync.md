@@ -906,7 +906,7 @@ Agents can optionally have their own GitHub PAT, falling back to the global PAT 
 | **API** | `PUT /api/agents/{name}/github-pat` | Set per-agent PAT (validated, encrypted) |
 | **API** | `DELETE /api/agents/{name}/github-pat` | Clear per-agent PAT (revert to global) |
 | **MCP** | `get_agent_github_pat_status` | Check PAT configuration |
-| **MCP** | `set_agent_github_pat` | Set or clear per-agent PAT |
+| **MCP** | `set_agent_github_pat` | Set or clear per-agent PAT. Listed to a person's own user-scoped key only (trinity-enterprise#719); setting and clearing both take a person |
 
 **Database Storage:**
 - Column: `agent_git_config.github_pat_encrypted` (TEXT, nullable)
@@ -1190,6 +1190,8 @@ When a pull operation fails due to local changes conflicting with remote:
 | `clean` (default) | Simple pull with rebase. Fails if conflicts. | When you have no local changes |
 | `stash_reapply` | Stash local changes, pull, reapply stash | When you want to keep local changes |
 | `force_reset` | Hard reset to remote, discard all local changes | When remote is source of truth |
+
+**A pinned agent is never pulled (trinity#4470).** An agent created from `github:owner/repo@<tag>` runs on a detached HEAD (trinity#4165). Every strategy above is refused `400` on it — "pinned to a tag or commit … Nothing was changed" — before anything is fetched, so `force_reset` cannot discard a pinned workspace. The automatic cycle records the same condition as a named skip. A detached HEAD left by a rebase that stopped part-way is not a pin and keeps the conflict handling. Moving a pinned agent to another ref is a recreate. `agent_server/routers/git.py::pull_from_github`; `tests/unit/test_4470_manual_pull_pinned_tag.py`.
 
 ### Sync (Push) Conflict Strategies
 

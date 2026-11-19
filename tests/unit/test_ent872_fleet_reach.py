@@ -570,7 +570,7 @@ def test_the_event_stream_endpoint_scopes_an_agent_key(fleet, monkeypatch):
 
 def test_an_agent_key_slot_refreshes_its_reach_on_an_access_change():
     """A spawned child appears without a reconnect; a failed re-read keeps the
-    older, smaller roster; a non-access event reads nothing."""
+    previous roster; a non-access event reads nothing."""
     from services.event_bus import SCOPE_SCOPED, StreamDispatcher, _ClientSlot
 
     calls = []
@@ -776,10 +776,16 @@ _HELPER_ACCESSORS = {"get_accessible_agents", "accessible_agent_names", "visible
 #: (file, function) → why its principal is never an agent key, or why the admin
 #: branch selects no fleet. Shrink-only: `test_every_allowlist_entry_still_applies`.
 _ALLOW = {
+    ("main.py", "_scope_matches_snapshot"):
+        "compares the `/ws` scope a person's ticket resolved with that account's snapshot; selects no fleet "
+        "(trinity-enterprise#863)",
     ("routers/system_agent.py", "system_agent_terminal"):
         "the system-agent terminal authenticates a person (JWT) and checks the user row's role",
     ("services/settings_service.py", "get_agent_quota_for_role"):
         "maps a role to an agent-creation quota; selects no roster",
+    ("services/settings_service.py", "get_effective_max_parallel_tasks_for"):
+        "the queue-stall monitor's background tick (#4635): no principal; answers the caps of the agent "
+        "names it is handed, never a roster to a caller",
     ("services/access_candidate_service.py", "suggest"):
         "the role compare only decides whether a row SHOWS its role; selects no fleet, and the route is require_interactive (ent#450)",
     ("services/template_source_policy.py", "in_use"):
@@ -806,6 +812,8 @@ _ALLOW = {
         "routers/ops.py gates it with assert_admin (ops scope opted in), which refuses agent keys",
     ("services/fleet_ops_service.py", "stop_fleet_impl"):
         "routers/ops.py gates it with assert_admin, which refuses agent keys",
+    ("services/agent_model_seed.py", "_live_agents"):
+        "startup: no principal; only fills blank model values (#4442)",
     ("services/git_service/token_scrub.py", "sweep_fleet_git_remote_tokens"):
         "background sweep: no principal",
     ("services/github_pat_propagation_service.py", "propagate_github_pat"):

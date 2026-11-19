@@ -54,6 +54,13 @@ variable "build_instance_type" {
   default = "t3a.medium"
 }
 
+# The Marketplace lane needs no public AMI, and an account with "block public
+# access for AMIs" on fails a public build at the share step, after the whole build.
+variable "ami_public" {
+  type    = bool
+  default = true
+}
+
 locals {
   # Minute resolution, so two builds of one tag on one day stay distinguishable
   # in the Marketplace "Add version" picker.
@@ -83,7 +90,7 @@ source "amazon-ebs" "trinity" {
   # Public, so the CloudFormation Launch Stack works outside the build account.
   # The account's "block public access for AMIs" setting must be off for this
   # to take effect.
-  ami_groups = ["all"]
+  ami_groups = var.ami_public ? ["all"] : []
 
   # Instances launched from the AMI require IMDSv2 (hop limit 2).
   imds_support = "v2.0"
@@ -155,18 +162,10 @@ build {
     scripts         = ["${path.root}/scripts/90-aws-cleanup.sh"]
   }
 
-  # Record the AMI id; mp-submit.sh is a no-op unless TRINITY_AWS_PRODUCT_ID is
-  # set. `post-processors` (plural) runs them as a chain, so the submit reads
-  # the manifest the first one wrote.
-  post-processors {
-    post-processor "manifest" {
-      output     = "manifest.json"
-      strip_path = true
-    }
-
-    post-processor "shell-local" {
-      environment_vars = ["TRINITY_IMAGE_TAG=${var.image_tag}"]
-      inline           = ["bash ${path.root}/scripts/mp-submit.sh"]
-    }
+  # Record the AMI id for scripts/boot-check.sh. A build never submits:
+  # scripts/mp-submit.sh takes a boot-checked AMI.
+  post-processor "manifest" {
+    output     = "manifest.json"
+    strip_path = true
   }
 }

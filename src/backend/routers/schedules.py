@@ -47,6 +47,7 @@ from dependencies import (
 )
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
 from services import dispatch_admission_service, skill_gate_map_service
+from services import execution_attribution  # ent#1105
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from utils.public_url import public_base_url
 from services.schedule_validation import (
@@ -1080,8 +1081,12 @@ async def get_execution(
     # trinity-enterprise#754: "ran without approval", as on the list.
     self_approved, by_viewer = skill_gate_map_service.self_approved_flags(
         name, [execution_id], current_user).get(execution_id, (False, False))
+    # ent#1105: the project an edition attributed it to, when this reader may
+    # see that project. Fails open to absent; the read always answers 200.
+    project_id = execution_attribution.annotate(execution, current_user).get("project_id")
     return ExecutionResponse(**execution.model_dump(), gate_self_approved=self_approved,
-                             gate_self_approved_by_viewer=by_viewer)
+                             gate_self_approved_by_viewer=by_viewer,
+                             project_id=project_id)
 
 
 @router.get("/{name}/executions/{execution_id}/log")

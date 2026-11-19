@@ -49,6 +49,7 @@ from services.template_schedules import normalize_declared_schedules
 from services.template_plugins import normalize_declared_plugins
 from services.template_skills import normalize_declared_library_skills
 from services import metric_registry
+from services import agent_model_seed
 from services import git_service
 from services.settings_service import get_anthropic_api_key, resolve_github_pat, resolve_github_pat_candidates, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
@@ -63,7 +64,7 @@ from utils import avatar_paths
 from utils.log_masking import masked_traceback
 from .fork_to_own import (
     SAVED_TOKEN_TIERS, fork_pat_required, fork_template_to_own_repo, saved_token_message,
-    saved_token_not_for_agents,
+    saved_token_needs_a_session,
 )
 from . import snapshot_import
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
@@ -423,10 +424,23 @@ class _TemplateResolution:
     # assign at creation), fed by ALL THREE resolver branches — the same
     # one-carrier shape as `declared_plugins`, for the same reason. Empty = none.
     declared_library_skills: list = field(default_factory=list)
+    # #4442: the model the template declares (`runtime.model`, else a top-level
+    # `model:`), fed by both resolver branches. Seeds the agent's own model
+    # (`default_model`) at registration; the `github:` path never set
+    # `config.runtime_model`, so its agents' wakes ran on the platform default.
+    declared_model: Optional[str] = None
     # trinity-enterprise#15: staged backend-materialized snapshot for the
     # "copy" import intent. When set, `github_repo_for_agent` stays None by
     # design — the container gets NO GitHub env, no git-config row, no PAT.
     copy_snapshot: Optional["snapshot_import.SnapshotStaging"] = None
+    # ent#1173 (AC-2): bytes of a GitHub template's bundled avatar file (avatar.webp
+    # or avatar.png). None when no such file exists or fetch failed. Installed
+    # after `_register_agent` via `_install_bundled_avatar_bytes`.
+    bundled_avatar_bytes: Optional[bytes] = None
+    # #4570: the GitHub template's own `avatar_prompt` (its template.yaml, read
+    # as `source_metadata`), seeded with the installed file so `avatar_url`
+    # resolves. None when the template declares none.
+    bundled_avatar_prompt: Optional[str] = None
 
 
 @dataclass
@@ -542,6 +556,68 @@ def _apply_ephemeral_pregates(config: AgentConfig, current_user: User) -> Option
     return ephemeral_expires_at
 
 
+def leftover_workspace_volume_detail(name: str) -> str:
+    """The #1667 refusal text, shared by create's 409 and apply's dry-run
+    blocker (trinity-enterprise#984), so both say the same thing."""
+    volume = f"agent-{name}-workspace"
+    return (
+        f"Data volume '{volume}' already exists and no agent "
+        f"claims it, so its contents would silently become this "
+        f"agent's home directory. Refusing to adopt another agent's "
+        f"leftover data. Remove it (docker volume rm "
+        f"{volume}) or choose a different name. Only volumes this "
+        f"install labelled as its own are reclaimed automatically; one "
+        f"created before that label existed stays until it is removed by "
+        f"hand."  # #3214: the sweep never reclaims an unlabelled volume
+    )
+
+
+async def workspace_volume_exists(name: str) -> bool:
+    """Does `agent-<name>-workspace` exist? (#1667, trinity-enterprise#984)
+
+    `False` on NotFound, `True` when the volume exists, and RAISES on any
+    other error (including no Docker client).
+    """
+    if not docker_client:
+        raise RuntimeError("Docker is not available")
+    try:
+        await volume_get(f"agent-{name}-workspace")
+    except docker.errors.NotFound:
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class CreateVolumeRefusal:
+    """A volume create refuses to adopt for a name (`create_volume_refusal`)."""
+
+    kind: str    # e.g. "workspace_volume_leftover"; apply's blocker is `member_<kind>`
+    volume: str  # the Docker volume to remove
+    detail: str  # create's 409 text, also apply's blocker detail
+
+
+async def create_volume_refusal(name: str) -> Optional[CreateVolumeRefusal]:
+    """Does create refuse `name` over a leftover volume? None -> it proceeds.
+
+    The one answer both callers use, so they agree by construction
+    (trinity-enterprise#984): create's guard raises it as a 409
+    (`_guard_leftover_workspace_volume`), and apply's snapshot
+    (`system_service.read_apply_snapshot`) refuses the member before its dry
+    run can say `create`. A new create-time volume refusal goes HERE.
+
+    RAISES when it cannot answer (including no Docker client); each caller
+    picks its own policy: create proceeds, apply refuses with a retryable
+    read failure.
+    """
+    if await workspace_volume_exists(name):
+        return CreateVolumeRefusal(
+            kind="workspace_volume_leftover",
+            volume=f"agent-{name}-workspace",
+            detail=leftover_workspace_volume_detail(name),
+        )
+    return None
+
+
 async def _guard_leftover_workspace_volume(
     config: AgentConfig, adopt_existing_workspace: bool
 ) -> None:
@@ -554,29 +630,17 @@ async def _guard_leftover_workspace_volume(
         and not adopt_existing_workspace
         and docker_client
     ):
-        _workspace_vol = f"agent-{config.name}-workspace"
         try:
-            await volume_get(_workspace_vol)
-        except docker.errors.NotFound:
-            pass  # the normal path: no leftover, create it below
+            refusal = await create_volume_refusal(config.name)
         except Exception as e:  # noqa: BLE001 — a probe failure must not block creation
             logger.warning(
                 "[#1667] could not probe workspace volume %s (%s); proceeding",
-                _workspace_vol,
+                f"agent-{config.name}-workspace",
                 e,
             )
-        else:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Data volume '{_workspace_vol}' already exists and no agent "
-                    f"claims it, so its contents would silently become this "
-                    f"agent's home directory. Refusing to adopt another agent's "
-                    f"leftover data. Remove it (docker volume rm "
-                    f"{_workspace_vol}) or choose a different name — unclaimed "
-                    f"agent volumes are also reclaimed automatically."
-                ),
-            )
+            return
+        if refusal is not None:
+            raise HTTPException(status_code=409, detail=refusal.detail)
 
 
 # ent#123: owner/repo charset guard. The repo path is interpolated into
@@ -1197,10 +1261,18 @@ async def _apply_fork_to_own(
     if config.fork_to_own.github_pat is not None:
         user_pat, token_source = config.fork_to_own.github_pat.get_secret_value(), "form"
     elif github_pat_tier in SAVED_TOKEN_TIERS and github_pat_for_agent:
-        # An agent key carries its owner's identity; the owner's saved token
-        # is the owner's to spend, not the agent's.
-        if getattr(current_user, "agent_name", None):
-            raise saved_token_not_for_agents()
+        # This arm makes the creator's saved personal token the new agent's
+        # own, a credential bind, so it takes the INTERACTIVE rule
+        # (requirements/auth.md §2.8; trinity-enterprise#719): a signed-in
+        # session only, the predicate and loopback refusal of
+        # `require_interactive`. A key carries its owner's identity, and the
+        # saved token stays the owner's to spend.
+        from dependencies import is_interactive_principal
+
+        if not is_interactive_principal(current_user) or getattr(
+            current_user, "vouched_source_agent", None
+        ):
+            raise saved_token_needs_a_session()
         user_pat, token_source = github_pat_for_agent, "saved"
     else:
         raise fork_pat_required()
@@ -1997,6 +2069,7 @@ async def _resolve_template(
             tr.declared_library_skills = normalize_declared_library_skills(
                 source_metadata.get("library_skills")
             )
+            tr.declared_model = agent_model_seed.declared_model(source_metadata)
             (
                 tr.github_repo_for_agent,
                 tr.github_pat_for_agent,
@@ -2053,6 +2126,27 @@ async def _resolve_template(
             tr.git_instance_id, tr.git_working_branch = await _reserve_git_instance(
                 config, current_user, tr.github_repo_for_agent
             )
+            # ent#1173 (AC-2): try to fetch a bundled avatar from the template
+            # repo. Best-effort — a missing file or fetch failure does not
+            # block creation; the agent gets an AI-generated avatar later.
+            if not config.ephemeral:
+                for _avatar_fname in _BUNDLED_AVATAR_NAMES:
+                    try:
+                        _avatar_bytes = await asyncio.to_thread(
+                            _fetch_github_file_bytes, tr.github_repo_for_agent,
+                            tr.github_pat_for_agent, url_branch, _avatar_fname,
+                            _BUNDLED_AVATAR_MAX_BYTES,
+                        )
+                    except Exception as _e:
+                        logger.debug("[AVATAR-003] could not fetch %s from %s: %s",
+                                     _avatar_fname, tr.github_repo_for_agent, _e)
+                        _avatar_bytes = None
+                    if _avatar_bytes:
+                        tr.bundled_avatar_bytes = _avatar_bytes
+                        _declared_prompt = (source_metadata or {}).get("avatar_prompt")
+                        if isinstance(_declared_prompt, str) and _declared_prompt.strip():
+                            tr.bundled_avatar_prompt = _declared_prompt.strip()
+                        break
         elif config.template.startswith("local:"):
             tr.template_data, tr.template_shared_folders = _resolve_local_template(config)
             # Same normalizer as the `github:` branch above — symmetric by
@@ -2069,6 +2163,7 @@ async def _resolve_template(
             tr.declared_library_skills = normalize_declared_library_skills(
                 tr.template_data.get("library_skills")
             )
+            tr.declared_model = agent_model_seed.declared_model(tr.template_data)
     return tr
 
 
@@ -2799,16 +2894,91 @@ def _install_bundled_avatar(config: AgentConfig) -> None:
         return
 
 
+def _fetch_github_file_bytes(
+    repo: str, pat: Optional[str], ref: Optional[str], filename: str, max_bytes: int
+) -> Optional[bytes]:
+    """ent#1173 (AC-2): Fetch raw bytes of a file from a GitHub repo via the
+    contents API.  Returns None on 404 or any error. Only a 200 with valid
+    base64 content returns bytes; everything else is None (best-effort caller).
+    """
+    import base64 as _base64
+    import httpx as _httpx
+    try:
+        headers = {"Accept": "application/vnd.github+json"}
+        if pat:
+            headers["Authorization"] = f"Bearer {pat}"
+        with _httpx.Client(timeout=10.0) as client:
+            resp = client.get(
+                f"https://api.github.com/repos/{repo}/contents/{filename}",
+                headers=headers,
+                params={"ref": ref} if ref else None,
+            )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        raw = _base64.b64decode(data["content"])
+        if len(raw) > max_bytes:
+            logger.debug("[AVATAR-003] bundled avatar %s/%s is %d bytes (max %d); skipping",
+                         repo, filename, len(raw), max_bytes)
+            return None
+        return raw
+    except Exception as e:
+        logger.debug("[AVATAR-003] could not fetch %s from %s: %s", filename, repo, e)
+        return None
+
+
+def _stamp_bundled_avatar(agent_name: str, prompt: Optional[str]) -> None:
+    """#4570: point the agent at a just-installed GitHub bundled avatar.
+
+    `db.get_avatar_identity` ignores a row whose identity prompt is empty, so a
+    template that ships the file without an `avatar_prompt` still needs a
+    prompt for `avatar_url` to resolve; it is also what Regenerate starts from.
+    Log-and-continue: the agent is registered and works without an avatar.
+    """
+    identity_prompt = prompt or f"an AI agent named {agent_name}"
+    try:
+        db.set_default_avatar(agent_name, identity_prompt, datetime.now(timezone.utc).isoformat())
+        logger.info(f"[AVATAR-003] Stamped GitHub bundled avatar as default for {agent_name}")
+    except Exception as e:
+        logger.warning(f"[AVATAR-003] Failed to stamp GitHub bundled avatar for {agent_name}: {e}")
+
+
+def _install_bundled_avatar_bytes(agent_name: str, data: bytes) -> None:
+    """ent#1173 (AC-2): install a GitHub template's bundled avatar from raw bytes.
+
+    Unlike the `local:` path (which reads from a filesystem path), the GitHub
+    path delivers raw bytes fetched from the API. Same size/pixel caps as the
+    local version. Stored as a default avatar (is_default_avatar=1) so
+    Settings → Generate Default Avatars can still overwrite it.
+    """
+    import io as _io
+    from PIL import Image
+    from utils.image_optimize import optimize_avatar
+
+    dest = avatar_paths.avatar_path_or_none(agent_name, ".webp")
+    if dest is None:
+        return
+    with Image.open(_io.BytesIO(data)) as img:
+        if img.width * img.height > 4096 * 4096:
+            raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
+    avatar_paths.ensure_avatar_store()
+    with open(dest, "wb") as f:
+        f.write(optimize_avatar(data))
+    logger.info(f"[AVATAR-003] Installed GitHub bundled avatar for {agent_name}")
+
+
 def _register_agent(
     config: AgentConfig,
     current_user: User,
     template_data: dict,
     ephemeral_expires_at: Optional[str],
     auto_assigned_subscription_id: Optional[str],
+    declared_model: Optional[str] = None,
 ) -> None:
     """DB registration: ownership row (require_email #1129 + ephemeral fields +
     provenance), the ent#69 parent→child spawn edge, the auto-assigned
-    subscription (#74), the AVATAR-003 avatar seed, and default permissions.
+    subscription (#74), the AVATAR-003 avatar seed, the agent's own model
+    (#4442), and default permissions.
     Each post-registration grant is log-and-continue (non-fatal)."""
     # #1129: seed require_email from the fleet-wide default
     # (secure-by-default ON) at creation; owners can override per agent.
@@ -2847,6 +3017,16 @@ def _register_agent(
             db.set_display_label(config.name, config.display_label)
         except Exception as e:
             logger.warning(f"Could not set display label for {config.name}: {e}")
+
+    # #4442: seed the agent's own model, the one its wakes and other
+    # platform-started turns run on, from the request's runtime model or the
+    # template's declared one. Fill-blank only, so another writer's value stays.
+    _own_model = config.runtime_model or declared_model
+    if _own_model:
+        try:
+            agent_model_seed.seed_default_model(config.name, _own_model, config.runtime, db_ops=db)
+        except Exception as e:
+            logger.warning(f"Could not seed the model of {config.name}: {type(e).__name__}")
 
     # trinity-enterprise#69 Part 2: auto-grant the parent→child
     # permission edge so the spawning agent can immediately
@@ -4165,10 +4345,27 @@ async def create_agent_internal(
                 tr.template_data,
                 ephemeral_expires_at,
                 auto_assigned_subscription_id,
+                declared_model=tr.declared_model,
             )
             permitted_library_skills = await _permitted_library_skills(
                 request, current_user, tr.declared_library_skills, config.name,
             )
+            # ent#1173 (AC-2): install a GitHub template's bundled avatar bytes
+            # (fetched during _resolve_template). Best-effort — the agent is
+            # already registered and fully functional without an avatar.
+            if tr.bundled_avatar_bytes and not config.ephemeral:
+                try:
+                    _install_bundled_avatar_bytes(config.name, tr.bundled_avatar_bytes)
+                except Exception as _e:
+                    logger.warning(f"[AVATAR-003] Failed to install GitHub avatar for {config.name}: {_e}")
+                else:
+                    # #4570: the file alone is invisible — `avatar_url` is built
+                    # only from a row with a non-empty identity prompt and a
+                    # timestamp. Stamp it as a DEFAULT avatar, like the `local:`
+                    # path, so Generate Default Avatars may still replace it.
+                    # Only after a successful install: a URL to a file that was
+                    # never written breaks the image instead of showing initials.
+                    _stamp_bundled_avatar(config.name, tr.bundled_avatar_prompt)
             await _materialize_agent_files(
                 config,
                 tr.template_data,

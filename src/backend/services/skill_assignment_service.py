@@ -299,8 +299,10 @@ async def assign_set_and_deliver(
     acting_agent: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Assign a library skill set (ent#530), gate, deliver the new members,
-    broadcast — the set route's sequence, for a system manifest's
-    `skill_sets:` field. Raises `skill_set_service.SetError` before any write
+    broadcast — the one sequence behind ``POST /api/agents/{n}/skill-sets/{set}``,
+    a system manifest's `skill_sets:` field and the Workspace project's steward
+    pick (trinity-enterprise#1169). Governance is the caller's (the ent#596
+    fence runs before this). Raises `skill_set_service.SetError` before any write
     for a set that cannot be assigned.
 
     Returns `skill_set_service.assign`'s result plus `delivery` and `gates`.

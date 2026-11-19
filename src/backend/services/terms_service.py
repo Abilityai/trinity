@@ -415,8 +415,8 @@ def _hook_name(fn: AcceptanceHook) -> str:
 
 async def _run_one_inline(fn: AcceptanceHook, name: str, user_id: Optional[int],
                           email: Optional[str], terms_version: Optional[str],
-                          accepted_at: Optional[str]) -> None:
-    """One inline hook, owning its own failure.
+                          accepted_at: Optional[str]) -> Any:
+    """One inline hook, owning its own failure. Returns what the hook returned.
 
     The failure is audited HERE rather than by the waiter, because past the
     ceiling there is no waiter left to catch it — and an exception nobody
@@ -425,7 +425,8 @@ async def _run_one_inline(fn: AcceptanceHook, name: str, user_id: Optional[int],
     try:
         result = fn(user_id, email, terms_version, accepted_at)
         if inspect.isawaitable(result):
-            await result
+            result = await result
+        return result
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001 — a consumer never fails an acceptance
@@ -437,8 +438,13 @@ async def _run_one_inline(fn: AcceptanceHook, name: str, user_id: Optional[int],
 
 async def run_inline_acceptance_hooks(user_id: Optional[int], email: Optional[str],
                                       terms_version: Optional[str],
-                                      accepted_at: Optional[str]) -> None:
+                                      accepted_at: Optional[str]) -> Optional[str]:
     """Await the inline hooks before the response, under ONE ceiling.
+
+    Returns a landing (trinity-enterprise#1170): the first same-origin path a
+    hook that finished in time returned (``landing_path``), else None. The
+    seam knows nothing about what the path names — a consumer that has put
+    something in front of the person says where it is.
 
     Each hook runs as its own task, and the wait is `wait_for(shield(task))`:
     on timeout the WAIT ends, the task does not. That is the whole point —
@@ -452,7 +458,8 @@ async def run_inline_acceptance_hooks(user_id: Optional[int], email: Optional[st
     """
     hooks = tuple(_INLINE_HOOKS)
     if not hooks:
-        return
+        return None
+    landing: Optional[str] = None
     loop = asyncio.get_running_loop()
     deadline = loop.time() + max(float(TERMS_INLINE_HOOK_BUDGET_S), 0.0)
     for fn in hooks:
@@ -470,7 +477,9 @@ async def run_inline_acceptance_hooks(user_id: Optional[int], email: Optional[st
             await _audit_hook_slow(name, user_id, terms_version, "budget_spent")
             continue
         try:
-            await asyncio.wait_for(asyncio.shield(task), remaining)
+            result = await asyncio.wait_for(asyncio.shield(task), remaining)
+            if landing is None:
+                landing = landing_path(result)
         except asyncio.TimeoutError:
             await _audit_hook_slow(name, user_id, terms_version, "timeout")
         except asyncio.CancelledError:
@@ -478,6 +487,24 @@ async def run_inline_acceptance_hooks(user_id: Optional[int], email: Optional[st
         except Exception:  # noqa: BLE001 — `_run_one_inline` already audited it
             logger.exception("[terms] inline acceptance hook %s raised past its own guard",
                              name)
+    return landing
+
+
+#: The longest landing an inline hook may name (trinity-enterprise#1170).
+LANDING_MAX_LEN = 512
+
+
+def landing_path(value: Any) -> Optional[str]:
+    """``value`` when it is a same-origin path the SPA may navigate to, else
+    None: a string starting with one ``/`` (never ``//`` or ``/\\`` — those
+    leave the origin), no control characters, at most ``LANDING_MAX_LEN``."""
+    if not isinstance(value, str) or not value or len(value) > LANDING_MAX_LEN:
+        return None
+    if not value.startswith("/") or value[1:2] in ("/", "\\"):
+        return None
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value) or "\\" in value:
+        return None
+    return value
 
 
 async def _audit_hook_slow(name: str, user_id: Optional[int], terms_version: Optional[str],

@@ -99,10 +99,12 @@ In order, the script:
 
 1. **Checks `CREDENTIAL_ENCRYPTION_KEY`.** It stops before touching anything if the key is empty in the server's `.env`, because the backend refuses to start without it once credentials are stored encrypted.
 2. **Backs up the database** with `backup.sh`, and aborts if the backup fails.
-3. **Pulls** the latest code from `TRINITY_BRANCH` (default `main`). On a hosted install pinned to a release, it checks out the git tag matching the server's `TRINITY_IMAGE_TAG` instead, so the compose file and `config/` match the images. Marketplace and one-command installs are single-tag clones, where a branch pull would not upgrade anything.
+3. **Pulls** the latest code from `TRINITY_BRANCH` (default `main`). On a hosted install pinned to a release, it checks out the git tag matching the server's `TRINITY_IMAGE_TAG` instead, so the compose file and `config/` match the images. Marketplace and one-command installs are single-tag clones, where a branch pull would not upgrade anything. If the pulled release refuses SQLite and the running backend is still on SQLite, the script **stops here** and prints the copy steps from `docs/migrations/SQLITE_TO_POSTGRES.md` (on a source-built install, build all four platform images before the copy, not only `backend`), because starting the new stack would only loop on the refusal.
 4. **Updates the containers.** On a source-built install it rebuilds the platform images (`backend`, `frontend`, `mcp-server`, `scheduler`) and runs `docker compose up -d`. On a hosted install it runs `start.sh --hosted --unattended`.
 5. **Sweeps agent restart policies.** Agent containers created by older releases are moved to `unless-stopped`, so they come back after a host reboot. A stopped agent stays stopped.
 6. **Verifies.** It checks backend and scheduler health, and whether the running `version` matches the image it runs in, so a stale platform image is called out rather than missed. It prints which database the backend runs on, and on a hosted install it flags an existing SQLite file with no `DATABASE_URL` line in `.env`, which would select the empty bundled PostgreSQL. It also warns if the PostgreSQL migration history has more than one head, which stops schema migrations from applying. Finally, it reads the backend's report on moving GitHub tokens out of agents' git remotes. If any remote was rewritten, it reminds you to rotate the platform GitHub token, and it names any agent the cleanup could not finish. See [Upgrading → GitHub token out of agent remotes](upgrading.md#github-token-out-of-agent-remotes-automatic-then-rotate).
+
+When the server checkout carries Trinity's own [`scripts/deploy/update.sh`](upgrading.md#the-one-command), the script says so once and continues with its own flow; the upstream command adds a preflight, port-drift checks and a schema-aware `--rollback`, so prefer it on those releases.
 
 It does **not** rebuild the agent base image on a source-built install. That image changes rarely, and rebuilding it forces every agent to be re-deployed. The script tells you when the pulled range touched it, or on a hosted install that a new one was pulled. Agents adopt a new base image on a cold stop and start, and `/rebuild-agent` rolls it out to agents.
 
@@ -173,7 +175,7 @@ Open the repo in Claude Code and use the slash commands it ships with. The repo'
 | `/telemetry` | CPU, memory, disk, container resource stats |
 | `/rollback [commit] [backup]` | Roll back to a previous commit, optionally restoring a DB backup |
 | `/cleanup [--execute]` | Prune Docker images, build cache, old backups |
-| `/migrate-to-postgres` | Migrate the database from SQLite to PostgreSQL — validate in parallel, then cut over; one-line rollback. SQLite reached end of support on 2026-09-01 |
+| `/migrate-to-postgres` | Migrate the database from SQLite to PostgreSQL — validate in parallel, then cut over; one-line rollback. SQLite reached end of support on 2026-09-01. On releases whose images refuse SQLite and bundle PostgreSQL in every compose file, use the copy command in `docs/migrations/SQLITE_TO_POSTGRES.md` instead; the skill checks the version first |
 | `/provision [provider]` | Step-by-step provisioning for Hetzner, GCP, AWS, DigitalOcean, Vultr or localhost; for DigitalOcean it offers the one-command installer first, and for AWS and Vultr it walks through the one-command `start.sh --provision` install |
 | `/sync-ops-knowledge` | Review recent Trinity changes and update the agent's own instructions |
 

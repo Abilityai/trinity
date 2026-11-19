@@ -511,3 +511,88 @@ screenshots:
     captured_at: 2026-10-14
     captured_commit: f6a998f6993bd85a33a77f2d335db33357c5b70d
 
+  # ---------------------------------------------------------------- v1.0.5 surfaces
+  - file: workspace-project-board.webp
+    title: "Workspace Projects — the task board (Enterprise)"
+    route: /workspace/projects/{id}
+    shows: "A project's Tasks tab in Board view: Active, Awaiting verification and Done columns with task cards, owners, a blocked task and Confirm buttons."
+    sources:
+      - src/frontend/src/components/portal/projects
+    captured_at: 2026-11-17
+    captured_commit: unknown
+
+  - file: workspace-project-task-run.webp
+    title: "Workspace Projects — run a task from the project (Enterprise)"
+    route: /workspace/projects/{id}
+    shows: "A task open with Run this task: the agent picker, Start, and the preview of what the agent is given (objective, definition of done, context files, recent task log)."
+    sources:
+      - src/frontend/src/components/portal/projects
+    captured_at: 2026-11-17
+    captured_commit: unknown
+
+  - file: workspace-project-mode-steward.webp
+    title: "Workspace Projects — project mode and the Steward card (Enterprise)"
+    route: /workspace/projects/{id}
+    shows: "A running project's header with Stop project, Mark done and the Mode menu set to Propose, the Continue card, Where it stands, Waiting for your go and the Steward card with its wake state."
+    sources:
+      - src/frontend/src/components/portal/projects
+    captured_at: 2026-11-17
+    captured_commit: unknown
+
+  - file: workspace-project-runs.webp
+    title: "Workspace Projects — the Runs tab (Enterprise)"
+    route: /workspace/projects/{id}
+    shows: "A project's Runs tab: total cost and a card per agent, then each run with status, agent, model, cost, run time and the task it belongs to."
+    sources:
+      - src/frontend/src/components/portal/projects
+    captured_at: 2026-11-17
+    captured_commit: unknown
+
+  - file: workspace-ask-in-chat.webp
+    title: "Workspace — an ask in the conversation"
+    route: /workspace
+    shows: "A Needs approval card inside a chat: the question, the proposed action per option, option buttons, Something else, a note field, Discuss and Dismiss."
+    sources:
+      - src/frontend/src/components/portal/PortalAsks.vue
+      - src/frontend/src/components/portal/portalChatAsks.js
+    captured_at: 2026-11-17
+    captured_commit: unknown
+
+  - file: workspace-ask-answered.webp
+    title: "Workspace — the agent continues after an answered ask"
+    route: /workspace
+    shows: "A chat opened from an answered approval: the line saying who answered and when, then the agent's finished turn using the chosen option."
+    sources:
+      - src/frontend/src/components/portal/PortalAsks.vue
+      - src/frontend/src/components/portal/PortalAskContext.vue
+    captured_at: 2026-11-17
+    captured_commit: unknown
+
+  - file: workspace-credential-ask.webp
+    title: "Workspace — a credential asked for in the chat"
+    route: /workspace
+    shows: "A Needs a credential card in a chat: the credential's name, the agent's reason, a masked field with Show and Send, and the note that the value never appears in the chat."
+    sources:
+      - src/frontend/src/components/portal/PortalCredentialField.vue
+    captured_at: 2026-11-17
+    captured_commit: unknown
+
+  - file: workspace-direct-call.webp
+    title: "Workspace — a Direct call"
+    route: /workspace
+    shows: "A Direct call in progress: the call bar with the transcribed sentence, stop, mute and hang up, the spoken message in the thread, and the agent's Working card with Stop."
+    sources:
+      - src/frontend/src/components/portal/DirectCallStage.vue
+      - src/frontend/src/components/portal/CallBars.vue
+    captured_at: 2026-11-17
+    captured_commit: unknown
+
+  - file: agent-person-memory-search.webp
+    title: "Agent Settings — a person's memory, with search"
+    route: /agents/{name}
+    shows: "A person's memory view: retrieval-memory facts with History and Forget, Load more, and Search their facts returning facts ranked by relevance with date and kind of run."
+    sources:
+      - src/frontend/src/components/agent-settings/PersonMemoryModal.vue
+      - src/frontend/src/components/agent-settings/RetrievalMemorySearch.vue
+    captured_at: 2026-11-17
+    captured_commit: unknown

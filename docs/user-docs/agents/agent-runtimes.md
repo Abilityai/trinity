@@ -57,6 +57,8 @@ Every runtime talks to its provider's own API. The endpoint, proxy and TLS trust
 
 A proxy or CA configured on the container (for example by Docker's proxy settings) still applies to every runtime. Behind such a proxy, list the platform's internal hosts (`mcp-server`, `backend`, `localhost`) in the container's `NO_PROXY`, or Trinity MCP calls go through the proxy too. Using a self-hosted model or an alternative endpoint is not supported.
 
+Claude Code's usage telemetry, error reporting and update and feedback checks are off. Trinity sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `DISABLE_TELEMETRY` and `DISABLE_ERROR_REPORTING` to `1` in Claude Code's managed settings in the agent image, so Claude Code sends no usage events or error reports to Anthropic or its third-party log intake, and makes no update, release-notes or feedback checks. An agent's `settings.json` `env` block and its `.env` cannot turn them back on; like the endpoint pins above, this protects against the agent's own files, not against an agent that uses its passwordless `sudo`. Two side effects: features that Claude Code's documentation lists as depending on its feature-flag fetch are unavailable (for example Remote Control, and claude.ai skills and plugins synced to the CLI), and Claude Code no longer updates plugins in the background, so a plugin from the official marketplace stays at its installed version until it is reinstalled. Trinity's own plugin is installed by the platform and is not affected. Still on: the model API calls, Claude Code's own settings and policy-limit reads, the WebFetch domain check, the official marketplace auto-install, and the OpenTelemetry metrics Trinity's own cost and token reporting reads, which go to your Trinity's collector, not to Anthropic. An existing agent picks this up when its container is recreated on the new base image: restart it (a stop and start, not just a start) after upgrading. A new ephemeral agent is created on the current image anyway, and a running system agent is recreated the next time it is stopped and started.
+
 ### Codex authentication
 
 A Codex agent authenticates in one of two ways, and Trinity handles the file the CLI reads its credential from:
@@ -94,7 +96,7 @@ Set the runtime in the template's `template.yaml`:
 | Field | Values | Default | Notes |
 |-------|--------|---------|-------|
 | `runtime.type` | `claude-code`, `gemini-cli`, `codex` | `claude-code` | Selects the harness |
-| `runtime.model` | runtime-specific model id (e.g. `gpt-5.6-sol`) | runtime default | Optional override — pin it, so recorded cost is attributable |
+| `runtime.model` | runtime-specific model id (e.g. `gpt-5.6-sol`) | runtime default | Optional override — pin it, so recorded cost is attributable. On a Claude Code agent it is also saved as the agent's own model at creation, so turns the platform starts run on it too (see [Model Selection](agent-configuration.md#model-selection)) |
 
 A Codex agent reads its identity and instructions from `AGENTS.md`. At startup Trinity copies the template's `CLAUDE.md` to `AGENTS.md` when the workspace has none, so a single instruction file works across runtimes; an `AGENTS.md` you ship yourself is left as it is.
 
@@ -109,6 +111,7 @@ There is no API or MCP endpoint to switch an agent's runtime after creation. See
 - **Codex cannot resume a session.** In the Workspace, a Codex agent's turns replay the visible history as text instead of carrying its working memory forward — the conversation stays coherent, but tool results and mid-task state do not survive between turns.
 - **Gemini headless turns never resume a session.** Tasks, schedules and Workspace turns on a Gemini agent run without the previous turn's working memory. Only the Chat path resumes the agent's own Gemini session.
 - **No turn cap on Gemini or Codex.** Neither CLI has a per-run turn limit, so the guardrail `max_turns` settings are logged but not enforced there. The execution timeout bounds the run.
+- **Gemini runs are cut off by the clock.** A Gemini chat turn stops at the agent's `execution_timeout_sec` guardrail (default 1,800 seconds, the same cap as a Claude Code chat) and answers `504` *Chat execution timed out after N seconds*; a Gemini task stops at its timeout with `504` *Task exceeded Ns timeout*. A timer ends the run even when the CLI has gone silent, so a hung Gemini turn no longer holds a slot forever.
 - **The headless tool denial reaches an agent on its next container recreate** after the base image is rebuilt; the prompt guidance reaches every agent as soon as the platform is updated.
 - **No runtime switch after creation.** Recreate the agent from a different template to change runtimes — a post-creation runtime-switch endpoint is planned.
 - **Codex cost is estimated**, not metered exactly.

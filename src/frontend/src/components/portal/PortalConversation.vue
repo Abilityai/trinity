@@ -51,7 +51,7 @@
           data-testid="portal-agent-picker"
           @click="pickerOpen = !pickerOpen"
         >
-          <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="26" />
+          <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="26" />
           <span class="font-semibold truncate">{{ agentDisplayName(agent) }}</span>
           <svg class="w-4 h-4 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
         </button>
@@ -65,7 +65,7 @@
             class="w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-800"
             @click="pickAgent(a)"
           >
-            <PortalAvatar :name="a.name" :avatar-url="a.avatar_url" :size="28" />
+            <PortalAvatar :name="agentDisplayName(a)" :avatar-url="a.avatar_url" :size="28" />
             <span class="min-w-0">
               <span class="block text-sm font-medium truncate">
                 {{ a.name === agent.name ? agentDisplayName(a) : `New chat with ${agentDisplayName(a)}` }}
@@ -290,6 +290,13 @@
              keyed on the call id (`groupVoiceBlocks`), placed where the call
              started. Visibly spoken — no rating control, a mic glyph, the
              label the call wrote ("Voice call · N min", and how it ended). -->
+        <!-- ent#1175: member onboarding progress card — in Main from acceptance; one line once every step is done -->
+        <PortalProgressCard
+          v-if="isMainChat"
+          :steps="progressData.steps"
+          :all-done="progressData.all_done"
+          :active="progressData.active"
+        />
         <!-- #2694: the window is counted in typed turns under a row ceiling.
              When the ceiling cut the OLD end, say so — a thread that silently
              starts mid-call is the very symptom the window fix removes. -->
@@ -306,7 +313,7 @@
              background ask never reaches this loop — its home is the Inbox. -->
         <div v-if="item.kind === 'ask'" :data-ask-id="item.ask.id">
           <div v-if="item.mode === 'card'" class="flex items-start gap-2.5" data-testid="portal-chat-ask-tile">
-            <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
+            <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
             <!-- `relative`: each card's sr-only text stays inside the thread's scroll box. -->
             <div class="relative min-w-0 flex-1 max-w-[min(85%,40rem)]">
               <PortalAsks
@@ -339,6 +346,26 @@
             </template>
           </p>
         </div>
+        <!-- trinity-enterprise#1134 (AC4): an ask this chat's turn raised that
+             fell to the operators — nobody is this agent's primary and the
+             owner cannot stand in. Content-free: the person here is not its
+             addressee, so the line says where it went and who fixes it, never
+             what it asks. -->
+        <p
+          v-else-if="item.kind === 'ask-notice'"
+          class="flex items-baseline justify-center gap-1 min-w-0 text-xs flex-wrap text-center"
+          :class="META_INK_CLASS"
+          :data-ask-id="item.notice.id"
+          data-testid="portal-chat-ask-notice"
+        >
+          <span class="shrink-0">{{ item.line.kind }}</span>
+          <span aria-hidden="true">·</span>
+          <span>went to the operators: {{ item.line.reason }}. {{ item.line.fix }}</span>
+          <template v-if="item.line.when">
+            <span aria-hidden="true">·</span>
+            <time class="shrink-0" :datetime="item.line.at" :title="formatLocalDateTime(item.line.at)">{{ item.line.when }}</time>
+          </template>
+        </p>
         <details
           v-else-if="item.kind === 'voice-call'"
           class="rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950"
@@ -358,7 +385,7 @@
               :data-message-id="t.id || undefined"
               data-testid="portal-voice-turn"
             >
-              <PortalAvatar v-if="t.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="24" class="mt-0.5" />
+              <PortalAvatar v-if="t.role !== 'user'" :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="24" class="mt-0.5" />
               <div
                 v-if="t.role === 'user'"
                 class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-2 text-sm leading-relaxed whitespace-pre-wrap bg-action-primary-600 text-white"
@@ -381,7 +408,7 @@
           data-testid="portal-system-line"
         >{{ item.message.content }}</p>
         <div v-else :class="item.message.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'">
-          <PortalAvatar v-if="item.message.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
+          <PortalAvatar v-if="item.message.role !== 'user'" :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <div v-if="item.message.role === 'user'" class="max-w-[85%] flex flex-col items-end gap-1">
             <!-- ent#610 round 8: what this message replied to (this visit —
                  the stored row keeps only what was typed). Removable only while
@@ -506,7 +533,7 @@
              (ent#155) and Open in Work. The feed's row wins once it has the
              turn — matched by execution id, never "latest running". -->
         <div v-if="sending" class="flex items-start gap-2.5">
-          <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
+          <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <PortalWorkCard
             :item="liveCardItem"
             :live-step="liveStepLine"
@@ -526,7 +553,7 @@
              exactly as the red message does. Success collapses into the
              reply — the reply IS the outcome. "Ask about it" is a prefill. -->
         <div v-else-if="terminalCardItem" class="flex items-start gap-2.5" data-testid="portal-work-terminal">
-          <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
+          <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <PortalWorkCard
             :item="terminalCardItem"
             show-open-in-work
@@ -635,6 +662,12 @@
           class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-300"
           data-testid="portal-availability-notice"
         >{{ availabilityNotice.message }}</p>
+        <!-- ent#1201: a send held while the member's assistant is starting. -->
+        <p
+          v-if="heldSend"
+          class="mb-2 text-xs text-status-info-700 dark:text-status-info-300"
+          data-testid="portal-held-send"
+        >Your assistant is starting — your message will send when it's ready.</p>
         <!-- ent#524: one chip per file, each with its OWN progress and its own
              outcome — a batch has no shared verdict, which is what makes "one
              failure does not fail the batch" true rather than aspirational. A
@@ -951,14 +984,14 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags, isNewChatTranscript } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, viewerIsMemberTier, assistantStarting, memberTierRefusal, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags, isNewChatTranscript } from './portalUtils'
 import { tailSignature, tailLimit, adoptLocalIds, freshRows, tailOverflowed, TAIL_LIMIT_CAP } from './portalThreadTail'
 // ent#621: the same wrap the typeahead's roving selection uses — one modulo.
 import { cycleIndex } from './portalKeymap'
 // ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
 // Aliased: `submitUserText` already takes a `replyExcerpt` (the excerpt itself).
 import { replyExcerpt as excerptForReply } from './portalInbox'
-import { chatTurnAsks, placeAsksInThread, askTileMode, askHistoryLine, isDiscussedIn } from './portalChatAsks'
+import { chatTurnAsks, chatTurnNotices, placeAsksInThread, askTileMode, askHistoryLine, askNoticeLine, isDiscussedIn } from './portalChatAsks'
 import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import { formatLocalDateTime } from '@/utils/timestamps'
 import { usePortalFileDrop } from '@/composables/usePortalFileDrop'
@@ -981,6 +1014,8 @@ import PortalAsks from './PortalAsks.vue'
 import PortalReplyChip from './PortalReplyChip.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
+import PortalProgressCard from './PortalProgressCard.vue'
+import { usePortalProgressStore } from '@/stores/portalProgress'
 import { workSignalFrom } from './portalRail'
 import PortalRating from './PortalRating.vue'
 import ExecutionGateMarker from '../skills/ExecutionGateMarker.vue'  // trinity-enterprise#754
@@ -1201,7 +1236,9 @@ const messageLimit = computed(() => messageLimitState(input.value.trim()))
 const resetting = ref(false)
 // ent#523 AC 10 — the same pure rule the sidebar chip and the details header
 // read, so the four surfaces cannot disagree about one agent.
-const availabilityNotice = computed(() => composerAvailabilityNotice(props.agent))
+// ent#1201: a member's assistant that is being started says so on its progress
+// card, not here — `starting` silences the notice for that window.
+const availabilityNotice = computed(() => composerAvailabilityNotice(props.agent, { starting: assistantIsStarting.value }))
 const replyTo = computed(() => (
   props.replyTarget && props.replyTarget.messageId && props.replyTarget.sessionId === currentSessionId.value
     ? props.replyTarget : null
@@ -1384,6 +1421,126 @@ const activeTurnSpoken = ref(false)
 // A stop said on the call before the server has named the run: cancel it the moment it
 // starts, and never ask for it to be spoken.
 let stopWhenStarted = false
+
+// ---- ent#1175: member onboarding progress card ------------------------------
+const progressStore = usePortalProgressStore()
+const progressData = computed(() => progressStore.progressFor(props.agent.name))
+const memberTier = computed(() => viewerIsMemberTier(props.agent))
+// Fetch on mount (idempotent — cache-hits skip the network round-trip). A
+// member-tier chat reads it on every tab too: whether the assistant is still
+// starting decides what a send does (ent#1201).
+onMounted(() => { if (isMainChat.value || memberTier.value) progressStore.fetchProgress(props.agent.name) })
+
+// ---- ent#1201: a send while the member's assistant is starting --------------
+// The hand-over recreates the member's agent, and the server refuses every turn
+// until it is up. The row reads ready and the card says "starting", so a send in
+// that window is HELD here rather than walked into the refusal: it goes out when
+// the assistant_ready step flips to done (the progress WS trigger refetches the
+// card), and is handed back as text if the start failed or three minutes pass.
+// Text, reply and tags are held; a send carrying files is not held — it goes out
+// as ever, because a held file chip would have to outlive the composer.
+const HELD_SEND_CEILING_MS = 3 * 60 * 1000
+// ent#1220: one lost progress event must not cost the member the whole ceiling.
+// While a send is held the card is re-read every 30 s, and once more before the
+// words are handed back; a flip a re-read caught is logged, because it means
+// the event that should have flipped it never arrived.
+const HELD_SEND_REREAD_MS = 30 * 1000
+const assistantIsStarting = computed(() => memberTier.value && assistantStarting(progressData.value))
+const heldSend = ref(null)
+let heldSendTimer = null
+let heldSendPoll = null
+let heldSendReread = false
+let conversationUnmounted = false
+
+function holdSend(text, reply, tags) {
+  heldSend.value = { text, reply, tags }
+  clearTimeout(heldSendTimer)
+  clearInterval(heldSendPoll)
+  // The ceiling first: at the instant both are due, the hand-back's own re-read runs.
+  heldSendTimer = setTimeout(handBackHeldSend, HELD_SEND_CEILING_MS)
+  heldSendPoll = setInterval(() => { void rereadHeldSendProgress() }, HELD_SEND_REREAD_MS)
+}
+
+// The one consumer: whichever path takes the held send first sends or hands it back.
+function takeHeldSend() {
+  clearTimeout(heldSendTimer)
+  clearInterval(heldSendPoll)
+  heldSendTimer = null
+  heldSendPoll = null
+  const h = heldSend.value
+  heldSend.value = null
+  return h
+}
+
+function giveBackHeldSend() {
+  const h = takeHeldSend()
+  if (!h) return
+  input.value = restoreDraft(h.text, input.value)
+  autoGrowAfterUpdate()
+}
+
+function sendHeld() {
+  const h = takeHeldSend()
+  if (!h) return
+  void submitUserText(h.text, { replyId: h.reply?.messageId || null, replyExcerpt: h.reply?.excerpt || '',
+                                tags: h.tags })
+}
+
+function assistantReadyState() {
+  return (progressData.value?.steps || []).find((s) => s?.key === 'assistant_ready')?.state
+}
+
+// A forced read of the card. A flip it brings sends through the watch below.
+async function rereadHeldSendProgress() {
+  if (!heldSend.value) return
+  heldSendReread = true
+  try {
+    await progressStore.fetchProgress(props.agent.name, { force: true })
+  } finally {
+    heldSendReread = false
+  }
+}
+
+// The ceiling: read the card once more, then send only on a read that says
+// ready. Starting, failed, a failed read or a missing step all hand back.
+async function handBackHeldSend() {
+  if (!heldSend.value) return
+  clearInterval(heldSendPoll)
+  heldSendPoll = null
+  await rereadHeldSendProgress()
+  if (conversationUnmounted || !heldSend.value) return   // left the chat, or the watch sent it
+  if (!progressData.value?.error && assistantReadyState() === 'done') return sendHeld()
+  giveBackHeldSend()
+}
+
+watch(assistantIsStarting, (isStarting) => {
+  if (isStarting || !heldSend.value) return
+  if (assistantReadyState() !== 'done') return giveBackHeldSend()
+  if (heldSendReread) {
+    console.warn('[portal] the assistant read ready on a re-read of its progress, not on its '
+      + 'progress event — the event did not arrive (ent#1220)')
+  }
+  sendHeld()
+})
+
+// While a send is held its words ARE this chat's draft, ahead of anything typed
+// since — so a reload or a closed tab finds them (no unmount hook runs then).
+// `flush: 'post'` runs after `useComposerDraft`'s write of the emptied field.
+// The draft lets go of them when the hold ends: sent, or handed back (the
+// composer then holds them, and the draft follows the composer as ever).
+watch([input, heldSend], ([text, h], [, wasHeld]) => {
+  if (!draftKey.value || (!h && !wasHeld)) return
+  drafts.set(draftKey.value, h ? restoreDraft(h.text, text) : text)
+}, { flush: 'post' })
+
+// Leaving the chat with a send still held keeps the words as this chat's draft.
+onBeforeUnmount(() => {
+  conversationUnmounted = true
+  clearTimeout(heldSendTimer)
+  clearInterval(heldSendPoll)
+  const h = heldSend.value
+  if (h && draftKey.value) drafts.set(draftKey.value, restoreDraft(h.text, input.value))
+})
 
 // ---- ent#525: the live card and the terminal card ---------------------------
 const workStore = usePortalWorkStore()
@@ -2372,6 +2529,11 @@ async function deliver(text, { replyId = null, attachments = null, tags = null }
     }
     const refused = messageRefusalReason(err)
     if (refused) return { error: refused, retryable: false, restoreText: text }
+    // ent#1201: "its owner needs to start it" means nothing to a member, who
+    // cannot start it and does not know the account. Same verdict, their words.
+    // Not retryable while it is down, so the words go back to the composer.
+    const memberCopy = memberTierRefusal(err, props.agent)
+    if (memberCopy) return { error: memberCopy, retryable: false, restoreText: text }
     return { error: deliveryFailureReason(err) }
   } finally {
     sending.value = false
@@ -2753,6 +2915,17 @@ async function send() {
       }
       return
     }
+  }
+
+  // ent#1201: held while the member's assistant is starting (see `holdSend`).
+  if (assistantIsStarting.value && !heldSend.value && !attachments.value.length) {
+    const heldReply = replyTo.value
+    if (heldReply) emit('reply-done')
+    holdSend(text, heldReply, peoplePicker.tagsFor(text))
+    peoplePicker.reset()
+    input.value = ''
+    autoGrowAfterUpdate()
+    return
   }
 
   input.value = ''
@@ -3347,8 +3520,13 @@ const voiceHeaderText = computed(() => voiceHeaderLine({
 const threadItems = computed(() => groupVoiceBlocks(messages.value, { liveCallId: directCallActive.value ? direct.voiceSessionId.value : null }))
 // trinity-enterprise#610: the thread's rows with this chat's chat-turn asks
 // placed among them by time, each as a card or a history row.
-const threadRows = computed(() => placeAsksInThread(threadItems.value, chatTurnAskList.value, { truncated: historyTruncated.value, sessionId: currentSessionId.value }).map((row) => (
-  row.kind !== 'ask' ? row
+// trinity-enterprise#1134 (AC4): this chat's notices come from its own read only.
+const chatTurnNoticeList = computed(() => (
+  chatRead.value.sid === currentSessionId.value ? chatTurnNotices(chatRead.value.rows, currentSessionId.value) : []
+))
+const threadRows = computed(() => placeAsksInThread(threadItems.value, [...chatTurnAskList.value, ...chatTurnNoticeList.value], { truncated: historyTruncated.value, sessionId: currentSessionId.value }).map((row) => (
+  row.kind === 'ask-notice' ? { ...row, line: askNoticeLine(row.notice) }
+  : row.kind !== 'ask' ? row
     // trinity-enterprise#748: a dismissal inside its Undo window keeps the card,
     // which is where its Undo is.
     : askTileMode(row.ask) === 'card' || store.askDismissals[row.ask.id] ? { ...row, mode: 'card' }
@@ -3378,7 +3556,7 @@ function refreshAsksAfterTurn() {
   store.fetchAsks().catch(() => {})
 }
 const rowKey = (item) => (
-  item.kind === 'ask' ? `ask-${item.ask.id}` : item.kind === 'voice-call' ? `call-${item.callId}` : `m-${item.index}`
+  item.kind === 'ask' ? `ask-${item.ask.id}` : item.kind === 'ask-notice' ? `ask-notice-${item.notice.id}` : item.kind === 'voice-call' ? `call-${item.callId}` : `m-${item.index}`
 )
 
 // The shell reads these to swap the rail for the canvas column and to refuse

@@ -47,7 +47,7 @@ You do **NOT** participate in:
 
 ## Available MCP Tools
 
-You have full access to all Trinity MCP tools:
+Your system-scoped key lists the Trinity MCP tools for fleet operations, including these. A tool whose route admits only a person or only a signed-in session is not listed to your key; ask the operator to do those: renaming an agent, initializing GitHub sync, setting or clearing a per-agent GitHub token, credential export, inject and import, assigning or clearing a subscription, configuring or switching Nevermined payments, revoking a Nevermined card mandate, answering an Operating Room item, and closing a room. Git sync, pull and status, and whether an agent has a token, stay listed.
 
 ### Agent Management
 - `mcp__trinity__list_agents` - List all agents with status and details

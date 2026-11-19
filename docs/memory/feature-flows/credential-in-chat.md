@@ -3,7 +3,8 @@
 > **Status**: OSS core. No schema change — the kind rides the existing
 > `operator_queue.type` TEXT column, the name rides `context.credential_name`
 > and, since trinity-enterprise#1109, a destination rides
-> `context.credential_destination`.
+> `context.credential_destination` (since trinity-enterprise#1158 it may name a
+> registered instance instead of a key variable).
 > Requirements: [credentials.md §3.10](../requirements/credentials.md) and
 > [§3.11](../requirements/credentials.md) (the destination),
 > [security.md §20.11](../requirements/security.md).
@@ -20,8 +21,9 @@ the thread, the execution log and the agent's next prompt.
 ```
 agent ──ask_for_credential(name, why)──▶ MCP operator_queue.ts
         POST /api/agents/{self}/operator-queue  {type: credential, context.credential_name, to: primary}
-        └─ ask_service.raise_ask → _validated_ask (name policy, no options, to: primary only) → exactly one person (else 422 no_person)
-file channel ── _clamp_ingested_item: a credential entry not addressed to the agent's primary person is ingested unaddressed
+        └─ ask_service.raise_ask → _validated_ask (name policy, no options, to: primary only) → exactly one person who can open the field: the primary, else the owner (else 422 no_person / role_cannot_open_agent, #4579)
+file channel ── filechannel.CredentialCycle.judge: the same raise checks and reader chain (#4599); the entry's addressed_to_email is ignored
+        └─ a reader → _clamp_ingested_item files the row for them · none → the entry is held (no row, stays pending), its id listed in platform.ingestion
 
 person's Workspace thread ── PortalAsks → PortalCredentialField (masked)
         Send ─▶ store.provideCredential(id, value)
@@ -37,7 +39,89 @@ person's Workspace thread ── PortalAsks → PortalCredentialField (masked)
 thread row: "NAME provided"
 ```
 
-### With a destination (trinity-enterprise#1109)
+### With an instance destination (trinity-enterprise#1158)
+
+The preferred form. The destination names an entry an admin registered under
+Settings → Integrations → Outbound A2A endpoints, and the platform delivers
+under the key stored on that entry. The asking agent never holds a copy, and
+its own `.env` is neither read nor written.
+
+```
+admin ── Settings → Integrations → Outbound A2A endpoints: name + URL + key (AES-GCM envelope, Invariant #12)
+
+agent ──ask_for_credential(name, why, destination={instance, agent_name})──▶ MCP (superRefine: exactly one shape)
+        context.credential_destination ── _validated_ask → credential_destination.validate(agent_name)
+             shape: instance + instance_url/key_env → destination_invalid (ambiguous_shape);
+                    neither shape complete → destination_invalid (missing_field);
+                    instance not a 1..200-char control-free string → destination_instance_invalid
+             the outbound A2A switch ON (destination_outbound_disabled)
+             instance_entry(agent, ref) ── a2a_outbound.resolve_endpoint(agent, ref)  (the same call
+                    call_a2a_agent makes; id exact or name case-insensitive), reduced on the spot to
+                    metadata {id, name, url, auth_scheme, credential_kind, has_credential} — never the key
+               none → destination_not_approved / instance_unknown (unknown ≡ out of this agent's reach)
+               no bearer key → destination_instance_no_credential (no_credential | aauth | payment_token)
+             → stored {instance: <entry name>, endpoint_id, instance_url: <origin of the entry URL>, agent_name}
+        the route never reads the asking agent's .env for this shape
+        receipt + Workspace projection: credential_destination {agent_name, host} — never the entry name
+
+person's field: "Sent to the agent X on the Trinity at host …"
+        Send ─▶ provide_credential  (destination read from the STORED row; a row carrying a destination
+                that parses as neither shape → 409 destination_unreadable, nothing written anywhere)
+             └─ credential_sink.set_env_value(..., destination)
+                  stage_secret (fail closed)
+                  · _deliver_remote, inside ONE audit `finally`:
+                      check_switch (outbound on) — not check_deliverable: the resolve-by-id + origin equality below is the registry check
+                      _resolve_instance_key ◀── THE resolve point (the per-agent grant seam)
+                         a2a_outbound.resolve_endpoint(agent, endpoint_id) — by the stored id
+                         none → destination_not_approved / instance_unknown
+                         origin_of(entry URL) ≠ stored instance_url → destination_not_approved / instance_moved
+                         no bearer key → destination_instance_no_credential (reason)
+                         not header-safe → destination_key_invalid
+                      URL resolved OFF the loop, connection pinned (Host + SNI = the registered host)
+                      POST {instance_url}/api/agents/{agent}/credentials/inject {mode: "merge", env: {NAME: value}}
+                         Authorization: Bearer <entry key>  (resolved now: a rotation applies to the next delivery)
+                      · audit ONE row credentials / credential_instance_delivery {name, ask_id, instance,
+                        endpoint_id, destination {host, agent_name}, outcome: delivered | <code>, may_have_written}
+                  · 2xx → unstage; refusals as for the key_env form below, 401/403 → destination_key_refused
+                    ("refused the key registered for that Trinity" — the admin rotates it on the entry)
+             └─ ask_service.answer(response="provided", via_credential_sink=True)
+```
+
+**The key on the entry needs inject rights on the receiving instance.** The
+entry's credential was registered for A2A messaging; this path presents it to
+the receiving instance's owner-tier `POST /api/agents/{agent}/credentials/inject`
+(`require_person`: a `user`-scoped key qualifies, an agent-scoped one does not).
+A key without that right refuses every delivery with `destination_key_refused`.
+
+**Two consequences of reusing the entry's key** (trinity-enterprise#1158 C12,
+accepted within the ruling):
+
+- *The key's reach on the receiving instance is the asker's reach.* If the
+  entry key is user- or admin-scoped there, any agent on this instance that
+  can resolve the entry can ask a person to send a value to any agent that
+  key reaches there — the `agent_name` is the asker's choice. Each delivery is
+  still person-gated (the person reads the agent and host first) and audited.
+  Per-agent narrowing is the per-entry grant the resolve point is shaped for.
+- *An entry that is not a Trinity receives the key and the value.* A vendor's
+  A2A URL registered for messaging would receive the entry key and the
+  person's value at `/api/agents/{agent}/credentials/inject`. The person sees
+  that host before typing; an admin should name only Trinity instances.
+
+**Rollback caveat.** Code from before trinity-enterprise#1158 reads an
+`instance` row as "no destination" and writes the value into the asking
+agent's own `.env`. Before rolling back across this release, end every pending
+`credential` ask whose `context.credential_destination` carries `instance`.
+
+### With a key_env destination (trinity-enterprise#1109, the older form)
+
+Still supported. The destination carries the NAME of a variable in the asking
+agent's own `.env` holding its key to the other instance. Since
+trinity-enterprise#1158 the route reads that `.env` at raise (off the loop,
+5 s budget; `credential_sink.key_env_state` through the same `classify_key` as
+delivery) and refuses a missing or unusable key before a person types:
+`destination_key_env_missing` / `destination_key_invalid` (422; an unreadable
+file or a stopped agent decides nothing, and delivery stays the
+authoritative check).
 
 ```
 agent ──ask_for_credential(name, why, destination={instance_url, agent_name, key_env})──▶ MCP
@@ -78,13 +162,14 @@ receiving instance: POST /api/agents/{name}/credentials/inject mode "merge"
 | Layer | File | Role |
 |---|---|---|
 | MCP | `src/mcp-server/src/tools/operator_queue.ts` → `ask_for_credential` | Self-acting; builds the ask from declared fields only; derives `request_id` from name + turn when left out |
-| Backend | `services/ask_service.py` | `credential` in `ASK_TYPES`; options refused; `to` other than `primary` refused (`invalid_to`); `no_person`; `CredentialAnswerRefused` unless `via_credential_sink` |
-| Backend | `services/operator_queue_service::_clamp_ingested_item` | File channel: a credential entry keeps its addressee only when that is the agent's single primary person |
+| Backend | `services/ask_service.py` | `credential` in `ASK_TYPES`; options refused; `to` other than `primary` refused (`invalid_to`); the reader is `role_addressing.resolve_credential_reader` — the primary person when the agent is on their Workspace roster, else the owner, else `role_cannot_open_agent`, whose message names the real cause and remedy (#4579, #4599; `readdress_role` and an admin's re-address by rule, `admin_readdress`, move a pending row by the same rule); `file_credential_entry_checks` / `file_credential_reader` / `file_credential_context` run the same checks and chain for a queue-file entry; `no_person`; `CredentialAnswerRefused` unless `via_credential_sink` |
+| Backend | `services/operator_queue_service/filechannel.py` → `CredentialCycle`, `_clamp_ingested_item` | File channel (#4599): a new credential entry is judged once per sync cycle by the kind's raise checks and the reader chain (resolved once per agent per cycle, at most 10 destination checks); the row is filed for the platform's reader with the destination in its stored form, and the entry's `addressed_to_email` is ignored. An entry that cannot be filed is held and named in `platform.ingestion`; `changed_fields` never compares a credential row's addressee or stored destination, so the row stays `confirmed` |
 | Backend | `services/credential_ask_policy.py` | Name charset, ≤64, reserved names (agent-side mirror, parity-tested) |
 | Backend | `client_portal/asks/router.py` → `POST /{id}/credential` | Person-only door, rate-limited, uniform 404 |
 | Backend | `client_portal/asks/service.py::provide_credential` | Ownership and state checks, sink, then the ask sink |
-| Backend | `services/credential_sink.py` | The one leaf that handles the value; `_deliver_remote` (destination branch) and `merge_env_values` (the inject route's `mode: "merge"`) since ent#1109 |
-| Backend | `services/credential_destination.py` | ent#1109: the destination's shape, URL gate (`validate_a2a_endpoint_url`), `destination_of` at answer time, `public_view` / `plain_words` (agent + host, never `key_env`) |
+| Backend | `services/credential_sink.py` | The one leaf that handles the value; `_deliver_remote` (destination branch) and `merge_env_values` (the inject route's `mode: "merge"`) since ent#1109; `_resolve_instance_key` (the resolve point), the single `credential_instance_delivery` audit row, `classify_key` / `key_env_state` (the raise-time `key_env` check) since ent#1158 |
+| Backend | `services/credential_destination.py` | ent#1109: the destination's shape, URL gate (`validate_a2a_endpoint_url`), `destination_of` at answer time, `public_view` / `plain_words` (agent + host, never `key_env`); ent#1158: the `instance` shape, `instance_entry` (metadata only), `origin_of`, `carries_destination` |
+| Backend | `routers/operator_queue.py::raise_my_ask` | ent#1158: reads a `key_env` destination's key state before `raise_ask(destination_key_state=)`; an `instance` destination is never read |
 | Backend | `routers/credentials.py` → `POST /agents/{name}/credentials/inject` | `mode: "merge"` + `env` (ent#1109): one line set in place through the sink's leaf; `mode: "replace"` (default) is the whole-file write, unchanged |
 | Backend | `services/system_service.py` → `parse_manifest` | ent#1109: `credentials: [NAME, ...]` read as variable names (validated, previewed); the older map form stays an unknown key, warned and dropped |
 | Agent | `agent_server/routers/credentials.py` → `GET /api/credentials/read` | Lists a path in `missing` only when the agent proved it absent; a path in none of `files` / `files_b64` / `missing` was not read |
@@ -115,6 +200,8 @@ receiving instance: POST /api/agents/{name}/credentials/inject mode "merge"
 |---|---|---|---|
 | `invalid_to` | 422 | raise | A credential ask is addressed to `primary` only |
 | `no_person` | 422 | raise | No single person to ask |
+| `role_cannot_open_agent` | 422 | raise | Nobody who could fill the ask can open the field (#4579). One code, the message names the real cause and remedy (#4599): a seated primary and the owner both cannot open the agent in their Workspace (make sure it is shared with its primary person and that they can sign in); nobody is seated and the owner cannot (assign a primary person and share the agent with them); the owner is the primary person (check the owner's access to the Workspace); a system agent, which is in nobody's Workspace (set the credential on the agent directly); the platform could not check (try again in a few minutes; a primary who could not be checked is not passed over for the owner). A deactivated account and an email blocked from the Workspace are not readers. Names roles, never a person or the account state that stops them |
+| `role_cannot_open_agent` / `no_person` / `invalid_credential` | n/a | file channel (#4599) | Hold names, not HTTP refusals: a new `type: "credential"` entry that cannot be filed creates no row and stays `pending`, its id listed under the hold's name in the file's `platform.ingestion` block (nobody who could fill it can open the agent in their Workspace; no single person; the entry fails the kind's own checks: name, options, destination, context size). A lookup that failed holds the entry for the cycle with no marker |
 | `invalid_credential_name` | 422 | raise / sink | Malformed or reserved name (`reason`) |
 | `invalid_options` | 422 | raise | A credential ask offers no options |
 | `credential_answer_via_field` | 422 | operator respond / Workspace answer | Only the field answers the kind |
@@ -127,12 +214,19 @@ receiving instance: POST /api/agents/{name}/credentials/inject mode "merge"
 | `agent_unreachable` | 503 | sink | The agent's read (nothing stored) or inject (may or may not be stored) failed |
 | `already_resolved` | 409 / 400 | door | Ended first; `credential_written: true` when the value landed |
 | `secret_in_message` | 422 | Workspace chat | The message looked like a secret; nothing stored |
-| `destination_invalid` / `destination_url_invalid` / `destination_agent_invalid` / `destination_key_env_invalid` | 422 | raise (ent#1109) | The destination's shape, URL (`reason`: `endpoint_not_https`, `endpoint_private_address`, `endpoint_dns_failure`, `endpoint_invalid`, `path`, …), agent name or key variable name |
+| `destination_invalid` / `destination_url_invalid` / `destination_agent_invalid` / `destination_key_env_invalid` | 422 | raise (ent#1109) | The destination's shape (`reason`: `ambiguous_shape` — both shapes, `missing_field` — neither, `not_an_object`), URL (`reason`: `endpoint_not_https`, `endpoint_private_address`, `endpoint_dns_failure`, `endpoint_invalid`, `path`, …), agent name or key variable name |
+| `destination_instance_invalid` | 422 | raise (ent#1158) | `instance` is not a 1..200-character control-free string |
+| `destination_not_approved` | 422 | raise / sink | `not_registered` (key_env form: no registered entry has that origin); `instance_unknown` (instance form: no entry by that name or id this agent can reach — uniform, no existence oracle); `instance_moved` (sink only: the entry now points at another host than the person read) |
+| `destination_outbound_disabled` | 422 | raise / sink | The outbound A2A switch is off |
+| `destination_instance_no_credential` | 422 | raise / sink (ent#1158) | The entry holds no key Trinity can present as Bearer (`reason`: `no_credential`, `aauth`, `payment_token`); an admin stores the instance's key on the entry |
+| `destination_key_env_missing` / `destination_key_invalid` | 422 | raise (ent#1158, key_env form) | The asking agent's `.env` holds nothing (or nothing header-safe) under `key_env`; the message names `destination.instance` as the way forward |
+| `destination_key_invalid` | 409 / 422 | sink | key_env form: the key cannot travel as a header (409); instance form: the entry's credential is not header-safe (422) |
+| `destination_unreadable` | 409 | answer (ent#1158) | The stored destination parses as neither shape; nothing written anywhere — the agent raises again |
 | `destination_on_non_credential` | 422 | raise | Only a credential ask carries a destination |
 | `destination_key_missing` | 409 | sink | The asking agent holds no key under `key_env`; nothing stored |
 | `destination_url_invalid` | 422 | sink | The URL no longer passes the gate at delivery time; nothing stored |
 | `destination_unreachable` | 503 | sink | Connect failure (nothing stored, unstaged) or a timeout after the request left (`may_have_written: true`, stays staged) |
-| `destination_key_refused` | 409 | sink | The destination answered 401/403 to the key; nothing stored |
+| `destination_key_refused` | 409 | sink | The destination answered 401/403 to the key (the instance form names the key registered for that Trinity: an admin rotates it on the entry, or gives it inject rights); nothing stored |
 | `destination_agent_missing` | 409 | sink | The destination answered 404 — no such agent, or one the key cannot reach |
 | `destination_refused` | 409 | sink | Any other non-2xx (`status`); nothing stored here |
 | `merge_takes_env` | 400 | inject route | `mode: "merge"` with `files`, or without `env` |
@@ -142,8 +236,16 @@ receiving instance: POST /api/agents/{name}/credentials/inject mode "merge"
 - The paste guard is not wired into channel adapters (Slack, Telegram, voice).
 - The value is stored in the agent's `.env` only; a vault target is a second
   sink target, not a change to the ask kind or the field. A destination
-  (ent#1109) is such a second target: another Trinity's agent, over the key
-  the asking agent holds for it.
+  (ent#1109) is such a second target: another Trinity's agent, under the key
+  an admin registered for that Trinity (`instance`, ent#1158) or, in the older
+  form, a key the asking agent holds (`key_env`).
+- Under OSS the outbound registry is platform-wide, so every agent here can
+  name every registered entry (the reach `call_a2a_agent` already has). The
+  per-agent grant plugs in at `_resolve_instance_key` / the provider's
+  `resolve_endpoint(agent_name, …)`.
+- An `instance` delivery writes one audit row in a `finally`; a process killed
+  after the request left writes none. A names-only log line before the send
+  remains.
 - The platform schedules no retry of a failed delivery: the person sends the
   value again. The asking agent's own wording (where the secret lives, who
   reads it, how to rotate it) and the "ask for each missing manifest
@@ -152,17 +254,28 @@ receiving instance: POST /api/agents/{name}/credentials/inject mode "merge"
   whole-file writes that do not take the sink's lease, so they stay
   last-writer-wins against it.
 - A credential ask raised from a schedule or another agent's turn reaches the
-  agent's owner; any variable name the policy allows can be asked for, and the
-  card (who asks, in its own words) is the person's defence.
+  same reader as one raised in a chat (the primary person, else the owner);
+  any variable name the policy allows can be asked for, and the card (who
+  asks, in its own words) is the person's defence.
+- A credential row filed from the queue file carries no role (#4599), so it
+  does not follow a later seat change and an admin cannot re-address it by
+  rule. A credential row the file channel ingested unaddressed before #4599
+  stays as it is: cancel it. The native route's check of the agent's own
+  `key_env` value is not run for a file entry; delivery checks it.
 - The live stream of a turn is not scrubbed (ent#279), so a model that echoes the
   value shows it once on screen, never in history.
 
 ## Testing
 
-- `tests/unit/test_ent1066_credential_ask_kind.py` — the kind, the name policy and parity, primary-only on the REST door and the file channel, `no_person`, the answer refusal on both doors, the wake.
+- `tests/unit/test_4579_credential_primary_reach.py` — the reader chain on the real sink, door and route: a primary off the roster hands the ask to the owner, nobody who can open the field refuses it by name and files nothing, an admin or a deactivated account off the roster is not a reader, the owned roster on real rows, and re-addressing by the same rule.
+- `tests/unit/test_4599_credential_reader_doors.py`: the queue-file channel on the real poller (the platform's reader, the entry's addressee ignored, the three hold names, a failed lookup held with no marker, the chain read once per cycle, the row staying `confirmed`), a blocked or deactivated person on both reach rules, the cause-named refusal wording on the raise, the gate's `503 gate_unavailable` for a reach that could not be checked, and the admin re-address messages.
+- `tests/unit/test_ent1066_credential_ask_kind.py` — the kind, the name policy and parity, primary-only on the REST door, the platform's reader on the file channel (never the address the agent wrote), `no_person`, the answer refusal on both doors, the wake.
 - `tests/unit/test_ent1066_credential_sink.py` — round-trip through the agent's parser, the agent image's real read/inject over a tmp home (non-UTF-8 and unreadable `.env` keep every byte), fail-closed staging and unstaging on refusal, stopped agent, lease, CAS after write, value absent from logs, audit and refusals.
 - `tests/unit/test_ent1066_credential_route_gates.py` — agent, system and connector keys refused; Workspace-only person admitted; stranger 404.
 - `tests/unit/test_ent1109_credential_handover.py` — the destination: validated and stored at raise, said in plain words on the receipt and the projection, the key read by name and never shown, the pinned merge inject on the destination, nothing written here and nothing staged after, every refusal named and unstaged when nothing could have been written, the wake, `mode: "merge"` on the inject route, manifest `credentials:` names (and the legacy map form kept as an unknown key).
+- `tests/unit/test_ent1158_instance_destination.py` — the `instance` shape and its refusals at raise, the fail-closed answer path (`destination_unreadable`), raise/delivery parity over every entry state, delivery under the entry key with the asking agent's `.env` never touched, rotation, `instance_moved`, one audit row per delivery on success and on each refusal.
+- `tests/unit/test_ent1158_key_env_raise_check.py` — the raise-time `key_env` check: one classifier for raise and delivery, fail open when unreadable, applied after every earlier refusal, the route reads only a `key_env` destination.
+- `tests/unit/test_ent1158_credential_key_journey.py` — the journey: an admin registers the instance with its key (real encrypted registry), the agent raises over the real route, the person answers, one merge inject under the entry key, one audit row, the asking agent's `.env` untouched; plus the key cleared before the answer and a `key_env` refused at raise.
 - `tests/unit/test_ent1066_secret_paste_guard.py` — every shape, both routes, nothing persisted, no echo; `ops_` snake_case identifiers neither refused nor redacted.
 - `src/mcp-server/src/operator_queue.test.ts` — the tool's shape, only declared fields travel, the description.
 - `src/frontend/tests/unit/portalCredentialField.mount.spec.js`, `credentialAskSurfaces.mount.spec.js`, `portalSecretInMessage.mount.spec.js` — mounted.

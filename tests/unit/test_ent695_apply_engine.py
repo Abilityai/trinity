@@ -581,13 +581,17 @@ class TestSchedulesInThePlan:
 
 class TestCreatedMemberPlan:
     def test_a_member_to_create_marks_its_template_dependent_fields_pending(self, world):
+        """Resources stay pending; a `local:` template's schedules are predicted
+        (trinity-enterprise#984): `sched` declares `daily`, left disabled."""
         mf = (f"name: {SYSTEM}\nagents:\n  a:\n    template: local:sched\n"
               "    resources: {cpu: '2'}\n"
               "    schedules:\n      - {name: daily, cron: '0 7 * * *', message: /m}\n")
         mp = _member(_plan(world, mf), "a")
         assert mp.verdict == "create" and mp.creating
         pending = [c.field for c in mp.changes if c.code == "pending_template_resolution"]
-        assert pending == ["resources", "schedule:daily"]
+        assert pending == ["resources"]
+        assert [(c.field, c.code) for c in mp.changes if c.field.startswith("schedule:")] == [
+            ("schedule:daily", "schedule_update"), ("schedule:daily", "enabled_differs")]
 
     def test_an_unresolvable_local_template_is_refused(self, world):
         plan = _plan(world, f"name: {SYSTEM}\nagents:\n  a:\n    template: local:nope\n")
@@ -987,7 +991,7 @@ class TestSchedulesOnACreatedMember:
     def test_the_templates_same_named_row_is_updated_after_creation(self, ew):
         dry = W.apply(ew, FLEET, dry_run=True)
         a = next(m for m in dry.members if m.short_name == "a")
-        assert ("schedule:daily", "pending_template_resolution") in [(c.field, c.code) for c in a.changes]
+        assert ("schedule:daily", "schedule_update") in [(c.field, c.code) for c in a.changes]
 
         real = W.apply(ew, FLEET, dry_run=False)
         rows = {s.name: s for s in db.list_agent_schedules("acme-a")}

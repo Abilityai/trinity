@@ -1,7 +1,7 @@
 """Pydantic models for Workspace asks (ent#364). OSS core since ent#428."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -125,6 +125,34 @@ class WorkspaceAsk(BaseModel):
     # caption. Never the name of the variable that holds the asking agent's
     # key to that instance.
     credential_destination: Optional[Dict[str, str]] = None
+    # trinity-enterprise#1134: where the ask went, as the reader is told —
+    # `{"kind": "project", "seat": "steward" | "creator"}` on an ask addressed
+    # `to: project` (which rule picked this reader), None on every other ask.
+    # The same field carries `{"kind": "operators", "reason": …}` on a
+    # `WorkspaceAskNotice`; ent#1135's room line reads it in this shape.
+    destination: Optional[Dict[str, str]] = None
+
+
+class WorkspaceAskNotice(BaseModel):
+    """trinity-enterprise#1134 (AC4): an ask a chat's own turn raised that fell
+    to the operators — nobody is assigned as primary and the owner cannot
+    stand in. One row in THAT chat's read, for the chat's owner only.
+
+    Content-free on purpose: the person in the chat is not the ask's
+    addressee, so no title, question, options, proposal or context — only what
+    kind of ask, its state, when, and where it went and why. `notice` is
+    required (never defaulted) so a full ask can never validate as a notice in
+    the route's response union."""
+    notice: Literal[True]
+    id: str
+    agent_name: str
+    kind: str
+    status: str
+    created_at: str
+    chat_id: str
+    # `{"kind": "operators", "reason": "owner_no_email" | "no_owner"}`; the
+    # reason is absent when the ownership row could not be read at raise time.
+    destination: Dict[str, str]
 
 
 class WorkspaceAskAnswer(BaseModel):

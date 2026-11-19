@@ -21,7 +21,10 @@ import { agentRowTitle } from '../../src/components/portal/portalUtils.js'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 
-import { availabilityChip } from '../../src/components/portal/portalUtils'
+import {
+  availabilityChip, composerAvailabilityNotice, viewerIsMemberTier, assistantStarting,
+  memberTierRefusal, MEMBER_RESTARTING_NOTICE, setupPollVerdict, SETUP_POLL_CEILING_MS,
+} from '../../src/components/portal/portalUtils'
 
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
 const SIDEBAR = read('../../src/components/portal/PortalSidebar.vue')
@@ -213,5 +216,100 @@ describe('#2196 the surfaces consume the shared rule', () => {
     expect(agentRowTitle({ label: 'a', name: 'a' })).not.toMatch(/—/)
     // #2424 additionally requires a pending ask to be reachable the same way.
     expect(agentRowTitle({ label: 'a', name: 'a', askCount: 2 })).toMatch(/2 asks/i)
+  })
+})
+
+// ent#1201 — a member-tier viewer (a person on an agent shared to them as a
+// member, `is_member_agent && !owned`) is never told to go and ask an account
+// to start their assistant, and is shown nothing at all while it is starting.
+describe('ent#1201 a member-tier viewer', () => {
+  const MEMBER = { is_member_agent: true, owned: false, owner: 'ops-account@example.com' }
+
+  it('the tier is read off the card', () => {
+    expect(viewerIsMemberTier(MEMBER)).toBe(true)
+    expect(viewerIsMemberTier({ ...MEMBER, owned: true })).toBe(false)
+    expect(viewerIsMemberTier({ owner: 'x' })).toBe(false)
+    expect(viewerIsMemberTier(null)).toBe(false)
+  })
+
+  it('a stopped or containerless agent reads "Restarting" and never names the owner', () => {
+    for (const availability of ['stopped', 'unavailable']) {
+      for (const detailed of [false, true]) {
+        const chip = availabilityChip({ ...MEMBER, availability }, { detailed })
+        expect(chip.label).toBe('Restarting')
+        expect(chip.title).toBe(MEMBER_RESTARTING_NOTICE)
+        expect(`${chip.label} ${chip.title}`).not.toMatch(/ops-account|@|owner|start it/)
+      }
+      const notice = composerAvailabilityNotice({ ...MEMBER, availability })
+      expect(notice.message).toBe('Your assistant is restarting.')
+      expect(notice.message).not.toMatch(/ops-account|@|owner/)
+    }
+  })
+
+  it('while the assistant is starting there is no chip and no notice', () => {
+    for (const availability of ['stopped', 'unavailable', 'ready']) {
+      expect(availabilityChip({ ...MEMBER, availability }, { starting: true })).toBeNull()
+      expect(composerAvailabilityNotice({ ...MEMBER, availability }, { starting: true })).toBeNull()
+    }
+  })
+
+  it('ready and unknown still render nothing', () => {
+    expect(availabilityChip({ ...MEMBER, availability: 'ready' })).toBeNull()
+    expect(availabilityChip({ ...MEMBER, availability: 'unknown' })).toBeNull()
+  })
+
+  it('an operator-facing card is unchanged (regression)', () => {
+    const chip = availabilityChip({ availability: 'stopped', owner: 'alice' }, { detailed: true })
+    expect(chip.label).toBe('Stopped')
+    expect(chip.title).toContain('alice')
+    // `starting` is a member-tier rule only.
+    expect(availabilityChip({ availability: 'stopped', owner: 'alice' }, { starting: true })).toBeTruthy()
+    expect(composerAvailabilityNotice({ availability: 'unavailable', owner: 'alice' }).message).toContain('alice')
+  })
+
+  it('"starting" is the assistant_ready step in progress, nothing else', () => {
+    const at = (state) => ({ steps: [{ key: 'assistant_ready', state }] })
+    expect(assistantStarting(at('in_progress'))).toBe(true)
+    expect(assistantStarting(at('done'))).toBe(false)
+    expect(assistantStarting(at('failed'))).toBe(false)
+    expect(assistantStarting({ steps: [{ key: 'other', state: 'in_progress' }] })).toBe(false)
+    expect(assistantStarting(null)).toBe(false)
+    expect(assistantStarting({})).toBe(false)
+  })
+
+  it('a turn refused because the agent is down reads as restarting for a member', () => {
+    const err = { response: { status: 502, data: { detail: "This agent isn't running right now — its owner needs to start it." } } }
+    expect(memberTierRefusal(err, MEMBER)).toBe(MEMBER_RESTARTING_NOTICE)
+    // Anyone else keeps the server's own words.
+    expect(memberTierRefusal(err, { owner: 'alice' })).toBeNull()
+    // A different 502 (usage limit, agent error) is not relabelled.
+    expect(memberTierRefusal({ response: { status: 502, data: { detail: 'The agent has reached its usage limit.' } } }, MEMBER)).toBeNull()
+    expect(memberTierRefusal({ response: { status: 422, data: { detail: 'x' } } }, MEMBER)).toBeNull()
+  })
+
+  // The match is on the server's free-text 502 body — no category reaches the
+  // response — so every refusal the server can send is read from its source and
+  // run through the rule. A copy edit there turns this red, not the rewrite off.
+  // Its consumer is CI: the backend file is the contract, not this component.
+  it("matches every availability refusal the server sends", () => {
+    const service = read('../../../backend/client_portal/service.py')
+    const body = service.slice(service.indexOf('_AVAILABILITY_REFUSAL = {'),
+                               service.indexOf('def _usage_limit_detail'))
+    const copies = [...body.matchAll(/"(This agent [^"]+)"/g)].map((m) => m[1])
+    expect(copies.length).toBe(3)
+    for (const detail of copies) {
+      expect(memberTierRefusal({ response: { status: 502, data: { detail } } }, MEMBER)).toBe(MEMBER_RESTARTING_NOTICE)
+    }
+  })
+})
+
+describe('ent#1201 the set-up poll', () => {
+  it('polls while pending, stops when the flag clears, and goes overdue at the ceiling', () => {
+    expect(SETUP_POLL_CEILING_MS).toBe(3 * 60 * 1000)
+    expect(setupPollVerdict({ pending: true, elapsedMs: 0 })).toBe('poll')
+    expect(setupPollVerdict({ pending: true, elapsedMs: SETUP_POLL_CEILING_MS - 1 })).toBe('poll')
+    expect(setupPollVerdict({ pending: true, elapsedMs: SETUP_POLL_CEILING_MS })).toBe('overdue')
+    expect(setupPollVerdict({ pending: false, elapsedMs: 0 })).toBe('idle')
+    expect(setupPollVerdict({ pending: false, elapsedMs: SETUP_POLL_CEILING_MS * 2 })).toBe('idle')
   })
 })

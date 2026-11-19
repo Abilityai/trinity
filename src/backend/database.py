@@ -1157,6 +1157,13 @@ class DatabaseManager:
     def update_user_role(self, username: str, role: str):
         return self._user_ops.update_user_role(username, role)
 
+    # abilityai/trinity-enterprise#863 — the live-connection re-check's batched reads
+    def get_users_access_state(self, usernames):
+        return self._user_ops.get_users_access_state(usernames)
+
+    def get_keys_active(self, key_ids):
+        return self._mcp_key_ops.get_keys_active(key_ids)
+
     # --- Per-user GitHub PAT (ent#162) ---
 
     def get_user_github_pat(self, user_id: int):
@@ -1374,6 +1381,18 @@ class DatabaseManager:
 
     def set_autonomy_enabled(self, agent_name: str, enabled: bool):
         return self._agent_ops.set_autonomy_enabled(agent_name, enabled)
+
+    def transfer_agent_ownership(self, agent_name: str, *, to_user_id: int, expect: dict,
+                                 clear_spawn_provenance: bool, clear_ephemeral: bool,
+                                 enable_autonomy: bool, restore_spawn_provenance=None):
+        """Re-own an agent and its owner-carrying rows under a CAS (ent#1147);
+        every side effect is a named, required option — see the mixin."""
+        return self._agent_ops.transfer_agent_ownership(
+            agent_name, to_user_id=to_user_id, expect=expect,
+            clear_spawn_provenance=clear_spawn_provenance,
+            clear_ephemeral=clear_ephemeral, enable_autonomy=enable_autonomy,
+            restore_spawn_provenance=restore_spawn_provenance,
+        )
 
     def get_all_agents_autonomy_status(self):
         return self._agent_ops.get_all_agents_autonomy_status()
@@ -1702,8 +1721,11 @@ class DatabaseManager:
 
     # Physical-occupancy meter (#1081 Phase 3): read-only leased-row counters
     # consumed by CapacityManager's two meter methods. Metering only.
-    def count_active_leased_by_agent(self, agent_names):
-        return self._schedule_ops.count_active_leased_by_agent(agent_names)
+    def count_active_leased_by_agent(self, agent_names, unexpired_at=None):
+        # #4635: `unexpired_at` — the stall monitor counts live leases only.
+        return self._schedule_ops.count_active_leased_by_agent(
+            agent_names, unexpired_at=unexpired_at
+        )
 
     def execution_awaits_claim(self, execution_id: str) -> bool:
         return self._schedule_ops.execution_awaits_claim(execution_id)
@@ -1722,11 +1744,14 @@ class DatabaseManager:
     ) -> int:
         return self._schedule_ops.count_queued_ahead(agent_name, queued_at, execution_id)
 
-    def oldest_queued_head_per_agent(self):
-        return self._schedule_ops.oldest_queued_head_per_agent()
+    def oldest_queued_head_per_agent(self, agent_names=None, *, claimable=False):
+        return self._schedule_ops.oldest_queued_head_per_agent(
+            agent_names, claimable=claimable
+        )
 
-    def agents_with_running_conversation(self, agent_name: str):
-        return self._schedule_ops.agents_with_running_conversation(agent_name)
+    def running_conversation_keys_by_agent(self, agent_names):
+        # #4635: the #2843 guard's read, for every agent with a head in one query.
+        return self._schedule_ops.running_conversation_keys_by_agent(agent_names)
 
     def cancel_queued_execution(
         self, execution_id: str, reason: str = "cancelled", status: str = "cancelled"
@@ -1809,6 +1834,18 @@ class DatabaseManager:
 
     def set_public_channel_model(self, agent_name: str, model):
         return self._agent_ops.set_public_channel_model(agent_name, model)
+
+    def get_default_model_raw(self, agent_name: str):
+        return self._agent_ops.get_default_model_raw(agent_name)
+
+    def get_default_models_raw(self, agent_names):
+        return self._agent_ops.get_default_models_raw(agent_names)
+
+    def set_default_model(self, agent_name: str, model):
+        return self._agent_ops.set_default_model(agent_name, model)
+
+    def set_default_model_if(self, agent_name: str, expected, model):
+        return self._agent_ops.set_default_model_if(agent_name, expected, model)
 
     # =========================================================================
     # MCP API Key Management (delegated to db/mcp_keys.py)
@@ -1974,6 +2011,10 @@ class DatabaseManager:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
         return self._schedule_ops.get_max_running_chain_depth(agent_name)
 
+    def get_deepest_running_chain_row(self, agent_name: str):
+        """The running row that set that depth, for a refusal to name (#4357)."""
+        return self._schedule_ops.get_deepest_running_chain_row(agent_name)
+
     def get_running_turn_attribution(self, agent_name: str):
         """Who each of the agent's running turns is for (trinity-enterprise#926)."""
         return self._schedule_ops.get_running_turn_attribution(agent_name)
@@ -2001,6 +2042,9 @@ class DatabaseManager:
 
     def restamp_execution_dispatch(self, execution_id: str) -> bool:
         return self._schedule_ops.restamp_execution_dispatch(execution_id)
+
+    def stamp_model_used_if_null(self, execution_id: str, model) -> bool:
+        return self._schedule_ops.stamp_model_used_if_null(execution_id, model)
 
     def stamp_execution_channel_context(self, execution_id: str, **kwargs) -> bool:
         """ent#498 — attach a delivery destination to a pre-created row."""
@@ -2054,6 +2098,10 @@ class DatabaseManager:
 
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
+
+    def get_turn_attribution(self, execution_id: str):
+        """One execution's rating columns and status (trinity-enterprise#1225)."""
+        return self._schedule_ops.get_turn_attribution(execution_id)
 
     def get_execution_gate_state(self, execution_id: str):
         return self._schedule_ops.get_execution_gate_state(execution_id)
@@ -4266,10 +4314,13 @@ class DatabaseManager:
 
     def respond_to_operator_queue_item(self, item_id, response, response_text,
                                         responded_by_id, responded_by_email,
-                                        divergence_acknowledged=False, terminal=False):
+                                        divergence_acknowledged=False, terminal=False,
+                                        expect_address=None):
+        # trinity-enterprise#1096: `expect_address` adds the address to the CAS.
         return self._operator_queue_ops.respond_to_item(
             item_id, response, response_text, responded_by_id, responded_by_email,
             divergence_acknowledged=divergence_acknowledged, terminal=terminal,
+            expect_address=expect_address,
         )
 
     def withdraw_operator_queue_item(self, agent_name, item_id, *, reason):
@@ -4277,12 +4328,12 @@ class DatabaseManager:
         return self._operator_queue_ops.withdraw_item(agent_name, item_id, reason=reason)
 
     def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None,
-                                   disposition="cancelled"):
+                                   disposition="cancelled", expect_address=None):
         # trinity-enterprise#611: CAS + endings ledger; a lost race carries
         # `_status_conflict` (the mirror of respond). ent#748: `dismissed`.
         return self._operator_queue_ops.cancel_item(
             item_id, disposed_by_email=disposed_by_email, reason=reason,
-            disposition=disposition,
+            disposition=disposition, expect_address=expect_address,
         )
 
     def drop_operator_queue_addressee(self, item_id, email):
@@ -4378,6 +4429,10 @@ class DatabaseManager:
     # #3246 — platform alerts: one pending row per (agent, subject)
     def find_pending_operator_queue_by_subject(self, agent_name, subject):
         return self._operator_queue_ops.find_pending_by_subject(agent_name, subject)
+
+    def list_pending_operator_queue_by_subject_prefix(self, subject_prefix):
+        # #4635: one emitter's open alerts across agents (the stall reconcile).
+        return self._operator_queue_ops.list_pending_by_subject_prefix(subject_prefix)
 
     def find_person_ended_operator_queue_by_subject(self, agent_name, subject, since):
         return self._operator_queue_ops.find_person_ended_by_subject(agent_name, subject, since)

@@ -142,7 +142,9 @@ describe('#3692 — the goal renders as markdown', () => {
     projects.fetchTasks = vi.fn()
     projects.tasks = { prj_1: { rows: [task], loaded: true, error: null } }
     projects.fetchTask = vi.fn().mockResolvedValue(task)
-    mount(ProjectTasks, { props: { projectId: 'prj_1', canContribute: true }, attachTo: document.body })
+    // A reader: ent#1133 replaces the rendered block with an editable field for
+    // a contributor on an open task, so this is the audience that reads it.
+    mount(ProjectTasks, { props: { projectId: 'prj_1', canContribute: false }, attachTo: document.body })
     await flushPromises()
     byTestId('project-task-T-001').click()
     await flushPromises()

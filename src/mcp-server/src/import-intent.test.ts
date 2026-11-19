@@ -10,8 +10,9 @@
  * `fork_to_own` block of `destination_repo` + `private` — and NO `github_pat`.
  * MCP tool args land in transcripts (the caller's conversation, an agent's
  * execution log), so a PAT argument would persist there in plaintext; the
- * backend spends the caller's saved personal token and refuses an agent key
- * by name (FORK_PAT_REQUIRED). The body sent here is the
+ * backend spends the caller's saved personal token only for a signed-in
+ * session (trinity-enterprise#719), so it refuses every MCP key by name
+ * (FORK_PAT_REQUIRED). The body sent here is the
  * same literal `tests/unit/test_ent1007_mcp_fork_body.py` validates through the
  * backend's AgentConfig, so a key the backend would drop goes red there.
  *

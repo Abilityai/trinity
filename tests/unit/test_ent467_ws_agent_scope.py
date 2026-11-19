@@ -325,8 +325,8 @@ async def test_an_ordinary_event_does_not_hit_the_database():
 
 @pytest.mark.asyncio
 async def test_a_failing_resolver_leaves_the_previous_roster_in_place():
-    """The stale roster is the older, smaller one — degrading to it is the
-    safe direction; emptying it would break a working UI."""
+    """A failed read keeps the previous roster until the next read replaces
+    it; emptying it would break a working UI."""
     dispatcher = StreamDispatcher()
     slot = _slot(agents={"mine"})
     dispatcher._clients = {"a": slot}

@@ -1317,6 +1317,15 @@ def _rebase_in_progress(home_dir: Path) -> bool:
     return False
 
 
+#: trinity#4470 — what a manual Pull answers on a tag- or commit-pinned agent.
+#: The automatic cycle records the same condition as a named skip.
+PINNED_PULL_REFUSAL = (
+    "This agent is pinned to a tag or commit (detached HEAD), so there is no "
+    "branch to pull onto. Nothing was changed. To follow a branch instead, "
+    "create the agent from that branch."
+)
+
+
 class _PullCountError(Exception):
     """The pull cycle could not count a branch against origin."""
 
@@ -2608,6 +2617,28 @@ async def pull_from_github(request: GitPullRequest = GitPullRequest()):
         raise HTTPException(status_code=400, detail="Git sync not enabled for this agent")
 
     try:
+        # trinity#4470: a clone of `@<tag>` runs on a detached HEAD by design —
+        # the agent is pinned to that release (trinity#4165). Below, the branch
+        # is read with `rev-parse --abbrev-ref HEAD`, which prints the literal
+        # `HEAD` when detached, so every strategy pulled `origin/HEAD` — the
+        # remote's DEFAULT branch — and moved a pinned agent off its tag
+        # (`force_reset` hard-reset it there). Refuse before anything is
+        # fetched or touched, as the automatic cycle (`_run_pull_once`) skips.
+        # A rebase that stopped part-way also detaches HEAD; that is a stuck
+        # tree, not a pin, and keeps the handling below. `symbolic-ref -q`
+        # exits 1 for a detached HEAD and 128 for a real error; only the
+        # former is a pin — an unreadable repo is not answered "pinned".
+        attached = subprocess.run(
+            ["git", "symbolic-ref", "--short", "-q", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=str(home_dir),
+            timeout=10
+        )
+        if (attached.returncode == 1 and not attached.stdout.strip()
+                and not _rebase_in_progress(home_dir)):
+            raise HTTPException(status_code=400, detail=PINNED_PULL_REFUSAL)
+
         # Always fetch first to update remote refs
         fetch_result = subprocess.run(
             ["git", *GIT_NO_AUTO_MAINTENANCE, "fetch", "origin"],

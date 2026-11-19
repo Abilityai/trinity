@@ -28,7 +28,13 @@ with the answer shaped as::
         "role_id":              str | None,
         "stakeholders":         list[str] | None,
         "proactive_consent":    bool | None,
+        "proactive_reachable":  bool | None,   # trinity-enterprise#1221
     }
+
+``proactive_reachable`` answers a different question from consent: whether any
+channel could deliver to the primary at all. ``False`` makes the line say so
+instead of "permitted"; ``None`` (unknown, or a provider that predates the key)
+renders exactly as before.
 
 **The provider owns "never an email", not this module.** The validation below
 checks *types*, not contents — a display name that happens to be an address is a
@@ -66,7 +72,10 @@ MAX_APPROVER_ROLES = 100
 
 # The keys a provider answer may carry. Anything else is dropped — a provider
 # cannot smuggle an unrendered field into the prompt path by adding a key.
-_ANSWER_KEYS = ("primary_user_display", "role_id", "stakeholders", "proactive_consent")
+_ANSWER_KEYS = ("primary_user_display", "role_id", "stakeholders", "proactive_consent",
+                "proactive_reachable")
+#: Keys whose only valid value is a real bool (``bool("false")`` is True).
+_BOOL_KEYS = frozenset({"proactive_consent", "proactive_reachable"})
 
 
 class AssignmentProvider(Protocol):
@@ -155,6 +164,27 @@ class AssignmentProvider(Protocol):
     # person seats unobserved. Nothing ever fills a person seat through it.
     # def person_seat_status(self, agent_name: str, role_id: str, kind: str) -> Optional[dict]: ...
 
+    # OPTIONAL (trinity-enterprise#1174): the instance's recorded hub member's
+    # seat ``role_id`` of ``kind`` on ``agent_name`` (which may not exist yet —
+    # apply will create it). ``{"state": s}``, ``s`` one of
+    # :data:`MEMBER_SEAT_STATES`: ``filled`` (seated AND shared), ``partial``
+    # (one of the two), ``vacant``, ``differs`` (another person holds the
+    # primary), ``no_member`` (none recorded) or ``entitlement_missing`` (the
+    # module is not entitled; the answer's ``entitlement`` names which). Takes
+    # no person and returns none. Read through ``getattr`` by
+    # :func:`resolve_member_seat`.
+    # def member_seat_status(self, agent_name: str, role_id: str, kind: str) -> Optional[dict]: ...
+
+    # OPTIONAL (trinity-enterprise#1174): seat the RECORDED member on
+    # ``agent_name`` and make the agent visible to them — the one person-seat
+    # write on this seam. It takes no person: the module resolves who from its
+    # own record, which only an interactive admin writes, so no caller can name
+    # someone to share with. The core has already judged the principal
+    # (`dependencies.can_seat_member`); ``created_by`` is attribution only.
+    # Answers ``{"changed": bool, "shared": bool}`` or ``{"refused": code}``.
+    # Read through ``getattr`` by :func:`write_member_seat`.
+    # def seat_member(self, agent_name: str, role_id: str, kind: str, created_by: str) -> Optional[dict]: ...
+
 
 _provider: Optional[AssignmentProvider] = None
 
@@ -215,16 +245,18 @@ def _validated(answer: Any, agent_name: str) -> Optional[Dict[str, Any]]:
                 )
                 continue
             out[key] = [str(v) for v in value]
-        elif key == "proactive_consent":
-            # A permission statement: only a real bool counts. ``bool("false")``
-            # is True, so coercion turned "not permitted" into "permitted".
-            # Anything else is unresolved, and the renderer fails closed on it.
+        elif key in _BOOL_KEYS:
+            # A permission (or reachability) statement: only a real bool counts.
+            # ``bool("false")`` is True, so coercion turned "not permitted" into
+            # "permitted". Anything else is unresolved, and the renderer fails
+            # closed on consent and renders reachability as unknown.
             if not isinstance(value, bool):
                 logger.warning(
                     "[assignment_provider] provider returned %s for "
-                    "'proactive_consent' (expected bool/None); treating as "
+                    "%r (expected bool/None); treating as "
                     "unresolved for %s",
                     type(value).__name__,
+                    key,
                     agent_name,
                 )
                 continue
@@ -565,3 +597,72 @@ def resolve_person_seat(agent_name: str, role_id: str, kind: str) -> str:
                        "malformed answer for %s/%s", agent_name, role_id)
         return "error"
     return "filled" if answer["filled"] else "vacant"
+
+
+# --- trinity-enterprise#1174: the hub member's seat -------------------------
+
+#: What :func:`resolve_member_seat` may answer from a provider.
+MEMBER_SEAT_STATES = ("filled", "partial", "vacant", "differs", "no_member",
+                      "entitlement_missing")
+#: The provider's own name for what is missing rides on this state as
+#: ``entitlement_missing:<name>`` — OSS names no module's entitlement.
+ENTITLEMENT_MISSING = "entitlement_missing"
+
+
+def member_seat_writer_installed() -> bool:
+    """Can a ``holder: member`` seat be both read and written on this install?"""
+    provider = _provider
+    return (provider is not None
+            and getattr(provider, "member_seat_status", None) is not None
+            and getattr(provider, "seat_member", None) is not None)
+
+
+def resolve_member_seat(agent_name: str, role_id: str, kind: str) -> str:
+    """One of :data:`MEMBER_SEAT_STATES`, ``unobserved`` (no hook, or the hook
+    answers ``None``) or ``error`` (a raise or a malformed answer — a READ
+    failure, never unobserved). ``entitlement_missing`` carries the provider's
+    ``entitlement`` as ``entitlement_missing:<name>`` when it is id-shaped.
+    Never a person."""
+    provider = _provider
+    fn = getattr(provider, "member_seat_status", None) if provider is not None else None
+    if fn is None:
+        return "unobserved"
+    try:
+        answer = fn(agent_name, role_id, kind)
+    except Exception:  # noqa: BLE001 — answered as a read failure, never a raise
+        logger.warning("[assignment_provider] provider.member_seat_status failed for %s",
+                       agent_name, exc_info=True)
+        return "error"
+    if answer is None:
+        return "unobserved"
+    if not isinstance(answer, Mapping) or answer.get("state") not in MEMBER_SEAT_STATES:
+        logger.warning("[assignment_provider] provider.member_seat_status returned a "
+                       "malformed answer for %s", agent_name)
+        return "error"
+    entitlement = answer.get("entitlement")
+    if (answer["state"] == ENTITLEMENT_MISSING and isinstance(entitlement, str)
+            and ROLE_ID_RE.fullmatch(entitlement)):
+        return f"{ENTITLEMENT_MISSING}:{entitlement}"
+    return answer["state"]
+
+
+def write_member_seat(agent_name: str, role_id: str, kind: str,
+                      created_by: Optional[str]) -> Dict[str, Any]:
+    """Seat the recorded member through ``seat_member``.
+
+    ``{"changed": bool, "shared": bool}`` or ``{"refused": code}`` — nothing
+    else crosses back, so no address reaches the apply report. Raises
+    :class:`SeatWriterUnavailable` without the hook and ``ValueError`` on a
+    malformed answer; a provider raise propagates (the caller records it)."""
+    provider = _provider
+    fn = getattr(provider, "seat_member", None) if provider is not None else None
+    if fn is None:
+        raise SeatWriterUnavailable("no member seat writer is installed")
+    answer = fn(agent_name, role_id, kind, created_by)
+    if not isinstance(answer, Mapping):
+        raise ValueError("the member seat writer returned a malformed answer")
+    refused = answer.get("refused")
+    if refused is not None:
+        code = refused if isinstance(refused, str) and ROLE_ID_RE.fullmatch(refused) else "refused"
+        return {"refused": code}
+    return {"changed": bool(answer.get("changed")), "shared": bool(answer.get("shared"))}

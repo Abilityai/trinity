@@ -54,7 +54,8 @@ class PollerCoreMixin:
         self._skipped_native: set[tuple[str, str]] = set()
         # #3243: (agent, req_id) already logged for an entry held over the
         # authoring caps — once per process, bounded like the sets above.
-        self._cap_held_logged: set[tuple[str, str]] = set()
+        # #4599: and (agent, req_id, hold) for a held credential entry.
+        self._cap_held_logged: set[tuple] = set()
         self._file_channel_noticed: set[str] = set()
         # #1632: unique per worker process so the cross-worker leader lock only
         # ever refreshes/releases ITS OWN lease (mirror monitoring #1464).
@@ -221,6 +222,15 @@ class PollerCoreMixin:
             if self._changed_this_cycle:
                 await self._broadcast_sync()
             return
+
+        # abilityai/trinity-enterprise#1135 (T4): once per process, after
+        # startup recovery, re-offer the ask wakes a restart dropped — leader
+        # only (this cycle is past the lease), never with unreadable states.
+        try:
+            from services import operator_resume_service
+            operator_resume_service.redispatch_pending_wakes_after_boot(states)
+        except Exception as e:
+            logger.error(f"Boot re-offer of pending ask wakes failed: {e}")
 
         running_agents = sorted(name for name, state in states.items() if state == "running")
         now = utc_now_iso()

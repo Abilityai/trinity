@@ -126,6 +126,7 @@ Shared primitives are the unit of consistency: **compose them, never re-implemen
 | BaseInput | `components/base/BaseInput.vue` | TemplateRegistryPanel registry URL |
 | BaseSelect | `components/base/BaseSelect.vue` | `ResourceModal.vue` memory/CPU (`field`) · `PortalConversation.vue` model picker (`ghost`, #2662) · `SkillCard.vue` approver picker (`field`, `size="sm"`, trinity-enterprise#754) |
 | BasePeopleInput | `components/base/BasePeopleInput.vue` | `AccessPanel.vue` add field (`suggest`, trinity-enterprise#1153); assignments Person / New primary (`pick`, #1154); project member, steward, task owner (`pick`) and guest (`suggest`, #1155) |
+| BaseSegmented | `components/base/BaseSegmented.vue` | `portal/projects/ProjectTasks.vue` List \| Board (trinity-enterprise#957) |
 | BaseToggle | `components/base/BaseToggle.vue` | TemplateRegistryPanel enable switch |
 | BaseTextarea | `components/base/BaseTextarea.vue` | `SystemInstallPanel.vue` manifest editor (mono) |
 | BaseBadge | `components/base/BaseBadge.vue` | TemplateRegistryPanel status + Default chips · `SkillCard.vue` author-mode chip (`size="sm"`, trinity-enterprise#754) |
@@ -174,6 +175,13 @@ The people-picker form field (trinity-enterprise#1153): BaseInput's anatomy and 
 
 - **Do:** `<BasePeopleInput v-model="email" v-model:picked="person" mode="pick" :fetch="(q) => store.candidates(agent, q)" :no-match="inviteHint" />`
 - **Don't:** a native `<select>` of every account, or a free-text email box where the person must exist.
+
+### BaseSegmented
+
+The segmented control (trinity-enterprise#957): pick ONE of two to four short, fixed options that change how the same content is shown (List | Board). A `radiogroup` with a roving tabindex — the current choice is announced and Left/Right move and select. `v-model` plus `options: [{ value, label }]` and a required `aria-label`.
+
+- **Do:** a view switch beside the content it switches; reserve its place (`invisible`, not `v-if`) when the other view is unavailable, so the row does not move.
+- **Don't:** a form field (that is a BaseSelect), navigation between sections (OverflowTabs), or a hand-rolled pair of `aria-pressed` buttons.
 
 ### BaseSelect
 

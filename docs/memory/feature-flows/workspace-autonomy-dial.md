@@ -69,6 +69,8 @@ person    ──► PortalAgentAutonomy.vue → GET /api/enterprise/client-porta
                     hold    = a refusal   → any reader, own seat (owner: any seat)
                     release = a grant     → the agent OWNER only (403 release_not_yours)
               ──► POST …/autonomy/guard   {ask_class, guard_metric} → owner only
+                    both writes: a person first (403 person_required to the system
+                    key the door admits, before the roster; trinity-enterprise#719)
 every turn ──► platform_prompt_service memory block → autonomy_dial_service.prompt_lines
                  "You may act unprompted on: vendor-renewal."
                  "Ask first on: hiring-scope — the instance autonomy level is below L2."

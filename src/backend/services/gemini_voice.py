@@ -3,7 +3,7 @@ Gemini Live API voice service for Trinity (VOICE-001).
 
 Provides a wrapper around the google-genai SDK's Live API for real-time
 speech-to-speech conversations with agents (model: `VOICE_MODEL`, default
-`models/gemini-3.1-flash-live-preview` — the newest general-purpose Live model
+`models/gemini-3.8-live` — the newest general-purpose Live model
 as of 2026-09; the `gemini-3.5-*-live` ids are transcribe/translate-only).
 
 Architecture:

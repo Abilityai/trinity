@@ -1,4 +1,4 @@
-# mcp: operator_queue.ts (list_operator_queue, get_operator_queue_item, respond_to_operator_queue — a person-scoped key only; ask_operator → agent_router's raise; get_my_ask → agent_router's self-readback; withdraw_ask → agent_router's self-withdraw, trinity-enterprise#901)
+# mcp: operator_queue.ts (list_operator_queue, get_operator_queue_item, respond_to_operator_queue — a person-scoped key only; ask_operator → agent_router's raise; get_my_ask → agent_router's self-readback; withdraw_ask → agent_router's self-withdraw, trinity-enterprise#901); readdress → none, a human-only admin verb (ent#1096)
 """
 Operator Queue API Router (OPS-001).
 
@@ -21,6 +21,7 @@ from models import (
     OperatorAskCreate,
     OperatorAskWithdraw,
     OperatorCancel,
+    OperatorReaddress,
     OperatorResponse,
 )
 
@@ -31,11 +32,14 @@ from dependencies import (
     is_person_principal,
     principal_reach,
     reject_non_person_principal,
+    require_admin,
+    require_person,
 )
 from db_models import User
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.operator_queue_choices import ReservedAnswerError, ResponseNotOfferedError
 from services import ask_service, operator_queue_service, skill_gate_service
+from services import credential_ask_policy, credential_destination, credential_sink
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +171,7 @@ _MACHINE_ROW_FIELDS = (
     "replaces", "replaced_by",  # #3247 — uuids; the readback maps them to request_ids
     "aging", "aged_since",
     "subject", "last_seen_at",  # #3246: a platform alert's condition key + latest reading
-    "wake_state",  # abilityai/trinity-enterprise#1108 AC #4: pending (not yet woken) | woken
+    "wake_state",  # ent#1108 AC #4, ent#1135: pending (not woken) | owed (being delivered) | woken
 )
 
 
@@ -325,7 +329,10 @@ async def bulk_cancel_queue_items(
         cancellable, accessible, actor=_actor(current_user, request), reason=body.reason,
     )
     cancelled = len(ending.rows)
-    return {"cancelled": cancelled, "skipped": len(ids) - cancelled, "batch_id": ending.batch_id}
+    # trinity-enterprise#1096 (R6): of the skipped, the fenced cards the actor
+    # is not on — ended one at a time, with a reason.
+    return {"cancelled": cancelled, "skipped": len(ids) - cancelled, "batch_id": ending.batch_id,
+            "skipped_fenced": ending.skipped_fenced}
 
 
 @router.post("/clear-resolved")
@@ -500,15 +507,19 @@ async def respond_to_queue_item(
         # trinity-enterprise#751: a gated-skill approval is decided only by a
         # person it was addressed to; #1042: an ask to a canon role only by a
         # person seated in it — named by the role's label, never a person.
-        raise HTTPException(status_code=403, detail={
-            "code": "not_addressee",
-            "message": e.role_message()
-            or "This approval was addressed to someone else; only they can decide it.",
-        })
+        # trinity-enterprise#1096: `waiting_on` + `seat` on every refusal; a
+        # gate approval's message names the person, and an admin is told the
+        # two verbs (re-address, or end with a reason).
+        raise HTTPException(status_code=403, detail=e.detail(
+            admin_verbs=ask_service._gate_admin(current_user)))
     except ask_service.AskConflict as conflict:
         # The response was NOT recorded — surfaced instead of a silent 200
         # (#1017). `expired`: still pending but past its deadline (#611) — the
         # poller has not swept it yet, and an approval must not land after it.
+        if conflict.code == "readdressed":
+            # trinity-enterprise#1096 (R5): moved after this caller read it.
+            raise HTTPException(status_code=409,
+                                detail=ask_service.readdressed_detail(conflict.item))
         if conflict.code == "expired":
             raise HTTPException(
                 status_code=409,
@@ -563,18 +574,58 @@ async def cancel_queue_item(
         raise HTTPException(status_code=404, detail="Queue item not found")
     except ask_service.AskNotAddressee as e:
         # trinity-enterprise#751: only its addressee or an admin cancels a
-        # gated-skill approval (#1042: named by its role when it has one).
-        raise HTTPException(status_code=403, detail={
-            "code": "not_addressee",
-            "message": e.role_message(cancelling=True)
-            or "This approval was addressed to someone else; only they or an admin can cancel it.",
+        # gated-skill approval (#1042: named by its role when it has one;
+        # trinity-enterprise#1096: who it waits for, structured).
+        raise HTTPException(status_code=403, detail=e.detail(cancelling=True))
+    except ask_service.AskReasonRequired:
+        # trinity-enterprise#1096: an admin ending someone else's decision.
+        raise HTTPException(status_code=422, detail={
+            "code": "reason_required",
+            "message": "This card waits for someone else's decision; give a reason to end it.",
         })
     except ask_service.AskConflict as conflict:
+        if conflict.code == "readdressed":
+            raise HTTPException(status_code=409,
+                                detail=ask_service.readdressed_detail(conflict.item))
         raise HTTPException(
             status_code=409,
             detail=f"Item is no longer pending (now '{conflict.item['status']}') — it was not cancelled"
         )
     return ending.rows[0]
+
+
+@router.post("/{item_id}/readdress")
+async def readdress_queue_item(
+    item_id: str,
+    body: OperatorReaddress,
+    request: Request,
+    current_user: User = Depends(require_admin),
+    _person: User = Depends(require_person),
+):
+    """An instance admin moves one pending card (trinity-enterprise#1096):
+    `to: rule` re-runs the rule that raised it, `to: admin` takes a
+    registered family's card to the admin seat. No person picker; the reason
+    is required and only its presence is audited.
+
+    Human-only and admin-only (`require_admin` + `require_person`): changing
+    who decides is a grant, never an agent's call — the `# mcp:` header says
+    so. The row's visibility is the same as the read's: a row the admin cannot
+    see is the uniform 404.
+    """
+    existing = db.get_operator_queue_item(item_id)
+    if not existing or operator_queue_service.is_person_tag(existing):
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    _assert_agent_accessible(existing["agent_name"], _accessible_set(current_user))
+    if _hidden_for(existing, current_user):
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    try:
+        return ask_service.admin_readdress(
+            item_id, to=body.to, reason=body.reason, actor=_actor(current_user, request))
+    except ask_service.AskNotFound:
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    except ask_service.ReaddressRefused as e:
+        raise HTTPException(status_code=e.status,
+                            detail={"code": e.code, "message": e.message, **e.data})
 
 
 @router.get("/agents/{agent_name}")
@@ -625,16 +676,26 @@ async def raise_my_ask(
     FIRST ask's receipt (`status: "replayed"`) when this `request_id` was
     already raised, so a retry is a no-op. Refusals carry named codes — 422
     for a malformed ask, 429 for the caps.
+
+    A credential ask whose destination names `key_env` has that variable read
+    from this agent's own `.env` first (trinity-enterprise#1158 §2), so a
+    missing or unusable key is refused before a person types anything. The
+    sink decides whether the result applies; an unreadable file decides nothing.
     """
+    ask = body.model_dump(exclude_none=True)
+    key_env = _destination_key_env(ask)
+    key_state = (await credential_sink.key_env_state(name, key_env)
+                 if key_env is not None else None)
     try:
         receipt = ask_service.raise_ask(
             name,
-            body.model_dump(exclude_none=True),
+            ask,
             raised_by="agent",
             channel="mcp",
             actor_user=current_user,
             # ent#661 v3: the raising turn as the platform saw it (#2392).
             platform_execution_id=x_trinity_execution_id,
+            destination_key_state=key_state,
         )
     except ask_service.AskRejected as e:
         raise HTTPException(
@@ -643,6 +704,21 @@ async def raise_my_ask(
         )
     response.status_code = 201 if receipt["status"] == "created" else 200
     return receipt
+
+
+def _destination_key_env(ask: Dict[str, Any]) -> Optional[str]:
+    """The `key_env` a credential ask's destination names, when it names a
+    valid variable (trinity-enterprise#1158 §2); None for every other ask, an
+    `instance` destination, or a shape `raise_ask` will refuse anyway."""
+    if ask.get("type") != "credential":
+        return None
+    destination = (ask.get("context") or {}).get(credential_destination.CONTEXT_KEY)
+    if not isinstance(destination, dict) or "instance" in destination:
+        return None
+    key_env = destination.get("key_env")
+    if credential_ask_policy.credential_name_problem(key_env) is not None:
+        return None
+    return key_env
 
 
 @agent_router.get("/{name}/operator-queue/{request_id}")

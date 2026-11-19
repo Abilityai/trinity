@@ -1,0 +1,82 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-11",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/1216-wake-turn-reads",
+  "merge_base": "af465288ada12c98f210f99b09eb5541c85ac28c",
+  "issue": "abilityai/trinity-enterprise#1216",
+  "counts_as_full_run": false,
+  "docker_available": true,
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_skipped_no_overlap": [
+    3,
+    4,
+    5,
+    6,
+    8
+  ],
+  "stack_cve_quicklist": [],
+  "attack_surface": {
+    "endpoints_added": 0,
+    "mcp_tools_added": 0,
+    "websocket_channels_added": 0,
+    "agent_context_ingress_added": 0,
+    "tier_change": "caller_wake turn: share/visitor -> owner when the delegation ran with an owner-tier person; unchanged otherwise"
+  },
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "The live run covered the owner's delegation only; the wakes that stay unchanged are covered by unit tests on a real database.",
+    "Private enterprise tree checked by a grep for the trigger name only.",
+    "Wakes this diff leaves unchanged and other no-person platform turns are out of scope and tracked separately."
+  ],
+  "supply_chain_summary": {
+    "scanner": "not applicable: no dependency, lockfile or pin change in the diff"
+  },
+  "guard_tests": {
+    "run": [
+      "test_293_admin_gate_rejects_agent_keys",
+      "test_1310_auth_wiring",
+      "test_186_enumeration_uniformity",
+      "test_ent614_source_agent_attribution",
+      "test_292_cmdline_credential_leak",
+      "test_ent926_agent_key_turn_scope",
+      "test_ent1148_caller_reads_stay_person",
+      "test_ent1148_fleet_reads_stay_person",
+      "test_ent1148_delegation_tier",
+      "test_ent875_viewer_tier"
+    ],
+    "result": "768 passed"
+  },
+  "filter_stats": {
+    "candidates": 3,
+    "below_gate": 3,
+    "excluded": 0,
+    "verified": 0,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior_reports_on_surface": 0,
+    "resolved": 0,
+    "persistent": 0,
+    "new": 0
+  }
+}

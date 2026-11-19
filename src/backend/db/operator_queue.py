@@ -103,6 +103,20 @@ _TIMEOUT_REASON = case(
 _NOT_A_MENTION = not_a_tag_clause()
 
 
+def _address_conds(expect: Optional[Dict]) -> list:
+    """trinity-enterprise#1096: the extra compare-and-set clauses an ending
+    takes when it decided on the row's address — each stored column equal to
+    the raw text the caller read (NULL as NULL). Nothing when `expect` is None."""
+    if expect is None:
+        return []
+    conds = []
+    for key in ("addressed_to_email", "resolved_to", "context"):
+        if key in expect:
+            col, raw = getattr(operator_queue.c, key), expect[key]
+            conds.append(col.is_(None) if raw is None else col == raw)
+    return conds
+
+
 def _own_pending_conds(agent_name: str, exclude_request_id_prefixes=None) -> list:
     """The pending rows that spend an agent's OWN ask budget — the one predicate
     both depth caps read (the file seam's #1632 cap and the native `queue_full`,
@@ -798,6 +812,27 @@ class OperatorQueueOperations:
             row = self._find_pending_by_subject(conn, agent_name, subject)
         return self._row_to_item(row) if row else None
 
+    def list_pending_by_subject_prefix(self, subject_prefix: str) -> List[Dict]:
+        """Every pending row whose `subject` starts with `subject_prefix`, any
+        agent (#4635) — a platform emitter's view of its own open alerts, e.g.
+        `"dispatch_queue_stalled:"`. Platform-internal: never route-exposed.
+
+        Matched with `substr`, which is exact and case-sensitive on SQLite and
+        PostgreSQL alike; a LIKE pattern would treat each `_` as a wildcard and,
+        on SQLite, ignore case. No limit: the partial unique index keeps one
+        pending row per subject, so a kind's prefix returns at most one row per
+        key. (The stall monitor's reconcile used to read 1,000 pending rows of
+        every kind and filter them here in Python, which missed its own rows on
+        a busy queue.)"""
+        stmt = select(*self._SELECT_COLS).where(and_(
+            operator_queue.c.status == "pending",
+            operator_queue.c.subject.isnot(None),
+            func.substr(operator_queue.c.subject, 1, len(subject_prefix)) == subject_prefix,
+        ))
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_item(r) for r in rows]
+
     def _find_pending_by_subject(self, conn, agent_name: str, subject: str):
         return conn.execute(
             select(*self._SELECT_COLS).where(and_(
@@ -1244,6 +1279,7 @@ class OperatorQueueOperations:
         addressee_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         addressee_email: Optional[str] = None,
         addressee_reach_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        project_reach_key: Optional[str] = None,
     ) -> Optional[list]:
         """The WHERE conditions `list_items`, `count_items` and
         `list_item_agent_names` share (#3059) — ONE definition, so a page, its
@@ -1257,9 +1293,11 @@ class OperatorQueueOperations:
         # of a platform row about them.
         reach = tuple(addressee_reach_request_id_prefixes or ())
         viewer_for_reach = (addressed_to_email or "").strip().lower()
+        project_key = project_reach_key or None
         if not viewer_for_reach:
-            reach = ()
-        if accessible_agent_names is not None and len(accessible_agent_names) == 0 and not reach:
+            reach, project_key = (), None
+        if (accessible_agent_names is not None and len(accessible_agent_names) == 0
+                and not reach and not project_key):
             return None
 
         conds = []
@@ -1292,6 +1330,25 @@ class OperatorQueueOperations:
                 access = or_(access, and_(
                     self._request_id_prefixed_ci(reach),
                     operator_queue.c.raised_by == "gate",
+                    or_(
+                        func.lower(operator_queue.c.addressed_to_email) == viewer_for_reach,
+                        self._resolved_to_contains(viewer_for_reach),
+                    ),
+                ))
+            if project_key:
+                # trinity-enterprise#1134: an agent's ask addressed `to: project`
+                # reaches the steward or creator the platform resolved — who may
+                # be off the agent's roster — by address. Same shape as the
+                # ent#981 arm: the row's own `to_role` and `raised_by` columns,
+                # the platform's project stamp in the stored context (a LIKE
+                # prefilter; the Python twin `is_project_reach` re-checks the
+                # parsed key) and the viewer as its addressee.
+                stamp = json.dumps({project_key: ""})[1:-2]
+                stamp = stamp.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                access = or_(access, and_(
+                    operator_queue.c.to_role == "project",
+                    operator_queue.c.raised_by == "agent",
+                    operator_queue.c.context.like(f"%{stamp}%", escape="\\"),
                     or_(
                         func.lower(operator_queue.c.addressed_to_email) == viewer_for_reach,
                         self._resolved_to_contains(viewer_for_reach),
@@ -1413,12 +1470,18 @@ class OperatorQueueOperations:
         addressee_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         addressee_email: Optional[str] = None,
         addressee_reach_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        project_reach_key: Optional[str] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
 
         addressee_reach_request_id_prefixes (trinity-enterprise#981): rows
         under one of these prefixes, raised by the gate and addressed to
         `addressed_to_email`, are listed even when their agent is outside
+        `accessible_agent_names` — see `_list_conditions`.
+
+        project_reach_key (trinity-enterprise#1134): the platform's project
+        context key; an agent's `to: project` row carrying it and addressed to
+        `addressed_to_email` is listed even when its agent is outside
         `accessible_agent_names` — see `_list_conditions`.
 
         exclude_request_id_prefixes (trinity-enterprise#815): leave out rows
@@ -1477,6 +1540,7 @@ class OperatorQueueOperations:
             addressee_only_request_id_prefixes=addressee_only_request_id_prefixes,
             addressee_email=addressee_email,
             addressee_reach_request_id_prefixes=addressee_reach_request_id_prefixes,
+            project_reach_key=project_reach_key,
         )
         if conds is None:
             return []
@@ -1666,8 +1730,15 @@ class OperatorQueueOperations:
         responded_by_email: str,
         divergence_acknowledged: bool = False,
         terminal: bool = False,
+        expect_address: Optional[Dict] = None,
     ) -> Optional[Dict]:
         """Record a response to a queue item.
+
+        `expect_address` (trinity-enterprise#1096) — the stored address the
+        caller decided on (`addressed_to_email`, `resolved_to` and, when given,
+        `context`, all raw): the compare-and-set also requires them unchanged,
+        so an answer read before a re-address moved the row loses like any
+        other race (`_status_conflict` with the row still pending).
 
         `terminal` (#2372): the row has no agent audience (a platform-minted
         alert — the caller decides, this layer knows no prefixes), so the
@@ -1714,6 +1785,7 @@ class OperatorQueueOperations:
                             operator_queue.c.expires_at.is_(None),
                             operator_queue.c.expires_at > now,
                         ),
+                        *_address_conds(expect_address),
                     )
                 )
                 .values(
@@ -1760,8 +1832,11 @@ class OperatorQueueOperations:
         disposed_by_email: str,
         reason: Optional[str] = None,
         disposition: str = "cancelled",
+        expect_address: Optional[Dict] = None,
     ) -> Optional[Dict]:
         """Cancel a pending queue item, recording who ended it (trinity-enterprise#611).
+
+        `expect_address` (trinity-enterprise#1096): as `respond_to_item`'s.
 
         `disposition` (trinity-enterprise#748) is `cancelled` (an operator ended
         it) or `dismissed` (the person it was addressed to chose not to answer).
@@ -1784,6 +1859,7 @@ class OperatorQueueOperations:
                     and_(
                         operator_queue.c.id == item_id,
                         operator_queue.c.status == "pending",
+                        *_address_conds(expect_address),
                     )
                 )
                 .values(
@@ -2586,18 +2662,19 @@ class OperatorQueueOperations:
             return result.rowcount > 0
 
     def list_pending_wakes_for_agent(self, agent_name: str) -> List[Dict]:
-        """This agent's ANSWERED asks whose wake is still owed, oldest answer
-        first — what its next start re-dispatches. An ask that ended another
-        way never reads `pending` (only the answer wake writes it), and the
-        predicate says so anyway."""
+        """This agent's ended asks whose wake is still owed — answered,
+        cancelled or dismissed, `pending` (skipped) or `owed` (being delivered
+        when the process went away; abilityai/trinity-enterprise#1135) — oldest
+        ending first: what its next start, and the first leader cycle after a
+        boot, re-dispatch. An expiry never wakes, so it never reads owed."""
         stmt = (
             select(*self._SELECT_COLS)
             .where(
                 and_(
                     operator_queue.c.agent_name == agent_name,
-                    operator_queue.c.wake_state == "pending",
+                    operator_queue.c.wake_state.in_(("pending", "owed")),
                     or_(
-                        operator_queue.c.disposition == "answered",
+                        operator_queue.c.disposition.in_(("answered", "cancelled", "dismissed")),
                         operator_queue.c.status.in_(("responded", "acknowledged")),
                     ),
                 )
@@ -2621,7 +2698,7 @@ class OperatorQueueOperations:
                 .where(
                     and_(
                         operator_queue.c.agent_name == agent_name,
-                        operator_queue.c.wake_state == "pending",
+                        operator_queue.c.wake_state.in_(("pending", "owed")),
                         operator_queue.c.request_id.in_(ids),
                     )
                 )

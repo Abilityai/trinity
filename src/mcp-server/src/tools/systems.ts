@@ -716,7 +716,9 @@ export function createSystemTools(
             + "description, prompt, agents, permissions). Members are named '{name}-{agent}', or by "
             + "their agent key under `naming: bare`. Per member, optionally: skills, skill_sets, "
             + "gates ({skill: {approver, deadline_hours}}), grants, seat (a canon role id), "
-            + "person_seats ([{role, kind}], never a person or an email) and deploy: false (a "
+            + "person_seats ([{role, kind}], never a person or an email; add `holder: member` with "
+            + "kind primary to seat and share this instance's recorded member — written for an "
+            + "admin's own key or session, on a member it creates or owns) and deploy: false (a "
             + "declared-only member: verdict declared_only, never created or deleted)."
           ),
         dry_run: z

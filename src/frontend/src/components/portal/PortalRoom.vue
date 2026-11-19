@@ -152,7 +152,9 @@
           <!-- A system line is the room narrating itself: a join, a budget
                close, a wake that did not happen. It is not from a participant,
                so it renders as neither side of the conversation. -->
-          <p v-if="m.kind === 'system'" class="text-center text-xs text-gray-500 dark:text-gray-400 py-1">
+          <!-- trinity#4302: keyed on WHO (`sender_kind`), not on `kind` — a
+               system row may be typed (`chain_paused`, `chain_continued`). -->
+          <p v-if="m.sender_kind === 'system'" class="text-center text-xs text-gray-500 dark:text-gray-400 py-1">
             {{ m.content }}
           </p>
 
@@ -177,6 +179,18 @@
             </div>
           </div>
         </div>
+
+        <!-- trinity#4302: the paused chain's Continue, once, after the
+             transcript — from the payload's offer, not anchored under a row
+             (a collaborator above the read floor has the offer without the
+             row). Keyed by the pause so a later pause starts fresh. -->
+        <PortalRoomContinue
+          v-if="room?.paused_chain && !isClosed && !roomGone"
+          :key="room.paused_chain.seq"
+          :room-id="roomId"
+          :offer="room.paused_chain"
+          :reload="load"
+        />
 
         <!-- Who is thinking. Derived from the SERVER (`room.working`), not just
              the local send, so a client that reloaded mid-turn still sees it —
@@ -433,6 +447,7 @@ import { liveElapsedSeconds, liveItemsForRoom, soleStoppableItem } from './porta
 import { resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalRoomPeople from './PortalRoomPeople.vue'
+import PortalRoomContinue from './PortalRoomContinue.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
@@ -947,7 +962,7 @@ function onDocClick(e) {
 }
 
 function isMine(m) {
-  if (m.sender_kind === 'agent' || m.kind === 'system') return false
+  if (m.sender_kind === 'agent' || m.sender_kind === 'system') return false
   // trinity-enterprise#701: a room can hold more than one person, so "a human
   // sender" is no longer "the caller" — the server names who is reading.
   const you = room.value?.you

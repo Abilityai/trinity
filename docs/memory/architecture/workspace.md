@@ -62,7 +62,7 @@ either a password or the email login would admit it — email login on, the poli
 allow-listed; an allow-list row alone is not an account) gets no portal session: after its code verifies, `/auth/verify` answers
 409 `platform_login_required`, and the Workspace sends it to `/login` with a return path. Every
 platform login (`auth._finalizeLogin`) ends a leftover Workspace client sign-in, since `authHeader`
-prefers a held portal token. Detail: [workspace-only-role.md](../feature-flows/workspace-only-role.md). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
+prefers a held portal token. **Nor is it a door for a deactivated account (trinity-enterprise#1258).** A portal session carries an email and no account, so `users.suspended_at` (#995) is read explicitly: `service.email_account_suspended` refuses the three mint paths (inside `email_has_access`, and first in `/auth/request` and `/auth/verify`), and `portal_auth._reject_if_blocked` — the check every `decode_portal_session` consumer makes — refuses a live session on its next request. Suspension wins over a share; fail-closed. Detail: [workspace-only-role.md](../feature-flows/workspace-only-role.md). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
 reads (`WORKSPACE_WS_EVENT_TYPES` / `_FIELDS`, `architecture/integrations.md`). An agent whose owner
 is Workspace-only is refused at the rooms door.
 
@@ -744,6 +744,17 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   `/budget-defaults` path there would sit beside `/{room_id}`, one ordering slip from
   being read as a room id (Invariant #4) on the one surface whose reader must never be
   a client.
+- **Ask return** (abilityai/trinity-enterprise#1135): an ask raised from a room turn
+  carries the platform key `context.workspace_room_id` (`room_for_execution`, a RUNNING
+  room turn of this agent in an open room it sits in; never a credential ask). The room
+  gets one system line when it is raised (`post_ask_raised_line`) and one when it ends
+  (`on_ask_ending`, the sink's ending observer registered from `main.py` — every
+  disposition, one line per room/agent/event; coarse *who*, never the answer). The answer
+  or a cancel/dismiss wake runs **through the turn engine** (`return_ask_to_room` →
+  `_wake_agent(…, ask_block=…)`) under an engine `Waker` that acts for nobody (client
+  stamp only for a seated answerer; mention reach = the moderator rebuilt from its row);
+  closed / departed / over budget / capped / lock-busy declines with one clause and the
+  resume service runs today's wake. Normative text: `requirements/security.md` §26.9, §26.12.
 - **Turn engine** (`service.py::post_message` → `_wake_agent`): mentions resolve against
   participants; each woken agent runs an **ordinary** `execute_task(triggered_by="room")`,
   so slots, the circuit breaker, cost and observability come for free, and its reply is
@@ -787,6 +798,23 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   With two or more people present the turn prompt names them and what each may decide, and an
   `@username` of a seated person becomes a tag through the #631 path, never a wake.
   `POST /api/rooms/{id}/leave` is people-only (no MCP tool: an agent is removed, never leaves).
+- **A paused chain says so, and a person continues it (trinity#4302).** At
+  `ROOM_MAX_CHAIN_DEPTH` `_after_landing` writes a typed system row
+  (`_post_pause_line`: `kind = "chain_paused"`, `mentions` = who was next, facts-only
+  content) instead of waking. `get_room` derives `paused_chain` `{seq, next}` at read time
+  (`_paused_chain`: newest pause → `db.offer_stands` → still-seated agents), for every
+  reader. `POST /api/rooms/{id}/continue` → `service.continue_chain` (membership → person →
+  budgets → offer → seated → reachable) consumes the offer with a `chain_continued` receipt
+  that `db.append_continue_receipt` inserts `INSERT … SELECT … WHERE NOT EXISTS` under the
+  same moved-on predicate (`_MOVED_ON_SQL`, one fragment, two readers) inside the
+  seq-allocation transaction, then wakes through `_wake_targets` — the per-target loop
+  extracted from `_after_landing`, so a Continue and a landed message wake one way, here at
+  depth 1. The idempotency claim has its own scope `room-continue:{room_id}` and is never
+  the once-per-stop guard. **Readers key a system row on `sender_kind`, not `kind`**: `kind`
+  now types some system rows, so a `kind === 'system'` test misreads them as messages
+  (`PortalRoom.vue`'s transcript and `isMine`, as `portalInbox.js` already did). The
+  Workspace control is `portal/PortalRoomContinue.vue`, rendered once after the transcript
+  from the payload. No MCP tool: Continue is a person's action.
 - **A gated wake is recorded, not re-run (trinity#3402).** A wake the skill gate held — or
   refused for a reason the same request would get again (`STANDING_REFUSALS`) — records in
   `room_gate_holds` each shown post whose own text invokes a skill gated on that agent, plus
@@ -1004,6 +1032,17 @@ Requirement §5.39 of `core-agent.md`; flow in `workspace-suggestions.md`.
 ask table (Action), the portal messages and addressed deliverables (Unread, All),
 and the #557 read cursor. It adds **no table, no store and no router**. Requirement
 §5.40 of `core-agent.md`; flow in `feature-flows/workspace-inbox.md`.
+
+**One seam from the ask card back to the Inbox: `notifyAnswered`.** A row leaves a tab
+visit only as a ghost (principle 5), with one exception: the reader's own confirmed answer
+crosses its row off Action and opens the next ask. The card tells the Inbox through a
+**function prop** handed down the pane (`PortalInbox.onAnswered` → `PortalInboxPane` →
+`PortalAsks` → `PortalCredentialField`), called on the answer's success path only. It is not
+an emit, because the pane is keyed by the item and an emit from a card unmounted
+mid-request is dropped; and it is not read off the data, because an ask a poll brings back
+ended must keep its ghost. The timing and the selection live in the container, the rules
+(`nextPendingAsk`, `dropFromVisit`, `answeredAnnouncement`) in `portalInbox.js`; still no
+store. A surface that passes the prop also takes over the "Sent" confirmation.
 
 **Unread is the #557 cursor, generalised to deliverables.** `client_portal/db.py`
 holds ONE fragment, `_UNREAD_ARRIVALS`, a `UNION ALL` of two arms that share the
@@ -1314,7 +1353,7 @@ chat when the execution row is a still-running Workspace chat turn (`triggered_b
 that pair (a reset, archived Main included — it stays resumable) — the link the portal creation sites already stamp (ent#457), so no column. Anything
 else, including a schedule that DELIVERS into Main (portal stamp, `schedule` trigger) and
 every file-ingested ask, falls through to Main; a lookup failure falls through with a warning.
-Because Main is then both a chat-turn ask's home and a background ask's reply target, the
+Because Main serves as a chat-turn ask's home, a reminder-wake ask's tile home (ent#1171), and a pure background ask's reply target — the
 row also carries `context.workspace_raised_in_turn` (platform-written, only on a turn match),
 projected as `WorkspaceAsk.raised_in_turn` — the fact a chat strip needs to draw a tile
 (trinity#3101 is the consumer; no frontend reads it yet).
@@ -1716,12 +1755,36 @@ is the edition-agnostic surface it plugs into:
   `tabPassesDoor` checks a declared capability fail-closed against
   `session.capabilities`, so a session without it — including a platform
   session on a build without the module — sees exactly the tabs it saw before.
+- **Tasks board (trinity-enterprise#957)** — the Tasks tab is one task surface
+  with two views, List | Board (`BaseSegmented`, remembered per person in
+  `localStorage`). `ProjectTaskBoard.vue` only draws and emits; the columns and
+  every rule are pure data in `projectsUtils.js` (`BOARD_COLUMNS`, `columnOf`,
+  `boardColumns`, `boardMove`), so a new step of the path is one array entry and
+  a status no column names lands in the first column instead of vanishing.
+  `ProjectTasks.vue` owns the writes: a move is the existing status-only task
+  update (`store.moveTask` — the answer is merged into the rows at once and the
+  re-reads reconcile in the background), tracked in ONE in-flight map
+  (`useTaskBoardMoves`) shared with Confirm. The dragged task is component
+  state; the drag payload is never read back, because task ids repeat across
+  projects. Tasks are re-read while the tab is visible (`useVisiblePolling`),
+  `fetchTasks` lets only the newest read of a project write (success and error
+  alike), and fresh rows are held while a drag or a keyboard pick is in
+  progress. Under `boardMinWidth()` of container width the list renders.
 - **Project page (v2)** — `OverflowTabs` over Overview / Tasks
   (`ProjectTasks.vue`) / Log (`ProjectLog.vue`) / Files & reports
   (`ProjectMaterial.vue`, reusing `ReportRenderer`). An invited guest gets one
   narrow view (the server omits the log, tasks, decisions and members); the
   controls it cannot use are absent, not disabled. `ProjectImportModal.vue`
-  imports a folder project once.
+  imports a folder project once. A contributor edits a task's title, objective
+  and definition of done as fields in the detail form's one Save / one dirty
+  path, so the rendered objective and definition-of-done blocks render only
+  when those fields are NOT offered (a reader, an archived project, or a task
+  whose status is done and therefore locked) — a mount spec that reads the
+  rendered objective must pick that audience, or it finds nothing. Lengths are
+  checked client-side by the shared `projectsUtils.validateTaskFields` in
+  CODE POINTS, which is what the server's `len` counts; a refusal that names a
+  field (`invalid_title` / `invalid_objective` / `invalid_done_definition`)
+  is shown under it rather than as the form's error.
 - **Project page Overview (v3 hub + #3694 + ent#896)** — ONE layout owned by
   `ProjectPage.vue`: a `lg:grid-cols-3 lg:items-start` wrapper holding a
   main stack (`lg:col-span-2`) and a side stack, cards stacking within their

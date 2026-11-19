@@ -201,11 +201,47 @@ def _other_local_ipv4() -> str:
     return ip
 
 
+def _hold_port_free_on_loopback(other: str, candidate=lambda: 0, attempts: int = 50):
+    """Bind `other` on a port that 127.0.0.1 can ALSO bind; return (held, port).
+
+    A bind on `(other, 0)` gets a port the kernel guarantees free on `other`
+    only. If something else on the host already holds that port on 127.0.0.1,
+    the busy assertion below passes for the wrong reason and the loopback bind
+    fails with EADDRINUSE -- the CI flake in abilityai/trinity#4445. So confirm
+    the loopback side is free while the other bind is held, and retry if not.
+    `candidate` supplies the port to try (0 = kernel's choice); tests inject it.
+    """
+    for _ in range(attempts):
+        held = _RealSocket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            held.bind((other, candidate()))
+            port = held.getsockname()[1]
+            with _RealSocket(socket.AF_INET, socket.SOCK_STREAM) as check:
+                check.bind(("127.0.0.1", port))
+        except OSError:
+            held.close()
+            continue
+        return held, port
+    pytest.fail(f"no port free on both {other} and 127.0.0.1 after {attempts} attempts")
+
+
+def test_port_choice_skips_a_port_already_taken_on_loopback():
+    """Regression for abilityai/trinity#4445: a port busy on 127.0.0.1 is never chosen."""
+    other = _other_local_ipv4()
+    with _RealSocket(socket.AF_INET, socket.SOCK_STREAM) as busy:
+        busy.bind(("127.0.0.1", 0))
+        taken = busy.getsockname()[1]
+        offered = iter([taken, 0])
+        held, port = _hold_port_free_on_loopback(other, candidate=lambda: next(offered))
+        with held:
+            assert port != taken
+            assert held.getsockname() == (other, port)
+
+
 def test_wildcard_probe_sees_a_bind_on_another_local_address(is_port_available):
     other = _other_local_ipv4()
-    with _RealSocket(socket.AF_INET, socket.SOCK_STREAM) as held:
-        held.bind((other, 0))
-        port = held.getsockname()[1]
+    held, port = _hold_port_free_on_loopback(other)
+    with held:
         assert is_port_available(port) is False
         # The reason the probe binds the wildcard: a loopback-only probe would
         # have called this port free.

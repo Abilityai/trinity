@@ -37,6 +37,8 @@ _STUBBED_MODULE_NAMES = [
     "services.operator_intake_service",
     "services.telemetry_sharing_service",
     "services.subscription_headroom_alerts",
+    "services.reserved_settings",
+    "services.terms_service",
     "services.agent_service",
     "services.agent_service.capabilities",
     "adapters",
@@ -115,6 +117,8 @@ def _load_settings_module():
         assert_agent_owner=MagicMock(),
         assert_owns_or_admin=MagicMock(),
         assert_owns=MagicMock(),
+        # ent#1174: settings reads/writes gate reserved keys on the caller.
+        is_interactive_principal=MagicMock(return_value=True),
     )
 
     _stub(
@@ -192,7 +196,20 @@ def _load_settings_module():
     )
     services_mod.operator_intake_service = intake_mod
     services_mod.telemetry_sharing_service = telemetry_mod
+    # ent#1174: the settings routes import `reserved_settings` lazily; own the
+    # stub for the same reason as the two above. No key is reserved here.
+    reserved_mod = _stub(
+        "services.reserved_settings",
+        managed_by=MagicMock(return_value=None),
+    )
     services_mod.subscription_headroom_alerts = headroom_mod
+    services_mod.reserved_settings = reserved_mod
+    # `generic.py` imports `SETTING_KEYS` from terms_service at module level;
+    # without its own stub the load borrows whatever an earlier file imported.
+    services_mod.terms_service = _stub(
+        "services.terms_service",
+        SETTING_KEYS=frozenset({"terms_required", "terms_version", "terms_text", "terms_title"}),
+    )
     agent_service_mod = _stub("services.agent_service", __path__=[])
     capabilities_mod = _stub(
         "services.agent_service.capabilities",

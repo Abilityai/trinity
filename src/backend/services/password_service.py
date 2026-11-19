@@ -36,6 +36,7 @@ from dependencies import (
     verify_password,
 )
 from redis_breaker_util import get_breaker_redis
+from services import live_connections
 from utils.admin_identity import admin_username, is_usable_password_hash
 from utils.password_validation import validate_password_strength
 
@@ -177,6 +178,10 @@ def change_own_password(username: str, current: str, new: str, token_mode: Optio
     )
     signed_out = revoke_user_sessions(username, keep_jti=jwt.get_unverified_claims(fresh).get("jti"))
     revoked, still_active = _settle_person_keys(username, revoke_keys)
+    # abilityai/trinity-enterprise#863: the account's open connections were
+    # authorized under the old password; re-check them now, on every worker
+    # (after the keys above, so a revoked key's stream reads as ended).
+    live_connections.notify_account_changed(username)
     return PasswordChangeResult(
         access_token=fresh,
         other_sessions_signed_out=signed_out,

@@ -227,12 +227,15 @@
           </button>
 
           <!-- Docs link (trinity-enterprise#53) — always-available external
-               link to the public documentation site. opens in a new tab. -->
+               link to the public documentation site. opens in a new tab.
+               #3541: shown from `sm` up, with the theme button below. On a
+               phone the avatar menu carries Documentation and the theme picker
+               already, and the bar needs the width for the menu button. -->
           <a
             href="https://docs.ability.ai"
             target="_blank"
             rel="noopener noreferrer"
-            class="p-2 rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            class="hidden sm:block p-2 rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
             title="Documentation (opens docs.ability.ai)"
             aria-label="Documentation"
           >
@@ -245,7 +248,7 @@
           <!-- Theme Toggle Button -->
           <button
             @click="cycleTheme"
-            class="p-2 rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            class="hidden sm:block p-2 rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
             :title="themeTitle"
           >
             <!-- Sun icon for light mode -->
@@ -262,11 +265,19 @@
             </svg>
           </button>
 
+          <!-- #3541 — below `sm` the link row is not displayed; this menu
+               button opens the same links in a bottom sheet. Beside the
+               avatar, within thumb reach; the user menu stays last. -->
+          <NavSheet :links="navLinks" />
+
           <!-- User Menu -->
           <div class="relative" ref="userMenuRef">
+            <!-- #3541: padded to a 44px touch target below `sm`. -->
             <button
               @click="toggleUserMenu"
-              class="flex items-center space-x-2 focus:outline-none"
+              class="flex items-center space-x-2 p-1.5 -mr-1.5 sm:p-0 sm:mr-0 focus:outline-none"
+              aria-label="Account menu"
+              :aria-expanded="showUserMenu"
             >
               <!-- User Avatar -->
               <div
@@ -399,6 +410,7 @@
 
 <script setup>
 import BaseModal from './base/BaseModal.vue'
+import NavSheet from './NavSheet.vue'
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'

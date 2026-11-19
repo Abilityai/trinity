@@ -1,3 +1,4 @@
+# mcp: a2a.ts (get_agent_a2a_card → /a2a/agent-card) + a2a_call.ts (call_a2a_agent → /a2a/call, get_a2a_task → /a2a/task); the inbound A2A server (well-known card + JSON-RPC endpoint) is the external-protocol surface, called by outside orchestrators, not by agents
 """
 A2A (Agent-to-Agent) protocol endpoints (#737 card; ent#157 inbound server;
 #736 outbound calls).
@@ -57,6 +58,7 @@ from services import (
     settings_service,
 )
 from services.a2a_card_service import generate_a2a_card, with_payment_extension
+from services.agent_model_service import resolve_default_model
 from services.aauth import config as aauth_config
 from services.aauth import httpsig as aauth_httpsig
 from services.aauth import inbound as aauth_inbound
@@ -615,7 +617,11 @@ def _mint_a2a_execution(agent_name: str, text: str, current_user: Optional[User]
     moment later, leaving a RUNNING row with no terminal writer.
     """
     if model is None:
-        model = settings_service.get_platform_default_model()
+        # ent#1202: the same resolver `execute_task` uses, strict so a failed
+        # read raises here rather than leaving a row with no terminal writer.
+        model = resolve_default_model(
+            agent_name, strict=True, db_ops=db, settings=settings_service,
+        ).model
     try:
         subscription_id = db.get_agent_subscription_id(agent_name)
     except Exception:  # noqa: BLE001

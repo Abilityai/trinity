@@ -42,5 +42,36 @@ fi
 sed "s/\${TRINITY_PROXY_GATEWAY}/${GATEWAY}/" "$TEMPLATE" > "${OUTPUT}.tmp"
 mv -f "${OUTPUT}.tmp" "$OUTPUT"
 
+# --- the vendor hosts in the Content-Security-Policy (#4499) -----------------
+# security-headers.conf allows the browser to reach two vendor-operated hosts:
+# the docs Q&A service (the help widget's Ask tab) and the report intake (its
+# Bug / Feature / Feedback tabs). When the operator switched a channel off —
+# ASK_TRINITY_ENABLED=false, BUG_REPORTING_ENABLED=false, or DO_NOT_TRACK set to
+# anything but 0 / empty / false — its host is taken out of the served policy,
+# so the browser refuses the request whatever the page tries.
+# Only the two fixed strings below are ever removed; no environment VALUE is
+# written into the configuration, so a setting can never inject a directive.
+HEADERS_SOURCE="${TRINITY_HEADERS_SOURCE:-/etc/nginx/security-headers.conf}"
+HEADERS_OUTPUT="${TRINITY_HEADERS_OUTPUT:-/etc/nginx/generated/security-headers.conf}"
+DOCS_QA_HOST='https://us-central1-mcp-server-project-455215.cloudfunctions.net'
+REPORT_INTAKE_HOST='https://intake.abilityai.dev'
+
+switched_off() {  # $1 = the channel's own switch value
+    case "$(printf '%s' "${DO_NOT_TRACK:-0}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+        0|''|false) ;;
+        *) return 0 ;;
+    esac
+    [ "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" = "false" ]
+}
+
+cp "$HEADERS_SOURCE" "${HEADERS_OUTPUT}.tmp"
+if switched_off "${ASK_TRINITY_ENABLED:-true}"; then
+    sed -i "s| ${DOCS_QA_HOST}||g" "${HEADERS_OUTPUT}.tmp"
+fi
+if switched_off "${BUG_REPORTING_ENABLED:-true}"; then
+    sed -i "s| ${REPORT_INTAKE_HOST}||g" "${HEADERS_OUTPUT}.tmp"
+fi
+mv -f "${HEADERS_OUTPUT}.tmp" "$HEADERS_OUTPUT"
+
 [ "$#" -gt 0 ] || set -- nginx -g "daemon off;"
 exec "$@"

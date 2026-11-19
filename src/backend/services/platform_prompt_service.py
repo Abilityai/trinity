@@ -203,7 +203,7 @@ Until it is removed, an entry appended to the `requests` array of `~/.trinity/op
 }
 ```
 
-The operator's answer is written back into the entry: `status: "responded"` with `response`, `response_text` and `responded_at` — never who answered. On an approval, `response` is one of your options or the reserved value `(something else)`, which comes with the person's instruction in `response_text`. An item that has waited past the operator's aging bound carries a `platform.aging_since` timestamp written by Trinity — read it, never write to `platform`. While Trinity is holding new entries from this file, the file carries a `platform.ingestion` block: `reason` is `queue_full` (you already have `max_pending` open requests — wait for one to end), `rate_limited` (too many too fast — they are read again shortly), `invalid_id` (an entry's `id` is malformed and will never be read — fix it), or `invalid_options` / `invalid_title` (an entry breaks the ask caps: more than 5 options, an option over 60 characters or that reads as `(something else)`, or a title over 120 characters — the entry ids are listed under those keys beside `reason`, whatever the reason; shorten or split them, and they will not be read until they fit), and `since` says when the hold began. Held entries stay `pending` and are read again every few seconds; the block is removed once nothing is held. `ask_operator` refuses the same cases immediately, with the reason. After processing a response, update the item's status to `"acknowledged"`. Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items. An ID you raised with `ask_operator` is never read from the file.
+The operator's answer is written back into the entry: `status: "responded"` with `response`, `response_text` and `responded_at` — never who answered. On an approval, `response` is one of your options or the reserved value `(something else)`, which comes with the person's instruction in `response_text`. An item that has waited past the operator's aging bound carries a `platform.aging_since` timestamp written by Trinity — read it, never write to `platform`. While Trinity is holding new entries from this file, the file carries a `platform.ingestion` block: `reason` is `queue_full` (you already have `max_pending` open requests — wait for one to end), `rate_limited` (too many too fast — they are read again shortly), `invalid_id` (an entry's `id` is malformed and will never be read — fix it), `invalid_options` / `invalid_title` (an entry breaks the ask caps: more than 5 options, an option over 60 characters or that reads as `(something else)`, or a title over 120 characters — the entry ids are listed under those keys beside `reason`, whatever the reason; shorten or split them, and they will not be read until they fit), or `role_cannot_open_agent` / `no_person` / `invalid_credential` (a `type: "credential"` entry cannot be read: nobody who could fill it can open you in their Workspace, no single person can be asked, or the entry breaks the rules of a credential ask — the entry ids are listed under those keys; remove the entry and raise it with `ask_for_credential`, whose refusal names the reason and the remedy), and `since` says when the hold began. Held entries stay `pending` and are read again every few seconds; the block is removed once nothing is held. `ask_operator` refuses the same cases immediately, with the reason. After processing a response, update the item's status to `"acknowledged"`. Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items. An ID you raised with `ask_operator` is never read from the file.
 
 #### When to Use
 
@@ -263,7 +263,7 @@ Your own memory directory is `memory/` at the repo root, committed with the repo
 
 `template.yaml` is not live: it is read when you are created, and after that only its metrics are re-read (on git pull, on start, or now with `mcp__trinity__refresh_metric_definitions`).
 
-__PATH_DENY_SENTENCE__
+__PATH_DENY_SENTENCE__ For a credential an agent on another Trinity needs, raise `ask_for_credential` with `destination.instance` (the platform uses that instance's stored key).
 
 ### Package Persistence
 
@@ -941,6 +941,9 @@ class ExecutionContext:
     role_id: Optional[str] = None
     stakeholders: Optional[List[str]] = None
     proactive_consent: Optional[bool] = None
+    # trinity-enterprise#1221: whether any channel could deliver to the primary.
+    # Only an explicit False changes the line; None renders as before.
+    proactive_reachable: Optional[bool] = None
     # trinity-enterprise#611: asks this agent raised that ended in the last day —
     # `{request_id, disposition, disposed_at}` each, no human text. Auto-filled
     # from the DB; stateless, so a wake that was lost (a crash, a stopped agent)
@@ -1134,6 +1137,11 @@ def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
     unresolved bit (``None`` — a provider may validly answer a name and a role
     and nothing else) renders the restrictive clause, exactly like ``False``,
     because a permission statement that nobody made is not a permission.
+
+    Consent is not reachability (trinity-enterprise#1221): with consent but an
+    explicit ``proactive_reachable is False`` — no channel can deliver to them —
+    the line says so instead of "permitted", so the agent does not send into a
+    refusal. Unknown reachability (``None``) keeps the consent wording.
     """
     display = _sanitize_field(ctx.primary_user_display, max_len=MAX_DISPLAY_NAME_LEN)
     if not display:
@@ -1142,6 +1150,11 @@ def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
     role = _sanitize_field(ctx.role_id, max_len=MAX_ROLE_ID_LEN)
     if role:
         line = f"{line} (role: {role})"
+    if ctx.proactive_consent is True and ctx.proactive_reachable is False:
+        return (
+            f"{line} — consented to proactive contact, but no channel reaches "
+            "them; do not message them — it waits for their next turn"
+        )
     if ctx.proactive_consent is True:
         return f"{line} — proactive contact permitted"
     return (
@@ -1493,6 +1506,11 @@ def compose_system_prompt(
                     ctx.proactive_consent
                     if ctx.proactive_consent is not None
                     else assignment.get("proactive_consent")
+                ),
+                proactive_reachable=(
+                    ctx.proactive_reachable
+                    if ctx.proactive_reachable is not None
+                    else assignment.get("proactive_reachable")
                 ),
                 ended_asks=(
                     ctx.ended_asks

@@ -126,6 +126,7 @@ def _install(monkeypatch, *, respond_result, enabled=True):
     stub = SimpleNamespace(
         spawn_resume_dispatch=lambda item, **kw: calls.append(item),
         spawn_on_loop=lambda factory: None,   # the audit/broadcast hop: not under test here
+        mark_wake_owed=lambda rows: None,     # ent#1135: the sink stamps `owed` first
     )
     monkeypatch.setattr(sink, "operator_resume_service", stub)
     return svc, calls
@@ -188,7 +189,8 @@ def test_resume_requested_is_false_when_the_spawn_raised(monkeypatch):
 
     import services.ask_service as sink
 
-    stub = SimpleNamespace(spawn_resume_dispatch=_boom, spawn_on_loop=lambda factory: None)
+    stub = SimpleNamespace(spawn_resume_dispatch=_boom, spawn_on_loop=lambda factory: None,
+                           mark_wake_owed=lambda rows: None)
     monkeypatch.setattr(sink, "operator_resume_service", stub)
     out = svc.answer_ask("q1", "x@example.com", False, "PDF", None)
     assert out.resume_requested is False, (

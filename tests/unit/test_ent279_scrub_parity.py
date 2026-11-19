@@ -32,11 +32,13 @@ Anchors, all against ``services/ + routers/ + client_portal/``:
    that scrub (voice transcript, group broadcast) — but a NEW direct writer of
    raw agent text here would be a fresh leak.
 
-3. **Positive — the direct agent-text sinks.** Four functions persist agent free
-   text (or write it to the platform log) WITHOUT going through the appliers, and
-   two of them do not write any of the anchored tables directly. They are pinned
-   by name with NO allowlist escape: each MUST still call a scrub function, so
-   removing the scrub turns CI red rather than silently re-opening the leak.
+3. **Positive — the direct agent-text sinks.** The functions in
+   ``_REQUIRED_SCRUBBERS`` persist or deliver agent free text (to a message
+   table, the platform log, or a third-party TTS provider) WITHOUT going through
+   the appliers, and most of them write none of the anchored tables directly.
+   They are pinned by name with NO allowlist escape: each MUST still call a scrub
+   function, so removing the scrub turns CI red rather than silently re-opening
+   the leak.
 
 **Why agent_activities / agent_events / idempotency_keys are NOT anchored
 (deliberate, per the plan).** The plan lists seven agent-text tables; this guard
@@ -87,7 +89,7 @@ _MESSAGE_WRITERS = {
 }
 
 # Any of these discharges the obligation (all imported bare from the seam).
-_SCRUBBERS = {"get_staged_values", "scrub_text", "scrub_obj"}
+_SCRUBBERS = {"get_staged_values", "scrub_text", "scrub_obj", "scrub_staged"}
 
 _SCAN_DIRS = ("services", "routers", "client_portal")
 
@@ -287,10 +289,11 @@ _ALLOWLIST = {
 }
 
 # Direct agent-free-text sinks pinned positively — each MUST call a scrub
-# function (NO allowlist escape). Two do not write an anchored table directly, so
-# only a positive check reaches them; the other two also pass the negative
-# message-writer anchor, and are pinned here too so a scrub-removal-plus-allowlist
-# edit can never quietly exempt them. Value = the sink it protects.
+# function (NO allowlist escape). Most do not write an anchored table directly
+# (the TTS sinks hand text to a third-party provider), so only a positive check
+# reaches them; the two that also pass the negative message-writer anchor are
+# pinned here too so a scrub-removal-plus-allowlist edit can never quietly exempt
+# them. Value = the sink it protects.
 _REQUIRED_SCRUBBERS = {
     (
         "routers/voice.py",
@@ -308,6 +311,30 @@ _REQUIRED_SCRUBBERS = {
         "services/chat_execution_service.py",
         "_parse_agent_http_error",
     ): "agent HTTP error body -> platform ERROR log + schedule_executions.error",
+    (
+        "services/voice_reply_service.py",
+        "send_voice_reply",
+    ): "in-session voice note text -> TTS provider + spoken audio (#4228)",
+    (
+        "services/voice_reply_service.py",
+        "send_proactive_voice",
+    ): "addressed voice note text -> TTS provider + spoken audio + audit message_preview (#4228)",
+    (
+        "services/tts_service.py",
+        "synthesize_mp3",
+    ): "any caller's text -> ElevenLabs (also under synthesize_voice_note) (#4228)",
+    (
+        "client_portal/service.py",
+        "synthesize_portal_tts",
+    ): "Workspace read-aloud text -> TTS provider (#4359)",
+    (
+        "services/direct_voice_service.py",
+        "_speak_sentence",
+    ): "direct voice call sentence -> streaming TTS provider + `spoken` frame (#4359)",
+    (
+        "services/direct_voice_service.py",
+        "speak_execution",
+    ): "direct voice call reply text, scrubbed before speakable() rewrites it (#4359)",
 }
 
 
@@ -392,7 +419,7 @@ class TestScrubParity:
         )
 
     def test_direct_sinks_still_scrub(self):
-        """The four direct agent-text sinks must each still call a scrub function
+        """Every direct agent-text sink must still call a scrub function
         — removing it must turn CI red, with no allowlist escape."""
         missing = []
         for (rel, fn_name), sink in _REQUIRED_SCRUBBERS.items():

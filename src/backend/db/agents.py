@@ -805,6 +805,70 @@ class AgentOperations(
             return result.rowcount > 0
 
     # =========================================================================
+    # The agent's own model (ent#1202)
+    # What a turn that names no model runs on, ahead of the platform default.
+    # Stored as written; `services/agent_model_service.py` decides on read
+    # whether this instance can run it.
+    # =========================================================================
+
+    DEFAULT_MODEL_MAX_LEN = 128
+
+    def get_default_model_raw(self, agent_name: str) -> Optional[str]:
+        """The stored ``default_model``, unvalidated (live rows only)."""
+        stmt = select(agent_ownership.c.default_model).where(
+            agent_ownership.c.agent_name == agent_name,
+            agent_ownership.c.deleted_at.is_(None),
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return (row["default_model"] or None) if row else None
+
+    def get_default_models_raw(self, agent_names) -> dict:
+        """``{agent_name: stored default_model}`` for live rows, in one query."""
+        names = [n for n in (agent_names or []) if n]
+        if not names:
+            return {}
+        stmt = select(agent_ownership.c.agent_name, agent_ownership.c.default_model).where(
+            agent_ownership.c.agent_name.in_(names),
+            agent_ownership.c.deleted_at.is_(None),
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return {r["agent_name"]: (r["default_model"] or None) for r in rows}
+
+    def set_default_model(self, agent_name: str, model: Optional[str]) -> bool:
+        """Set/clear the agent's own model (None or blank clears it).
+
+        Stripped and bounded at ``DEFAULT_MODEL_MAX_LEN``; never validated here,
+        so a value this instance cannot run yet is kept and named on read.
+        """
+        value = (model or "").strip()[: self.DEFAULT_MODEL_MAX_LEN] or None
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_ownership)
+                .where(agent_ownership.c.agent_name == agent_name)
+                .values(default_model=value)
+            )
+            return result.rowcount > 0
+
+    def set_default_model_if(self, agent_name: str, expected: Optional[str],
+                             model: Optional[str]) -> bool:
+        """``set_default_model``, but only while the column still holds
+        ``expected`` (None = NULL). True when this call changed the row, so of
+        several writers that read the same old value exactly one sees True."""
+        value = (model or "").strip()[: self.DEFAULT_MODEL_MAX_LEN] or None
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_ownership)
+                .where(
+                    agent_ownership.c.agent_name == agent_name,
+                    agent_ownership.c.default_model.is_not_distinct_from(expected),
+                )
+                .values(default_model=value)
+            )
+            return result.rowcount > 0
+
+    # =========================================================================
     # Public/Channel System Prompt (#1205)
     # Custom instructions injected into public-facing conversations only
     # (public links, Slack/Telegram/WhatsApp channels, x402 paid chat).

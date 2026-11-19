@@ -632,3 +632,21 @@ def test_release_version_resolver_is_import_safe_and_prefers_env(monkeypatch):
     monkeypatch.setenv("VERSION", "unknown")
     v = app_version.resolve_release_version()
     assert isinstance(v, str) and v            # file fallback or "unknown", never a raise
+
+
+def test_release_version_unknown_only_without_env_and_file(monkeypatch):
+    """#4381: "unknown" is reported only when neither env nor file is available."""
+    from utils import app_version
+    monkeypatch.delenv("VERSION", raising=False)
+    monkeypatch.setattr(app_version, "_candidate_paths", lambda: [])
+    assert app_version.resolve_release_version() == "unknown"
+
+
+def test_release_version_read_from_file_when_env_unset(monkeypatch, tmp_path):
+    """#4381: the VERSION file is used when the env var is unset."""
+    from utils import app_version
+    f = tmp_path / "VERSION"
+    f.write_text("1.2.3\n")
+    monkeypatch.delenv("VERSION", raising=False)
+    monkeypatch.setattr(app_version, "_candidate_paths", lambda: [f])
+    assert app_version.resolve_release_version() == "1.2.3"

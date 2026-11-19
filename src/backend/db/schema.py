@@ -94,6 +94,7 @@ TABLES = {
             voice_system_prompt TEXT,
             voice_name TEXT,
             public_channel_model TEXT,
+            default_model TEXT,
             public_channel_system_prompt TEXT,
             guardrails_config TEXT,
             file_sharing_enabled INTEGER DEFAULT 0,
@@ -310,6 +311,12 @@ TABLES = {
             -- #3380: the /chat thread this turn answers, so a watchdog-claimed
             -- result can still write its reply there. NULL = not a /chat turn.
             chat_session_id TEXT,
+            -- ent#1225: the turn this row continues, written by the platform
+            -- only for a turn RUNNING on that agent when it was recorded. A
+            -- continuation trigger (caller_wake, operator_response,
+            -- operator_ending, skill_gate) is rated as that turn; a delegated
+            -- callee row records the caller's turn. NULL = none.
+            continues_execution_id TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -789,7 +796,7 @@ TABLES = {
             seq INTEGER NOT NULL,                      -- monotonic per room
             sender_kind TEXT NOT NULL,                 -- agent | user | workspace_user | system
             sender_identity TEXT,
-            kind TEXT NOT NULL DEFAULT 'message',      -- message | system
+            kind TEXT NOT NULL DEFAULT 'message',      -- what the row is: message | system | chain_paused | chain_continued (#4302); sender_kind says who
             mentions TEXT,                             -- JSON array of agent names
             content TEXT NOT NULL,
             execution_id TEXT,                         -- schedule_executions.id (nullable)

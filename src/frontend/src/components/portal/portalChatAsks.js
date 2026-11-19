@@ -19,10 +19,21 @@ import { relativeTime } from './portalUtils'
 // whatever raised it — the discussion is where it is decided.
 export function chatTurnAsks(asks, sessionId) {
   if (!sessionId || !Array.isArray(asks)) return []
-  return asks.filter((a) => a && (
+  return asks.filter((a) => a && a.notice !== true && (
     (a.raised_in_turn === true && a.chat_id === sessionId)
     || isDiscussedIn(a, sessionId)
   ))
+}
+
+// trinity-enterprise#1134 (AC4): an ask this chat's turn raised that FELL to
+// the operators — nobody is assigned as primary and the owner cannot stand in.
+// The chat read carries it as a content-free row marked `notice: true` (kind,
+// status, time, `destination`; never a title, question or options — the person
+// here is not its addressee). Only the platform's literal `true` counts, and
+// only in its own chat.
+export function chatTurnNotices(rows, sessionId) {
+  if (!sessionId || !Array.isArray(rows)) return []
+  return rows.filter((n) => n && n.notice === true && n.chat_id === sessionId)
 }
 
 // trinity-enterprise#747: is `sessionId` the chat this ask's addressee opened
@@ -79,17 +90,19 @@ export function placeAsksInThread(items, asks, { truncated = false, sessionId = 
   const out = []
   let next = 0
   let lastAt = -Infinity
+  // trinity-enterprise#1134: a notice is placed by the same rule, as its own row.
+  const place = (a) => (a.notice === true ? { kind: 'ask-notice', notice: a } : { kind: 'ask', ask: a })
   for (const item of rows) {
     let at = rowTime(item)
     if (at !== null) lastAt = Math.max(lastAt, at)
     else at = item?.message?.local === true ? lastAt : Infinity
     while (next < pending.length && pending[next].at < at) {
-      out.push({ kind: 'ask', ask: pending[next].a })
+      out.push(place(pending[next].a))
       next += 1
     }
     out.push(item)
   }
-  for (; next < pending.length; next += 1) out.push({ kind: 'ask', ask: pending[next].a })
+  for (; next < pending.length; next += 1) out.push(place(pending[next].a))
   return out
 }
 
@@ -124,6 +137,24 @@ export function askHistoryLine(ask, now = Date.now()) {
     plain: (ask?.title || '').replace(/[*_`~]/g, ''),
     // #3247: a replaced ask reads "Replaced by the agent with <request_id>".
     ending: historyEnding(ask, ending),
+    when: at ? relativeTime(at, now) : '',
+    at,
+  }
+}
+
+// trinity-enterprise#1134 (AC4): the notice's line — kind · where it went ·
+// why · who fixes it · when. Built from the notice's own fields only, so a
+// stray title on the row can never reach the screen.
+const NOTICE_REASON = Object.freeze({
+  owner_no_email: "nobody is assigned as this agent's primary contact and its owner has no email address",
+  no_owner: 'nobody is assigned as its primary contact and the agent has no owner',
+})
+export function askNoticeLine(notice, now = Date.now()) {
+  const at = notice?.created_at || null
+  return {
+    kind: HISTORY_KIND[notice?.kind] || queueTypeLabel(notice?.kind) || 'Question',
+    reason: NOTICE_REASON[notice?.destination?.reason] || "nobody is assigned as this agent's primary contact",
+    fix: "An admin can assign one in the agent's Access tab.",
     when: at ? relativeTime(at, now) : '',
     at,
   }

@@ -23,7 +23,9 @@ from models import (
     FleetExecutionSummary,
     User,
 )
-from services.agent_service.helpers import accessible_agent_names, narrow_to_agent, viewer_own_rows
+from services.agent_service.helpers import (
+    accessible_agent_names, acting_person_agents, narrow_to_agent, viewer_own_rows,
+)
 
 router = APIRouter(prefix="/api/executions", tags=["executions"])
 
@@ -39,7 +41,7 @@ _VALID_STATUSES = {"running", "queued", "success", "failed", "error", "cancelled
 # `self_task` is an agent's `POST /task` to itself (#4105). `caller_wake` is
 # the turn that tells a delegating agent its delegated run ended
 # (trinity-enterprise#1102) — the `operator_ending` shape, agent-to-agent.
-_VALID_TRIGGERS = {"schedule", "manual", "agent", "mcp", "chat", "session", "public", "webhook", "fan_out", "loop", "reminder", "room", "a2a", "operator_response", "operator_ending", "retry", "skill_gate", "self_task", "caller_wake"}
+_VALID_TRIGGERS = {"schedule", "manual", "agent", "mcp", "chat", "session", "public", "webhook", "fan_out", "loop", "reminder", "room", "a2a", "operator_response", "operator_ending", "retry", "skill_gate", "self_task", "caller_wake", "project_steward"}
 _VALID_HOURS = {0, 1, 6, 24, 168, 720}  # 0 = all-time
 
 # ent#326. `hour`/`day` are gap-filled; `trigger`/`agent` are categorical and
@@ -188,7 +190,9 @@ async def list_fleet_executions(
     current_user: User = Depends(get_current_user),
 ):
     """List executions across all accessible agents with optional filters."""
-    agent_names = narrow_to_agent(accessible_agent_names(current_user), agent)
+    # trinity-enterprise#1148: in a person's turn, only agents that person may open.
+    agent_names = acting_person_agents(
+        current_user, narrow_to_agent(accessible_agent_names(current_user), agent))
     # trinity-enterprise#875: on every agent the caller does not own, the list
     # (and the `search` over message text) is the caller's own executions,
     # narrowed in the WHERE before the LIMIT/OFFSET.

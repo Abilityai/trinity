@@ -52,7 +52,7 @@ services:
       # Gemini model overrides (#1130) — non-empty defaults so an unset var doesn't inject "" (#1076)
       - GEMINI_TEXT_MODEL=${GEMINI_TEXT_MODEL:-gemini-3.5-flash}              # image-gen prompt refinement
       - GEMINI_TRANSCRIPTION_MODEL=${GEMINI_TRANSCRIPTION_MODEL:-gemini-3.5-flash}  # Telegram voice transcription
-      - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
+      - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.8-live}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
       - DIRECT_VOICE_ENABLED=${DIRECT_VOICE_ENABLED:-}
       - GEMINI_STT_MODEL=${GEMINI_STT_MODEL:-gemini-3.5-transcribe}
@@ -120,8 +120,9 @@ services:
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
       # trinity-enterprise#478 — metric write path. The two policy values are a
       # bootstrap fallback; a Settings row wins over them.
-      # The three ENV-BACKED ops keys below (METRICS_RETENTION_DAYS,
-      # METRICS_DAILY_POINT_CAP, INTER_AGENT_MAX_CHAIN_DEPTH) are forwarded with
+      # The four ENV-BACKED ops keys below (METRICS_RETENTION_DAYS,
+      # METRICS_DAILY_POINT_CAP, INTER_AGENT_MAX_CHAIN_DEPTH,
+      # CALLER_WAKE_MAX_PER_HOUR) are forwarded with
       # an EMPTY default (ent#671): an unset variable must reach the container
       # unset, or GET /api/settings/retention reports `source: env` for a value
       # nobody chose and the Settings rows lock read-only. The code default is
@@ -130,6 +131,7 @@ services:
       - METRICS_RETENTION_DAYS=${METRICS_RETENTION_DAYS:-}    # recorded point retention (0 = forever)
       - METRICS_DAILY_POINT_CAP=${METRICS_DAILY_POINT_CAP:-}  # points per agent per UTC day (0 = unlimited)
       - INTER_AGENT_MAX_CHAIN_DEPTH=${INTER_AGENT_MAX_CHAIN_DEPTH:-}  # max agent-to-agent hops per call chain (#2806)
+      - CALLER_WAKE_MAX_PER_HOUR=${CALLER_WAKE_MAX_PER_HOUR:-}  # wakes per callee→delegator pair per hour, 0 = unlimited (#4357)
       - METRICS_READ_RATE_LIMIT=${METRICS_READ_RATE_LIMIT:-240}   # GET /metrics reads per agent per 60s (tiles, dashboard binds, get_metrics)
       - OBJECTIVES_READ_RATE_LIMIT=${OBJECTIVES_READ_RATE_LIMIT:-60}  # GET /objectives reads per agent per 60s (fans out into the agent container)
       # Agent canvases (ent#438/ent#553) — per-agent ceiling on the canvas pile.
@@ -301,6 +303,11 @@ services:
       - ALLOW_PDF_UPLOADS=${ALLOW_PDF_UPLOADS:-false}
       - OPERATOR_INTAKE_ENABLED=${OPERATOR_INTAKE_ENABLED:-true}
       - DO_NOT_TRACK=${DO_NOT_TRACK:-0}
+      # #4499: the help widget's report intake and the docs Q&A service (the Ask
+      # tab and the `ask_trinity` MCP tool), switched at run time. DO_NOT_TRACK
+      # turns both off. The frontend and the MCP server read the same variables.
+      - BUG_REPORTING_ENABLED=${BUG_REPORTING_ENABLED:-true}
+      - ASK_TRINITY_ENABLED=${ASK_TRINITY_ENABLED:-true}
       - OPERATOR_INTAKE_URL=${OPERATOR_INTAKE_URL:-https://intake.abilityai.dev/v1/operator-intake}
       # Tier-2 opt-in fleet telemetry sharing (ent#12): consent-gated aggregate
       # egress. TELEMETRY_SHARING_ENABLED=false is the hard kill switch
@@ -669,6 +676,9 @@ services:
       # unreachable value to effectively disable the tool (it degrades to a
       # structured error, never a crash).
       - ASK_TRINITY_ENDPOINT=${ASK_TRINITY_ENDPOINT:-}
+      # #4499: off (or DO_NOT_TRACK set) = `ask_trinity` is not registered.
+      - ASK_TRINITY_ENABLED=${ASK_TRINITY_ENABLED:-true}
+      - DO_NOT_TRACK=${DO_NOT_TRACK:-0}
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}  # SEC-001: for audit logging to backend
     depends_on:
       - backend

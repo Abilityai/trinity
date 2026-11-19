@@ -8,13 +8,63 @@
 
 import { askUrgencyCompare } from '../portalInbox'
 
-export const STATUS_BADGE = Object.freeze({ active: 'success', paused: 'warning', done: 'neutral' })
-const STATUS_LABEL = { active: 'Active', paused: 'Paused', done: 'Done' }
+// ent#1235: the stored status keeps its values; people read Running / Stopped.
+export const STATUS_BADGE = Object.freeze({ not_started: 'neutral', active: 'success', paused: 'warning', done: 'neutral' })
+const STATUS_LABEL = { not_started: 'Not started', active: 'Running', paused: 'Stopped', done: 'Done' }
 const VISIBILITY_LABEL = { members: 'Members only', company: 'Company' }
-const AGENT_STATE_LABEL = { active: 'Can work on it', pending: 'Waiting for owner', declined: 'Owner declined' }
+const AGENT_STATE_LABEL = {
+  active: 'Can work on it', pending: 'Waiting for owner', declined: 'Owner declined', off: 'Not on the project',
+}
 
 export const NAME_MAX = 120
 export const GOAL_MAX = 1000
+
+// A task's text limits, mirroring `TITLE_MAX` / `TEXT_MAX` in
+// `enterprise/backend/projects/work.py` — the server is still the authority;
+// these stop the user before a paste reaches the outer Pydantic cap, whose
+// refusal has no field to show it under. A test pins the two in step.
+export const TASK_TITLE_MAX = 200
+export const TASK_TEXT_MAX = 4000
+
+// How a task field is named to a person, and which inline error a server
+// refusal belongs under.
+const TASK_FIELD_LABEL = { title: 'title', objective: 'objective', done_definition: 'definition of done' }
+export const TASK_FIELD_ERROR_CODES = Object.freeze({
+  invalid_title: 'title', invalid_objective: 'objective', invalid_done_definition: 'done_definition',
+  // ent#1232: a task's shape — its parent and the tasks it waits on.
+  parent_not_found: 'parent', parent_is_self: 'parent', parent_is_subtask: 'parent',
+  has_subtasks: 'parent', invalid_blocked_by_add: 'blocked_by', invalid_blocked_by_remove: 'blocked_by',
+  invalid_blocked_by: 'blocked_by', blocker_not_found: 'blocked_by', blocker_is_self: 'blocked_by',
+  blocker_is_parent: 'blocked_by', blocker_cycle: 'blocked_by', too_many_blockers: 'blocked_by',
+  done_without_claim_needs_note: 'note',
+})
+
+/** Length in CODE POINTS, which is what Python's `len` counts — `.length`
+ *  would read 150 emoji as 300 and refuse a title the server accepts. */
+const codePoints = (text) => [...String(text ?? '')].length
+
+/**
+ * The create dialog's and the detail form's shared check, so "the same limits
+ * as at creation" holds in both directions. `only` narrows it to the fields a
+ * save actually sends: a legacy stored value over the limit must not block an
+ * unrelated change.
+ */
+export function validateTaskFields(values, only = null) {
+  const fields = only || Object.keys(TASK_FIELD_LABEL)
+  const errors = {}
+  for (const f of fields) {
+    if (!(f in TASK_FIELD_LABEL)) continue
+    const text = String(values?.[f] ?? '').trim()
+    const n = codePoints(text)
+    if (f === 'title' && !n) {
+      errors.title = 'Give the task a title, e.g. "Draft the launch brief".'
+      continue
+    }
+    const max = f === 'title' ? TASK_TITLE_MAX : TASK_TEXT_MAX
+    if (n > max) errors[f] = `Keep the ${TASK_FIELD_LABEL[f]} to ${max} characters (it's ${n} now).`
+  }
+  return errors
+}
 
 export function statusLabel(status) {
   return STATUS_LABEL[status] || 'Unknown'
@@ -71,13 +121,74 @@ export function continueChoice(options) {
   return { primary, others: actionable.filter((o) => o !== primary) }
 }
 
-/** The Steward card's schedule line for the server's `{state, next_run_at}`. */
-export function stewardScheduleLine(schedule) {
+/**
+ * The Steward card's schedule line for the server's `{state, next_run_at}`.
+ * With a `wake` block (trinity-enterprise#1236) Trinity wakes the steward, so
+ * having no schedule of its own is not news: no line, never "No sweep scheduled".
+ */
+export function stewardScheduleLine(schedule, wake = null) {
   if (!schedule) return ''
-  if (schedule.state === 'none') return 'No sweep scheduled'
+  if (schedule.state === 'none') return wake ? '' : 'No sweep scheduled'
   if (schedule.state === 'scheduled') return schedule.next_run_at ? 'Next run' : 'Scheduled'
   if (schedule.state === 'hidden') return 'Scheduled'
   return "Schedule couldn't be read"
+}
+
+/**
+ * trinity-enterprise#1236 — the Steward card's wake line: whether Trinity wakes
+ * the agent steward, or the one named reason it does not. `agent` is the
+ * steward agent's name.
+ */
+export function stewardWakeLine(wake, agent) {
+  if (!wake) return ''
+  if (wake.state === 'on') return 'Trinity wakes it'
+  switch (wake.reason) {
+    case 'not_started': return 'Not started. A person starts waking the steward.'
+    case 'paused': return wake.paused_by ? `Paused by ${wake.paused_by}` : 'Paused'
+    case 'autonomy_off': return `${agent} has autonomy off, so it isn't woken.`
+    case 'project_not_running': return "This project isn't active, so the steward isn't woken."
+    case 'steward_not_on_project': return `${agent} isn't active on this project yet, so it isn't woken.`
+    case 'unknown': return "Couldn't check whether Trinity wakes it."
+    default: return "Trinity isn't waking it."
+  }
+}
+
+const WAKE_REASON_LABEL = { task: 'a task changed', ask: 'an ask was answered', daily: 'the daily check' }
+
+/** What wakes the steward next: `{text, at}` for the server's `wake.next`, or null. */
+export function stewardWakeNext(next) {
+  if (!next) return null
+  if (next.kind === 'running') return { text: 'Running now', at: null }
+  if (next.kind === 'owed') {
+    const why = (next.reasons || []).map((r) => WAKE_REASON_LABEL[r]).filter(Boolean).join(', ')
+    return { text: why ? `Next wake soon (${why})` : 'Next wake soon', at: next.at || null }
+  }
+  if (next.kind === 'daily') {
+    return next.at
+      ? { text: 'Next daily check', at: next.at }
+      : { text: 'Next: when a task changes or an ask is answered, and daily while work is open', at: null }
+  }
+  return null
+}
+
+const WAKE_SKIP_LABEL = {
+  agent_stopped: 'the agent was stopped',
+  budget: 'this hour\'s wakes were used up',
+  nothing_open: 'nothing was open',
+  dispatch_error: "the run couldn't be started",
+}
+
+/** The last wake Trinity did not run, when that is worth saying. */
+export function stewardWakeSkipLine(skip) {
+  const label = skip && WAKE_SKIP_LABEL[skip.reason]
+  return label ? `Last wake skipped: ${label}` : ''
+}
+
+const RUN_STATUS_LABEL = { success: 'finished', failed: 'failed', cancelled: 'cancelled', skipped: 'skipped' }
+
+/** "Last run 2 h ago · finished" — the status word for the recorded run. */
+export function stewardRunStatus(status) {
+  return RUN_STATUS_LABEL[status] || (status ? String(status) : '')
 }
 
 /** The one-time "how a project moves" line (ent#896): remembered per browser. */
@@ -97,6 +208,49 @@ export function chatProjectActions({ projectsAvailable, isPlatform, isMain, sess
   return { show, linked, canAdd: show && platform, canWrapUp: linked && platform }
 }
 
+/**
+ * A linked room's agents and where each stands on the project
+ * (trinity-enterprise#1131), from the server's `room_agents` block — null
+ * when the read has none (a thread, a guest, a participant who can't open the
+ * project). The chip counts the agents not on it (`off` / `declined`) before
+ * the ones waiting on their owner, and is null when every agent is active.
+ * Add is offered only to a MANAGE_AGENTS holder on a row the server marked
+ * `can_add`; a row it can't add says why.
+ */
+const ROOM_AGENT_BADGE = { active: 'success', pending: 'warning', declined: 'neutral', off: 'neutral' }
+const ROOM_AGENT_NOTE = { not_on_your_list: 'Not on your list' }
+const REQUEST_NOTE = {
+  pending: 'Asked — waiting on the creator',
+  blocked: 'You have a request waiting on the creator',
+}
+
+export function roomAgentRows(project) {
+  if (!project || !('room_agents' in project)) return null
+  const canManage = project.can?.manage_agents === true
+  if (project.room_agents === null) {
+    return { rows: [], canManage, degraded: true, chip: { label: "Couldn't read agents", variant: 'neutral' } }
+  }
+  const rows = (project.room_agents || []).map((a) => ({
+    name: a.agent_name,
+    state: a.state,
+    label: agentStateLabel(a.state),
+    badge: ROOM_AGENT_BADGE[a.state] || 'neutral',
+    action: canManage && a.can_add === true ? 'add'
+      // ent#1131 part 2: a member who can't add asks the creator instead —
+      // one request at a time, so none beside a pending one (`blocked`).
+      : (a.can_request === true && !['pending', 'blocked'].includes(a.my_request) ? 'request' : null),
+    // My request for it: `pending` reads as waiting; a decline offers Ask again.
+    requested: a.can_request === true ? (a.my_request || null) : null,
+    note: canManage ? ROOM_AGENT_NOTE[a.reason] || null
+      : (a.can_request === true ? REQUEST_NOTE[a.my_request] || null : null),
+  }))
+  const notOn = rows.filter((r) => r.state === 'off' || r.state === 'declined').length
+  const waiting = rows.filter((r) => r.state === 'pending').length
+  const chip = notOn ? { label: `${notOn} not on it`, variant: 'warning' }
+    : waiting ? { label: `${waiting} waiting on owner`, variant: 'neutral' } : null
+  return { rows, canManage, degraded: false, chip }
+}
+
 const CODE_MESSAGE = {
   owner_unreachable: "This agent's owner can't be asked here. Ask them to add it to the project themselves.",
   already_linked: 'This chat is already in a project. Detach it there first.',
@@ -105,11 +259,31 @@ const CODE_MESSAGE = {
   archived: 'This project is archived. Restore it to add to it.',
   not_permitted: 'Only the person who created this project can change that.',
   unknown_person: 'Only people at your company can be added. Check the email, e.g. name@your-company.com.',
+  owner_not_on_project: "A task's owner must be the project's creator or one of its members. Add them to the project first.",
+  invalid_owner: "Pick the owner from the project's people, or write a role as role:<id>. A name on its own reaches nobody.",
+  session_required: 'Looking people up needs you signed in to Trinity. Reload the page and try again.',
+  context_too_large: 'A brief can be at most 512 KB. Split it into several files.',
+  project_context_full: "This project's briefs can total at most 5 MB. Remove one you no longer need first.",
+  unsupported_type: 'A brief is markdown (.md) or plain text (.txt). Link other files from Add from… instead.',
+  not_text: "This file isn't text. Save it as .md or .txt and try again.",
+  empty_brief: 'The brief is empty.',
   agent_not_found: "That agent isn't on your list, so you can't add it.",
   too_many_members: 'This project has reached its member limit.',
   too_many_links: 'This project has reached its link limit.',
   creator_is_permanent: "The project's creator can't be removed.",
   project_not_found: "This project isn't available to you.",
+  // ent#1235: why a task's run doesn't start, in the words of the page.
+  project_not_started: "This project hasn't been started, so no run starts yet. Someone with edit rights starts it.",
+  project_stopped: 'This project is stopped, so no new run starts. Someone with edit rights starts it again.',
+  project_done: 'This project is done. Reopen it before starting a run.',
+  task_run_live: 'A run is already under way on this task. Open it from the task, or wait for it to end.',
+  start_already_proposed: 'A run for this task is already waiting for a go.',
+  task_needs_decision: 'This task was rejected twice and needs a person\'s decision first.',
+  task_is_for_a_person: "This task is a person's, so no agent is started for it.",
+  needs_go_is_human_only: "Only a person holds a task for their go.",
+  lifecycle_is_a_persons: 'Only a person starts or stops a project.',
+  mode_is_a_persons: "Only a person sets the project's mode.",
+  cannot_unstart: "A started project can't go back to not started. Stop it instead.",
 }
 
 /** What happened and what to do, in the user's words (principle 25). */
@@ -121,6 +295,27 @@ export function projectErrorMessage(err) {
   if (code && CODE_MESSAGE[code]) return CODE_MESSAGE[code]
   if (detail && typeof detail === 'object' && typeof detail.message === 'string') return detail.message
   return 'Something went wrong on the server. Try again in a moment.'
+}
+
+// ent#1163 — the epic field: `owner/repo#N` or the issue's github.com link.
+const EPIC_SHORT = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}#[1-9]\d{0,8}$/
+const EPIC_URL = /^https?:\/\/github\.com\/[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}\/issues\/[1-9]\d{0,8}\/?$/
+const EPIC_EXAMPLE = 'e.g. your-org/repo#12 or https://github.com/your-org/repo/issues/12'
+
+/** A named error for the epic field before it is sent (principle 17), else ''. */
+export function validateEpicRef(text) {
+  const t = String(text || '').trim()
+  if (!t) return `Paste the epic's GitHub issue, ${EPIC_EXAMPLE}.`
+  if (!EPIC_SHORT.test(t) && !EPIC_URL.test(t)) return `That isn't a GitHub issue. Use ${EPIC_EXAMPLE}.`
+  return ''
+}
+
+/** The epic import's refusal in the dialog's words; other codes as everywhere. */
+export function epicImportErrorMessage(err) {
+  const detail = err && err.response && err.response.data && err.response.data.detail
+  const code = detail && typeof detail === 'object' ? detail.code : null
+  if (code === 'invalid_ref') return `That isn't a GitHub issue. Use ${EPIC_EXAMPLE}.`
+  return projectErrorMessage(err)
 }
 
 /** The list tabs: all I can see / I'm a member / company, plus a name search. */
@@ -164,6 +359,27 @@ export function stewardFormValue(steward, myEmail) {
   return { steward: 'me', steward_email: '' }
 }
 
+/**
+ * ent#1169 — the dialog's one line under Steward: what picking it does about
+ * the library's project-management skills. `options` is the steward-options
+ * read: null while it loads ("Checking…"), false when it failed (no line,
+ * nothing guessed).
+ */
+export function stewardSkillHint(steward, options) {
+  if (!String(steward || '').startsWith('agent:')) {
+    return 'A person steward checks finished tasks and health by hand. An agent steward with the project-management skills does it on its own schedule.'
+  }
+  if (options === false) return ''        // the read failed: say nothing rather than guess
+  if (!options) return 'Checking the project-management skills…'
+  const name = steward.slice(6)
+  const row = (options.agents || []).find((a) => a.agent_name === name)
+  if (row?.holds_set) return `${name} already has the project-management skills, so it can keep this project's record.`
+  if (row && row.holds_set === null) return `Trinity couldn't check ${name}'s skills. You can still make it the steward.`
+  if (options.set && !options.set.available) return options.set.message || "The project-management skills aren't available on this Trinity yet."
+  if (row?.can_assign) return `${name} gets the project-management skills, so it can verify finished tasks, record health and write the log.`
+  return `Only ${name}'s owner or an admin can give it the project-management skills. It can be the steward, but it can't keep the record until they do.`
+}
+
 /** The API's steward for the form's fields; null leaves the server default. */
 export function stewardPayload(form, myEmail) {
   if (String(form.steward || '').startsWith('agent:')) return { kind: 'agent', ref: form.steward.slice(6) }
@@ -173,13 +389,13 @@ export function stewardPayload(form, myEmail) {
 
 // --- v2: tasks and the log ------------------------------------------------------
 
-export const TASK_STATUSES = ['active', 'blocked', 'needs-decision', 'paused', 'pending-verification', 'done']
+export const TASK_STATUSES = ['todo', 'active', 'blocked', 'needs-decision', 'paused', 'pending-verification', 'done']
 const TASK_STATUS_LABEL = {
-  active: 'Active', blocked: 'Blocked', 'needs-decision': 'Needs a decision', paused: 'Paused',
+  todo: 'To do', active: 'Active', blocked: 'Blocked', 'needs-decision': 'Needs a decision', paused: 'Paused',
   'pending-verification': 'Awaiting verification', done: 'Done',
 }
 export const TASK_STATUS_BADGE = Object.freeze({
-  active: 'info', blocked: 'danger', 'needs-decision': 'warning', paused: 'neutral',
+  todo: 'neutral', active: 'info', blocked: 'danger', 'needs-decision': 'warning', paused: 'neutral',
   'pending-verification': 'autonomous', done: 'success',
 })
 
@@ -198,13 +414,205 @@ export function taskStatusOptions(task) {
 }
 
 export function groupTasks(tasks) {
-  const byId = (a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true })
+  // ent#1232: a subtask sorts straight after its parent (one level deep).
+  const num = (id) => String(id || '')
+  const cmp = (a, b) => num(a).localeCompare(num(b), undefined, { numeric: true })
+  const byId = (a, b) => cmp(a.parent || a.id, b.parent || b.id) || (a.parent ? 1 : 0) - (b.parent ? 1 : 0) || cmp(a.id, b.id)
   const list = [...(tasks || [])].sort(byId)
   return {
     open: list.filter(isOpenTask),
     verifying: list.filter((t) => t.status === 'pending-verification'),
     done: list.filter((t) => t.status === 'done'),
   }
+}
+
+// --- ent#1232: a task's shape, who made it and who it is for ---------------------
+
+const TASK_ID = /^T-(\d{1,6})$/
+
+/** Task ids typed with commas or spaces, normalised to T-NNN; the rest named. */
+export function parseTaskIds(text) {
+  const ids = []
+  const bad = []
+  for (const raw of String(text || '').split(/[\s,]+/).filter(Boolean)) {
+    const m = raw.toUpperCase().match(TASK_ID)
+    if (!m) bad.push(raw)
+    else {
+      const id = `T-${m[1].padStart(3, '0')}`
+      if (!ids.includes(id)) ids.push(id)
+    }
+  }
+  return { ids, bad }
+}
+
+/** "You", "scout (agent)", or the person's name. */
+export function creatorLabel(creator, myEmail, labelOf = (e) => e) {
+  if (!creator || !creator.name) return ''
+  if (creator.kind === 'agent') return `${creator.name} (agent)`
+  if (sameEmail(creator.name, myEmail)) return 'You'
+  return labelOf(creator.name) || creator.name
+}
+
+/** Who a task is for: the person who owns it and the agent doing it. */
+export function assignedLabel(task, labelOf = (e) => e) {
+  const parts = []
+  if (task?.owner) parts.push(labelOf(task.owner) || task.owner)
+  if (task?.agent) parts.push(`${task.agent} (agent)`)
+  return parts.join(' · ')
+}
+
+/** "2/5 subtasks" on a parent. Finishing them does not finish the parent. */
+export function subtaskLabel(task) {
+  const s = task?.subtasks
+  return s && s.total ? `${s.done}/${s.total} subtasks` : ''
+}
+
+/** Waiting on other tasks — derived, and never the Blocked status. */
+export function waitingLabel(task) {
+  const w = task?.waiting_for || []
+  return w.length ? `Waiting on ${w.join(', ')}` : ''
+}
+
+// Ruling 2026-11-12: a task with an agent on it set done from anything but
+// pending-verification closes without its agent's done claim. The server
+// requires a note on that write; the page asks for it on the same condition.
+export function doneWithoutClaim(task, nextStatus) {
+  return !!task && nextStatus === 'done' && !['done', 'pending-verification'].includes(task.status)
+    && !task.for_person && !!task.agent
+}
+
+export const UNCLAIMED_MEANING = 'its output may not exist; read the note on its log.'
+
+// --- the board (trinity-enterprise#957) ------------------------------------------
+//
+// A second VIEW over the same tasks: one column per step of the path a task
+// walks, a card per task. A task that is blocked, waiting on a decision or
+// paused stays in its column and says so with a badge. The columns are data, so
+// a new step of the path is one more entry here, and the server stays the
+// authority for every move — these only decide what to offer and what to send.
+
+export const BOARD_COLUMNS = Object.freeze([
+  // ent#1232: `todo` is not started yet; it shares the first column and says so with a badge.
+  Object.freeze({ key: 'active', label: 'Active', badge: 'info', statuses: Object.freeze(['todo', 'active', 'blocked', 'needs-decision', 'paused']), drop: 'active' }),
+  Object.freeze({ key: 'pending-verification', label: 'Awaiting verification', badge: 'autonomous', statuses: Object.freeze(['pending-verification']), drop: 'pending-verification' }),
+  Object.freeze({ key: 'done', label: 'Done', badge: 'success', statuses: Object.freeze(['done']), drop: 'done' }),
+])
+
+/** The statuses that hold a task where it is: shown as a badge, set from the card. */
+export const BOARD_HELD = Object.freeze(['blocked', 'needs-decision', 'paused'])
+
+const BOARD_COLUMN_MIN = 232
+const BOARD_GAP = 12
+
+/** The narrowest container the board fits; under it the list renders instead. */
+export function boardMinWidth(columns = BOARD_COLUMNS) {
+  return columns.length * BOARD_COLUMN_MIN + Math.max(0, columns.length - 1) * BOARD_GAP
+}
+
+/**
+ * The column a task sits in. A status no column names (one a newer server
+ * added) lands in the FIRST column, so a task is never missing from the board.
+ */
+export function columnOf(task, columns = BOARD_COLUMNS) {
+  const hit = columns.find((c) => c.statuses.includes(task?.status))
+  return (hit || columns[0]).key
+}
+
+/**
+ * What dropping `task` on column `toKey` means:
+ *   { kind: 'noop' }                       — its own column, or no such column
+ *   { kind: 'refused', reason }            — nothing is sent
+ *   { kind: 'move', status, confirm }      — send `{ status }`; `confirm` asks first
+ * A done task can only be reopened (to Active). Marking a task done that never
+ * waited for verification skips the evidence step, so it asks first.
+ */
+export function boardMove(task, toKey, columns = BOARD_COLUMNS) {
+  const to = columns.find((c) => c.key === toKey)
+  if (!task || !to || columnOf(task, columns) === to.key) return { kind: 'noop' }
+  if (task.status === 'done' && to.drop !== 'active') {
+    return { kind: 'refused', reason: `${task.id} is done. A done task can only be reopened: move it to Active.` }
+  }
+  return { kind: 'move', status: to.drop, confirm: to.drop === 'done' && task.status !== 'pending-verification' }
+}
+
+/** What a card's own menu offers: hold it, or let it run again. Never a path step. */
+export function boardStateActions(task) {
+  const status = task?.status
+  if (status === 'pending-verification' || status === 'done') return []
+  const out = []
+  if (BOARD_HELD.includes(status)) out.push({ status: 'active', label: 'Resume' })
+  if (status !== 'blocked') out.push({ status: 'blocked', label: 'Mark blocked' })
+  if (status !== 'needs-decision') out.push({ status: 'needs-decision', label: 'Needs a decision' })
+  if (status !== 'paused') out.push({ status: 'paused', label: 'Pause' })
+  return out
+}
+
+/**
+ * The board's columns with their cards. `inflight` maps a task id to the status
+ * a move in flight is sending: the card is drawn where it is going, marked as
+ * saving, until the server answers. Done reads newest first; the rest by id.
+ */
+export function boardColumns(tasks, { inflight = {}, members = [], myEmail = '', columns = BOARD_COLUMNS } = {}) {
+  const label = (email) => {
+    const m = (members || []).find((x) => x.email === String(email || '').toLowerCase())
+    return (m && m.label) || email || ''
+  }
+  const byId = (a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true })
+  const cards = [...(tasks || [])].sort(byId).map((t) => {
+    const saving = Object.prototype.hasOwnProperty.call(inflight, t.id)
+    const status = saving && inflight[t.id] ? inflight[t.id] : t.status
+    const known = TASK_STATUSES.includes(status)
+    return {
+      id: t.id,
+      title: t.title,
+      status,
+      saving,
+      p1: t.priority === 'p1',
+      // The column says the path step; a badge says anything else.
+      flag: BOARD_HELD.includes(status) || status === 'todo' ? { label: taskStatusLabel(status), variant: TASK_STATUS_BADGE[status] }
+        : known ? null : { label: String(status || 'No status'), variant: 'neutral' },
+      owner: t.owner ? label(t.owner) : '',
+      agent: t.agent || '',
+      creator: t.created_by ? authorLabel(t.created_by, myEmail) : '',
+      waitingOn: status === 'blocked' ? (t.waiting_on || '') : '',
+      // ent#1232: the task's shape — derived waiting, subtasks, and a done without its agent's claim.
+      waitingFor: status === 'done' ? '' : waitingLabel(t),
+      subtasks: subtaskLabel(t),
+      unclaimed: status === 'done' && !!t.closed_without_claim,
+      updatedAt: t.updated_at || null,
+      pendingSince: status === 'pending-verification' ? (t.pending_since || null) : null,
+      task: t,
+    }
+  })
+  return columns.map((c, i) => {
+    const mine = cards.filter((k) => columnOf(k, columns) === c.key)
+    if (c.drop === 'done') mine.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+    const held = BOARD_HELD
+      .map((st) => ({ status: st, label: taskStatusLabel(st).toLowerCase(), count: mine.filter((k) => k.status === st).length }))
+      .filter((h) => h.count)
+    return { key: c.key, label: c.label, badge: c.badge, first: i === 0, cards: mine, held }
+  })
+}
+
+/** "T-104 · Blocked → Awaiting verification" — the line a finished move says. */
+export function boardMoveLine(taskId, from, to) {
+  return `${taskId} · ${taskStatusLabel(from)} → ${taskStatusLabel(to)}`
+}
+
+// The Tasks view a person used last, per browser and per person.
+export const TASKS_VIEWS = Object.freeze(['list', 'board'])
+export const tasksViewKey = (email) => `trinity.workspace.projects.tasksView:${String(email || '').toLowerCase() || 'anon'}`
+
+export function readTasksView(email, storage = globalThis.localStorage) {
+  try {
+    const v = storage.getItem(tasksViewKey(email))
+    return TASKS_VIEWS.includes(v) ? v : 'list'
+  } catch { return 'list' }
+}
+
+export function writeTasksView(email, view, storage = globalThis.localStorage) {
+  if (!TASKS_VIEWS.includes(view)) return
+  try { storage.setItem(tasksViewKey(email), view) } catch { /* private window: asked again next time */ }
 }
 
 export const LOG_KINDS = ['decision', 'deliverable', 'task', 'blocker', 'handoff', 'note']
@@ -242,7 +650,7 @@ export function wrapUpPrompt(projectName) {
 
 const TASK_LOG_KIND_LABEL = {
   created: 'Created', status: 'Status', reopened: 'Reopened', done_claim: 'Done claim',
-  note: 'Note', imported: 'Imported',
+  note: 'Note', imported: 'Imported', edited: 'Edited', owner: 'Owner',
 }
 
 /** A task-log entry's kind in words ("Done claim", "Reopened"). */
@@ -337,3 +745,283 @@ export function projectNeedsYouRows(asks, mineIds, { expanded = {}, dismissals =
       ask: a,
     }))
 }
+
+// --- trinity-enterprise#1132: where a person stands on a project, in plain words ---
+// One place for the wording, so the header, the withheld-control lines and the
+// task rule never disagree. Roles come from the read (`my_role`: creator /
+// member / null for a company viewer); a guest has its own narrow page.
+
+/** The one email comparison (case-insensitive), shared by every project control. */
+export const sameEmail = (a, b) => Boolean(a) && Boolean(b) && String(a).toLowerCase() === String(b).toLowerCase()
+const same = sameEmail
+
+/** The creator, as the reader should see them. */
+export function creatorName(project, myEmail) {
+  const c = project?.created_by || ''
+  return same(c, myEmail) ? 'you' : (c || 'the creator')
+}
+
+/** The header's one line: my role on this project and what it lets me do. */
+export function roleLine(project, myEmail) {
+  const role = project?.my_role || null
+  const creator = creatorName(project, myEmail)
+  if (project?.archived_at) {
+    return role === 'creator' || creator === 'you'
+      ? 'This project is archived. Nothing on it changes until you restore it.'
+      : `This project is archived. Nothing on it changes until ${creator} restores it.`
+  }
+  if (role === 'creator') {
+    return 'You created this project. You can change its name, goal, steward, members, visibility and tasks, and write in the log.'
+  }
+  if (role === 'member') {
+    return `You're a member. You can add and change tasks, write in the log and add files. Only ${creator} changes the name, goal, steward, members and visibility.`
+  }
+  if (!role && project?.visibility === 'company') {
+    // ent#1132 part 2: with Ask to join offered, the line points at it.
+    const ask = project?.my_request?.can_ask_to_join ? `Ask to join, and ${creator} decides.` : `Ask ${creator} to add you as a member.`
+    return `You can view this project because it's open to everyone at the company. You can chat with its agents about it, but only members add or change tasks, the log and files. ${ask}`
+  }
+  return `You can view this project. ${creator === 'you' ? 'You decide' : `${creator} decides`} who else can change it.`
+}
+
+/**
+ * The line shown IN PLACE of a withheld control (no lost layout). `what` names
+ * the thing: "tasks", "log entries", "files and reports". Decided from the
+ * SAME inputs the control's own v-if uses (`canContribute`, `archived`), and
+ * only for someone who is not a member (a member has nobody to ask to be
+ * added; an archived project already says why nothing changes).
+ */
+export function withheldLine({ project, myEmail, canContribute, archived }, what) {
+  if (canContribute || archived || !project) return ''
+  if (project.my_role === 'creator' || project.my_role === 'member') return ''
+  if (project.my_request?.can_ask_to_join) return `Only members add or change ${what}. Use Ask to join at the top of the page.`
+  return `Only members add or change ${what}. Ask ${creatorName(project, myEmail)} to add you.`
+}
+
+/**
+ * Who confirms a finished task: a member, or the steward agent when it is an
+ * ACTIVE agent on the project (only then can it verify — projects/work.py).
+ */
+export function verificationRule(project) {
+  const s = project?.steward
+  const active = s?.kind === 'agent'
+    && (project?.agents || []).some((a) => a.agent_name === s.ref && a.state === 'active')
+  const who = active ? `a member, or the steward agent ${s.ref},` : 'a member'
+  return `An agent's completion claim waits here until ${who} confirms it.`
+}
+
+// --- trinity-enterprise#1193: context for agents ------------------------------------
+/** One agent read returns at most this many bytes; past it the agent reads on by offset. */
+export const AGENT_READ_BYTES = 200 * 1024
+/** A file an agent can read as text (the server's `context._is_text`). */
+export const isTextMime = (mime) => {
+  const m = String(mime || '')
+  return m.startsWith('text/') || m === 'application/json' || m === 'application/x-yaml'
+}
+export const CONTEXT_SHARED_NOTICE = 'Everyone who can read this project can read it.'
+
+/**
+ * What an agent receives from one read of `text`: the first part, and whether it
+ * is cut. `budget` is the server's `context_limits.agent_read_bytes` (the page
+ * read carries it); the constant is only the fallback for an older read. The cut
+ * mirrors `context._part` on the server (a character is never split).
+ */
+export function agentPreview(text, budget = AGENT_READ_BYTES) {
+  const bytes = new TextEncoder().encode(text || '')
+  if (bytes.length <= budget) return { text: text || '', truncated: false, total: bytes.length, shown: bytes.length }
+  let end = budget
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1     // never split a character
+  return { text: new TextDecoder().decode(bytes.slice(0, end)), truncated: true, total: bytes.length, shown: end }
+}
+
+// --- trinity-enterprise#1132 part 2: Ask to join ------------------------------------
+/**
+ * What the page shows a company viewer about joining, from the read's
+ * `my_request`: `ask` (offer the button), `pending` (waiting on the creator),
+ * `declined` (the reason, and Ask again), or null (nothing to say — a member,
+ * a guest, an older backend, or a read that failed).
+ */
+export function joinRequestState(project) {
+  const mine = project?.my_request
+  if (!mine || mine.unknown) return null
+  const last = mine.last && mine.last.request === 'join' ? mine.last : null
+  if (last && last.state === 'pending') return { kind: 'pending', waitingOn: last.waiting_on || project.created_by }
+  if (!mine.can_ask_to_join) return null
+  if (last && last.state === 'declined') return { kind: 'declined', reason: last.reason || null }
+  return { kind: 'ask' }
+}
+
+// --- ent#1235: the lifecycle, the mode and a task's run -----------------------------
+// Read tolerantly: a value this page doesn't know never breaks it — it reads as
+// "Unknown" and offers nothing, rather than guessing a state that lets work start.
+
+const STATE_OF_STATUS = { not_started: 'not_started', active: 'running', paused: 'stopped', done: 'done' }
+const STATE_LABEL = { not_started: 'Not started', running: 'Running', stopped: 'Stopped', done: 'Done', archived: 'Archived' }
+export const STATE_BADGE = Object.freeze({
+  not_started: 'neutral', running: 'success', stopped: 'warning', done: 'neutral', archived: 'locked',
+})
+
+/** `not_started | running | stopped | done | archived`, or `unknown`. */
+export function projectState(project) {
+  if (!project) return 'unknown'
+  if (project.archived_at) return 'archived'
+  if (STATE_LABEL[project.state]) return project.state
+  return STATE_OF_STATUS[project.status] || 'unknown'
+}
+
+export function stateLabel(state) {
+  return STATE_LABEL[state] || 'Unknown'
+}
+
+const STATUS_VERB = { active: 'Started', paused: 'Stopped', done: 'Marked done' }
+
+/** Who last changed the lifecycle, as "Started by you" — '' when no one has yet. */
+export function stateBy(project, myEmail) {
+  const by = project?.status_by
+  const verb = STATUS_VERB[project?.status]
+  if (!by || !verb) return ''
+  const who = sameEmail(by, myEmail) ? 'you' : String(by).startsWith('agent:') ? String(by).slice(6) : String(by)
+  return `${verb} by ${who}`
+}
+
+/** What the header offers a person with edit rights: Start or Stop, and Mark done.
+ *  An unknown state OR mode offers nothing — never a guess that lets work start. */
+export function lifecycleActions(project) {
+  if (!project?.can?.edit || project.archived_at) return { primary: null, markDone: false }
+  if (!PROJECT_MODES.includes(projectMode(project))) return { primary: null, markDone: false }
+  const state = projectState(project)
+  const primary = {
+    not_started: { verb: 'start', label: 'Start project' },
+    running: { verb: 'stop', label: 'Stop project' },
+    stopped: { verb: 'start', label: 'Start project' },
+    done: { verb: 'start', label: 'Reopen project' },
+  }[state] || null
+  return { primary, markDone: ['not_started', 'running', 'stopped'].includes(state) }
+}
+
+/** The stop dialog's words: the runs still finishing, named, or said honestly when unknown. */
+export function stopMessage(project) {
+  const head = 'Nothing new starts until someone starts it again.'
+  const live = project?.runs_live
+  if (!Array.isArray(live)) return `${head} Runs already under way finish.`
+  if (!live.length) return `${head} No run is under way.`
+  const named = live.map((r) => `${r.task_id || 'a task'}${r.agent_name ? ` on ${r.agent_name}` : ''}`).join(', ')
+  return `${head} ${live.length === 1 ? 'This run is' : 'These runs are'} still finishing: ${named}.`
+}
+
+/** Why a task's run can't start on a project that isn't running, or ''. */
+export function notRunningLine(state) {
+  return {
+    not_started: "This project hasn't been started, so no run starts yet. Someone with edit rights starts it.",
+    stopped: 'This project is stopped, so no new run starts. Runs already under way finish.',
+    done: 'This project is done. Reopen it to start a run.',
+    unknown: "This project's state isn't known here, so no run is offered. Reload the page.",
+  }[state] || ''
+}
+
+export const PROJECT_MODES = ['track', 'propose', 'auto']
+const MODE_LABEL = { track: 'Track', propose: 'Propose', auto: 'Auto' }
+const MODE_HINT = {
+  track: "A person starts each task's run. The steward keeps the record.",
+  propose: 'The steward proposes runs; each one waits for a person\'s go.',
+  auto: "The steward starts runs itself, except tasks held for a person's go.",
+}
+
+/** The project's mode; a project read without one is Track (the safe default). */
+export function projectMode(project) {
+  return project?.mode == null ? 'track' : String(project.mode)
+}
+
+export function modeLabel(mode) {
+  return MODE_LABEL[mode] || 'Unknown'
+}
+
+export function modeHint(mode) {
+  return MODE_HINT[mode] || ''
+}
+
+const RUN_STATE_LABEL = {
+  proposed: 'Waiting for a go', started: 'Running', declined: 'Declined', withdrawn: 'Withdrawn', ended: 'Ended',
+}
+const RUN_END_LABEL = {
+  completed: 'Finished', failed: 'Failed', skipped: 'Skipped', gated: 'Stopped by a gate',
+  dispatch_lost: 'Never started', dispatch_failed: "Couldn't start",
+}
+export const RUN_BADGE = Object.freeze({
+  proposed: 'warning', started: 'info', declined: 'neutral', withdrawn: 'neutral', ended: 'neutral',
+})
+
+/** A run in words: its state, or how it ended. */
+export function runLabel(run) {
+  if (!run) return ''
+  if (run.state === 'ended') return RUN_END_LABEL[run.end_status] || 'Ended'
+  return RUN_STATE_LABEL[run.state] || 'Unknown'
+}
+
+/** A task's run that is still live (proposed or running), or null. */
+export function liveRun(task) {
+  const run = task?.run
+  return run && (run.state === 'proposed' || run.state === 'started') ? run : null
+}
+
+const RUN_OUTCOME = {
+  started: 'Started', declined: 'Declined', proposed: 'Still waiting',
+  run_not_found: 'Not found on this project', already_decided: 'Already decided by someone else',
+  mode_track: 'The project is in Track now, so a person starts it',
+  agent_not_on_project: 'Its agent is no longer on the project',
+  origin_cannot_view: "You can't see this project's work for that agent",
+  agent_consent_predates_runs: "Its agent's owner hasn't approved runs yet",
+  dispatch_failed: "Couldn't start right now; try again",
+  task_waiting: 'The task waits on another task', task_blocked: 'The task is blocked',
+  task_done: 'The task is done', task_awaiting_check: 'The task is waiting for its check',
+  archived: 'The project is archived',
+}
+
+/** One id's outcome from Approve / Decline, in words — every code has a line. */
+export function runOutcomeLabel(outcome) {
+  if (!outcome) return ''
+  return RUN_OUTCOME[outcome] || CODE_MESSAGE[outcome] || `Not done (${outcome})`
+}
+
+/** Why a task needs a person's decision: the steward's last send-back, or the rule. */
+export function needsDecisionReason(task) {
+  if (!task?.needs_decision) return ''
+  const line = [...(task.log || [])].reverse().find((l) => /needs a decision/i.test(l.body || ''))
+  const why = line?.body?.replace(/\s*\(rejected twice — needs a decision\)\s*$/i, '').trim()
+  return why
+    ? `Rejected twice. The last reason: ${why}`
+    : 'Rejected twice. A person decides what happens next.'
+}
+
+// --- trinity-enterprise#1240: a task's GitHub issues and PRs ---------------------
+// Read-only: Trinity reads title and state. A merged PR or a closed issue is
+// evidence for a done claim, never a done. "Couldn't read" is the warning tone,
+// never the closed one — a failed read must not look like finished work.
+
+export const REF_STATE_BADGE = Object.freeze({
+  open: Object.freeze({ label: 'Open', variant: 'success' }),
+  merged: Object.freeze({ label: 'Merged', variant: 'purple' }),
+  closed: Object.freeze({ label: 'Closed', variant: 'neutral' }),
+  not_planned: Object.freeze({ label: 'Not planned', variant: 'neutral' }),
+  unreadable: Object.freeze({ label: "Couldn't read", variant: 'warning' }),
+})
+
+/** The badge for one ref: unreadable whenever the latest read did not succeed. */
+export function refBadge(ref) {
+  if (!ref || ref.readable === false) return REF_STATE_BADGE.unreadable
+  return REF_STATE_BADGE[ref.state] || REF_STATE_BADGE.unreadable
+}
+
+/** The link target, only for an https:// url; anything else renders as text. */
+export function refHref(ref) {
+  const url = ref && ref.url
+  return typeof url === 'string' && url.startsWith('https://') ? url : null
+}
+
+/** `owner/repo#N`. */
+export function refLabel(ref) {
+  return `${ref?.repo || ''}#${ref?.number ?? ''}`
+}
+
+export const REFS_MAX = 10
+export const REF_TEXT_MAX = 300

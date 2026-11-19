@@ -90,8 +90,23 @@ For complete documentation, see the GitHub repository.
 /**
  * Create documentation tools
  */
-export function createDocsTools() {
-  return {
+/**
+ * #4499: whether `ask_trinity` may exist on this instance. The tool sends an
+ * agent's free text to a vendor-hosted docs service, so the operator's
+ * run-time switches decide it — the same two the backend reads:
+ * `ASK_TRINITY_ENABLED=false`, or the cross-tool `DO_NOT_TRACK` (any value but
+ * 0 / empty / false). Off means the tool is never registered: it is absent
+ * from every listing and cannot be called, which a refusal at call time would
+ * not give.
+ */
+export function askTrinityEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const flag = (env.ASK_TRINITY_ENABLED ?? "true").trim().toLowerCase();
+  const dnt = (env.DO_NOT_TRACK ?? "0").trim().toLowerCase();
+  return flag !== "false" && ["0", "", "false"].includes(dnt);
+}
+
+export function createDocsTools(env: NodeJS.ProcessEnv = process.env) {
+  const tools = {
     // ========================================================================
     // get_agent_requirements - Get Trinity-compatible agent requirements
     // ========================================================================
@@ -151,4 +166,7 @@ export function createDocsTools() {
       },
     },
   };
+  if (askTrinityEnabled(env)) return tools;
+  const { askTrinity: _off, ...rest } = tools;
+  return rest;
 }

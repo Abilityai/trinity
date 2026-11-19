@@ -27,10 +27,14 @@ export function closedInviteMessage(code) {
 }
 
 /**
- * Where an accepted (or never-gated) person goes from the terms page: the page
- * they were sent from, role-aware — never the terms page itself.
+ * Where an accepted (or never-gated) person goes from the terms page: the
+ * landing the accept named (trinity-enterprise#1170 — e.g. the conversation
+ * with the agent just handed to them), else the page they were sent from,
+ * role-aware — never the terms page itself.
  */
-export function afterTermsLocation(rawRedirect, role) {
+export function afterTermsLocation(rawRedirect, role, landing) {
+  const named = safeRedirect(landing, null)
+  if (named && !isTermsPath(named)) return landingAfterSignIn(named, role)
   const target = safeRedirect(rawRedirect, null)
   return landingAfterSignIn(target && !isTermsPath(target) ? target : undefined, role)
 }

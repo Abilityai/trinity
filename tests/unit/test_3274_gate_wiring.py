@@ -98,12 +98,14 @@ def _maintenance_phase():
 def test_startup_registers_the_skill_gate_ending_observer(monkeypatch):
     import services.ask_service as ask_service
     import services.skill_gate_service as sgs
+    from shared_sessions import service as rooms
 
     monkeypatch.setattr(ask_service, "_observers", [])
     phase, started, logger = _maintenance_phase()
     asyncio.run(phase())
     assert "operator_queue" in started                      # the slice really ran
-    assert ask_service._observers == [sgs.on_ending]
+    # abilityai/trinity-enterprise#1135: the rooms' ending line, after the gate
+    assert ask_service._observers == [sgs.on_ending, rooms.on_ask_ending]
     logger.error.assert_not_called()
 
 

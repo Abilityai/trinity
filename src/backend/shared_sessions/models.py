@@ -46,6 +46,13 @@ class RoomCloseRequest(BaseModel):
     reason: Optional[str] = Field(default="user_closed", max_length=50)
 
 
+class RoomContinueRequest(BaseModel):
+    """trinity#4302 — the `seq` of the `chain_paused` row the person is
+    continuing from (`paused_chain.seq` on the room payload). The service
+    refuses a seq that is not the room's live offer with a named 409."""
+    seq: int = Field(ge=1)
+
+
 # --- Operator room-budget defaults (ent#387) -------------------------------
 
 class RoomBudgetDefaults(BaseModel):

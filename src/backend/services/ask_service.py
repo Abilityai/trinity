@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
@@ -126,25 +127,108 @@ class AskConflict(Exception):
         self.item = item
 
 
+# abilityai/trinity-enterprise#1096: the decider order's three seats, as the
+# platform stamps them on a gate approval (`_WORKSPACE_DECIDER_SEAT_KEY`).
+PRIMARY_SEAT = "primary"
+OWNER_SEAT = "owner"
+ADMIN_SEAT = "admin"
+DECIDER_SEATS = (PRIMARY_SEAT, OWNER_SEAT, ADMIN_SEAT)
+_SEAT_LABELS = {PRIMARY_SEAT: "the agent's primary", OWNER_SEAT: "the agent's owner",
+                "approver": "the agent's approver"}
+# Why a card fell to the admins (`role_addressing.operators_reason`).
+_OPERATORS_REASON_TEXT = {"owner_no_email": "the agent's owner has no email",
+                          "no_owner": "the agent has no owner"}
+
+
 class AskNotAddressee(Exception):
     """trinity-enterprise#751: a gated-skill approval may be decided only by a
-    person it was addressed to (an admin may cancel it, never approve it).
+    person it was addressed to (an admin may cancel it; it may decide one only
+    on the admin seat, trinity-enterprise#1096).
     trinity-enterprise#1042: so may an ask addressed to a canon role id —
-    `role` is that `role:<id>` (or `approver`, #1053), None for any other ask."""
+    `role` is that `role:<id>` (or `approver`, #1053; or `project`,
+    trinity-enterprise#1134), None for any other ask.
 
-    def __init__(self, item_id: str, *, role: Optional[str] = None):
+    trinity-enterprise#1096: every refusal names who the card waits for —
+    `waiting_on` (the people) and `seat` (`primary` | `owner` | `admin`, or the
+    role the row was addressed to). Both reach the 403 `detail` on every door;
+    the caller who gets the refusal already reads `waiting_on` on the card
+    (`addressed_view`), so nothing new is disclosed. `gate` marks a gate
+    approval, the one kind whose MESSAGE names the person (R7)."""
+
+    def __init__(self, item_id: str, *, role: Optional[str] = None,
+                 waiting_on: Optional[List[str]] = None, seat: Optional[str] = None,
+                 operators_reason: Optional[str] = None, gate: bool = False):
         super().__init__("not_addressee")
         self.item_id = item_id
         self.role = role
+        self.waiting_on = list(waiting_on or [])
+        self.seat = seat
+        self.operators_reason = operators_reason
+        self.gate = gate
+
+    def message(self, *, cancelling: bool = False, admin_verbs: bool = False) -> str:
+        """The refusal's text: a role-addressed ask keeps `role_message` (no
+        person — the text reaches a model through MCP); a gate approval names
+        its seat and its people; anything else keeps the generic wording.
+        `admin_verbs` (the Operations door, for an admin) adds what an admin can
+        do instead — never on the Workspace door, which has no such verbs."""
+        role_text = self.role_message(cancelling=cancelling)
+        if role_text is not None:
+            return role_text
+        if not self.gate:
+            if cancelling:
+                return "This approval was addressed to someone else; only they or an admin can cancel it."
+            return "This approval was addressed to someone else; only they can decide it."
+        if self.seat == ADMIN_SEAT and not self.waiting_on:
+            why = _OPERATORS_REASON_TEXT.get(self.operators_reason or "")
+            text = ("This approval waits for an instance admin"
+                    + (f" ({why})." if why else ".")
+                    + (" Only an admin can cancel it." if cancelling
+                       else " Only an instance admin can decide it."))
+        elif self.waiting_on:
+            text = (f"This approval waits for {_SEAT_LABELS.get(self.seat or '', 'the person it was addressed to')}: "
+                    f"{', '.join(self.waiting_on)}."
+                    + (" Only they or an admin can cancel it." if cancelling
+                       else " Only they can decide it."))
+        else:
+            text = ("This approval waits for nobody who can decide it."
+                    + (" Only an admin can cancel it." if cancelling else ""))
+        if admin_verbs:
+            text += " An admin can re-address it or end it with a reason."
+        return text
+
+    def detail(self, *, cancelling: bool = False, admin_verbs: bool = False) -> Dict[str, Any]:
+        """The 403 body every door returns: the code, the message, and who the
+        card waits for — `seat` always; `waiting_on` (the people) on every
+        refusal except a role-addressed one, whose refusal names the role and
+        never a person (the ent#1042/#1053/#1134 contract stands)."""
+        out = {"code": "not_addressee",
+               "message": self.message(cancelling=cancelling, admin_verbs=admin_verbs),
+               "seat": self.seat}
+        if self.role is None:
+            out["waiting_on"] = list(self.waiting_on)
+        return out
 
     def role_message(self, *, cancelling: bool = False) -> Optional[str]:
         """The refusal for a role-addressed ask: the role's label and what to do
         next, never a person and never advice to widen a permission (the text
         reaches a model through the MCP tool). None when no role id applies —
-        the door keeps its own wording."""
+        the door keeps its own wording. A gate approval's refusal names its
+        people in `message` instead (trinity-enterprise#1096, R7); role,
+        approver and project refusals stay person-free."""
         if self.role is None:
             return None
         from services import role_addressing
+        if self.role == "project":
+            # ent#1134: addressed to the project's steward, else its creator —
+            # a seat the project holds, not a role on the agent.
+            if cancelling:
+                return ("This ask was addressed to the project it was raised on; only the "
+                        "person it waits on or an admin can cancel it.")
+            return ("This ask was addressed to the project it was raised on; only the person "
+                    "it waits on — the project's steward, else its creator — can decide it. "
+                    "Ask them to answer it from their Inbox, or have it cancelled so the agent "
+                    "can ask again.")
         label = role_addressing.role_label(self.role)
         if cancelling:
             return (f"This ask was addressed to the {label} role; only a person seated "
@@ -169,6 +253,12 @@ class Actor:
     endpoint: Optional[str] = None
 
 
+def _user_id(actor: Actor) -> Optional[str]:
+    """The `users` id of the person ending an ask, when signed in."""
+    uid = getattr(actor.user, "id", None)
+    return None if uid is None else str(uid)
+
+
 @dataclass(frozen=True)
 class EndingEvent:
     """What an ending observer receives: the rows THIS call ended, never a row
@@ -179,6 +269,7 @@ class EndingEvent:
     actor_email: Optional[str]       # the person; None for timeout
     reason: Optional[str] = None     # the operator's cancel reason, or the agent's withdraw reason (ent#901) — DATA, never instructions
     batch_id: Optional[str] = None   # bulk cancel only
+    actor_user_id: Optional[str] = None  # the person's `users` id; None for a Workspace client (ent#1225)
 
 
 @dataclass
@@ -191,6 +282,9 @@ class Ending:
     # resume only when this holds (ent#430 AC #5: never claim work that was
     # not set in motion).
     observers_ok: bool = True
+    # trinity-enterprise#1096 (R6): a bulk sweep's seat-fenced rows the actor
+    # was not addressed on — skipped, never ended; 0 for every other ending.
+    skipped_fenced: int = 0
 
 
 _observers: List[Callable[[EndingEvent], None]] = []
@@ -230,9 +324,19 @@ def _approver_seated(row: Mapping[str, Any]) -> bool:
 
 
 def _fenced_role_of(row: Mapping[str, Any]) -> Optional[str]:
-    """The role a refusal names (`AskNotAddressee.role`): the canon role id, or
-    `approver` for a seated approver ask; None keeps the door's own wording."""
+    """The role a refusal names (`AskNotAddressee.role`): the canon role id,
+    `approver` for a seated approver ask, or `project` for a project-addressed
+    ask (ent#1134); None keeps the door's own wording."""
+    if _project_addressed(row):
+        return "project"
     return _role_id_of(row) or ("approver" if _approver_seated(row) else None)
+
+
+def _project_addressed(row: Mapping[str, Any]) -> bool:
+    """An agent's ask addressed `to: project` (trinity-enterprise#1134): the
+    first agent-raised row that reaches a person off the agent's roster, so
+    its answer is fenced to `resolved_to` like a canon-role ask's."""
+    return row.get("to_role") == "project"
 
 
 def _seat_fenced(row: Mapping[str, Any], *, cancelling: bool = False) -> bool:
@@ -241,16 +345,18 @@ def _seat_fenced(row: Mapping[str, Any], *, cancelling: bool = False) -> bool:
     so a card never offers a control the sink would refuse.
 
     - A gated-skill approval (trinity-enterprise#751): its answer AND its cancel.
-    - An ask addressed to a canon role id (trinity-enterprise#1042), or to the
-      `approver` kind with a seat snapshot (trinity-enterprise#1053): its answer
-      only — a cancel keeps the rule every ask has.
+    - An ask addressed to a canon role id (trinity-enterprise#1042), to the
+      `approver` kind with a seat snapshot (trinity-enterprise#1053), or to
+      the turn's project (trinity-enterprise#1134 — the steward, else the
+      creator, who may be off the agent's roster): its answer only — a cancel
+      keeps the rule every ask has.
     The other kinds, and a legacy `approver` row with no snapshot, are not
     fenced here."""
     if row.get("raised_by") == "gate" and row.get("type") == "approval":
         return True
     if cancelling:
         return False
-    return _role_id_of(row) is not None or _approver_seated(row)
+    return _role_id_of(row) is not None or _approver_seated(row) or _project_addressed(row)
 
 
 def _resolved_people(row: Mapping[str, Any]) -> List[str]:
@@ -266,6 +372,65 @@ def _resolved_people(row: Mapping[str, Any]) -> List[str]:
     return list(dict.fromkeys(str(p).strip() for p in resolved if str(p).strip()))
 
 
+def _context_of(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """The row's context as a dict (stored text or parsed); anything else is {}."""
+    ctx = row.get("context")
+    if isinstance(ctx, str):
+        try:
+            ctx = json.loads(ctx)
+        except ValueError:
+            return {}
+    return dict(ctx) if isinstance(ctx, dict) else {}
+
+
+def _decider_seat(row: Mapping[str, Any]) -> Optional[str]:
+    """The decider seat the PLATFORM stamped on the row
+    (trinity-enterprise#1096), or None. Platform-only: stripped from anything
+    an agent authored at both ingest boundaries."""
+    from services import operator_queue_service as oqs
+    seat = _context_of(row).get(oqs._WORKSPACE_DECIDER_SEAT_KEY)
+    return seat if seat in DECIDER_SEATS else None
+
+
+def _gate_approval(row: Mapping[str, Any]) -> bool:
+    return row.get("raised_by") == "gate" and row.get("type") == "approval"
+
+
+def _admin_seated(row: Mapping[str, Any]) -> bool:
+    """A gate approval the decider order left to an instance admin
+    (trinity-enterprise#1096, arm three): raised by the gate, an approval,
+    NOBODY in its snapshot, and the platform's `admin` seat stamp. The stamp is
+    never the only authority (R8) — an un-stamped empty gate approval stays
+    "nobody", exactly as before."""
+    return _gate_approval(row) and not _resolved_people(row) and _decider_seat(row) == ADMIN_SEAT
+
+
+def _gate_admin(user: Any) -> bool:
+    """Whether `user` would pass the admin gate AND is a person — the same
+    predicate `require_admin` + `require_person` apply at a route (#2323's
+    `ADMIN_GATE_SCOPES` allowlist; a principal without `mcp_scope` fails
+    closed). Repeated in the sink so the admin arm never rests on a raw
+    `role == "admin"` (R8)."""
+    if user is None:
+        return False
+    from fastapi import HTTPException
+    from dependencies import assert_admin, assert_person
+
+    try:
+        assert_admin(user)
+        assert_person(user)
+    except HTTPException:
+        return False
+    except Exception:  # noqa: BLE001 — a stand-in that does not look like a principal
+        return False
+    return True
+
+
+def _addressed(row: Mapping[str, Any], actor: "Actor") -> bool:
+    email = (getattr(actor, "email", None) or "").strip().casefold()
+    return bool(email) and email in {p.casefold() for p in _resolved_people(row)}
+
+
 def may_end(row: Mapping[str, Any], actor: "Actor", *, cancelling: bool = False) -> bool:
     """Who may end an ask — the one rule every ending door shares
     (trinity-enterprise#751; the operator routes, the Workspace answer and a
@@ -277,16 +442,20 @@ def may_end(row: Mapping[str, Any], actor: "Actor", *, cancelling: bool = False)
     a canon role id (trinity-enterprise#1042 — the role addresses the ask, the
     seat authorises the answer) or to the approver (#1053). An empty or
     unreadable snapshot is nobody — except on an `approver` row, which is then
-    not fenced at all (a legacy row, open as it was). An
-    admin may CANCEL a gate approval — the escalation — but never decide a
-    fenced ask. Every other ending keeps the rule it had: any person with access
-    to the agent, checked by the caller. Person-only endings stay the routes'
-    check (`dependencies.reject_non_person_principal`), since an agent key
-    carries its owner's email."""
+    not fenced at all (a legacy row, open as it was), and on a gate approval
+    the platform stamped with the `admin` decider seat
+    (trinity-enterprise#1096): an instance admin who is a person decides that
+    one (`_admin_seated` + `_gate_admin`). An admin may CANCEL a gate approval
+    — the escalation — but never decide any other fenced ask. Every other
+    ending keeps the rule it had: any person with access to the agent, checked
+    by the caller. Person-only endings stay the routes' check
+    (`dependencies.reject_non_person_principal`), since an agent key carries
+    its owner's email."""
     if not _seat_fenced(row, cancelling=cancelling):
         return True
-    email = (getattr(actor, "email", None) or "").strip().casefold()
-    if email and email in {p.casefold() for p in _resolved_people(row)}:
+    if _addressed(row, actor):
+        return True
+    if _admin_seated(row) and _gate_admin(getattr(actor, "user", None)):
         return True
     return cancelling and getattr(getattr(actor, "user", None), "role", None) == "admin"
 
@@ -301,10 +470,92 @@ def addressed_view(row: Mapping[str, Any], actor: "Actor") -> Optional[Dict[str,
     fenced ask belongs to the people it was addressed to; without this an admin
     saw Approve / Decline on someone else's decision and learned only from the
     refusal that it was not theirs. An empty snapshot waits on nobody and nobody
-    may decide it — the sink's answer, never None."""
+    may decide it — the sink's answer, never None. A row the platform stamped
+    with a decider seat (trinity-enterprise#1096) also says which seat it waits
+    on (`waiting_on_seat`; `admin` with nobody in `waiting_on` is the admin
+    seat); an un-stamped row keeps its shape."""
     if not _seat_fenced(row):
         return None
-    return {"waiting_on": _resolved_people(row), "can_decide": may_end(row, actor)}
+    view = {"waiting_on": _resolved_people(row), "can_decide": may_end(row, actor)}
+    seat = _decider_seat(row)
+    if seat is not None:
+        view["waiting_on_seat"] = seat
+    return view
+
+
+def not_addressee(row: Mapping[str, Any]) -> AskNotAddressee:
+    """The refusal for `row`, naming who it waits for (trinity-enterprise#1096):
+    the people, the seat (the decider stamp, else the role the row was
+    addressed to) and, on the admin seat, why it fell there."""
+    from services import operator_queue_service as oqs
+    seat = _decider_seat(row) or _fenced_role_of(row) or row.get("to_role")
+    reason = _context_of(row).get(oqs._WORKSPACE_OPERATORS_REASON_KEY)
+    return AskNotAddressee(row.get("id"), role=_fenced_role_of(row),
+                           waiting_on=_resolved_people(row), seat=seat,
+                           operators_reason=reason if isinstance(reason, str) else None,
+                           gate=_gate_approval(row))
+
+
+def readdressed_detail(row: Mapping[str, Any], *, name_people: bool = True) -> Dict[str, Any]:
+    """The 409 body for an ending that lost to a re-address
+    (trinity-enterprise#1096, R5): who the card waits for now. The Operations
+    door names the people (its caller reads them on the card anyway); the
+    Workspace door passes `name_people=False` — the person it moved away from
+    is no longer on it, and never learns who is. A role, approver or project
+    row names its role and seat only, on every door (R7)."""
+    e = not_addressee(row)
+    if not name_people:
+        return {"code": "readdressed",
+                "message": "This ask was moved to someone else before your answer landed; "
+                           "it no longer waits for you. Nothing was recorded."}
+    if e.role is not None:
+        # R7: a role, approver or project row names its role and seat, never a
+        # person — the `AskNotAddressee.detail` shape (the text reaches a model
+        # through MCP).
+        return {"code": "readdressed",
+                "message": "This card was re-addressed before your answer landed. "
+                           f"{e.role_message()} Nothing was recorded.",
+                "seat": e.seat}
+    if e.seat == ADMIN_SEAT and not e.waiting_on:
+        who = "an instance admin"
+    elif e.waiting_on:
+        who = (f"{_SEAT_LABELS.get(e.seat or '', 'the person it was addressed to')}: "
+               f"{', '.join(e.waiting_on)}")
+    else:
+        who = "nobody who can decide it"
+    return {"code": "readdressed",
+            "message": f"This card was re-addressed and now waits for {who}. Nothing was recorded.",
+            "waiting_on": e.waiting_on, "seat": e.seat}
+
+
+def _ledger_email(row: Mapping[str, Any], actor: "Actor") -> str:
+    """The email an ending records. An admin with no email deciding through
+    the admin arm (trinity-enterprise#1096, R9) is recorded `admin:<username>`
+    — never a bare username where every reader expects an email."""
+    email = actor.email or ""
+    if "@" in email or not _admin_seated(row):
+        return email
+    username = getattr(getattr(actor, "user", None), "username", None) or email
+    return f"admin:{username}" if username else email
+
+
+def _address_unchanged(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """trinity-enterprise#1096 (R5): the stored address of a seat-fenced row,
+    raw, when it still matches the caller's read of `row`; None when a
+    re-address moved it meanwhile (or the row is gone). The raw values feed the
+    ending's compare-and-set, so a re-address landing after this read is also
+    caught. A row that is not seat-fenced is never compared — its ending does
+    not depend on who it is addressed to."""
+    raw = db.read_operator_queue_address(row["id"])
+    if not raw:
+        return None
+    if (sorted(p.casefold() for p in _resolved_people(raw))
+            != sorted(p.casefold() for p in _resolved_people(row))
+            or (raw.get("addressed_to_email") or "").casefold()
+            != (row.get("addressed_to_email") or "").casefold()
+            or _decider_seat(raw) != _decider_seat(row)):
+        return None
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -344,23 +595,26 @@ def answer(
         raise NotOffMenuError()
     validate_response_choice(item, response, response_text=response_text)
     if not may_end(item, actor):
-        raise AskNotAddressee(item["id"], role=_fenced_role_of(item))
+        raise not_addressee(item)
+    expect = _ending_expectation(item, actor)
     from services.operator_queue_service import is_platform_minted
     updated = db.respond_to_operator_queue_item(
         item_id=item["id"],
         response=response,
         response_text=response_text,
         responded_by_id=responded_by_id,
-        responded_by_email=actor.email,
+        responded_by_email=_ledger_email(item, actor),
         divergence_acknowledged=divergence_acknowledged,
         # #2372: a platform alert has no agent audience — nobody will ever
         # acknowledge it from a file, so the person's answer is its last event.
         terminal=is_platform_minted(item),
+        # trinity-enterprise#1096 (R5): only a seat-fenced row compares its address.
+        **({"expect_address": expect} if expect is not None else {}),
     )
     if not updated:
         raise AskNotFound(item["id"])
     if updated.pop("_status_conflict", False):
-        raise AskConflict(_conflict_code(updated), updated)
+        raise AskConflict(_conflict_code(updated, address_compared=expect is not None), updated)
     audit = [_audit_row("answered", updated, actor,
                         {"divergence_acknowledged": bool(divergence_acknowledged)})]
     trigger = _broadcast_payload({"type": "operator_queue_responded",
@@ -378,19 +632,31 @@ def decided_by_options(item: Dict[str, Any]) -> bool:
 
 def cancel(item_id: str, *, actor: Actor, reason: Optional[str] = None) -> Ending:
     """A person cancelled one ask. Raises `AskNotFound` / `AskConflict` /
-    `AskNotAddressee` (a gate approval the actor may not end, #751)."""
+    `AskNotAddressee` (a gate approval the actor may not end, #751), or
+    `AskReasonRequired` (trinity-enterprise#1096): an admin ending a
+    seat-fenced card they are not addressed on — someone else's decision, or
+    the admin seat's — gives a reason, recorded on the row like any cancel's."""
     current = db.get_operator_queue_item(item_id)
     if current and not may_end(current, actor, cancelling=True):
-        raise AskNotAddressee(item_id, role=_fenced_role_of(current))
-    updated = db.cancel_operator_queue_item(item_id, disposed_by_email=actor.email, reason=reason)
+        raise not_addressee(current)
+    if (current and _seat_fenced(current, cancelling=True) and not _addressed(current, actor)
+            and not (reason or "").strip()):
+        raise AskReasonRequired(item_id)
+    expect = _ending_expectation(current, actor, cancelling=True) if current else None
+    updated = db.cancel_operator_queue_item(
+        item_id, disposed_by_email=_ledger_email(current or {}, actor), reason=reason,
+        **({"expect_address": expect} if expect is not None else {}))
     if not updated:
         raise AskNotFound(item_id)
     if updated.pop("_status_conflict", False):
-        raise AskConflict("not_pending", updated)
+        code = ("readdressed" if expect is not None and updated.get("status") == "pending"
+                else "not_pending")
+        raise AskConflict(code, updated)
     audit = [_audit_row("cancelled", updated, actor, {"has_reason": bool(reason)})]
     trigger = _broadcast_payload({"type": "operator_queue_cancelled",
                                   "data": {"id": updated["id"], "agent_name": updated["agent_name"]}})
-    return _ended(EndingEvent(CANCELLED, (updated,), actor.email, reason=reason), audit, trigger)
+    return _ended(EndingEvent(CANCELLED, (updated,), actor.email, reason=reason,
+                              actor_user_id=_user_id(actor)), audit, trigger)
 
 
 def dismiss(item_id: str, *, actor: Actor) -> Ending:
@@ -411,7 +677,8 @@ def dismiss(item_id: str, *, actor: Actor) -> Ending:
     audit = [_audit_row("dismissed", updated, actor, {})]
     trigger = _broadcast_payload({"type": "operator_queue_cancelled",
                                   "data": {"id": updated["id"], "agent_name": updated["agent_name"]}})
-    return _ended(EndingEvent(DISMISSED, (updated,), actor.email), audit, trigger)
+    return _ended(EndingEvent(DISMISSED, (updated,), actor.email,
+                              actor_user_id=_user_id(actor)), audit, trigger)
 
 
 def bulk_cancel(
@@ -429,15 +696,24 @@ def bulk_cancel(
     """
     ids = list(dict.fromkeys(ids))  # dedupe, keep order — an honest skipped count
     # trinity-enterprise#751: a gate approval the actor may not end is skipped,
-    # like any other row this sweep may not touch.
-    permitted = [i for i in ids
-                 if may_end(db.get_operator_queue_item(i) or {}, actor, cancelling=True)]
+    # like any other row this sweep may not touch. trinity-enterprise#1096
+    # (R6): so is a seat-fenced row the actor is not addressed on, an admin's
+    # included — a sweep carries no per-card reason, so an admin ends someone
+    # else's decision one card at a time, with a reason (`skipped_fenced`).
+    permitted: List[str] = []
+    skipped_fenced = 0
+    for i in ids:
+        row = db.get_operator_queue_item(i) or {}
+        if row and _seat_fenced(row, cancelling=True) and not _addressed(row, actor):
+            skipped_fenced += 1
+        elif may_end(row, actor, cancelling=True):
+            permitted.append(i)
     out = db.bulk_cancel_operator_queue_items(
         permitted, accessible_agent_names, disposed_by_email=actor.email, reason=reason,
     )
     rows, batch_id = out["rows"], out["batch_id"]
     if not rows:
-        return Ending(rows=[], batch_id=None)
+        return Ending(rows=[], batch_id=None, skipped_fenced=skipped_fenced)
     audit = [{
         "event_action": "bulk_cancel",
         "source": "api",
@@ -449,16 +725,20 @@ def bulk_cancel(
             "skipped": len(ids) - len(rows),
             "ids": [r["id"] for r in rows],
             "has_reason": bool(reason),
+            "skipped_fenced": skipped_fenced,
         },
     }]
     # Fleet-level: a sweep can span agents, so the trigger names none and
     # carries only a count; listeners refetch the access-controlled list.
     trigger = _broadcast_payload({"type": "operator_queue_cleared",
                                   "data": {"scope": "pending", "count": len(rows)}})
-    return _ended(
-        EndingEvent(CANCELLED, tuple(rows), actor.email, reason=reason, batch_id=batch_id),
+    ending = _ended(
+        EndingEvent(CANCELLED, tuple(rows), actor.email, reason=reason, batch_id=batch_id,
+                    actor_user_id=_user_id(actor)),
         audit, trigger, batch_id=batch_id,
     )
+    ending.skipped_fenced = skipped_fenced
+    return ending
 
 
 def expire() -> Ending:
@@ -576,6 +856,10 @@ class AskRejected(Exception):
         self.code = code
         self.message = message
         self.extra = extra
+        # #4599: why a `role_cannot_open_agent` refusal fired
+        # (`role_addressing.CAUSE_*`), for a caller that words its own refusal.
+        # Never in `extra`: the agent's remedy is the message, not a new field.
+        self.cause: Optional[str] = None
 
 
 # trinity-enterprise#1066: `credential` — the agent asks for a secret BY NAME
@@ -636,7 +920,47 @@ def drop_addressee(ask_id: str, email: str, *, reason: str) -> bool:
 # `PLATFORM_ENDING_REASONS`, carried on the audit row. The assignments router's
 # write is the one trigger today; ent#961's unshare adds its own reason here.
 ASSIGNMENT_CHANGED = "assignment_changed"
-PLATFORM_READDRESS_REASONS = (ASSIGNMENT_CHANGED,)
+# trinity-enterprise#1134: a project's steward was set, changed, cleared or
+# removed from the project — its pending `to: project` rows move (per row, by
+# the stamped project id; the enterprise projects module is the one caller).
+PROJECT_STEWARD_CHANGED = "project_steward_changed"
+# trinity-enterprise#1096: an instance admin moved a stranded card — back to the
+# rule that raised it, or to the admin seat (`POST /api/operator-queue/{id}/
+# readdress`). The one reason that carries a person's actor on its audit row.
+ADMIN_READDRESSED = "admin_readdressed"
+PLATFORM_READDRESS_REASONS = (ASSIGNMENT_CHANGED, PROJECT_STEWARD_CHANGED, ADMIN_READDRESSED)
+
+# trinity-enterprise#1096: who a platform-family row is re-addressed to, by the
+# rule that raised it — registered by the module that raises the family (the
+# `role_addressing.register_target_resolver` shape), keyed on a literal
+# request-id prefix under the reserved `gate-` family. The resolver takes the
+# agent name and returns the decider: `people`, `single`, `seat` (one of
+# `DECIDER_SEATS`) and `operators_reason`, as attributes or keys. In-process
+# and registered at boot only; an unregistered family has no rule to re-run.
+_readdress_resolvers: Dict[str, Callable[[str], Any]] = {}
+
+
+def register_readdress_resolver(prefix: str, fn: Callable[[str], Any]) -> Callable[[str], Any]:
+    """Register the rule that re-addresses the platform family whose request
+    ids start with `prefix`. A prefix outside the reserved `gate-` family is a
+    programming error: only the platform mints those ids (R13). So is a prefix
+    of hex digits only: it could prefix a skill-gate id (`gate-` + 40 hex),
+    and that approval must never reach the admin seat (T3)."""
+    from services import operator_queue_service as oqs
+    if not prefix or not prefix.startswith(oqs.GATE_ASK_ID_PREFIX) or prefix == oqs.GATE_ASK_ID_PREFIX:
+        raise ValueError(f"readdress resolver prefix must extend {oqs.GATE_ASK_ID_PREFIX!r}, got {prefix!r}")
+    if _SKILL_GATE_PREFIX.fullmatch(prefix):
+        raise ValueError(f"readdress resolver prefix {prefix!r} could prefix a skill-gate id")
+    _readdress_resolvers[prefix] = fn
+    return fn
+
+
+def readdress_resolver_for(request_id: Optional[str]) -> Optional[Callable[[str], Any]]:
+    """The registered rule for this row's family (longest prefix wins), or None."""
+    if not request_id:
+        return None
+    hits = [p for p in _readdress_resolvers if request_id.startswith(p)]
+    return _readdress_resolvers[max(hits, key=len)] if hits else None
 
 
 def _people_list(values: Optional[Iterable[Any]]) -> List[str]:
@@ -650,7 +974,9 @@ def _people_list(values: Optional[Iterable[Any]]) -> List[str]:
 
 
 def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
-                   reason: str, trigger: bool = True) -> bool:
+                   reason: str, trigger: bool = True, attach_chat: bool = True,
+                   platform_context: Optional[Mapping[str, Any]] = None,
+                   actor: Optional[Actor] = None, has_reason: Optional[bool] = None) -> bool:
     """The PLATFORM rewrites ONE pending row's audience
     (trinity-enterprise#1095): `resolved_to` becomes `people`, the single
     Workspace addressee becomes `single`. The row is not ended and its
@@ -669,8 +995,26 @@ def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
     `status = 'pending'`, so a row answered, cancelled or dropped meanwhile is
     never overwritten.
 
+    `attach_chat=False` (trinity-enterprise#1134) drops the stale keys but
+    attaches no Main for the new addressee — a project-addressed row moves to
+    a steward or creator who may be off the agent's roster, and a Main is a
+    roster relationship (the ent#981 reason the gate skips it).
+
+    `platform_context` (trinity-enterprise#1134) re-stamps platform keys
+    (`_PLATFORM_CONTEXT_KEYS` only; anything else is ignored) in the same
+    compare-and-set — a project row moved from its steward to its creator
+    carries the seat that picked the new reader, never the old one's.
+    trinity-enterprise#1096 (R4): a stamp whose value is None REMOVES the key,
+    and a stamp that differs from the stored one counts as a change — so a
+    card moved off the admin seat (or to another seat with the same people)
+    never keeps a stale seat.
+
+    `actor` (trinity-enterprise#1096) is the admin who moved the row by hand
+    (`ADMIN_READDRESSED`): the audit row then carries that person and
+    `has_reason`, never the reason's text.
+
     `reason` is one of `PLATFORM_READDRESS_REASONS`. An unchanged audience
-    writes, audits and announces nothing. Per changed row: one audit row (ids
+    and unchanged stamps write, audit and announce nothing. Per changed row: one audit row (ids
     and enums only, never an address — ent#715) and, when `trigger`, the thin
     agent-keyed `/ws` trigger the Operations store refetches on. Returns
     whether the row changed; no row, or a row no longer pending, is False.
@@ -689,23 +1033,29 @@ def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
         return False
     old_people = _people_list(_resolved_people(row))
     old_single = (row.get("addressed_to_email") or "").strip().lower() or None
-    if set(old_people) == set(new_people) and old_single == new_single:
+    raw_context = row.get("context")
+    stamps = {k: v for k, v in (platform_context or {}).items() if k in oqs._PLATFORM_CONTEXT_KEYS}
+    stored = _context_of(row)
+    stamps_differ = any(stored.get(k) != v for k, v in stamps.items())
+    if set(old_people) == set(new_people) and old_single == new_single and not stamps_differ:
         return False
 
-    raw_context = row.get("context")
     context: Optional[Dict[str, Any]] = None
+    if old_single != new_single or stamps_differ:
+        context = dict(stored)
     if old_single != new_single:
-        try:
-            parsed = json.loads(raw_context) if raw_context else {}
-        except ValueError:
-            parsed = {}
-        context = dict(parsed) if isinstance(parsed, dict) else {}
         for key in (oqs._WORKSPACE_THREAD_KEY, oqs._WORKSPACE_TURN_KEY, oqs._WORKSPACE_DISCUSSION_KEY):
             context.pop(key, None)
-        if new_single:
+        if new_single and attach_chat:
             thread, _ = oqs._workspace_attachment(row["agent_name"], new_single)
             if thread:
                 context[oqs._WORKSPACE_THREAD_KEY] = thread
+    if context is not None:
+        for key, value in stamps.items():
+            if value is None:
+                context.pop(key, None)
+            else:
+                context[key] = value
 
     changed = bool(db.readdress_operator_queue_item(
         ask_id, new_people, new_single,
@@ -720,6 +1070,9 @@ def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
         "target_id": ask_id,
         "details": {"reason": reason, "to_role": row.get("to_role"), "agent_name": row["agent_name"]},
     }]
+    if actor is not None:
+        audit[0].update(source="api", **_actor_fields(actor))
+        audit[0]["details"]["has_reason"] = bool(has_reason)
     payload = _broadcast_payload({"type": "operator_queue_new",
                                   "data": {"id": ask_id, "agent_name": row["agent_name"]}})
     try:
@@ -735,7 +1088,10 @@ def readdress_role(agent_name: str, role: str, *, reason: str) -> Dict[str, int]
     (trinity-enterprise#1095) — the agent's own raises, and gated-skill
     approvals (`db.list_pending_role_addressed`'s allowlist). A row the
     platform addressed to a named person (a gate note, a project consent card,
-    a reach row — ent#661) is never moved: the role was never its fence.
+    a reach row — ent#661) is never moved HERE: the role was never its fence.
+    A project consent card is moved by the module that raised it, through
+    `readdress_item` with its own decider (trinity-enterprise#1096) — this
+    pass stays unaware of that family.
 
     The fresh audience is what a fresh raise would get: an agent's row through
     `_address` (the one resolution rule), a gate approval through the gate's
@@ -746,7 +1102,9 @@ def readdress_role(agent_name: str, role: str, *, reason: str) -> Dict[str, int]
     again. A refused role (`approver`/`viewer` unfilled, nobody seated who can
     open the agent) leaves the rows AS THEY WERE: an empty snapshot on an
     approver row would un-fence it (ent#1053). A credential row keeps exactly
-    one reader (ent#1066): it moves only to a single person.
+    one reader (ent#1066): it moves only to a single person, and an agent's
+    credential row only to one who can open its secret field (#4579,
+    `_fresh_credential_audience`).
 
     `role` is one of `ASK_ROLES`; anything else is a programming error. One
     audit row per changed row (`readdress_item`), and ONE agent-keyed `/ws`
@@ -761,13 +1119,23 @@ def readdress_role(agent_name: str, role: str, *, reason: str) -> Dict[str, int]
     out = {"readdressed": 0, "unchanged": 0}
     if not rows:
         return out
-    fresh: Dict[bool, Optional[Tuple[List[str], Optional[str]]]] = {}
+    fresh: Dict[Tuple[bool, bool], Optional[Tuple[List[str], Optional[str]]]] = {}
     first_changed: Optional[str] = None
     for row in rows:
         gate = row.get("raised_by") == "gate"
-        if gate not in fresh:
-            fresh[gate] = _fresh_audience(agent_name, role, gate=gate)
-        audience = fresh[gate]
+        # #4579: an agent's credential row follows the rule its raise used —
+        # the reader must be able to open the secret field.
+        own_credential = row.get("type") == "credential" and role == "primary" and not gate
+        key = (gate, own_credential)
+        if key not in fresh:
+            try:
+                fresh[key] = (_fresh_credential_audience(agent_name) if own_credential
+                              else _fresh_audience(agent_name, role, gate=gate))
+            except _RuleRefused:
+                # A refused rule leaves the rows as they were, and is cached so
+                # each row does not resolve (and log) it again.
+                fresh[key] = None
+        audience = fresh[key]
         if audience is None:
             out["unchanged"] += 1
             continue
@@ -792,11 +1160,42 @@ def readdress_role(agent_name: str, role: str, *, reason: str) -> Dict[str, int]
     return out
 
 
-def _fresh_audience(agent_name: str, role: str, *, gate: bool) -> Optional[Tuple[List[str], Optional[str]]]:
+class _RuleRefused(Exception):
+    """The rule that addresses a row refuses today, so the row stays as it
+    was (#4599). `code` is the refusal's own code and `cause` its
+    `role_addressing.CAUSE_*` word, when it has one: `readdress_role` reads
+    the refusal as "unchanged", an admin's re-address words its 409 from it."""
+
+    def __init__(self, code: str, cause: Optional[str] = None):
+        super().__init__(code)
+        self.code = code
+        self.cause = cause
+
+
+def _fresh_credential_audience(agent_name: str) -> Tuple[List[str], Optional[str]]:
+    """`_fresh_audience` for an agent's `credential` row (#4579): the reader a
+    fresh raise would record NOW (`role_addressing.resolve_credential_reader`).
+    Raises `_RuleRefused` when nobody can open the secret field, so the row
+    stays as it was."""
+    from services import role_addressing
+
+    try:
+        r = role_addressing.resolve_credential_reader(agent_name, owner_lookup=_owner_email)
+    except role_addressing.RoleRefused as e:
+        logger.info("[AskService] the credential asks on %s are not re-addressed: %s%s",
+                    agent_name, e.code, f" ({e.cause})" if e.cause else "")
+        raise _RuleRefused(e.code, e.cause) from None
+    people = _people_list(r.people)
+    return people, (people[0] if len(people) == 1 else None)
+
+
+def _fresh_audience(agent_name: str, role: str, *, gate: bool) -> Tuple[List[str], Optional[str]]:
     """`(people, single)` the role reaches NOW, by the rule the row's raiser
-    uses; None when the role refuses and the rows must stay as they were.
-    Nobody filling `primary` is `([], None)` — the operators — for both."""
+    uses. Raises `_RuleRefused` when the role refuses and the rows must stay
+    as they were. Nobody filling `primary` is `([], None)` — the operators —
+    for both."""
     if gate:
+        from services import role_addressing
         from services import skill_gate_service as sgs
         try:
             people = sgs._approvers(agent_name, role)
@@ -806,16 +1205,246 @@ def _fresh_audience(agent_name: str, role: str, *, gate: bool) -> Optional[Tuple
             else:
                 logger.info("[AskService] %s on %s not re-addressed for gate approvals: %s",
                             role, agent_name, e.code)
-                return None
+                cause = role_addressing.CAUSE_UNCHECKED if getattr(e, "unchecked", False) else None
+                raise _RuleRefused(e.code, cause) from None
     else:
         try:
             people, _, _ = _address(agent_name, role)
         except AskRejected as e:
             logger.info("[AskService] %s on %s not re-addressed for the agent's asks: %s",
                         role, agent_name, e.code)
-            return None
+            raise _RuleRefused(e.code, e.cause) from None
     people = _people_list(people)
     return people, (people[0] if len(people) == 1 else None)
+
+
+def _rule_refused_message(row: Mapping[str, Any], refusal: _RuleRefused, *, credential: bool) -> str:
+    """What an admin reads when "re-address by its rule" is refused (#4599):
+    the real cause and its remedy. One sentence used to cover every cause
+    ("Nobody can be found for the role"), which sent an admin to end a card
+    whose remedy was to restore the person's reach. Names roles, never a
+    person, and what to check (the share, that they can sign in), never which
+    of the two fails."""
+    from services import role_addressing as ra
+
+    if refusal.cause == ra.CAUSE_UNCHECKED:
+        return ("The platform could not check right now who can open this agent, so the card "
+                "stays as it is. Try again in a few minutes.")
+    if credential and refusal.cause == ra.CAUSE_SYSTEM_AGENT:
+        return ("This is a system agent, and a system agent is in nobody's Workspace, so "
+                "nobody can fill this card. End it with a reason.")
+    if credential and refusal.cause == ra.CAUSE_NO_PRIMARY:
+        return ("This agent has no primary person, and its owner cannot open it in their "
+                "Workspace, so the card stays as it is. Assign a primary person, share the "
+                "agent with them and re-address the card again, or end it with a reason.")
+    if credential and refusal.cause == ra.CAUSE_OWNER_IS_PRIMARY:
+        return ("The primary person for this agent is its owner, who cannot open it in their "
+                "Workspace, so the card stays as it is. Check the owner's access to the "
+                "Workspace and re-address the card again, or end it with a reason.")
+    if credential and refusal.code == "role_cannot_open_agent":
+        return ("The primary person for this agent cannot open it in their Workspace, and "
+                "neither can its owner, so the card stays as it is. Make sure the agent is "
+                "shared with its primary person and that they can sign in, then re-address "
+                "the card again, or end it with a reason.")
+    if refusal.code in ("role_cannot_open_agent", "approver_cannot_open_agent"):
+        return (f"The people in the {ra.role_label(row['to_role'])} role for this agent cannot "
+                "open it, so the card stays as it is. Make sure the agent is shared with them "
+                "and that they can sign in, then re-address the card again, or end it with a "
+                "reason.")
+    return (f"Nobody can be found for the {row['to_role']} role on this agent "
+            "right now, so the card stays as it is; end it with a reason instead.")
+
+
+# ---------------------------------------------------------------------------
+# An admin moves a stranded card (trinity-enterprise#1096)
+# ---------------------------------------------------------------------------
+
+# The skill gate's id shape (`skill_gate_service._request_id`) — the gate
+# approvals `readdress_role` moves (`db.list_pending_role_addressed`'s twin).
+_SKILL_GATE_ID = re.compile(r"gate-[0-9a-f]{40}")
+# trinity-enterprise#1096 (L1): a resolver prefix that could start a skill-gate id.
+_SKILL_GATE_PREFIX = re.compile(r"gate-[0-9a-f]*")
+READDRESS_TARGETS = ("rule", "admin")
+
+
+class ReaddressRefused(Exception):
+    """An admin re-address that did not happen, named: `status` and `code`
+    for the route, `message` for the person, `data` the structured extras
+    (who the card waits for now, on `audience_unchanged`)."""
+
+    def __init__(self, status: int, code: str, message: str, **data: Any):
+        super().__init__(code)
+        self.status = status
+        self.code = code
+        self.message = message
+        self.data = data
+
+
+class AskReasonRequired(Exception):
+    """trinity-enterprise#1096: an admin ending a seat-fenced card they are
+    not addressed on — someone else's decision — must say why."""
+
+    def __init__(self, item_id: str):
+        super().__init__("reason_required")
+        self.item_id = item_id
+
+
+def _decider_value(decider: Any, key: str) -> Any:
+    if isinstance(decider, Mapping):
+        return decider.get(key)
+    return getattr(decider, key, None)
+
+
+def _role_family(row: Mapping[str, Any]) -> bool:
+    """A row addressed BY ROLE, whose rule `_fresh_audience` re-runs: the
+    agent's own raise to an `ASK_ROLES` role, or a skill-gate approval —
+    `readdress_role`'s allowlist."""
+    if row.get("to_role") not in ASK_ROLES:
+        return False
+    if row.get("raised_by") == "agent":
+        return True
+    return _gate_approval(row) and bool(_SKILL_GATE_ID.fullmatch(row.get("request_id") or ""))
+
+
+def admin_readdress(item_id: str, *, to: str, reason: str, actor: Actor) -> Dict[str, Any]:
+    """An instance admin re-addresses one pending card
+    (trinity-enterprise#1096, R2/T2) — never to a person they pick:
+
+    - `to="rule"` re-runs the rule that raised it: a platform family's
+      registered resolver (`register_readdress_resolver`; the decider and its
+      seat stamp), or, for a row addressed by role, the role as
+      `readdress_role` would resolve it now;
+    - `to="admin"` moves a registered family's gate approval to the admin seat
+      (no audience, the `admin` stamp), which an admin then decides. A skill
+      gate approval cannot go there (T3): its resume reads `resolved_to`, so an
+      admin's answer would be refused by the gate.
+
+    Written through `readdress_item` with `ADMIN_READDRESSED`, the admin on
+    the audit row and `has_reason` (the reason's text is never stored there).
+    Raises `AskNotFound`, or `ReaddressRefused`: 409 `not_pending`, 422
+    `unknown_family` (no rule to re-run), 422 `admin_seat_unsupported`, 409
+    `rule_refused` (the role refuses today, the family's rule raises, or it
+    names a person seat with nobody on it; for a role the message names the
+    real cause and its remedy, `_rule_refused_message`, #4599), 409
+    `audience_unchanged` naming who the card waits for. The caller (the route) has already applied the
+    admin + person gate and the row's visibility.
+    """
+    from services import operator_queue_service as oqs
+
+    if to not in READDRESS_TARGETS:
+        raise ValueError(f"admin_readdress: to must be one of {READDRESS_TARGETS}, got {to!r}")
+    row = db.read_operator_queue_address(item_id)
+    if not row:
+        raise AskNotFound(item_id)
+    if row.get("status") != "pending" or _past_deadline(row):
+        raise ReaddressRefused(409, "not_pending", "This card has already ended; there is nothing to move.")
+    resolver = readdress_resolver_for(row.get("request_id")) if _gate_approval(row) else None
+    agent_name = row["agent_name"]
+    stamps: Dict[str, Any] = {}
+    attach_chat = True
+    if resolver is not None:
+        attach_chat = False
+        if to == ADMIN_SEAT:
+            people, single, seat = [], None, ADMIN_SEAT
+            stamps = {oqs._WORKSPACE_DECIDER_SEAT_KEY: ADMIN_SEAT,
+                      oqs._WORKSPACE_OPERATORS_REASON_KEY: None}
+        else:
+            try:
+                decider = resolver(agent_name)
+            except Exception:
+                # L3: a rule that fails is a refusal the admin can act on, not a 500.
+                logger.warning("[AskService] readdress resolver failed for %s", item_id, exc_info=True)
+                raise ReaddressRefused(409, "rule_refused",
+                                       "The rule that raised this card could not be run right now, "
+                                       "so the card stays as it is; end it with a reason instead.")
+            seat = _decider_value(decider, "seat")
+            if seat not in DECIDER_SEATS:
+                raise ValueError(f"readdress resolver returned seat {seat!r}")
+            people = _people_list(_decider_value(decider, "people"))
+            if not people and seat != ADMIN_SEAT:
+                # L3: only the admin seat may be empty — a person seat with
+                # nobody on it would strand the card the admin is fixing.
+                raise ReaddressRefused(409, "rule_refused",
+                                       "The rule that raised this card finds nobody to decide it "
+                                       "right now, so the card stays as it is; move it to the admin "
+                                       "seat (to: admin) or end it with a reason.")
+            single = (_decider_value(decider, "single") or "").strip().lower() or None
+            if single is None and len(people) == 1:
+                single = people[0]
+            reason_code = _decider_value(decider, "operators_reason") if seat == ADMIN_SEAT else None
+            stamps = {oqs._WORKSPACE_DECIDER_SEAT_KEY: seat,
+                      oqs._WORKSPACE_OPERATORS_REASON_KEY: reason_code}
+    elif to == ADMIN_SEAT:
+        if _role_family(row) or _gate_approval(row):
+            raise ReaddressRefused(
+                422, "admin_seat_unsupported",
+                "This card cannot be moved to the admin seat: who decides it is fixed by the rule "
+                "that raised it. Re-address it by its rule, or end it with a reason.")
+        raise ReaddressRefused(422, "unknown_family",
+                               "This card has no rule to re-address it by; end it with a reason instead.")
+    elif _role_family(row):
+        gate = row.get("raised_by") == "gate"
+        # #4579: an agent's credential row is re-addressed by the rule its
+        # raise used, so "by its rule" cannot hand the secret field to a
+        # primary who cannot open it.
+        credential = row.get("type") == "credential" and row["to_role"] == "primary" and not gate
+        try:
+            people, single = (_fresh_credential_audience(agent_name) if credential
+                              else _fresh_audience(agent_name, row["to_role"], gate=gate))
+        except _RuleRefused as refusal:
+            raise ReaddressRefused(
+                409, "rule_refused",
+                _rule_refused_message(row, refusal, credential=credential)) from None
+        seat = row["to_role"]
+        if row.get("type") == "credential" and not single:
+            raise ReaddressRefused(409, "rule_refused",
+                                   "A credential ask must reach exactly one person, and its role "
+                                   "reaches more or fewer today; end it with a reason instead.")
+    else:
+        raise ReaddressRefused(422, "unknown_family",
+                               "This card has no rule to re-address it by; end it with a reason instead.")
+
+    changed = readdress_item(item_id, people, single, reason=ADMIN_READDRESSED,
+                             attach_chat=attach_chat, platform_context=stamps or None,
+                             actor=actor, has_reason=bool((reason or "").strip()))
+    if not changed:
+        fresh = db.read_operator_queue_address(item_id) or {}
+        if fresh.get("status") != "pending":
+            raise ReaddressRefused(409, "not_pending", "This card ended while it was being moved.")
+        waiting = _resolved_people(fresh)
+        now_seat = _decider_seat(fresh) or fresh.get("to_role")
+        who = (f"{_SEAT_LABELS.get(now_seat or '', 'the person it was addressed to')}: "
+               f"{', '.join(waiting)}" if waiting else "an instance admin")
+        # #4599: the admin seat is offered only where it can be taken. A card
+        # addressed by role is always refused there (`admin_seat_unsupported`).
+        way_out = ("Move it to the admin seat (to: admin) or end it with a reason."
+                   if resolver is not None else "End it with a reason instead.")
+        raise ReaddressRefused(
+            409, "audience_unchanged",
+            f"This card already waits for {who}; re-addressing by its rule changes nothing. "
+            f"{way_out}",
+            waiting_on=waiting, seat=now_seat)
+    return {"id": item_id, "waiting_on": people, "seat": seat}
+
+
+def _raising_room(agent_name: str, turn: Optional[str], ask_type: str) -> Optional[str]:
+    """The room whose RUNNING turn raised this ask, or None
+    (abilityai/trinity-enterprise#1135). An agent's raise only — a gate's ask is
+    a background ask (the ent#610 amendment) — and never a credential ask: a
+    secret has exactly one reader (ent#1066), and a room has many. Fail-soft,
+    the #1632 clamp contract: a lookup that fails leaves the ask where ent#734
+    puts it (its chat, or Main) and never refuses it."""
+    if not turn or ask_type == "credential":
+        return None
+    try:
+        from shared_sessions import service as rooms
+
+        return rooms.room_for_execution(agent_name, turn)
+    except Exception:  # noqa: BLE001
+        logger.warning("[AskService] could not resolve the room of the turn that raised an "
+                       "ask from %s; it is not attached to a room (ent#1135)",
+                       agent_name, exc_info=True)
+        return None
 
 
 def raise_ask(
@@ -831,9 +1460,18 @@ def raise_ask(
     to_role_override: Optional[str] = None,
     attach_chat: bool = True,
     platform_context: Optional[Mapping[str, Any]] = None,
+    destination_key_state: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Raise an ask through the platform and return its receipt
     (trinity-enterprise#611).
+
+    `destination_key_state` (trinity-enterprise#1158 §2) is what the raise
+    route read from the asking agent's own `.env` for a `key_env` destination
+    (`credential_sink.key_env_state`): `missing` → 422
+    `destination_key_env_missing`, `invalid` → 422 `destination_key_invalid`,
+    `ok` or None (could not tell — delivery re-checks) → no effect. Applied
+    LAST, after every other refusal and the replay, and only to a stored
+    `key_env` destination; gate and file callers pass nothing.
 
     `attach_chat` and `platform_context` (trinity-enterprise#981) are the
     gate's too — an agent's raise passing either is a programming error.
@@ -929,6 +1567,7 @@ def raise_ask(
     (`ValueError`), never a refusal an agent earned.
     """
     from services import operator_queue_service as oqs
+    from services import role_addressing
 
     if raised_by not in ASK_RAISERS:
         raise ValueError(f"raise_ask: unknown raised_by {raised_by!r}")
@@ -937,7 +1576,7 @@ def raise_ask(
     if (raised_by == "gate") != (channel == "gate"):
         raise ValueError(f"raise_ask: channel {channel!r} does not go with raised_by {raised_by!r}")
     named = _named_addressee(addressee, raised_by)
-    pre = _named_addressees(addressees, to_role_override, raised_by, named)
+    pre = _named_addressees(addressees, to_role_override, raised_by, named, platform_context)
     if raised_by != "gate" and (attach_chat is not True or platform_context is not None):
         raise ValueError("raise_ask: only a gate raise may skip the chat or attach platform context")
     norm = _validated_ask(ask, oqs, raised_by=raised_by, agent_name=agent_name)
@@ -956,10 +1595,22 @@ def raise_ask(
         _refuse_unlinked_reask(agent_name, norm["proposal"], raised_by)
     target = _replace_target(agent_name, norm["replaces"])
     to_role = to_role_override or norm["to"]
+    turn = _platform_turn(agent_name, platform_execution_id)
+    project_id: Optional[str] = None
+    seat: Optional[str] = None
     if named:
         people, addressee, resolved = [named], named, True
     elif pre is not None:
-        people, addressee, resolved = pre, (pre[0] if len(pre) == 1 else None), True
+        people, addressee, resolved = pre, (pre[0] if len(pre) == 1 else None), bool(pre)
+    elif norm["to"] in role_addressing.ASK_TARGETS:
+        # trinity-enterprise#1134: the platform resolves the target from the
+        # turn it knows — the agent supplied the word, nothing else.
+        people, addressee, resolved, project_id, seat = _address_target(
+            agent_name, norm["to"], turn)
+    elif norm["type"] == "credential":
+        # #4579: the secret field is this kind's only door, so its reader is
+        # resolved by the rule that asks who can open it.
+        people, addressee, resolved = _address_credential(agent_name)
     else:
         people, addressee, resolved = _address(agent_name, norm["to"])
     if norm["type"] == "credential" and not addressee:
@@ -968,16 +1619,22 @@ def raise_ask(
         # primary) or several (a role two people fill) is refused before
         # anything is written — the value must not be typed by whoever
         # answers first and recorded against everyone it was delivered to.
-        raise AskRejected(
-            422, "no_person",
-            "A credential ask must reach exactly one person; ask it from a conversation "
-            "with the person who holds the credential, addressed to primary.")
+        raise AskRejected(422, "no_person", _NO_PERSON)
+    _refuse_key_state(norm, destination_key_state)
 
     context = dict(norm["context"])
-    turn = _platform_turn(agent_name, platform_execution_id)
     if turn:
         context["execution_id"] = turn
-    if addressee and attach_chat:
+    if addressee and attach_chat and project_id is not None:
+        # trinity-enterprise#1134: a project-addressed ask reaches a person who
+        # may be off the agent's roster, so it attaches ONLY to the chat the
+        # addressee's own running turn serves — never their Main (a roster
+        # relationship, which the ent#981 reach rows skip for the same reason).
+        thread = _in_turn_chat(agent_name, addressee, turn)
+        if thread:
+            context[oqs._WORKSPACE_THREAD_KEY] = thread
+            context[oqs._WORKSPACE_TURN_KEY] = True
+    elif addressee and attach_chat:
         # The chat the raising turn serves (ent#734), else the addressee's Main
         # (ent#429/#523), resolved at raise time. Only after the caps passed:
         # attaching may create Main. Only an AGENT's raise reads the turn: a
@@ -991,6 +1648,37 @@ def raise_ask(
             context[oqs._WORKSPACE_THREAD_KEY] = thread
         if thread and in_turn:
             context[oqs._WORKSPACE_TURN_KEY] = True
+    elif not people and raised_by == "agent" and to_role == "primary" and turn:
+        # trinity-enterprise#1134 (AC4): a chat turn's `primary` ask that fell
+        # to the operators (nobody assigned, no owner who can stand in). The
+        # person in the chat is not its addressee and reads none of its
+        # content — but the chat the turn serves is stamped, with why it fell,
+        # so that chat's own read shows one content-free line. An explicit
+        # `to: operator` is never stamped: it may be ABOUT the person.
+        hit = _turn_chat(agent_name, turn)
+        if hit:
+            context[oqs._WORKSPACE_THREAD_KEY] = hit
+            context[oqs._WORKSPACE_TURN_KEY] = True
+            reason = role_addressing.operators_reason(agent_name)
+            if reason:
+                context[oqs._WORKSPACE_OPERATORS_REASON_KEY] = reason
+    if project_id is not None:
+        # The platform's own stamp (ent#981's key, reused): written after the
+        # strip in `_validated_ask`, so an agent-authored value never survives
+        # and the Workspace card shows the project exactly as a gate row does.
+        context[oqs._WORKSPACE_PROJECT_ID_KEY] = project_id
+        if seat in ("steward", "creator"):
+            context[oqs._WORKSPACE_PROJECT_SEAT_KEY] = seat
+    if raised_by == "agent" and turn:
+        # trinity-enterprise#1225: the turn the answer and ending wakes
+        # continue, recorded only while it runs on this agent.
+        from services import turn_tier_service
+        origin = turn_tier_service.continuation_origin(db, agent_name, turn)
+        if origin:
+            context[oqs._CONTINUES_TURN_KEY] = origin
+    room_id = _raising_room(agent_name, turn, norm["type"]) if raised_by == "agent" else None
+    if room_id:
+        context[oqs._WORKSPACE_ROOM_KEY] = room_id
     for key, value in (platform_context or {}).items():
         # trinity-enterprise#981: the platform's own attachment, platform keys
         # only — after the strip in `_validated_ask`, so it is the one writer.
@@ -1059,6 +1747,12 @@ def raise_ask(
     row = out["row"]
     if out["outcome"] == "replayed":   # a concurrent call with the same id won
         return _replay(row, norm, oqs, raised_by)
+    if room_id:
+        # ent#1135: the room where the agent asked hears that it is waiting —
+        # only now, so a refused ask leaves no trace there. Never raises.
+        from shared_sessions import service as rooms
+
+        rooms.post_ask_raised_line(room_id, agent_name, row)
     replaced = out.get("predecessor") if target else None
 
     audit = [{
@@ -1170,6 +1864,113 @@ def _too_large(field: str, limit: int, unit: str) -> AskRejected:
                        field=field, limit=limit, unit=unit)
 
 
+_NO_PERSON = ("A credential ask must reach exactly one person; ask it from a conversation "
+              "with the person who holds the credential, addressed to primary.")
+
+
+# The `credential` kind's own raise checks (trinity-enterprise#1066, ent#1109),
+# one function each so the queue-file channel runs the same ones (#4599) and the
+# two doors cannot drift. The first two read nothing but their argument.
+
+def _refuse_credential_options(options: Any) -> None:
+    """The person types the value into the secret field; there is nothing to
+    choose, and an option list would read as a place to put the value."""
+    if options:
+        raise AskRejected(422, "invalid_options",
+                          "A credential ask offers no options; the person types the value "
+                          "into the secret field it opens.")
+
+
+def _refuse_credential_name(context: Mapping[str, Any]) -> None:
+    from services import credential_ask_policy
+
+    problem = credential_ask_policy.credential_name_problem(context.get("credential_name"))
+    if problem is not None:
+        raise AskRejected(
+            422, "invalid_credential_name",
+            "A credential ask needs context.credential_name: the environment variable "
+            f"the person is filling — a variable name of at most "
+            f"{credential_ask_policy.CREDENTIAL_NAME_MAX} characters that the platform "
+            "and the agent runtime do not reserve.",
+            reason=problem)
+
+
+def _credential_destination_stored(context: Mapping[str, Any], agent_name: str) -> Mapping[str, Any]:
+    """`context` with its destination, if it names one, in the STORED form
+    (trinity-enterprise#1109): where the value lands when that is not this
+    agent — validated by name (shape, the outbound A2A switch, the admin's
+    endpoint registry for THIS agent; no resolver call on the loop), and
+    normalised. Reads the registry, unlike the two checks above."""
+    from services import credential_destination
+
+    if credential_destination.CONTEXT_KEY not in context:
+        return context
+    try:
+        stored = credential_destination.validate(
+            context[credential_destination.CONTEXT_KEY], agent_name=agent_name)
+    except credential_destination.DestinationProblem as exc:
+        raise AskRejected(422, exc.code, exc.message, reason=exc.reason) from None
+    return {**context, credential_destination.CONTEXT_KEY: stored}
+
+
+# ---------------------------------------------------------------------------
+# A `credential` entry of the queue file (#4599)
+# ---------------------------------------------------------------------------
+# The file channel never reaches `raise_ask`, so before #4599 it skipped the
+# kind's checks and let the AGENT pick the reader (vetoed against the shared
+# roster only, which no owner is on). These three are what its poller calls,
+# in this order, so a credential row from the file is one `raise_ask` would
+# have filed: the pure checks, the reader chain, then the stored context.
+
+def file_credential_entry_checks(entry: Mapping[str, Any]) -> None:
+    """The checks of a credential entry that read nothing but the entry:
+    options, the context's shape, the name. Raises `AskRejected` by the codes
+    `raise_ask` uses. An absent context is the name refusal, as there."""
+    _refuse_credential_options(entry.get("options"))
+    context = entry.get("context")
+    if context is None:
+        context = {}
+    if not isinstance(context, Mapping):
+        raise AskRejected(422, "invalid_context", "context must be an object.")
+    _refuse_credential_name(context)
+
+
+def file_credential_reader(agent_name: str) -> str:
+    """The ONE reader a credential ask from `agent_name` is recorded for:
+    `_address_credential`, the rule of the native raise. Raises `AskRejected`
+    `role_cannot_open_agent` (with its `cause`) or `no_person`. Quiet: the
+    poller calls this every cycle while an entry is held and logs once."""
+    _, addressee, _ = _address_credential(agent_name, quiet=True)
+    if not addressee:
+        raise AskRejected(422, "no_person", _NO_PERSON)
+    return addressee
+
+
+def file_credential_context(agent_name: str, entry: Mapping[str, Any]) -> Dict[str, Any]:
+    """The context a credential row from the file stores: the entry's, with
+    its destination in the stored form. Raises `AskRejected` by the codes
+    `raise_ask` uses.
+
+    Sized AS THE POLLER'S CLAMP STORES IT — the stored destination plus the
+    Workspace thread the clamp adds — so the clamp can never replace a context
+    judged here with its truncation marker, which keeps neither the name nor
+    the destination and would leave a field that cannot work. Not run: the
+    native route's read of the agent's own key (`destination_key_state`),
+    which needs the agent's environment; delivery checks it."""
+    from services import operator_queue_service as oqs
+
+    context = entry.get("context")
+    context = dict(context) if isinstance(context, Mapping) else {}
+    context = {k: v for k, v in context.items() if k not in oqs._PLATFORM_CONTEXT_KEYS}
+    context = dict(_credential_destination_stored(context, agent_name))
+    sized = oqs._json_bytes({**context, oqs._WORKSPACE_THREAD_KEY: "x" * 64})
+    if sized is None:
+        raise AskRejected(422, "invalid_context", "context must serialize as JSON.")
+    if sized > oqs.OPERATOR_QUEUE_CONTEXT_MAX_BYTES:
+        raise _too_large("context", oqs.OPERATOR_QUEUE_CONTEXT_MAX_BYTES, "bytes")
+    return context
+
+
 def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent",
                    agent_name: str = "") -> Dict[str, Any]:
     """The static half of validation — nothing here depends on the clock or
@@ -1238,40 +2039,16 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent",
     if kind == "approval" and not options:
         raise AskRejected(422, "options_required",
                           "An approval needs the options a person can choose from.")
-    if kind == "credential" and options:
-        # trinity-enterprise#1066: the person types the value into the secret
-        # field; there is nothing to choose, and an option list would read as
-        # a place to put the value.
-        raise AskRejected(422, "invalid_options",
-                          "A credential ask offers no options; the person types the value "
-                          "into the secret field it opens.")
+    if kind == "credential":
+        _refuse_credential_options(options)
     context = ask.get("context")
     if context is None:
         context = {}
     if not isinstance(context, Mapping):
         raise AskRejected(422, "invalid_context", "context must be an object.")
     if kind == "credential":
-        from services import credential_ask_policy, credential_destination
-        problem = credential_ask_policy.credential_name_problem(context.get("credential_name"))
-        if problem is not None:
-            raise AskRejected(
-                422, "invalid_credential_name",
-                "A credential ask needs context.credential_name: the environment variable "
-                f"the person is filling — a variable name of at most "
-                f"{credential_ask_policy.CREDENTIAL_NAME_MAX} characters that the platform "
-                "and the agent runtime do not reserve.",
-                reason=problem)
-        if credential_destination.CONTEXT_KEY in context:
-            # trinity-enterprise#1109: where the value lands when that is not
-            # this agent — validated here, by name (shape, the outbound A2A
-            # switch, the admin's endpoint registry for THIS agent; no
-            # resolver call on the loop), and stored normalised.
-            try:
-                stored = credential_destination.validate(
-                    context[credential_destination.CONTEXT_KEY], agent_name=agent_name)
-            except credential_destination.DestinationProblem as exc:
-                raise AskRejected(422, exc.code, exc.message, reason=exc.reason) from None
-            context = {**context, credential_destination.CONTEXT_KEY: stored}
+        _refuse_credential_name(context)
+        context = _credential_destination_stored(context, agent_name)
     elif isinstance(context, Mapping) and "credential_destination" in context:
         raise AskRejected(422, "destination_on_non_credential",
                           "Only a credential ask carries a destination.")
@@ -1300,9 +2077,9 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent",
         # so a retry spelt `role:Head` replays against `role:head` with no
         # false `differs`. Resolved — and refused by name — in `_address`.
         to = f"{role_addressing.ROLE_ID_PREFIX}{role_id}"
-    elif to not in ASK_ROLES:
+    elif to not in ASK_ROLES and to not in role_addressing.ASK_TARGETS:
         raise AskRejected(422, "invalid_to", "Unknown role.",
-                          allowed=[*ASK_ROLES, ASK_ROLE_ID_FORM])
+                          allowed=[*ASK_ROLES, *role_addressing.ASK_TARGETS, ASK_ROLE_ID_FORM])
     if kind == "credential" and to != "primary":
         # trinity-enterprise#1066: the secret field writes into the agent's
         # environment, so it opens for the agent's primary person only — never
@@ -1336,6 +2113,32 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent",
         "supersedes_expired": supersedes,
         "replaces": replaces,
     }
+
+
+def _refuse_key_state(norm: Mapping[str, Any], state: Optional[str]) -> None:
+    """trinity-enterprise#1158 §2: the raise route's read of the asking
+    agent's key, applied to a stored `key_env` destination only. The message
+    names the field, never the variable or its value."""
+    if state not in ("missing", "invalid") or norm.get("type") != "credential":
+        return
+    from services import credential_destination
+    destination = (norm.get("context") or {}).get(credential_destination.CONTEXT_KEY)
+    if not isinstance(destination, Mapping) or "key_env" not in destination:
+        return
+    if state == "missing":
+        raise AskRejected(
+            422, "destination_key_env_missing",
+            "Your environment holds no value under the variable named in destination.key_env, "
+            "so a person's value could not be delivered. Name the registered instance with "
+            "destination.instance instead (the platform uses the key stored for it), or ask "
+            "your owner to set that variable, then raise the ask again.")
+    raise AskRejected(
+        422, "destination_key_invalid",
+        "The value under the variable named in destination.key_env cannot be sent as a key "
+        "(it is blank or contains whitespace, control or non-ASCII characters), so a person's "
+        "value could not be delivered. Name the registered instance with destination.instance "
+        "instead (the platform uses the key stored for it), or ask your owner to fix that "
+        "variable, then raise the ask again.")
 
 
 def _deadline(value: Any, *, floor: bool) -> Optional[datetime]:
@@ -1575,14 +2378,18 @@ def _named_addressee(addressee: Optional[str], raised_by: str) -> Optional[str]:
 
 
 def _named_addressees(addressees: Optional[List[str]], to_role_override: Optional[str],
-                      raised_by: str, named: Optional[str]) -> Optional[List[str]]:
+                      raised_by: str, named: Optional[str],
+                      platform_context: Optional[Mapping[str, Any]] = None) -> Optional[List[str]]:
     """The lower-cased, de-duplicated emails a gate raise pre-lists, or None
     when it lists none (trinity-enterprise#848).
 
     A programming error (`ValueError`), never a refusal: an agent's raise that
     passes either, an override without the list it stands for, an empty list
     (a gate never asks nobody — `enforce` refused `role_unassigned` first), a
-    non-email, or a list beside a single `addressee`.
+    non-email, or a list beside a single `addressee`. The one empty list
+    allowed (trinity-enterprise#1096, R1) is the decider order's third arm: a
+    raise stamped with the `admin` decider seat, which an instance admin
+    decides (`may_end`).
     """
     if addressees is None and to_role_override is None:
         return None
@@ -1600,16 +2407,21 @@ def _named_addressees(addressees: Optional[List[str]], to_role_override: Optiona
         if email not in out:
             out.append(email)
     if not out:
-        raise ValueError("raise_ask: a gate raise must address someone")
+        from services import operator_queue_service as oqs
+        if (platform_context or {}).get(oqs._WORKSPACE_DECIDER_SEAT_KEY) != ADMIN_SEAT:
+            raise ValueError("raise_ask: a gate raise must address someone")
     return out
 
 
 def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool]:
     """`(resolved_to, addressed_to_email, resolved)` for a role.
 
-    The one resolution rule, `services/role_addressing.resolve` (ent#606) —
-    shared with reports and messages so an ask and a report addressed to the
-    same role reach the same people. Several people are recorded in
+    The one resolution rule of the addressing surfaces,
+    `services/role_addressing.resolve_addressee` (ent#606, ent#1134) — shared
+    with messages and the enterprise proposals so an ask and a message
+    addressed to the same role reach the same people: a provider answering
+    "nobody fills primary" stands the agent's OWNER in (the 2026-11-07
+    ruling), an owner with no email is still the operators. Several people are recorded in
     `resolved_to` and none becomes the single Workspace addressee: the ONE ask
     is delivered to each of them on read (trinity-enterprise#816, the
     2026-10-07 ruling — the Workspace list and its doors match `resolved_to`
@@ -1622,6 +2434,14 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
     (`role_unavailable`, `role_unassigned`, `role_cannot_open_agent`) maps 1:1
     to a 422 so the agent gets the remedy for the arm it hit, with the role's
     label and never a person in the text.
+
+    The `approver` kind goes through `role_addressing.resolve_approver_for_ask`
+    (#4501): its answer is fenced to the people recorded here
+    (trinity-enterprise#1053), so only seated approvers who can open the agent
+    are recorded, and none is `role_cannot_open_agent` — refused and logged,
+    never filed for a reader who cannot see it. A message or a report to the
+    approver keeps the plain resolution; `readdress_role` inherits this rule
+    through `_fresh_audience`.
     """
     from services import role_addressing
 
@@ -1630,15 +2450,115 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
         try:
             r = role_addressing.resolve_role_id_for_ask(agent_name, role_id)
         except role_addressing.RoleRefused as e:
-            raise AskRejected(422, e.code, e.message, role=e.role)
+            raise _rejected(e) from None
         return r.people, r.single, r.resolved
     try:
-        r = role_addressing.resolve(agent_name, role, owner_lookup=_owner_email)
-    except role_addressing.RoleRefused:
+        r = (role_addressing.resolve_approver_for_ask(agent_name) if role == "approver"
+             else role_addressing.resolve_addressee(agent_name, role, owner_lookup=_owner_email))
+    except role_addressing.RoleRefused as e:
+        if e.code == "role_cannot_open_agent":
+            # A refusal files nothing, so the log is the only trace a stalled
+            # agent leaves. The role and the agent, never a person.
+            why = ("the platform could not check who can open the agent"
+                   if e.cause == role_addressing.CAUSE_UNCHECKED
+                   else "nobody seated in it can open the agent")
+            logger.warning("[AskService] an ask to the %s role from %s was refused: %s",
+                           role, agent_name, why)
+            raise _rejected(e) from None
         raise AskRejected(422, "role_unassigned",
                           f"Nobody fills the {role} role for this agent yet; address the ask to "
                           "primary or operator.", role=role)
     return r.people, r.single, r.resolved
+
+
+def _rejected(e: Any) -> AskRejected:
+    """A `RoleRefused` as the 422 the agent gets, with its `cause` carried on
+    the exception for a caller that words its own refusal (#4599)."""
+    rejected = AskRejected(422, e.code, e.message, role=e.role)
+    rejected.cause = e.cause
+    return rejected
+
+
+def _address_credential(agent_name: str, *,
+                        quiet: bool = False) -> Tuple[List[str], Optional[str], bool]:
+    """`(resolved_to, addressed_to_email, resolved)` for a `credential` ask
+    (#4579): `role_addressing.resolve_credential_reader` — the agent's primary
+    person when they can open the Workspace secret field, else its owner when
+    they can, else refused `role_cannot_open_agent`. A credential ask is
+    answered through that field alone (`answer` refuses anything else), so a
+    reader who cannot open it would leave an ask nobody can fill. Nobody or
+    several is returned as it is and refused `no_person` by the caller. A
+    refusal files nothing, so it is logged: the agent and the real cause
+    (#4599), never a person. `quiet` is the queue-file poller, which asks
+    every cycle and logs a held entry once itself."""
+    from services import role_addressing
+
+    try:
+        r = role_addressing.resolve_credential_reader(agent_name, owner_lookup=_owner_email)
+    except role_addressing.RoleRefused as e:
+        if not quiet:
+            why = ("the platform could not check who can open the agent in their Workspace"
+                   if e.cause == role_addressing.CAUSE_UNCHECKED
+                   else "nobody who could fill it can open the agent in their Workspace")
+            logger.warning("[AskService] a credential ask from %s was refused: %s",
+                           agent_name, why)
+        raise _rejected(e) from None
+    return r.people, r.single, r.resolved
+
+
+def _address_target(agent_name: str, target: str,
+                    turn: Optional[str]) -> Tuple[List[str], Optional[str], bool, Optional[str],
+                                                  Optional[str]]:
+    """`(resolved_to, addressed_to_email, resolved, project_id, seat)` for an
+    addressing target (trinity-enterprise#1134) — `project`, resolved by the
+    PLATFORM from `turn` (the validated raising execution, or None) through
+    the resolver the enterprise projects module registers
+    (`role_addressing.resolve_target`). Every arm is a 422 by name:
+    `project_unavailable` (no resolver, or it failed — an OSS-only install),
+    and the resolver's own `not_in_project_turn` / `project_unreachable`, each
+    with its remedy. Never a fallback to the owner or the operators: a project
+    ask reaches the project's person or is not filed."""
+    from services import role_addressing
+
+    try:
+        r = role_addressing.resolve_target(target, agent_name, turn)
+    except role_addressing.RoleRefused as e:
+        raise AskRejected(422, e.code, e.message, role=e.role)
+    people = _people_list(r.people)
+    single = (r.single or "").strip().lower() or None
+    return people, single, bool(people), r.project_id, r.seat
+
+
+def _in_turn_chat(agent_name: str, email: str, turn: Optional[str]) -> Optional[str]:
+    """The Workspace chat `turn` serves iff it is (agent, email)'s own RUNNING
+    chat turn (`client_portal.service.chat_for_execution`, ent#734) — else
+    None, and no Main is resolved or created. Fail-soft like
+    `_workspace_attachment`: a lookup that fails costs the reader a click,
+    never the ask."""
+    if not turn:
+        return None
+    try:
+        from client_portal.service import chat_for_execution
+        return chat_for_execution(agent_name, email, turn) or None
+    except Exception:  # noqa: BLE001
+        logger.warning("[AskService] could not resolve the chat of the turn that raised a "
+                       "project ask from %s; stored without a chat", agent_name, exc_info=True)
+        return None
+
+
+def _turn_chat(agent_name: str, turn: str) -> Optional[str]:
+    """The chat a RUNNING Workspace chat turn serves, whoever its person is
+    (`client_portal.service.chat_of_turn`, trinity-enterprise#1134) — else
+    None. Fail-soft: a lookup that fails costs the person the notice, never
+    the ask."""
+    try:
+        from client_portal.service import chat_of_turn
+        hit = chat_of_turn(agent_name, turn)
+    except Exception:  # noqa: BLE001
+        logger.warning("[AskService] could not resolve the chat of the turn that raised an "
+                       "unaddressed ask from %s; stored without a chat", agent_name, exc_info=True)
+        return None
+    return hit[0] if hit else None
 
 
 def _owner_email(agent_name: str) -> Optional[str]:
@@ -1786,10 +2706,56 @@ def _broadcast_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def _conflict_code(row: Dict[str, Any]) -> str:
+def _conflict_code(row: Dict[str, Any], *, address_compared: bool = False) -> str:
     """Why an answer's compare-and-set lost. Still `pending` means the deadline
-    refused it (the respond predicate's only other clause)."""
-    return "expired" if row.get("status") == "pending" else "not_pending"
+    refused it (the respond predicate's only other clause) — or, when the
+    ending also compared the address (trinity-enterprise#1096, R5) and the
+    deadline has not passed, that a re-address moved the row: `readdressed`."""
+    if row.get("status") != "pending":
+        return "not_pending"
+    if address_compared and not _past_deadline(row):
+        return "readdressed"
+    return "expired"
+
+
+def _past_deadline(row: Mapping[str, Any]) -> bool:
+    deadline = row.get("expires_at")
+    if not deadline:
+        return False
+    try:
+        parsed = parse_iso_timestamp(deadline) if isinstance(deadline, str) else deadline
+    except Exception:  # noqa: BLE001 — unreadable reads as passed, the safe word
+        return True
+    if parsed is None:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed <= datetime.now(timezone.utc)
+
+
+def _ending_expectation(row: Mapping[str, Any], actor: "Actor", *,
+                        cancelling: bool = False) -> Optional[Dict[str, Any]]:
+    """What a seat-fenced ending's compare-and-set must still find
+    (trinity-enterprise#1096, R5): the stored address as the caller read it.
+    None for a row whose ending does not depend on its address. Raises
+    `AskConflict("readdressed")` when a re-address already moved it, and
+    `AskNotFound` when it is gone. On the admin seat the stored context (where
+    the seat stamp lives) is compared too."""
+    if not _seat_fenced(row, cancelling=cancelling):
+        return None
+    raw = _address_unchanged(row)
+    if raw is None:
+        fresh = db.get_operator_queue_item(row["id"])
+        if not fresh:
+            raise AskNotFound(row["id"])
+        if fresh.get("status") != "pending":
+            raise AskConflict("not_pending", fresh)
+        raise AskConflict("readdressed", fresh)
+    expect = {"addressed_to_email": raw.get("addressed_to_email"),
+              "resolved_to": raw.get("resolved_to")}
+    if _admin_seated(row):
+        expect["context"] = raw.get("context")
+    return expect
 
 
 def _acted_by(actor_user: Any) -> Dict[str, Any]:
@@ -1906,6 +2872,9 @@ def _wake_filer(event: EndingEvent) -> None:
         for row in event.rows:
             if is_platform_minted(row) or not _wakes(row):
                 continue
+            # ent#1135 (T4): `owed` BEFORE the spawn, so a restart between this
+            # ending and the turn still finds the wake owed and re-offers it.
+            _mark_wake_owed(lambda row=row: [row])
             operator_resume_service.spawn_resume_dispatch(
                 row,
                 response=row.get("response"),
@@ -1927,13 +2896,27 @@ def _wake_filer(event: EndingEvent) -> None:
     rows = [row for row in event.rows if row.get("disposed_by") != "agent" and _wakes(row)]
     if not rows:
         return
+    _mark_wake_owed(lambda: [row for row in rows
+                             if operator_resume_service._wakes_on_ending(row)])
     operator_resume_service.spawn_ending_dispatch(
         rows,
         disposition=event.disposition,
         disposed_by_email=event.actor_email,
+        disposed_by_id=event.actor_user_id,
         reason=event.reason,
         batch_id=event.batch_id,
     )
+
+
+def _mark_wake_owed(rows_of) -> None:
+    """ent#1135 (T4): stamp `owed` before a spawn. A failed stamp is logged and
+    never costs the wake: the spawn still runs and the dispatch writes its own
+    `woken` / `pending` — only a restart in between would lose it."""
+    try:
+        operator_resume_service.mark_wake_owed(rows_of())
+    except Exception:  # noqa: BLE001
+        logger.warning("ask sink: wake_state=owed not recorded — the wake is still spawned, "
+                       "but a restart before its turn would drop it", exc_info=True)
 
 
 register_ending_observer(_wake_filer)

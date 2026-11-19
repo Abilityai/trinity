@@ -138,7 +138,10 @@ RUN pip install --no-cache-dir \
     "mkdocstrings[python]==0.29.1" \
     mike==2.2.0 \
     pytest-asyncio==1.4.0 \
-    Pillow==11.1.0 \
+    # Pillow decodes avatar images that come from template repositories, which
+    # is untrusted input. 13.0.0 is the first release that fixes the decoder
+    # advisories open against every 11.x and 12.x release (trinity-enterprise#1124).
+    Pillow==13.0.0 \
     # #1536 report export. Both are pure-Python wheels — no system libraries, so
     # the image build is unchanged beyond these two lines (WeasyPrint was
     # rejected for exactly that reason: cairo/pango would have made a PDF button

@@ -58,6 +58,7 @@ from services.agent_service.helpers import agent_http_request
 from services.docker_service import get_agent_container
 from services.docker_utils import container_get_archive
 from services.platform_audit_service import AuditEventType, platform_audit_service
+from utils.app_version import resolve_release_version
 
 from utils.log_masking import masked_text
 
@@ -299,7 +300,7 @@ async def export_agent_data(
                 "exported_at": datetime.now(timezone.utc).isoformat(),
                 "data_root": "data/",
                 "data_paths": declared_paths,
-                "trinity_version": os.getenv("GIT_COMMIT_SHORT", "unknown"),
+                "trinity_version": resolve_release_version(),
             }
             await loop.run_in_executor(None, _append_manifest, tmp_path, manifest)
         except _ExportTooLarge:

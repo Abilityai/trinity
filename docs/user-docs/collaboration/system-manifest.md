@@ -85,7 +85,7 @@ A manifest describes:
 - A list of agents with name, template, resources, and configuration.
 - **Permissions** -- either a `preset:` (`full-mesh`: everyone can call everyone; `orchestrator-workers`: only an agent named `orchestrator` can call the rest; `none`: isolated) or an `explicit:` map of each caller to the agents it may call. Setting both is an error.
 - Shared folder configuration for inter-agent file access.
-- Schedule definitions for autonomous execution.
+- Schedule definitions for autonomous execution. A schedule's optional `model` is written on deploy and apply, compared on apply (a change is a `schedule_update` naming `model`), and exported, so an export re-applies with the same model.
 - Auto-start settings controlling which agents launch on deploy.
 - **`default_tags`** -- tags applied to every agent in the system (the system name is always applied as a tag too).
 - Per-agent **`tags`** -- additional tags applied to a specific agent, on top of `default_tags`.
@@ -158,6 +158,7 @@ Rules that hold for every key:
 - **`summary`** in the apply result counts, per group (`skills`, `grants`, `gates`, `roles`, `members`), what is written, what is only reported, and what is **`unobserved`**. Unobserved means this install has nothing that can answer for that group (each member lists its unobserved groups). It is never shown as "in sync". A failed read is different: it blocks the member with the retryable `member_reads_unavailable`. A dry run counts what apply *would* write; a real run counts only the writes that actually landed (a skill held back for its gate, or a write that failed, is not counted), and a refused run counts none. Likewise `adopted` lists only agents whose system tag was actually added.
 - **Export** writes each member's skills, skill sets, gates, grants and held seat back out, so the file re-applies unchanged. Person seats and declared-only members are not stored on the platform and are not exported. The first lines of every export are `# unobserved:` comments that say so (and name anything that could not be read — including every member's seat on an install with no assignment module). Grants, gates and seats appear only where the caller could read them directly: grants and seats for the agent's owner or an admin, and gates for anyone the Skills tab's gate read admits. An export names what was withheld from this caller. `resources` are the member's effective values, so re-applying an export keeps a limit that is waiting for a restart. A dry run of an export on the system it came from shows nothing to create, nothing to write and no drift: something an agent already holds stays in sync even if it has since left the library (a skill or skill set, a retired capability, a gate whose approver can no longer be resolved). Person seats in a manifest, and a seat the assignment module did not answer for, read back as `unobserved`. Exporting the same system twice gives the same text.
 - The deploy preview shows one line under **Agents to create** that totals what the created agents will be configured with. Anything held back is listed under the notes.
+- **The apply preview says what the run will do for a new member.** If the member's `local:` template declares its own schedules, the preview shows what happens to each one: a manifest schedule with the same name updates the template's schedule in place (which keeps the template's on/off state, reported as `enabled_differs`), and a schedule only the template declares is reported as `schedule_undeclared`. A `github:` template is not read during a preview, so its schedules show as `pending_template_resolution` until the run, and the run reports the template's own schedules. If the run could not create the member or read its schedules back, they are still shown as `pending_template_resolution`, next to the failure. If a data volume `agent-<name>-workspace` is left over from an earlier agent of that name, the preview is `invalid` with `member_workspace_volume_leftover` and the run is refused before anything is written. Apply never takes over leftover data: remove the volume (`docker volume rm agent-<name>-workspace`) or rename the member. The deploy preview also warns when a manifest schedule shares its name with one the template declares and differs from it, because deploy keeps the template's schedule.
 
 ## Deploy Result (best-effort by default)
 
@@ -178,13 +179,14 @@ Two deploy options control this:
 - **`dry_run`** -- validate and preview only. Returns `status: "valid"` with the list of agents that *would* be created. Nothing is deployed.
 - **`strict`** -- restore the legacy abort-on-first-failure behavior. The first agent that fails aborts the whole deploy (re-raising with that failure's original status code).
 
-**Redeploy caveat:** re-running a manifest after a `partial` failure does **not** yet converge idempotently -- it `_N`-suffixes the already-created agents (e.g. `my-system-worker_2`) instead of reusing them. Clean up the survivors first, or expect suffixed duplicates.
+**Redeploy caveat:** re-running a manifest with deploy after a `partial` failure does **not** converge -- it `_N`-suffixes the already-created agents (e.g. `my-system-worker_2`) instead of reusing them. Use **apply** (`apply_system`, `POST /api/systems/apply`) to bring a live system in line with its manifest instead; it creates only the members that are missing.
 
 ## After Deploy: Reading, Restarting, and Exporting a System
 
 Deploy is a one-shot recipe, but the deployed agents remain addressable as a system:
 
 - **Membership is by tag, not by name.** Deploy tags every member with the system name, and the post-deploy routes resolve membership from that tag. Only agents deployed before tagging existed fall back to the `<system>-*` name prefix, and even then an agent whose own tag claims a longer prefix is excluded — so restarting `acme` never touches the agents of a system named `acme-extra`. A system whose tagged members all lack the `<system>-` prefix is bare-named, and then an untagged `<system>-*` agent is not a member at all.
+- **List** (`GET /api/systems`, `list_systems`) lists a system by its tag, never by splitting agent names at a hyphen, so `content-writer` does not invent a `content` system. A tag is listed only with evidence that it is a system: the system view created for it, an apply run that named it, or a member named `<tag>-*`. A plain tag is not a system.
 - **Get** (`GET /api/systems/{name}`) returns the members you can access with their permissions, shared folders, and real schedules.
 - **Restart** (`POST /api/systems/{name}/restart`, `restart_system`) stops and starts every member. It requires the **creator** role or above and is **human-only**: an agent-scoped API key is refused, because the per-agent start/stop routes only let an agent touch agents it spawned and a bulk restart would bypass that.
 - **Export** (`GET /api/systems/{name}/manifest`, `get_system_manifest`) writes a manifest you can deploy again. Permission edges pointing outside the system are dropped rather than exported as broken names, and the instance-wide platform prompt is never embedded as the manifest's `prompt:` — deploying the export elsewhere would otherwise overwrite that instance's prompt for every agent.
@@ -203,7 +205,7 @@ On a **fresh install** (no non-system agents yet), Trinity auto-seeds a bundled 
 
 | Tool | Description |
 |------|-------------|
-| `deploy_system(manifest, dry_run?, strict?)` | Deploy a system from a manifest. `dry_run` validates and previews without creating; `strict` restores abort-on-first-failure. Check the response `status` / `failed[]`. |
+| `deploy_system(manifest, dry_run?, strict?)` | Deploy a system from a manifest. `dry_run` validates and previews without creating; `strict` restores abort-on-first-failure. Check the response `status` / `failed[]`. A failed deploy comes back as a result, not a thrown error: the report with `success: false` and the `http_status` (for example the `500` `failed` report or a `400` manifest error) |
 | `list_systems()` | List all deployed systems |
 | `restart_system(name)` | Restart all agents in a system (creator role, human callers only — refused for an agent key) |
 | `get_system_manifest(name)` | Export the system as a redeployable YAML manifest |
@@ -228,7 +230,8 @@ See the [Backend API Docs](http://localhost:8000/docs) for full request/response
 ## Limitations
 
 - A community build has no un-deploy: remove a system's agents one by one. Removing a whole system (the **Remove a deployed system** panel under Library → Systems, and `teardown_system`) needs a matching entitlement.
-- Re-running a manifest after a partial deploy creates `_N`-suffixed duplicates rather than reusing the survivors.
+- Re-running a manifest with deploy after a partial deploy creates `_N`-suffixed duplicates rather than reusing the survivors; use apply to converge.
+- System names, member keys and `local:` template names may not end in a newline.
 
 ## See Also
 

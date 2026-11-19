@@ -745,9 +745,14 @@ def decode_token(token: str) -> Optional[dict]:
     Returns the token payload with user info if valid, None if invalid.
     Useful for WebSocket authentication where Depends() doesn't work.
 
+    It is the shared socket-door decoder, so it applies the same account-state
+    checks as `get_current_user`: a deactivated account is refused here too
+    (abilityai/trinity-enterprise#863).
+
     Returns:
         dict with keys: sub, email, role, exp, mode (if valid)
-        None if token is invalid or expired
+        None if token is invalid or expired, or the account is missing or
+        deactivated
     """
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -774,6 +779,11 @@ def decode_token(token: str) -> Optional[dict]:
         # Get full user record from database
         user = db.get_user_by_username(username)
         if not user:
+            return None
+
+        # #995 — a deactivated account is refused at the socket doors as at
+        # get_current_user (abilityai/trinity-enterprise#863).
+        if user.get("suspended_at"):
             return None
 
         return {
@@ -1696,6 +1706,30 @@ def human_only(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+class HumanOnlyRefused(HTTPException):
+    """The 403 every human-only primitive below raises (trinity-enterprise#719).
+
+    To a caller it is the plain `HTTPException` it always was: the same status
+    and detail, answered by the handler the app registers for `HTTPException`
+    (`error_handlers.human_only_refused` delegates to it), so the response is
+    unchanged byte for byte and every `except HTTPException` still catches it.
+    The type exists so one app handler can record the refused attempt: a
+    `Depends` gate refuses before the handler body runs, and the imperative call
+    sites hold no `Request`.
+
+    `rule` names the allowlist that refused (`person` or `interactive`);
+    `principal` is the refused caller, for the audit row only. A site that
+    writes its own row for the refusal sets `audited` before re-raising, so the
+    app handler writes no second one.
+    """
+
+    def __init__(self, detail: Any, *, rule: str, principal: Any) -> None:
+        super().__init__(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+        self.rule = rule
+        self.principal = principal
+        self.audited = False
+
+
 def reject_non_interactive_principal(current_user: User) -> None:
     """Interactive-human-only guard — an ALLOWlist, not a denylist (#1854).
 
@@ -1716,12 +1750,13 @@ def reject_non_interactive_principal(current_user: User) -> None:
     decided — never for read/chat surfaces an MCP key legitimately drives.
     """
     if not is_interactive_principal(current_user):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
+        raise HumanOnlyRefused(
+            (
                 "This operation requires an interactive session; "
                 "MCP API keys cannot perform it"
             ),
+            rule="interactive",
+            principal=current_user,
         )
 
 
@@ -1831,9 +1866,8 @@ def reject_non_person_principal(current_user: User) -> None:
     (trinity-enterprise#611). Guards the three ways an ask ends by hand:
     respond, cancel and bulk-cancel."""
     if not is_person_principal(current_user):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=dict(PERSON_REQUIRED_DETAIL),
+        raise HumanOnlyRefused(
+            dict(PERSON_REQUIRED_DETAIL), rule="person", principal=current_user
         )
 
 
@@ -1876,9 +1910,8 @@ def assert_person(current_user: User) -> None:
     if not is_person_principal(current_user) or getattr(
         current_user, "vouched_source_agent", None
     ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=dict(HUMAN_ONLY_DETAIL),
+        raise HumanOnlyRefused(
+            dict(HUMAN_ONLY_DETAIL), rule="person", principal=current_user
         )
 
 
@@ -1886,6 +1919,25 @@ def require_person(current_user: User = Depends(get_current_user)) -> User:
     """`Depends` form of `assert_person` — the PERSON rule on a route."""
     assert_person(current_user)
     return current_user
+
+
+def can_seat_member(current_user: User) -> bool:
+    """May this caller seat the instance's recorded hub member through apply
+    (trinity-enterprise#1174, operator ruling T2)?
+
+    A PERSON (`assert_person`: a JWT session or the person's own `user` key —
+    never an agent, system, connector, delegate, ops or loopback principal)
+    who passes `assert_admin`. The only write it opens is the ONE person an
+    interactive admin recorded, as `primary`; every other seat, share and
+    grant keeps `is_interactive_admin`. A principal without `mcp_scope` fails
+    closed through both predicates' sentinels.
+    """
+    try:
+        assert_person(current_user)
+        assert_admin(current_user)
+    except HTTPException:
+        return False
+    return True
 
 
 def require_interactive(current_user: User = Depends(get_current_user)) -> User:
@@ -1896,9 +1948,8 @@ def require_interactive(current_user: User = Depends(get_current_user)) -> User:
     """
     reject_non_interactive_principal(current_user)
     if getattr(current_user, "vouched_source_agent", None):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=dict(HUMAN_ONLY_DETAIL),
+        raise HumanOnlyRefused(
+            dict(HUMAN_ONLY_DETAIL), rule="interactive", principal=current_user
         )
     return current_user
 
@@ -3466,11 +3517,33 @@ def assert_not_share_viewer(current_user: User, agent_name: str) -> None:
 NO_ROWS_USER_ID = -1
 
 
+def _acting_person_may_open(user_id: int, agent_name: str) -> bool:
+    """May the person an agent key is acting for open `agent_name` at all
+    (`db.can_user_access_agent`: admin, owner, shared)? Fails closed."""
+    try:
+        user = db.get_user_by_id(user_id)
+        username = (user or {}).get("username")
+        if not username:
+            return False
+        return db.can_user_access_agent(username, agent_name) is True
+    except Exception:  # noqa: BLE001 — fail closed: an unreadable answer shows no rows
+        logger.warning("[ent#1148] acting-person access lookup failed", exc_info=True)
+        return False
+
+
 def viewer_row_scope(current_user: User, agent_name: str) -> Optional[int]:
     """The user id whose executions the caller may see on `agent_name`, or None
-    when they may see every row (owner, admin, key tier)."""
+    when they may see every row (owner, admin, key tier).
+
+    An agent key acting for a shared person reads as that person on EVERY
+    agent the route names, and that person's rows exist on an agent they cannot
+    open: a callee the key's agent delegated to records the person
+    (trinity-enterprise#1148). So the person must be able to open the route's
+    agent, or the key sees no rows there — what the person's own key would see."""
     acting = acting_turn_user_id(current_user)
     if acting is not None:
+        if acting != NO_ROWS_USER_ID and not _acting_person_may_open(acting, agent_name):
+            return NO_ROWS_USER_ID
         return acting
     if agent_viewer_tier(current_user, agent_name) != VIEWER_SHARE:
         return None
@@ -3597,3 +3670,20 @@ SkillManagedAgentByName = Annotated[str, Depends(get_skill_managed_agent_by_name
 
 # Current user type alias
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+def check_requested_project(request: Any, current_user: Any, agent_name: str) -> None:
+    """Refuse a dispatch whose body names a ``project_id`` the platform will not
+    attribute (ent#1105). Call it BEFORE any admission, claim, slot or row.
+
+    The decision is the execution-attribution seam's; this only maps its
+    refusal onto the HTTP response — 422 ``project_attribution_unavailable``
+    when no edition attributes executions to projects.
+    """
+    from services import execution_attribution
+    try:
+        execution_attribution.check(
+            getattr(request, "project_id", None),
+            principal=current_user, agent_name=agent_name)
+    except execution_attribution.AttributionRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail())

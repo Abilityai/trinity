@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from database import db
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,7 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "metrics_daily_point_cap": "Maximum metric points one agent may record per UTC day (default: 100000, bounds 0-10000000; 0 is unlimited). Bootstrap via METRICS_DAILY_POINT_CAP until a value is saved here (trinity-enterprise#478)",
     "inter_agent_max_chain_depth": "Maximum agent-to-agent hops in one call chain (default: 8, bounds 1-32). A hop past it is refused with 403 inter_agent_depth_exceeded before any model work. Bootstrap via INTER_AGENT_MAX_CHAIN_DEPTH until a value is saved here (#2806)",
     "event_dispatch_max_fires_per_hour": "Maximum event-subscription dispatches from one source agent to one subscriber agent per hour, across all subscriptions between them (default: 120, bounds 1-10000). Dispatches past it are skipped and the subscriber gets one alert per window (#2973)",
+    "caller_wake_max_per_hour": "Maximum wakes one agent's ended runs may send the agent that delegated them per hour (default: 120, bounds 0-10000, 0 = unlimited). A wake past it is skipped and audited, the delegator gets one alert per window, and the ending stays readable with get_execution_result. Bootstrap via CALLER_WAKE_MAX_PER_HOUR until a value is saved here (#4357)",
 }
 
 
@@ -1124,6 +1125,40 @@ def resolve_github_pat_candidates(agent_name: Optional[str] = None,
     return ladder
 
 
+async def resolve_github_token(repo: str,
+                               agent_name: Optional[str] = None,
+                               owner_id: Optional[int] = None,
+                               permissions: Optional[dict] = None) -> tuple:
+    """Resolve a GitHub credential for ONE operation on ``repo`` (trinity-enterprise#1277).
+
+    Returns ``(token, tier, expires_at)``. Order: per-agent PAT, per-user PAT,
+    the registered repo-token provider (tier ``"app"``), platform PAT. PAT
+    tiers carry ``expires_at`` None.
+
+    An ``"app"`` token expires within the hour. Use it for the operation at
+    hand; never persist it or put it in a container environment. That is why
+    this is separate from ``resolve_github_pat``, whose answer the create path
+    bakes into the container.
+
+    Raises ``github_token_provider.GithubTokenUnavailable`` when the provider
+    covers ``repo`` and cannot produce a token. The platform PAT is not used
+    as a fallback in that case.
+
+    Caller contract: this function does NO per-caller authorization. The call
+    site must already have established that the caller may act on ``repo``.
+    ``permissions`` is handed to the provider as given, unvalidated.
+    """
+    from services import github_token_provider
+
+    pat, tier = resolve_github_pat(agent_name=agent_name, owner_id=owner_id)
+    if tier in ("per_agent", "per_user"):
+        return pat, tier, None
+    scoped = await github_token_provider.token_for_repo(repo, permissions)
+    if scoped:
+        return scoped.token, "app", scoped.expires_at
+    return pat, tier, None
+
+
 def get_google_api_key() -> str:
     """Get Google API key from settings, fallback to env var."""
     return settings_service.get_google_api_key()
@@ -1175,6 +1210,20 @@ def set_secret_setting(key: str, value: str) -> None:
 def clear_secret_setting(key: str) -> bool:
     """Remove a credential-bearing setting (encrypted + any legacy row)."""
     return settings_service.clear_secret_setting(key)
+
+
+def get_stored_secret_setting(key: str) -> str:
+    """A credential-bearing setting's decrypted value from the DB, '' if absent. No env leg.
+
+    Only for keys in ``SECRET_SETTING_KEYS``: the read lazily migrates a legacy
+    cleartext row to ``<key>_encrypted``, which must never happen to an ordinary
+    setting.
+    """
+    from services.secret_settings import SECRET_SETTING_KEYS
+
+    if key not in SECRET_SETTING_KEYS:
+        raise ValueError(f"{key!r} is not a credential-bearing setting")
+    return settings_service._stored_secret_setting(key)
 
 
 def has_secret_setting(key: str) -> bool:
@@ -1685,6 +1734,24 @@ def get_effective_max_parallel_tasks(agent_name: str) -> int:
     """
     from database import db
     return clamp_to_ceiling(db.get_max_parallel_tasks(agent_name))
+
+
+def get_effective_max_parallel_tasks_for(agent_names) -> Dict[str, int]:
+    """``get_effective_max_parallel_tasks`` for many agents at once (#4635).
+
+    One roster read and one ceiling read whatever the count — the queue-stall
+    monitor asks for every agent with a queue head on each tick. An agent with
+    no live roster row gets 3, the value ``get_max_parallel_tasks`` returns for
+    one. Raises when the roster cannot be read; the caller decides what an
+    unknown cap means.
+    """
+    names = list(agent_names)
+    if not names:
+        return {}
+    from database import db
+    caps = db.get_all_agents_parallel_capacity()
+    ceiling = get_max_parallel_tasks_ceiling()
+    return {name: min(int(caps.get(name, 3)), ceiling) for name in names}
 
 
 # ============================================================================

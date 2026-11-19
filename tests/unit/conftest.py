@@ -26,6 +26,13 @@ import sys
 import types
 from pathlib import Path
 
+# #4439: pin httpcore before any test can snapshot sys.modules. httpx 0.28
+# imports it lazily and caches its exception map on the first request; a
+# `patch.dict(sys.modules, ...)` that first imported httpcore drops it on exit,
+# the re-import is a second module, and its ConnectError then escapes every
+# `except httpx.HTTPError` raw. Loaded here, it is in every snapshot and no
+# restore can evict it. Guarded by test_4439_httpcore_pinned.py.
+import httpcore  # noqa: F401
 import pytest
 
 # Issue #589 + #645: backend/config.py raises at import if REDIS_URL lacks
@@ -484,6 +491,20 @@ def _restore_sys_modules_baseline_unit():
     _restore_unit_sys_modules()
     yield
     _restore_unit_sys_modules()
+
+
+@pytest.fixture(autouse=True)
+def _clear_rate_limiter_buckets():
+    """Empty the rate limiter's in-process buckets before every test.
+
+    They are module-global, so hits from one test count in the next. Channel
+    /login requests are capped per sender (ent#1253), and several files send
+    /login from the same fake sender, so without this the result depends on
+    test order. Looked up in sys.modules only: never imports the limiter."""
+    rl = sys.modules.get("services.rate_limiter")
+    if rl is not None:
+        rl.clear_inprocess()
+    yield
 
 
 @pytest.fixture(autouse=True)

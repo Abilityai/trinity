@@ -555,7 +555,17 @@ def _agent_unreachable(what: str) -> DelegationError:
     )
 
 
-def _env_unreadable(reason: str) -> DelegationError:
+def _env_unreadable(reason: str, *, old_image: bool = False) -> DelegationError:
+    if old_image:
+        # #4483: the agent kept an image from before the upgrade, which cannot
+        # say whether it has a credential file. The remedy is a restart.
+        return DelegationError(
+            409, "env_unreadable",
+            f"This agent is running an older agent image that cannot confirm what is in its "
+            f"credential file ({reason}), so nothing was changed: the Nevermined mandate is "
+            "untouched. Ask the agent's owner or an admin to stop and start it in Trinity, "
+            "then try again.",
+        )
     return DelegationError(
         409, "env_unreadable",
         f"The agent's credential file could not be read as text ({reason}), so it was left "
@@ -582,12 +592,14 @@ async def _read_agent_env(client: httpx.AsyncClient, agent_name: str) -> str:
             "the Nevermined mandate is untouched and nothing was bound.",
         )
     try:
-        state, content = agent_env_read.classify_env_read(response.json())
+        body = response.json()
+        state, content = agent_env_read.classify_env_read(body)
     except ValueError:
         raise _agent_unreachable("unreadable read response") from None
     if state in (agent_env_read.TEXT, agent_env_read.ABSENT):
         return content
-    raise _env_unreadable(state)
+    raise _env_unreadable(state, old_image=(
+        state == agent_env_read.UNCONFIRMED and agent_env_read.image_predates_missing(body)))
 
 
 async def _inject_agent_env(client: httpx.AsyncClient, agent_name: str, env_text: str) -> None:

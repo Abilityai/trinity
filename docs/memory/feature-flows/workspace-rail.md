@@ -524,7 +524,7 @@ string with `rail-scroll` on it.
 
 The sidebar said an agent was waiting on you, but the agent's own page gave you
 nothing to click: since the 2026-09-30 ruling an agent's asks live in the Inbox
-filtered to it, a background ask shows **only** there, and since ent#784 opening an
+filtered to it, a pure background ask (schedule/loop/gate) shows **only** there while a reminder-wake ask to the same person the reminder was set for also renders as a tile in their Main conversation (ent#1171), and since ent#784 opening an
 agent starts a new chat, so even a mid-chat ask sits in a chat you are not looking
 at. The rail gains an **Asks** tab that lists the agent's open asks, one line each,
 and opens the clicked one in the Inbox. The ruling stands: **answering happens in

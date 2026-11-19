@@ -226,7 +226,7 @@ _KNOWN = {
 }
 _ALLOWED_STORES = {
     "clientPortal", "projects", "portalDrafts", "portalWork", "portalRailFeeds", "portalLoops",
-    "auth", "userPreferences", "theme",
+    "portalProgress", "auth", "userPreferences", "theme",
 }
 
 

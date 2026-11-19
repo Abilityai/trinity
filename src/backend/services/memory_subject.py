@@ -188,4 +188,17 @@ def keeps_shared_auto_memory(
     if user_id is not None or email:
         return bool(owner) and email == owner
 
+    # trinity-enterprise#1225: a continuation names nobody; it serves the turn it
+    # continues, so it keeps auto-memory only when that turn is the owner's own.
+    from services import turn_tier_service
+    if (triggered_by in turn_tier_service.CONTINUATION_TRIGGERS
+            and getattr(execution, "continues_execution_id", None)):
+        try:
+            from database import db
+            return turn_tier_service.turn_actor(
+                db, getattr(execution, "agent_name", None), execution=execution,
+            ) == (turn_tier_service.OWNER, None, None)
+        except Exception:  # noqa: BLE001 - fail closed: a wrong "on" is the leak
+            return False
+
     return triggered_by in _AUTO_MEMORY_HEADLESS_TRIGGERS

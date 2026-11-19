@@ -23,6 +23,7 @@ from dependencies import (
     require_person,
 )
 from services import settings_service
+from services.agent_model_service import resolve_default_model
 from services.docker_service import get_agent_container
 from services.agent_service import (
     get_agent_api_key_setting_logic,
@@ -668,10 +669,13 @@ async def get_public_channel_model(
 
     override = db.get_public_channel_model(agent_name)
     platform_default = settings_service.get_platform_default_model()
+    # ent#1202: with no override a public turn runs on the agent's own model
+    # first, then the platform default — the same resolver the turn uses.
+    inherited = resolve_default_model(agent_name).model
     return {
         "agent_name": agent_name,
         "public_channel_model": override,                       # None = inherit
-        "resolved_model": override or platform_default,
+        "resolved_model": override or inherited or platform_default,
         "is_overridden": override is not None,
         "platform_default": platform_default,
         "available_models": sorted(settings_service.PUBLIC_CHANNEL_MODELS),
@@ -724,11 +728,12 @@ async def set_public_channel_model(
     )
 
     platform_default = settings_service.get_platform_default_model()
+    inherited = None if model else resolve_default_model(agent_name).model  # ent#1202
     return {
         "message": "Public-channel model updated",
         "agent_name": agent_name,
         "public_channel_model": model,
-        "resolved_model": model or platform_default,
+        "resolved_model": model or inherited or platform_default,
         "is_overridden": model is not None,
     }
 

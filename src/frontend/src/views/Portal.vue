@@ -191,6 +191,8 @@
           :rooms-available="store.multiAgentChatAvailable"
           :projects-active="projectsRoute"
           :loading-roster="store.loading && !store.rosterLoaded"
+          :setup-pending="store.agentSetupPending"
+          :setup-overdue="setupOverdue"
           :settled="sidebarReady"
           :threads-failed="store.sessionsFailed"
           v-model:search="search"
@@ -245,6 +247,8 @@
           :rooms-available="store.multiAgentChatAvailable"
             :projects-active="projectsRoute"
             :loading-roster="store.loading && !store.rosterLoaded"
+            :setup-pending="store.agentSetupPending"
+            :setup-overdue="setupOverdue"
             :settled="sidebarReady"
             :threads-failed="store.sessionsFailed"
             v-model:search="search"
@@ -653,6 +657,14 @@
             <p :class="STAGE_BODY">{{ store.error }}</p>
             <button :class="STAGE_ACTION" @click="store.fetchRoster()">Try again</button>
           </template>
+          <!-- ent#1201: accepted, and the agent is on its way. One line, no
+               agent name, in the place the conversation will mount — the
+               progress card's own in-progress dot, never a spinner. -->
+          <template v-else-if="store.agentSetupPending">
+            <p :class="STAGE_TITLE" class="inline-flex items-center gap-2" data-testid="portal-setup-pending">
+              <span class="w-1.5 h-1.5 rounded-full bg-current motion-safe:animate-pulse" aria-hidden="true"></span>{{ setupOverdue ? SETUP_OVERDUE_LINE : SETUP_PENDING_LINE }}
+            </p>
+          </template>
           <!-- ent#357: an empty roster needs a next step, not just a statement.
                The two audiences need different ones: a signed-in user can go
                make an agent, an external client can only ask the person who
@@ -985,6 +997,7 @@ import { loginLocation } from '@/utils/platformSession'
 import { closedInviteMessage, termsLocation } from '@/utils/termsGate'
 import { HELP_CLASS } from '@/components/base/fieldClasses'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { usePortalProgressStore } from '@/stores/portalProgress'
 import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDrafts'
 import { safeStorage } from '@/utils/safeStorage'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
@@ -1070,6 +1083,8 @@ import {
   orderRosterAgents,
   // #3672: the sidebar's one first-load verdict.
   sidebarSettled,
+  // ent#1201: the set-up landing's bounded poll.
+  setupPollVerdict, SETUP_PENDING_LINE, SETUP_OVERDUE_LINE,
 } from '@/components/portal/portalUtils'
 // ent#621 — the Workspace key map. The rules are pure and live there; this view
 // owns the one listener and the dispatch table (T3).
@@ -3259,6 +3274,61 @@ onUnmounted(() => clearUnreadCount())
 // a human-latency decision, not a stream.
 const ASKS_POLL_MS = 20000
 let asksTimer = null
+
+// ---- ent#1201: the set-up landing --------------------------------------------
+// The roster says the viewer's own agent is being set up (seated or started):
+// the first read after accepting can be empty, or hold an agent whose start is
+// still running. Re-read it quietly — no skeleton, no error over the line —
+// every 3 s while the flag holds, for at most `SETUP_POLL_CEILING_MS`; past
+// that, stop and say it is taking longer. Only while pending, so an ordinary
+// Workspace pays nothing (#3058's landing cost is untouched).
+const SETUP_POLL_MS = 3000
+const setupOverdue = ref(false)
+let setupPollTimer = null
+let setupPollStartedAt = 0
+let setupRefreshing = false
+
+function stopSetupPoll() {
+  clearInterval(setupPollTimer)
+  setupPollTimer = null
+}
+
+function tickSetupPoll() {
+  const verdict = setupPollVerdict({ pending: store.agentSetupPending, elapsedMs: Date.now() - setupPollStartedAt })
+  if (verdict !== 'poll') {
+    stopSetupPoll()
+    setupOverdue.value = verdict === 'overdue'
+    return
+  }
+  // One read at a time: a slow roster must not stack a second one behind it.
+  if (setupRefreshing) return
+  setupRefreshing = true
+  Promise.resolve(store.refreshRoster()).finally(() => { setupRefreshing = false })
+}
+
+watch(() => store.agentSetupPending, (pending) => {
+  if (!pending) {
+    stopSetupPoll()
+    setupOverdue.value = false
+    return
+  }
+  if (setupPollTimer || setupOverdue.value) return
+  setupPollStartedAt = Date.now()
+  setupPollTimer = setInterval(tickSetupPoll, SETUP_POLL_MS)
+}, { immediate: true })
+onBeforeUnmount(stopSetupPoll)
+
+// A member's progress card flipping its assistant_ready step (the progress WS
+// trigger refetches the card) is the moment their agent became usable: re-read
+// the roster once, so availability on the row and the composer is current
+// without a reload.
+const progressStore = usePortalProgressStore()
+watch(
+  () => Object.keys(progressStore.byAgent).sort()
+    .map((name) => `${name}:${(progressStore.byAgent[name]?.steps || []).find((st) => st?.key === 'assistant_ready')?.state || ''}`)
+    .join('|'),
+  () => { void store.refreshRoster() },
+)
 
 function startAsksPoll() {
   stopAsksPoll()

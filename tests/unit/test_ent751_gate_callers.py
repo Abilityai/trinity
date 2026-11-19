@@ -673,6 +673,7 @@ def a2a_client(monkeypatch):
         # #3749: `message/send` pre-mints the execution row before dispatch.
         create_task_execution=lambda **kw: SimpleNamespace(id="exec-a2a"),
         get_agent_subscription_id=lambda name: None,
+        get_default_model_raw=lambda name: None,  # ent#1202
         get_execution=lambda eid: None))
     monkeypatch.setattr(a2a, "settings_service",
                         SimpleNamespace(get_platform_default_model=lambda: "claude-test"))

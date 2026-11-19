@@ -15,6 +15,10 @@ are needed and they fail differently: session revocation is a Redis cutoff and
 is best-effort, so with Redis down a blocked client's live token would still
 decode. This check reads the durable block row, so the block holds regardless —
 it is the layer that makes "blocked" mean blocked.
+
+A deactivated platform account (`users.suspended_at`) is refused by the same
+check (trinity-enterprise#1258): its email may also hold a share, and a portal
+session knows the email only.
 """
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ from dependencies import (
     PORTAL_MINT_OTP,
     oauth2_scheme,
     decode_portal_session,
+    is_interactive_principal,
     is_person_principal,
     portal_session_is_interactive,
     portal_session_minted_by,
@@ -60,6 +65,16 @@ def _reject_if_blocked(email: str) -> None:
         logger.error("[#281] block lookup failed for %s; denying: %s", email, exc)
         raise HTTPException(status_code=403, detail="Access has been revoked.")
     if blocked:
+        raise HTTPException(status_code=403, detail="Access has been revoked.")
+    # trinity-enterprise#1258: the same refusal for a deactivated platform
+    # account (`users.suspended_at`, #995). A portal session carries an email
+    # and no account, so nothing else on this path reads the column, and a
+    # session minted before the suspension would outlive it. Here, because this
+    # is the one check every consumer of a portal session already makes (the
+    # two below and `routers/terms.py`). Fail-closed inside the helper.
+    from .service import email_account_suspended
+
+    if email_account_suspended(email):
         raise HTTPException(status_code=403, detail="Access has been revoked.")
 
 
@@ -127,6 +142,12 @@ class PortalPrincipal(NamedTuple):
     #: (ent#362) — two identity spaces — so the email alone cannot say which
     #: rooms are the caller's. None for a portal token, which has no username.
     username: str | None = None
+    #: trinity-enterprise#1165 — a platform person who signed in INTERACTIVELY
+    #: (a JWT session, ``mcp_scope is None``: the predicate behind
+    #: ``dependencies.is_interactive_principal``). Every MCP key is False —
+    #: user-scoped, system, ops — and so is a portal token. An authorization
+    #: input, unlike ``credential``: a company-wide read is offered only here.
+    is_interactive: bool = False
 
 
 #: Response header carrying a rotated Workspace session token (ent#375). The
@@ -265,6 +286,7 @@ async def get_portal_principal(
         self_approves=is_person,
         credential="platform_session" if scope is None else f"mcp_key:{scope}",
         username=user.username,
+        is_interactive=is_interactive_principal(user),
     )
 
 

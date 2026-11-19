@@ -252,3 +252,23 @@ def test_the_seam_file_is_covered_by_the_enterprise_docs_guard():
     # A file in SEAM_FILES but absent from the `paths:` filters is only grepped
     # when some OTHER path in the filter changed — i.e. not when it is edited.
     assert text.count("- 'src/backend/services/assignment_provider.py'") == 2
+
+
+# ---------------------------------------------------------------------------
+# trinity-enterprise#1221: reachability is a fifth, bool-only key
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reachable", [True, False])
+def test_a_real_bool_reachability_is_kept(reachable):
+    ap.register_provider(_Provider(answer={"proactive_reachable": reachable}))
+    assert ap.resolve_assignment("ops", "chat") == {"proactive_reachable": reachable}
+
+
+@pytest.mark.parametrize("reachable", ["false", "true", 0, 1])
+def test_a_non_bool_reachability_is_unresolved(reachable, caplog):
+    """``bool("false")`` is True: a string must not become "reachable", and a
+    reachability claim nobody made renders as today."""
+    ap.register_provider(_Provider(answer={
+        "primary_user_display": "A. Smith", "proactive_reachable": reachable}))
+    assert ap.resolve_assignment("ops", "chat") == {"primary_user_display": "A. Smith"}

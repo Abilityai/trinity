@@ -106,9 +106,12 @@ def test_a_provider_saying_nobody_approves_is_still_a_refusal(ra):
 
 def test_the_ask_sink_uses_the_same_rule(ra, monkeypatch):
     """An ask and a report addressed to the same role must reach the same
-    people — the sink delegates, keeping its own owner lookup patchable."""
+    people — the sink delegates, keeping its own owner lookup patchable. An
+    ask to the approver additionally drops anyone who cannot open the agent
+    (#4501, pinned in test_4501_approver_reach.py); here both can."""
     from services import ask_service
 
+    monkeypatch.setattr(ra, "agent_reach", lambda agent_name, email: True)
     _provide({"approver": [ALICE, BOB]})
     assert ask_service._address(AGENT, "approver") == ([ALICE, BOB], None, True)
     with pytest.raises(ask_service.AskRejected) as exc:
@@ -401,6 +404,17 @@ def route(ra, monkeypatch):
 
     monkeypatch.setattr(pms.proactive_message_service, "audit_send", _no_audit)
 
+    # ent#1221: web now writes into the Workspace. Refuse it here the way the
+    # shared gate does for a person not on the roster, so this fixture never
+    # reads the island's database for a roster.
+    from services import schedule_workspace_delivery as swd
+
+    def _not_on_roster(agent, email):
+        raise swd.WorkspaceDeliveryRefused(
+            "workspace_delivery_target_unreachable", f"{email} cannot reach {agent}")
+
+    monkeypatch.setattr(swd, "resolve_main_destination", _not_on_roster)
+
     app = FastAPI()
     app.include_router(messages.router)
     # Override the objects the ROUTE holds (an earlier test may have re-imported
@@ -456,6 +470,11 @@ def test_a_role_addressed_message_no_channel_reaches_names_only_the_role(route, 
     _no_person(resp)
     assert resp.json()["detail"]["code"] == "role_no_channel"
     assert resp.json()["detail"]["role"] == "approver"
+    # ent#1221: the refusal names why, per channel tried — codes only.
+    expected = {"telegram": "telegram_not_linked", "slack": "slack_user_not_found",
+                "web": "workspace_not_shared"}
+    tried = ["telegram", "slack", "web"] if channel == "auto" else [channel]
+    assert resp.json()["detail"]["channels"] == {c: expected[c] for c in tried}
 
 
 def test_a_channel_error_carrying_the_email_never_reaches_a_role_addressed_caller(route, monkeypatch):
@@ -474,7 +493,7 @@ def test_a_channel_error_carrying_the_email_never_reaches_a_role_addressed_calle
     _no_person(resp)
 
 
-def test_an_email_addressed_message_keeps_its_existing_detail(route):
+def test_an_email_addressed_message_keeps_its_403_and_names_why_on_404(route):
     """The agent supplied the email itself, so naming it back discloses nothing."""
     post, svc_db, _ = route
     svc_db.can_agent_message_email.return_value = False
@@ -486,4 +505,7 @@ def test_an_email_addressed_message_keeps_its_existing_detail(route):
     svc_db.can_agent_message_email.return_value = True
     resp = post(recipient_email=ALICE, channel="telegram")
     assert resp.status_code == 404
-    assert resp.json()["detail"] == "No delivery channel available for recipient"
+    # ent#1221: structured for email-addressed sends too, so the agent learns why.
+    assert resp.json()["detail"] == {
+        "code": "no_channel", "message": "No delivery channel available for recipient",
+        "channels": {"telegram": "telegram_not_linked"}}

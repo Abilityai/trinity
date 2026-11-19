@@ -104,6 +104,14 @@ PROTECTED_KEYS = frozenset({
     # extensions/commands dirs) away from the ~/.gemini/settings.json that the
     # platform keeps the usage-statistics opt-out in.
     "GEMINI_CLI_HOME", "GEMINI_CLI_SYSTEM_SETTINGS_PATH", "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
+    # trinity-enterprise#1093: these could detach the `/etc/claude-code` file
+    # tier's `env` (the vendor-traffic opt-out and the #1001 routing pins) from
+    # the CLI: one relocates the managed-settings path (a stub on 2.1.322, but
+    # that is its only purpose); the other keeps only the highest admin tier's
+    # `env` (an org's remote managed settings, when present) instead of merging
+    # every tier's. Refused on every runtime: no other runtime reads them, and a
+    # runtime is set at creation.
+    "CLAUDE_CODE_MANAGED_SETTINGS_PATH", "CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION",
 })
 
 # Prefix-matched companions to PROTECTED_KEYS: `GIT_CONFIG_KEY_<n>` /
@@ -128,7 +136,7 @@ ROUTING_KEYS = frozenset({
 })
 
 # Each runtime's own endpoint names, protected on that runtime only, read from
-# the CLI version the image pins (Claude Code 2.1.281, Codex 0.147.0, Gemini
+# the CLI version the image pins (Claude Code 2.1.322, Codex 0.147.0, Gemini
 # 0.62.0). A Claude agent's `.env` may still carry `OPENAI_BASE_URL` for its own
 # MCP servers and scripts (`${OPENAI_BASE_URL}/v1` is a documented `.mcp.json`
 # shape): Claude Code never reads it, and neither does that Codex.
@@ -154,6 +162,17 @@ RUNTIME_ENDPOINT_KEYS = {
     }),
 }
 
+# trinity-enterprise#1093: Claude Code's vendor-traffic opt-out, held at "1" by
+# the root-owned `managed-settings.d/70-vendor-telemetry.json`. Refused from
+# `.env` on Claude only: other CLIs, SDKs and MCP servers read the generic
+# `DISABLE_TELEMETRY` / `DISABLE_ERROR_REPORTING` too, and a Gemini or Codex
+# agent may still set them for its own tools.
+RUNTIME_OPT_OUT_KEYS = {
+    "claude": frozenset({
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING",
+    }),
+}
+
 # Refused from `.env` but never pinned to a value (`routing_pins`). OpenSSL
 # opens `SSL_CERT_FILE` even when it is "", so an empty pin would break TLS for
 # every child tool; Claude Code ignores `ANTHROPIC_UNIX_SOCKET` in every
@@ -172,12 +191,18 @@ def is_protected_key(key: str) -> bool:
         key in PROTECTED_KEYS
         or key.startswith(PROTECTED_KEY_PREFIXES)
         or is_routing_key(key)
+        or is_opt_out_key(key)
     )
 
 
 def is_routing_key(key: str) -> bool:
     """True when ``key`` decides where this agent's runtime sends its traffic."""
     return key in ROUTING_KEYS or key in RUNTIME_ENDPOINT_KEYS.get(runtime_family(), ())
+
+
+def is_opt_out_key(key: str) -> bool:
+    """True when ``key`` is this agent's runtime's vendor-traffic opt-out."""
+    return key in RUNTIME_OPT_OUT_KEYS.get(runtime_family(), ())
 
 
 def routing_pins(family: Optional[str] = None) -> Dict[str, str]:
@@ -514,6 +539,12 @@ def build_execution_env(
                 "can set it", key,
             )
             continue
+        if is_opt_out_key(key):
+            logger.warning(
+                "ignoring %s from .env: it is part of the runtime's vendor-traffic "
+                "opt-out, which the platform holds on", key,
+            )
+            continue
         if is_protected_key(key):
             logger.warning(
                 "ignoring %s from .env: it controls what the runtime executes "
@@ -597,7 +628,7 @@ def auth_override_env_layers(override) -> tuple:
 # prompt tells the model to save there when "the user explicitly asks you to
 # remember something". On a turn that serves someone other than the owner that
 # competes with `write_user_memory` and can land a person's note where every
-# other user's turn reads it. Claude Code (pinned 2.1.281 and later) reads this
+# other user's turn reads it. Claude Code (2.1.281 through the pinned 2.1.322) reads this
 # variable: truthy (1/true/yes/on) takes the memory system out of the spawn.
 AUTO_MEMORY_OFF_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
 

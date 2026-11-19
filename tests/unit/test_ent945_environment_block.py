@@ -312,3 +312,17 @@ def test_claude_alias_gets_the_hooked_sentence():
     rendered = _render(PromptTier.VERBOSE, "claude")
     assert hooked in rendered
     assert unhooked not in rendered
+
+
+# trinity-enterprise#1158 — beside the protected-paths line, one sentence names
+# destination.instance as the way to hand a credential to an agent on another
+# Trinity, on every runtime and tier (the hook says the same on a `.env` deny).
+@pytest.mark.parametrize("tier", TIERS)
+@pytest.mark.parametrize("runtime", HOOKED_RUNTIMES + UNHOOKED_RUNTIMES)
+def test_the_protected_paths_line_names_destination_instance(tier, runtime):
+    block = _section(_render(tier, runtime))
+    line = next(l for l in block.splitlines() if "protected paths" in l)
+    assert "`ask_for_credential`" in line
+    assert "`destination.instance`" in line
+    assert "another Trinity" in line
+    assert "key_env" not in line

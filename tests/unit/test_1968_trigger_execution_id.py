@@ -173,7 +173,9 @@ def _app(db_path: Path, *, grant_lock: bool = True, ran: list | None = None):
         redis_url="redis://test:test@redis:6379",
     )
 
-    async def _stub(schedule_id, triggered_by="schedule", origin=None, execution=None):
+    async def _stub(
+        schedule_id, triggered_by="schedule", origin=None, execution=None, context=None
+    ):
         if ran is not None:
             ran.append(
                 {
@@ -181,6 +183,7 @@ def _app(db_path: Path, *, grant_lock: bool = True, ran: list | None = None):
                     "triggered_by": triggered_by,
                     "origin": origin,
                     "execution": execution,
+                    "context": context,  # #4369
                 }
             )
 

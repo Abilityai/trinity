@@ -66,7 +66,7 @@ Response `202 Accepted`:
 
 ### Context Injection
 
-When `body.context` is provided, the backend wraps it with an injection-resistance frame:
+When `body.context` is provided, the backend strips and caps it and forwards it to the scheduler as `context`. The scheduler (`service.frame_webhook_context`) wraps it with an injection-resistance frame, both in the execution row's `message` and in the message dispatched to the agent (#4369; before that fix the context was framed in the backend and then dropped):
 
 ```
 {original schedule message}
@@ -101,8 +101,8 @@ POST /api/webhooks/{webhook_token}
 2. `db.get_schedule_by_webhook_token(token)` — O(1) via partial unique index. Miss → 404 + static `webhook 404: token lookup miss` (neutral: covers unknown/revoked/rotated tokens, soft-deleted schedules, soft-deleted agents — #1445)
 3. Check `schedule.webhook_enabled` — 403 if disabled
 4. `_check_webhook_rate_limit(token)` — Redis key `webhook_calls:{token}`, 10 calls / 60s window, fail-open on Redis unavailability
-5. Build message: append `body.context` (if present) with injection-resistant framing
-6. `POST {SCHEDULER_URL}/api/schedules/{schedule.id}/trigger` with `{"triggered_by": "webhook"}`
+5. Strip and cap `body.context` (if present)
+6. `POST {SCHEDULER_URL}/api/schedules/{schedule.id}/trigger` with `{"triggered_by": "webhook"}`, plus `"context": ...` when step 5 left a non-empty string
 7. Write audit log entry via `platform_audit_service.log()`
 8. Return 202
 
@@ -146,9 +146,9 @@ def _build_webhook_url(request: Request, token: str) -> str:
 
 **File**: `src/scheduler/main.py:136-221`
 
-The backend posts to `POST {SCHEDULER_URL}/api/schedules/{schedule_id}/trigger` with body `{"triggered_by": "webhook"}`.
+The backend posts to `POST {SCHEDULER_URL}/api/schedules/{schedule_id}/trigger` with body `{"triggered_by": "webhook"}` and an optional `"context"` string.
 
-`_trigger_handler` reads `triggered_by` from the JSON body (defaults to `"manual"` if absent or malformed), validates it is one of `("manual", "webhook")`, then fires a background task:
+`_trigger_handler` reads `triggered_by` from the JSON body (defaults to `"manual"` if absent or malformed), validates it is one of `("manual", "webhook")`, and reads `context` on webhook triggers only (#4369). It then fires a background task:
 
 ```python
 asyncio.create_task(
@@ -159,7 +159,7 @@ return 200 immediately
 
 `_execute_manual_trigger` acquires the per-schedule Redis lock and calls `_execute_schedule_with_lock(schedule_id, triggered_by="webhook")`, which creates a `schedule_executions` row with `triggered_by="webhook"`.
 
-The execution record is identical to a manual trigger except for the `triggered_by` field value. All downstream flows (slot management, activity tracking, WebSocket broadcasts) are unchanged.
+The execution record is identical to a manual trigger except for the `triggered_by` field value and, when context was sent, the framed context appended to `message`. All downstream flows (slot management, activity tracking, WebSocket broadcasts) are unchanged.
 
 ---
 

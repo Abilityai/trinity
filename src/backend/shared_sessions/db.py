@@ -493,6 +493,118 @@ def get_recent_messages(room_id: str, limit: int) -> list[dict]:
     return rows
 
 
+# --- a paused mention chain and the offer to continue it (trinity#4302) ------
+#
+# `sender_kind` says WHO wrote a row; `kind` says WHAT the row is. Two typed
+# system rows live here: `chain_paused` (the engine stopped a chain at the cap;
+# `mentions` holds the agents that were next) and `chain_continued` (a person
+# asked them to carry on). The OFFER to continue a pause stands until the room
+# moves on: a conversational row, or another pause/continue row, after it.
+# Bookkeeping lines (joined, left, still busy, could not be reached) keep it.
+# ONE predicate, written once, read by `offer_stands` and enforced by the
+# guarded insert in `append_continue_receipt` — so the two cannot drift.
+
+_PAUSE_AT_SQL = (
+    "EXISTS (SELECT 1 FROM enterprise_room_messages p "
+    "        WHERE p.room_id = :room AND p.seq = :pause AND p.kind = 'chain_paused')"
+)
+_MOVED_ON_SQL = (
+    "EXISTS (SELECT 1 FROM enterprise_room_messages x "
+    "        WHERE x.room_id = :room AND x.seq > :pause "
+    "          AND (x.sender_kind != 'system' "
+    "               OR x.kind IN ('chain_paused', 'chain_continued')))"
+)
+
+
+def latest_pause(room_id: str) -> Optional[dict]:
+    """The room's newest `chain_paused` row, or None."""
+    stmt = text(
+        "SELECT id, seq, sender_kind, sender_identity, kind, mentions, content, "
+        "       execution_id, created_at "
+        "FROM enterprise_room_messages WHERE room_id = :room AND kind = 'chain_paused' "
+        "ORDER BY seq DESC LIMIT 1"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"room": room_id}).mappings().first()
+    if not row:
+        return None
+    out = dict(row)
+    try:
+        out["mentions"] = json.loads(out.get("mentions") or "[]")
+    except (TypeError, ValueError):
+        out["mentions"] = []
+    return out
+
+
+def offer_stands(room_id: str, pause_seq: int) -> bool:
+    """Is the Continue offer for the pause at ``pause_seq`` still open? A READ of
+    the same predicate the receipt insert enforces; a verdict for a payload,
+    never a guard (the guard is the insert)."""
+    stmt = text(f"SELECT CASE WHEN {_PAUSE_AT_SQL} AND NOT {_MOVED_ON_SQL} THEN 1 ELSE 0 END")
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"room": room_id, "pause": int(pause_seq)}).first()
+    return bool(row and int(row[0]) == 1)
+
+
+def append_continue_receipt(msg_id: str, room_id: str, pause_seq: int, content: str,
+                            mentions: Optional[list[str]], now: str) -> Optional[int]:
+    """Consume the offer at ``pause_seq`` by writing the `chain_continued`
+    receipt, and return its seq — or None when the offer no longer stood.
+
+    The insert carries the offer predicate (``INSERT … SELECT … WHERE NOT
+    EXISTS``) and runs in the same seq-allocation transaction as
+    ``append_message``: a check made before this call goes stale across an
+    await and across workers, so the row itself is the once-per-stop guard. Two
+    racers that both read the offer as open: one inserts, the other loses on
+    UNIQUE(room_id, seq) (or SQLite's write lock), recomputes, evaluates the
+    predicate again, finds the winner's receipt and inserts nothing.
+    """
+    import time
+
+    from sqlalchemy.exc import IntegrityError, OperationalError
+
+    payload = {
+        "id": msg_id, "room": room_id, "pause": int(pause_seq),
+        "mentions": json.dumps(mentions or []), "content": content, "now": now,
+    }
+    last_error: Optional[Exception] = None
+    for attempt in range(5):
+        try:
+            with get_engine().begin() as conn:
+                row = conn.execute(
+                    text("SELECT COALESCE(MAX(seq), 0) + 1 FROM enterprise_room_messages "
+                         "WHERE room_id = :room"),
+                    {"room": room_id},
+                ).first()
+                seq = int(row[0]) if row else 1
+                result = conn.execute(
+                    text(
+                        "INSERT INTO enterprise_room_messages "
+                        "(id, room_id, seq, sender_kind, sender_identity, kind, mentions, "
+                        " content, execution_id, created_at) "
+                        "SELECT :id, :room, :seq, 'system', NULL, 'chain_continued', "
+                        "       :mentions, :content, NULL, :now "
+                        f"WHERE {_PAUSE_AT_SQL} AND NOT {_MOVED_ON_SQL}"
+                    ),
+                    {**payload, "seq": seq},
+                )
+                if (result.rowcount or 0) == 0:
+                    return None
+                return seq
+        except IntegrityError as e:
+            last_error = e
+            continue  # lost the seq race — recompute and retry
+        except OperationalError as e:
+            # SQLite refuses the second writer outright when waiting would
+            # deadlock the first's commit; the same "lost the race" as above.
+            last_error = e
+            time.sleep(0.02 * (attempt + 1))
+            continue
+    raise RuntimeError(
+        f"could not write the continue receipt for room {room_id} after 5 attempts"
+    ) from last_error
+
+
 # --- what one agent's skill gate stopped (trinity#3402) -----------------------
 
 def record_gate_holds(room_id: str, agent_name: str, seqs, gate_hold: str,
@@ -545,7 +657,7 @@ def count_budget_messages(room_id: str) -> int:
     made with ``max_messages=1`` was dead on arrival: the creation line alone
     tripped the budget and the first human message was refused 410 before anyone
     spoke. More generally an ``N``-message room held fewer than ``N`` actual
-    messages, because "Room created", "Room closed", "Mention chain stopped" and
+    messages, because "Room created", "Room closed", the chain-paused line and
     "could not respond" all silently consumed the operator's budget — and the
     closing line is itself posted BY the budget check, so the feature charged
     its own bookkeeping to the user.

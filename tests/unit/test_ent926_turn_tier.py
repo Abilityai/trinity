@@ -144,6 +144,15 @@ def test_the_route_404s_an_unknown_execution():
     assert _code(_call(tier_db=_db(execution=None))) == 404
 
 
+@pytest.mark.parametrize("kind", ["member", "delegated"])
+def test_the_route_gives_an_owner_by_rule_turn_the_shell(kind):
+    """ent#1148: an OWNER answer of a new kind (a member's turn, a delegated turn)
+    is full owner tier; the kind is echoed, the person is not."""
+    from services import turn_tier_service
+    with patch.object(turn_tier_service, "turn_actor", return_value=("owner", kind, 9)):
+        assert _call() == {"tier": "owner", "kind": kind, "shell": True}
+
+
 # ---- ent#926 2026-10-19: a schedule rates as its creator; visitors vs persons ----------
 
 def _sched_db(*, creator, creator_user, can_share, schedule_id="s1", trigger="schedule"):

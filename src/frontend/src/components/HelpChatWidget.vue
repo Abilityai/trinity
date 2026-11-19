@@ -1,7 +1,7 @@
 <template>
   <!-- Floating help button -->
   <button
-    v-if="!isOpen && !hideLauncher"
+    v-if="!isOpen && !hideLauncher && anyChannel"
     @click="openChat"
     class="fixed bottom-6 right-6 w-14 h-14 bg-action-primary-600 hover:bg-action-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-105 focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2 z-50"
     aria-label="Open help chat"
@@ -21,7 +21,7 @@
     leave-to-class="opacity-0 translate-y-4"
   >
     <div
-      v-if="isOpen"
+      v-if="isOpen && anyChannel"
       ref="panelRef"
       class="fixed bottom-6 right-6 w-96 max-w-[calc(100vw-3rem)] h-[32rem] max-h-[calc(100vh-6rem)] bg-white dark:bg-gray-800 rounded-xl shadow-2xl flex flex-col z-50 border border-gray-200 dark:border-gray-700"
       role="dialog"
@@ -62,10 +62,10 @@
         </div>
       </div>
 
-      <!-- Mode tabs (only when bug reporting is enabled) -->
-      <div v-if="bugReportingEnabled" class="flex border-b border-gray-200 dark:border-gray-700 shrink-0" role="tablist">
+      <!-- Mode tabs (only when more than one channel is on, #4499) -->
+      <div v-if="visibleTabs.length > 1" class="flex border-b border-gray-200 dark:border-gray-700 shrink-0" role="tablist">
         <button
-          v-for="tab in tabs"
+          v-for="tab in visibleTabs"
           :key="tab.id"
           role="tab"
           :aria-selected="mode === tab.id"
@@ -323,7 +323,7 @@ const INSTALL_KEY = 'trinity_install_id'
 // operators can repoint (VITE_BUG_INTAKE_URL) or disable in-app reporting
 // (VITE_BUG_REPORTING_ENABLED=false) at build time.
 const BUG_INTAKE_URL = import.meta.env.VITE_BUG_INTAKE_URL || 'https://intake.abilityai.dev/v1/report-bug'
-const bugReportingEnabled = String(import.meta.env.VITE_BUG_REPORTING_ENABLED ?? 'true') !== 'false'
+const bugReportingBuilt = String(import.meta.env.VITE_BUG_REPORTING_ENABLED ?? 'true') !== 'false'
 const MAX_TITLE = 120
 const MAX_DESC = 4000
 
@@ -364,6 +364,17 @@ const bugDeduped = ref(false)
 const pendingPayload = ref(null)
 
 const { info: buildInfo, load: loadBuildInfo } = useBuildInfo()
+
+// #4499: both channels post to a vendor-operated host, so the operator's
+// run-time switches decide them (`GET /api/version` → `help`, from
+// BUG_REPORTING_ENABLED / ASK_TRINITY_ENABLED / DO_NOT_TRACK). A channel is on
+// only for a literal `true`: until the answer arrives, when it fails, and on a
+// backend that sends no `help`, nothing is shown and nothing can be sent. The
+// build-time flag can still turn reporting off; it can no longer turn it on.
+const docsQaEnabled = computed(() => buildInfo.value?.help?.docs_qa === true)
+const bugReportingEnabled = computed(() => bugReportingBuilt && buildInfo.value?.help?.bug_reporting === true)
+const visibleTabs = computed(() => tabs.filter((t) => (t.id === 'ask' ? docsQaEnabled.value : bugReportingEnabled.value)))
+const anyChannel = computed(() => visibleTabs.value.length > 0)
 
 const panelRef = ref(null)
 const messagesRef = ref(null)
@@ -440,7 +451,7 @@ const scrollToBottom = () => {
 
 const sendMessage = async () => {
   const question = inputMessage.value.trim()
-  if (!question || loading.value) return
+  if (!question || loading.value || !docsQaEnabled.value) return
 
   error.value = null
   lastUserMessage.value = question
@@ -557,7 +568,7 @@ async function reviewReport() {
 }
 
 async function submitReport() {
-  if (bugSubmitting.value || !pendingPayload.value) return
+  if (bugSubmitting.value || !pendingPayload.value || !bugReportingEnabled.value) return
   bugSubmitting.value = true
   bugError.value = ''
   try {
@@ -633,7 +644,14 @@ onMounted(() => {
     sessionId.value = savedSession
   }
   document.addEventListener('keydown', handleKeydown)
+  // #4499: the switches; a failed read leaves every channel off.
+  loadBuildInfo().catch(() => {})
 })
+
+// #4499: never sit on a tab that is switched off.
+watch(visibleTabs, (list) => {
+  if (list.length && !list.some((t) => t.id === mode.value)) mode.value = list[0].id
+}, { immediate: true })
 
 onUnmounted(() => {
   document.removeEventListener('keydown', handleKeydown)

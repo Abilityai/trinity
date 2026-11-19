@@ -34,7 +34,7 @@ from dependencies import (
     require_interactive,
     oauth2_scheme,
 )
-from services import password_service, user_preferences_service
+from services import live_connections, password_service, user_preferences_service
 from services.user_preferences_service import PreferenceConflict, PreferenceError
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -471,6 +471,9 @@ async def update_user_role(
 
     previous_role = previous.get("role")
     if previous_role != updated["role"]:
+        # abilityai/trinity-enterprise#863: the account's open connections were
+        # authorized at the old role; re-check them now, after the write.
+        live_connections.notify_account_changed(updated["username"])
         await platform_audit_service.log(
             event_type=AuditEventType.AUTHORIZATION,
             event_action="role_change",

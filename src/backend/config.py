@@ -68,6 +68,23 @@ TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS = int(
     os.getenv("TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS", "30")
 )
 
+# --- Vendor-hosted help channels (#4499) ---------------------------------
+# The two remaining requests an instance makes to a vendor-operated host: the
+# help widget's bug / feature / feedback report (#1116) and the docs Q&A service
+# behind the widget's Ask tab and the `ask_trinity` MCP tool (ent#328). Both
+# are read here at RUN time, so the published images honour them without a
+# rebuild; the SPA reads them from `GET /api/version` (`help`), and the MCP
+# server reads the same two variables from its own environment.
+# `DO_NOT_TRACK=1` turns both off, with the two channels above: it is the one
+# setting after which no request leaves for a vendor-operated host.
+_DO_NOT_TRACK = os.getenv("DO_NOT_TRACK", "0").strip().lower() not in ("0", "", "false")
+BUG_REPORTING_ENABLED = (
+    os.getenv("BUG_REPORTING_ENABLED", "true").strip().lower() != "false" and not _DO_NOT_TRACK
+)
+ASK_TRINITY_ENABLED = (
+    os.getenv("ASK_TRINITY_ENABLED", "true").strip().lower() != "false" and not _DO_NOT_TRACK
+)
+
 # JWT Settings
 # SECURITY: SECRET_KEY must be set via environment variable in production
 # Generate with: openssl rand -hex 32
@@ -348,7 +365,7 @@ VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
 # defends against an empty value from any source. This line is the authoritative
 # source of the default model id — keep compose/.env.example in agreement.
 # (mirrors the GEMINI_API_KEY `or` coalesce above.)
-VOICE_MODEL = os.getenv("VOICE_MODEL") or "models/gemini-3.1-flash-live-preview"
+VOICE_MODEL = os.getenv("VOICE_MODEL") or "models/gemini-3.8-live"
 VOICE_MAX_DURATION = int(os.getenv("VOICE_MAX_DURATION", "300"))  # seconds
 # Workspace voice mode (ent#534): the cap for a call started from the Workspace
 # conversation — 30 min, ruled 2026-09-07 — kept apart from the Agent Detail
@@ -855,6 +872,11 @@ OPS_SETTINGS_DEFAULTS = {
     # source starve the rest). Chain depth bounds how deep a chain runs; this
     # bounds how often.
     "event_dispatch_max_fires_per_hour": "120",
+    # #4357: caller wakes one callee may send one delegator per one-hour Redis
+    # window (ent#1102 wakes). A wake stands at the delegator's own depth, so
+    # depth no longer bounds how many wakes follow one another; this does.
+    # "0" (or less) is unlimited — the `metrics_daily_point_cap` convention.
+    "caller_wake_max_per_hour": "120",
 }
 
 
@@ -902,6 +924,8 @@ OPS_SETTINGS_VALIDATION = {
     # #2806: the floor is 1, not 0 — no value may refuse every agent call.
     "inter_agent_max_chain_depth": ("int", 1, 32),
     "event_dispatch_max_fires_per_hour": ("int", 1, 10_000),
+    # #4357: `0` means UNLIMITED here, so the floor is 0.
+    "caller_wake_max_per_hour": ("int", 0, 10_000),
 }
 
 
@@ -924,6 +948,7 @@ ENV_BACKED_OPS_KEYS = {
     "metrics_retention_days": "METRICS_RETENTION_DAYS",
     "metrics_daily_point_cap": "METRICS_DAILY_POINT_CAP",
     "inter_agent_max_chain_depth": "INTER_AGENT_MAX_CHAIN_DEPTH",
+    "caller_wake_max_per_hour": "CALLER_WAKE_MAX_PER_HOUR",
 }
 
 _env_ops_warned: set = set()

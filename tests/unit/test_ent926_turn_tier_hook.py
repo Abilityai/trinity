@@ -260,6 +260,16 @@ def test_the_owners_turn_keeps_the_shell(hook, monkeypatch):
         0, [("agent-a", "exec-1")])
 
 
+@pytest.mark.parametrize("kind", ["member", "delegated"])
+def test_an_owner_by_rule_turn_keeps_the_shell_and_the_owner_paths(hook, monkeypatch, kind):
+    """ent#1148: the platform answers `owner` + shell for a member's turn or a
+    delegated turn; the hook treats it as the owner's."""
+    assert run(hook, monkeypatch, "Bash", {"command": "ls"}, tier="owner", shell=True, kind=kind)[0] == 0
+    code, _ = run(hook, monkeypatch, "Write", {"file_path": "/home/developer/CLAUDE.md"},
+                  tier="owner", shell=True, kind=kind)
+    assert code == 0
+
+
 @pytest.mark.parametrize("answer", ["unknown", "unreachable"])
 def test_no_answer_about_the_turn_keeps_the_shell_closed(hook, monkeypatch, answer):
     code, _ = run(hook, monkeypatch, "Bash", {"command": "ls"}, tier=answer)
@@ -411,6 +421,10 @@ def test_a_channel_visitor_keeps_the_shell_while_the_owner_allows_it(hook, monke
     (b'{"tier": "share", "kind": "person", "shell": "yes"}', ("share", False, "person")),  # strict True
     (b'{"tier": "owner"}', ("owner", False, None)),             # no answer is no shell
     (b'{"tier": "share", "kind": "robot"}', ("share", False, None)),
+    # ent#1148: an owner-by-rule turn (a member's, a delegated one) is read by tier and
+    # shell; its kind is outside the hook's two names and reads as None, never as a deny.
+    (b'{"tier": "owner", "kind": "member", "shell": true}', ("owner", True, None)),
+    (b'{"tier": "owner", "kind": "delegated", "shell": true}', ("owner", True, None)),
     (b'{"tier": "admin", "shell": true}', ("unreachable", False, None)),
 ])
 def test_the_shell_answer_is_read_as_a_strict_true(hook, platform, body, expected):

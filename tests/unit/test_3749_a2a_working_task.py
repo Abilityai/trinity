@@ -108,6 +108,7 @@ def h(monkeypatch):
         get_execution=lambda eid: state["executions"].get(eid),
         create_task_execution=_mint,
         get_agent_subscription_id=lambda name: "sub-1",
+        get_default_model_raw=lambda name: None,  # ent#1202
         cancel_queued_execution=lambda eid, reason=None: False,
     )
     monkeypatch.setattr(a2a, "db", fake_db)
@@ -638,6 +639,7 @@ def p(monkeypatch):
         get_execution=lambda eid: state["executions"].get(eid),
         create_task_execution=_mint,
         get_agent_subscription_id=lambda name: None,
+        get_default_model_raw=lambda name: None,  # ent#1202
         get_public_channel_model=lambda name: "claude-public",
         log_nevermined_payment=lambda **kw: state["payment_log"].append(kw),
         nevermined_payer_owns_execution=_owns,

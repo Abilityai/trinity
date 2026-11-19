@@ -65,6 +65,9 @@ _TRIGGER_BUCKETS = {
     # trinity-enterprise#1102: the wake of the agent that delegated a run, when
     # it ends. Spend driven by agent-to-agent delegation, not by an operator.
     "caller_wake": "Agent-to-agent",
+    # trinity-enterprise#1236: the platform waking a project's steward agent —
+    # the turn its schedule used to start, so it is counted with schedules.
+    "project_steward": "Scheduled",
     "voip": "Voice", "voice": "Voice",
 }
 

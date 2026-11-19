@@ -5039,6 +5039,25 @@ def _migrate_execution_chat_session_id(cursor, conn):
     conn.commit()
 
 
+def _migrate_execution_continues_execution_id(cursor, conn):
+    """trinity-enterprise#1225 — a continuation turn names the turn it continues.
+
+    One nullable column on `schedule_executions`. A wake, an ask resume or
+    ending and a gate notice carry nobody on the row; the platform records the
+    turn they continue so they are rated as that turn, and a delegated callee
+    row records the caller's turn the wake later continues. Nullable, no
+    backfill: old rows stay NULL and are rated as before.
+    PostgreSQL half: Alembic `0124_execution_continues_execution_id`.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "continues_execution_id",
+        "ALTER TABLE schedule_executions ADD COLUMN continues_execution_id TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_idempotency_claim_token(cursor, conn):
     """#3298 — an idempotency claim names its owner.
 
@@ -5900,6 +5919,27 @@ def _migrate_agent_ownership_wake_on_ending(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_default_model(cursor, conn):
+    """ent#1202 — the agent's own model for turns that name none.
+
+    Adds ``default_model TEXT`` to ``agent_ownership``, nullable with no
+    default: NULL means "no opinion", so a turn that names no model keeps
+    running on the platform default exactly as before. The value is stored as
+    written and checked against the model catalog on read
+    (``services/agent_model_service.py``), so a stored id this instance cannot
+    run is skipped by name, never passed to the CLI.
+
+    No backfill. Mirrored by Alembic revision 0123_agent_ownership_default_model.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "default_model",
+        "ALTER TABLE agent_ownership ADD COLUMN default_model TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_agent_memory_facts(cursor, conn):
     """trinity-enterprise#1022 (MEM-002) — retrieval memory facts.
 
@@ -6495,4 +6535,6 @@ MIGRATIONS = [
     ("public_user_memory_writes_section", _migrate_public_user_memory_writes_section),
     ("agent_ownership_wake_on_ending", _migrate_agent_ownership_wake_on_ending),
     ("channel_client_blocks", _migrate_channel_client_blocks),
+    ("agent_ownership_default_model", _migrate_agent_ownership_default_model),
+    ("execution_continues_execution_id", _migrate_execution_continues_execution_id),
 ]

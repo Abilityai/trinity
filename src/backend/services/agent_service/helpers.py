@@ -402,6 +402,23 @@ def viewer_own_rows(current_user: User) -> tuple:
     return uid, owned
 
 
+def acting_person_agents(current_user: User, agent_names: Optional[List[str]]) -> Optional[List[str]]:
+    """The agent set of a fleet read, cut to what an agent key's acting person
+    may open (trinity-enterprise#1148, AC3 — `viewer_row_scope`'s fence for the
+    fleet routes). `viewer_own_rows` narrows such a key to the person's rows on
+    its whole reach, and a callee the key's agent delegated to records that
+    person on an agent they cannot open. Unchanged outside a person's turn; an
+    unreadable lookup drops the agent, and an unbounded set reads nothing."""
+    import dependencies
+
+    acting = dependencies.acting_turn_user_id(current_user)
+    if acting is None or acting == dependencies.NO_ROWS_USER_ID:
+        return agent_names
+    if agent_names is None:
+        return []
+    return [a for a in agent_names if dependencies._acting_person_may_open(acting, a)]
+
+
 def narrow_to_agent(
     agent_names: Optional[List[str]], agent: Optional[str]
 ) -> Optional[List[str]]:

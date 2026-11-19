@@ -14,7 +14,7 @@ roster re-check, both in the service — never a role, and never an entitlement.
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
@@ -27,6 +27,7 @@ from .models import (
     WorkspaceAskAnswer,
     WorkspaceAskContext,
     WorkspaceAskDiscussion,
+    WorkspaceAskNotice,
     WorkspaceCredentialValue,
 )
 from .service import AskError, AsksUnavailable
@@ -49,7 +50,9 @@ def _raise(e: AskError):
                         detail={"code": e.code, "message": e.detail, **e.data})
 
 
-@router.get("", response_model=List[WorkspaceAsk])
+# trinity-enterprise#1134: a `chat_id` read also carries the chat's content-free
+# notices (`WorkspaceAskNotice`, marked `notice: true`) beside its asks.
+@router.get("", response_model=List[Union[WorkspaceAsk, WorkspaceAskNotice]])
 def list_asks(
     response: Response,
     agent_name: Optional[str] = Query(default=None),

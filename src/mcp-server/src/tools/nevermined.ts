@@ -13,17 +13,7 @@
 import { z } from "zod";
 import { ApiError, TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
-import { accessDenied } from "../access.js";
-
-/**
- * ent#966 (M6): the scopes that may see `revoke_agent_delegation`. An
- * ALLOW-list (#848 — a null or unknown scope fails closed). The backend's
- * `require_person` refuses every agent key, so an agent session is never shown
- * a tool it cannot call.
- */
-const REVOKE_DELEGATION_SCOPES: ReadonlySet<string> = new Set(["user", "system"]);
-export const revokeDelegationAccess = (auth: any): boolean =>
-  REVOKE_DELEGATION_SCOPES.has(auth?.scope ?? "");
+import { accessDenied, HUMAN_ONLY_WHO_MAY_CALL, humanOnlyToolAccess } from "../access.js";
 
 /**
  * The backend `detail` of a refusal, readable: a string, or the
@@ -73,8 +63,11 @@ export function createNeverminedTools(
       name: "configure_nevermined",
       description:
         "Configure Nevermined x402 payment settings for an agent. " +
-        "Requires owner or admin access. The NVM API key is encrypted at rest. " +
-        "Key format: 'env:jwt' (e.g., 'sandbox:eyJhbGci...').",
+        "The NVM API key is encrypted at rest. " +
+        "Key format: 'env:jwt' (e.g., 'sandbox:eyJhbGci...'). " +
+        HUMAN_ONLY_WHO_MAY_CALL.interactive +
+        " Configure it on the agent's Payments tab in the web UI instead.",
+      canAccess: humanOnlyToolAccess("interactive"),
       parameters: z.object({
         agent_name: z.string().describe("Agent name to configure"),
         nvm_api_key: z.string().describe("NVM API Key in 'env:jwt' format"),
@@ -151,7 +144,8 @@ export function createNeverminedTools(
       description:
         "Enable or disable Nevermined payments for an agent. " +
         "Agent must have a Nevermined config before enabling. " +
-        "Requires owner or admin access.",
+        HUMAN_ONLY_WHO_MAY_CALL.person,
+      canAccess: humanOnlyToolAccess("person"),
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),
         enabled: z.boolean().describe("Whether to enable (true) or disable (false) payments"),
@@ -232,8 +226,11 @@ export function createNeverminedTools(
       description:
         "Revoke the agent's Nevermined card mandate. Immediate: Nevermined refuses " +
         "the agent's next paid call; Trinity removes NVM_DELEGATION_ID from the agent. " +
-        "Owner or admin, human keys only.",
-      canAccess: revokeDelegationAccess,
+        HUMAN_ONLY_WHO_MAY_CALL.person,
+      // ent#966 (M6): the route takes `require_person`, which refuses agent and
+      // system keys alike, so it is listed to user keys only
+      // (abilityai/trinity-enterprise#719).
+      canAccess: humanOnlyToolAccess("person"),
       parameters: z.object({
         agent_name: z.string().describe("Agent whose Nevermined card mandate to revoke"),
       }),

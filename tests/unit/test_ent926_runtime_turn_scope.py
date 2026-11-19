@@ -167,6 +167,9 @@ def test_a_channel_visitor_runs_while_the_owner_allows_it(monkeypatch):
     ({"tier": "share", "kind": "visitor", "shell": True}, ("share", True, "visitor")),
     ({"tier": "share", "kind": "person", "shell": "yes"}, ("share", False, "person")),
     ({"tier": "owner"}, ("owner", False, None)),
+    # ent#1148: an owner-by-rule turn is read by tier and shell; its kind reads as None.
+    ({"tier": "owner", "kind": "member", "shell": True}, ("owner", True, None)),
+    ({"tier": "owner", "kind": "delegated", "shell": True}, ("owner", True, None)),
 ])
 def test_the_may_run_answer_is_a_strict_true(platform, body, expected):
     platform.reply = (200, body)
@@ -182,3 +185,9 @@ def test_a_visitor_the_owner_limited_is_told_so_not_called_a_shared_person(monke
     assert exc.value.status_code == 403
     assert "channel or a public link" in exc.value.detail["message"]
     assert "shared with" not in exc.value.detail["message"]
+
+
+@pytest.mark.parametrize("kind", ["member", "delegated"])
+def test_an_owner_by_rule_turn_runs(monkeypatch, kind):
+    """ent#1148: a member's turn or a delegated turn runs on Gemini/Codex like the owner's."""
+    assert _require(monkeypatch, "owner", may_run=True, kind=kind) == [("agent-a", "exec-1")]

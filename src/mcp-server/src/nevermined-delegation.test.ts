@@ -7,9 +7,10 @@
  *   - `get_agent_spending` passes the backend body through in every 200 state
  *     and maps the uniform 404 to `agent_not_found_or_no_access` — never the
  *     `configured: false` idiom of `get_nevermined_config`;
- *   - `revoke_agent_delegation` is hidden from agent sessions (canAccess
- *     allow-list) and returns a backend 403 as a readable refusal, stamped
- *     `denied` on the audit row;
+ *   - `revoke_agent_delegation` is listed to user-scoped keys only (the shared
+ *     person predicate: its route's `require_person` refuses agent and system
+ *     keys, abilityai/trinity-enterprise#719) and returns a backend 403 as a
+ *     readable refusal, stamped `denied` on the audit row;
  *   - every description names Nevermined and none says Trinity holds a card
  *     or settles money (ent#932).
  *
@@ -66,11 +67,11 @@ describe("ent#966 Nevermined delegation tools: registration", () => {
     }
   });
 
-  it("revoke is advertised to user/system keys only; spending to every scope the gate admits", () => {
+  it("revoke is advertised to user keys only; spending to every scope the gate admits", () => {
     const can = byName[REVOKE].canAccess!;
     assert.equal(can({ scope: "user" }), true);
-    assert.equal(can({ scope: "system" }), true);
-    for (const auth of [{ scope: "agent" }, { scope: "connector" }, { scope: "ops" }, {}, null, undefined]) {
+    // require_person refuses the system key, so it is not shown the tool (ent#719).
+    for (const auth of [{ scope: "system" }, { scope: "agent" }, { scope: "connector" }, { scope: "ops" }, {}, null, undefined]) {
       assert.equal(can(auth), false, `revoke must be hidden for ${JSON.stringify(auth)}`);
     }
     assert.equal(byName[SPEND].canAccess, undefined, "spending keeps the group gate (agent keys: own agent only, backend-enforced)");
