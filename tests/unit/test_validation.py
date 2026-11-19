@@ -114,6 +114,19 @@ class TestValidationPromptBuilding:
         assert "Check if Test task was done" in prompt
         assert "AUDITOR" not in prompt  # Custom doesn't include default
 
+    def test_custom_instructions_keep_json_response_format(self):
+        """Instructions-only custom prompts must still ask for the JSON verdict (#4508)."""
+        service = ValidationService()
+        prompt = service._build_validation_prompt(
+            original_message="Test task",
+            execution_response="Done",
+            custom_prompt="Check that the report mentions revenue.",
+        )
+
+        assert "Check that the report mentions revenue." in prompt
+        assert "Respond with a JSON object" in prompt
+        assert '"status": "pass" | "fail" | "partial"' in prompt
+
     def test_prompt_builder_truncates_long_response(self):
         """Long responses should be truncated."""
         service = ValidationService()
