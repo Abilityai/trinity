@@ -238,6 +238,25 @@ export function validTool(raw) {
   return { action: 'tool', tool: raw.tool, args: JSON.parse(JSON.stringify(args)) }
 }
 
+// A change the instance asks the person to confirm is not always one that
+// cannot be taken back: only reading runs without a click. These are the ones
+// that cannot (the instance holds the same list).
+const IRREVERSIBLE = /^(delete_|remove_|teardown_|revoke_|clear_|reset_|withdraw_|close_)|^(rename_agent|deploy_system|apply_system|restart_system|unassign_skill_set)$/
+export const irreversibleTool = (card) => card?.action === 'tool' && IRREVERSIBLE.test(card.tool || '')
+
+/**
+ * A link Trinity's side supplied, if it is a plain web address; '' otherwise.
+ * Nothing else (a `javascript:` or `data:` address) is ever put in an href or opened.
+ */
+export function webLink(raw) {
+  try {
+    const url = new URL(String(raw || ''))
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : ''
+  } catch {
+    return ''
+  }
+}
+
 /** `delete_agent` as words, and each argument as the person would read it. */
 export function toolWords(card) {
   const words = card.tool.replace(/_/g, ' ')
@@ -292,7 +311,7 @@ export function cardNote(card) {
   if (card.action === 'choice') return ''
   if (card.action === 'feedback') return 'Goes to the people who make Trinity, with the page you are on and your Trinity version. Nothing else is attached.'
   if (card.action === 'build') return 'Creates these agents on this instance, as you. Nothing is switched on.'
-  if (card.action === 'tool') return 'This cannot be undone. It runs as you.'
+  if (card.action === 'tool') return irreversibleTool(card) ? 'This cannot be undone. It runs as you.' : 'Changes this instance. It runs as you.'
   if (card.action === 'upgrade') return 'A larger allowance and bigger teams. You sign in with your email first.'
   return 'Runs as you, not as the assistant.'
 }

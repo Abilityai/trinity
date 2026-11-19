@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { CARD_ACTIONS, MAX_CARDS_PER_REPLY, acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, toolWords, validBuild, validCard, validChoice, validFeedback, validJob, validTool } from '@/utils/assistantCards'
+import { CARD_ACTIONS, MAX_CARDS_PER_REPLY, acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, irreversibleTool, toolWords, validBuild, validCard, validChoice, validFeedback, validJob, validTool, webLink } from '@/utils/assistantCards'
 
 const fleet = [
   { name: 'issue-digest', schedules: [{ id: 's1', name: 'Mondays 09:00' }] },
@@ -204,5 +204,26 @@ describe('assistant cards: a question, and a note to the Trinity team', () => {
   it('takes both through the reply\'s cards', () => {
     const cards = acceptCards([{ action: 'choice', question: 'q', options: ['a', 'b'] }, { action: 'feedback', kind: 'bug', summary: 's' }], [])
     expect(cards.map((c) => c.action)).toEqual(['choice', 'feedback'])
+  })
+})
+
+describe('a change that takes the person\'s click', () => {
+  it('says "cannot be undone" only for the ones that cannot', () => {
+    const gone = { action: 'tool', tool: 'delete_agent', args: { name: 'x' } }
+    const kept = { action: 'tool', tool: 'create_agent_schedule', args: { name: 'x' } }
+    expect(irreversibleTool(gone)).toBe(true)
+    expect(irreversibleTool(kept)).toBe(false)
+    expect(cardNote(gone)).toBe('This cannot be undone. It runs as you.')
+    expect(cardNote(kept)).toBe('Changes this instance. It runs as you.')
+  })
+})
+
+describe('a link supplied by Trinity\'s side', () => {
+  it('is used only when it is a plain web address', () => {
+    expect(webLink('https://example.com/terms')).toBe('https://example.com/terms')
+    expect(webLink('http://localhost:8090/terms/trial')).toBe('http://localhost:8090/terms/trial')
+    for (const bad of ['javascript:alert(1)', 'data:text/html,<script>1</script>', '/terms', '', null, undefined, 'vbscript:x']) {
+      expect(webLink(bad), String(bad)).toBe('')
+    }
   })
 })

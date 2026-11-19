@@ -91,10 +91,13 @@ def _pick_demo_agent(seeded_present: List[str]) -> Optional[str]:
 def _install_marker() -> Optional[str]:
     """A short, opaque mark of this install, so a browser that closed setup on
     a previous install of the same address is offered it again on a new one.
-    The first 8 characters of the durable installation id; None if unreadable."""
+    The first 8 characters of the durable installation id. READ-ONLY: this is
+    reached from a GET, and looking must never mint identity (#2669), so an
+    install whose id nothing has created yet answers None, as does an
+    unreadable one. The browser then falls back to its per-browser memory."""
     try:
-        from services.operator_intake_service import get_or_create_installation_id
-        return get_or_create_installation_id()[:8] or None
+        from services.operator_intake_service import get_installation_id
+        return (get_installation_id() or "")[:8] or None
     except Exception:  # pragma: no cover - a missing mark only means the old per-browser behaviour
         logger.debug("[onboarding] install marker unavailable", exc_info=True)
         return None

@@ -310,6 +310,11 @@ watch(
 function close() {
   persistFirstRunClosed(firstRun.install)
   closedHere.value = true
+  // An install gets its mark the first time something records an event, which
+  // may be this very session: read it again and keep the close against it.
+  if (!firstRun.install) {
+    firstRun.fetchState(true).then(() => { if (firstRun.install) persistFirstRunClosed(firstRun.install) }).catch(() => {})
+  }
   open.value = false
   if (nextRoute.value) {
     router.push(nextRoute.value).catch(() => {})

@@ -315,6 +315,7 @@ describe('per-browser state', () => {
     expect(persistFirstRunClosed('0f3c9a12')).toBe(true)
     expect(readFirstRunClosed('0f3c9a12')).toBe(true)
     expect(readFirstRunClosed('77aa0b01')).toBe(false)          // reinstalled at the same address
+    expect(readFirstRunClosed(null)).toBe(false)                // ...even one that cannot name itself yet
     localStorage.setItem(FIRST_RUN_CLOSED_KEY, '1')             // written before installs were told apart
     expect(readFirstRunClosed('77aa0b01')).toBe(true)           // an upgrade does not reopen setup
   })

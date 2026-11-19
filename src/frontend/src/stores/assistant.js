@@ -21,7 +21,7 @@ import { defineStore } from 'pinia'
 import api from '../api'
 import { useOnboardingStore } from './onboarding'
 import { buildContext, buildFleet, describePage } from '../utils/assistantContext'
-import { acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, validBuild } from '../utils/assistantCards'
+import { acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, validBuild, webLink } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
 
 export const FEATURE_ID = 'assistant'
@@ -764,8 +764,9 @@ export const useAssistantStore = defineStore('assistant', {
       try {
         const { data } = await api.post(`${BASE}/subscription/start`, {})
         this.status = { ...this.status, ...data }
-        if (data.checkout_url) {
-          window.open(data.checkout_url, '_blank', 'noopener')
+        const checkout = webLink(data.checkout_url)
+        if (checkout) {
+          window.open(checkout, '_blank', 'noopener')
           this.account.step = 'checkout'
           return
         }

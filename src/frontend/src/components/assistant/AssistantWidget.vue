@@ -484,7 +484,7 @@
               <input v-model="accepted" type="checkbox" class="mt-0.5 rounded" data-testid="assistant-terms" />
               <span>
                 I accept the
-                <a v-if="store.account.terms?.url" :href="store.account.terms.url" target="_blank" rel="noopener" class="underline text-action-primary-600 dark:text-action-primary-400" data-testid="assistant-full-terms-link">Trinity terms</a>
+                <a v-if="webLink(store.account.terms?.url)" :href="webLink(store.account.terms.url)" target="_blank" rel="noopener" class="underline text-action-primary-600 dark:text-action-primary-400" data-testid="assistant-full-terms-link">Trinity terms</a>
                 <button
                   v-else
                   type="button"
@@ -537,8 +537,8 @@
           <p class="text-[12.5px] text-gray-900 dark:text-gray-100">
             To answer you, your messages and details of your agents are sent to Ability AI, the company behind Trinity, which also keeps what you tell it about your work so its help fits you. Agreeing also turns on anonymous usage sharing (counts and versions only; you can turn it off in Settings). It's free to try, with no sign-up. By continuing you agree to the
             <a
-              v-if="store.status?.trial_terms?.url"
-              :href="store.status.trial_terms.url"
+              v-if="webLink(store.status?.trial_terms?.url)"
+              :href="webLink(store.status.trial_terms.url)"
               target="_blank"
               rel="noopener"
               class="underline font-medium text-action-primary-700 dark:text-action-primary-300"
@@ -614,7 +614,7 @@ import HelpChatWidget from '../HelpChatWidget.vue'
 import { useAssistantStore } from '../../stores/assistant'
 import { useOnboardingStore } from '../../stores/onboarding'
 import { useFirstRunStore } from '../../stores/firstRun'
-import { toolWords } from '../../utils/assistantCards'
+import { irreversibleTool, toolWords, webLink } from '../../utils/assistantCards'
 import { describePage } from '../../utils/assistantContext'
 import { starterGroups } from '../../utils/assistantStarters'
 import { renderMarkdown } from '../../utils/markdown'
@@ -644,7 +644,9 @@ const FOLLOWED = ['job', 'run']
 const ENDED = Object.freeze({ done: 'Finished', refused: "Didn't finish", unsure: 'Still going' })
 const BUILT = Object.freeze({ running: 'Creating', done: 'Created', refused: "Couldn't create", unsure: 'Partly created' })
 const heading = (c) => (FOLLOWED.includes(c.card.action) && c.state !== 'making' && ENDED[c.state])
-  || (c.card.action === 'build' && BUILT[c.state]) || HEADING[c.card.action] || 'Needs your OK'
+  || (c.card.action === 'build' && BUILT[c.state])
+  || (c.card.action === 'tool' && !irreversibleTool(c.card) && 'Needs your OK')
+  || HEADING[c.card.action] || 'Needs your OK'
 
 
 const route = useRoute()
