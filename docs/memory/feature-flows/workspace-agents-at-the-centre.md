@@ -489,9 +489,29 @@ render** (ent#468 Option A), recorded on the issue.
   not running ("Agent not yet woken — it picks this up when it next runs." on the
   card); the agent's next start delivers it and the card's line goes.
 
-- `portalUtils.js::answerConfirmation(answered, agentLabel)` is the rule and
-  consumes **both** fields, which is the AC's "either both or neither":
+- `portalUtils.js::answerConfirmation(answered, agentLabel, { availability })` is
+  the rule and consumes **both** fields, which is the AC's "either both or neither":
   `status === 'answered'` is the GATE, `resume_requested` is the WORDING.
+- **#4502: a stopped agent gets only "Sent."** `resume_requested` reports that a
+  wake was requested; whether it was delivered is `wake_state`, which the answer
+  response never carries (it is projected from the row the compare-and-set
+  returned, and the background dispatch writes `pending` afterwards). So
+  `PortalAsks.confirmAnswer` re-reads the roster quietly (`store.refreshRoster()`,
+  which resolves `true` only for a read that succeeded) and passes the agent's
+  `availability` plus `verified`. A read that failed, or took longer than 1.5 s,
+  is `verified: false` and says only "Sent." — the roster in hand is from page
+  load, not evidence. Nothing is drawn while the read is out. With a fresh
+  roster:
+  `stopped` / `unavailable`, or a row already saying `wake_state: 'pending'`, says
+  "Sent."; `ready`, `unknown` and an agent the roster does not list keep the
+  sentence. One extra GET, only for an answer that requested a wake, and never in
+  the Inbox pane (which shows no confirmation line: it opens the next ask).
+- **Where the line is drawn at all.** Only where the card outlives its answer: a
+  project's "Needs you" card. A chat tile is a card only while its ask waits; the
+  answer turns it into the history row in the same render, the card unmounts, and
+  that row is the confirmation (the #3101 ruling in `portalChatAsks.js`). So a tile
+  draws no "Sent" line and reads no roster — pinned through the real tile in
+  `portalChatTileConfirmation.mount.spec.js`.
 - The tense is load-bearing. `_resume_requested`'s own contract calls it a report
   of INTENT — the dispatch is backgrounded — so the copy is "is picking this up",
   not "has done it". `null`/`false` says only "Sent."; reading an absent value as

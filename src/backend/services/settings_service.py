@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from database import db
 
 logger = logging.getLogger(__name__)
@@ -1734,6 +1734,24 @@ def get_effective_max_parallel_tasks(agent_name: str) -> int:
     """
     from database import db
     return clamp_to_ceiling(db.get_max_parallel_tasks(agent_name))
+
+
+def get_effective_max_parallel_tasks_for(agent_names) -> Dict[str, int]:
+    """``get_effective_max_parallel_tasks`` for many agents at once (#4635).
+
+    One roster read and one ceiling read whatever the count — the queue-stall
+    monitor asks for every agent with a queue head on each tick. An agent with
+    no live roster row gets 3, the value ``get_max_parallel_tasks`` returns for
+    one. Raises when the roster cannot be read; the caller decides what an
+    unknown cap means.
+    """
+    names = list(agent_names)
+    if not names:
+        return {}
+    from database import db
+    caps = db.get_all_agents_parallel_capacity()
+    ceiling = get_max_parallel_tasks_ceiling()
+    return {name: min(int(caps.get(name, 3)), ceiling) for name in names}
 
 
 # ============================================================================

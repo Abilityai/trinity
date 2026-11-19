@@ -553,6 +553,11 @@ export function inboxSelectedAgent({ item, threads = [], asks = [], agents = [],
 // clicked again, and after a completed bulk mark-read — the only moments the
 // list may re-sort under the reader.
 //
+// ONE EXCEPTION, and it is the reader's own doing: an ask they answered in the
+// pane is crossed off Action and the next one opens ("answer, then next",
+// below). A change they did not cause — a poll, another person's answer, an
+// expiry, a withdrawal — still leaves a ghost.
+//
 // Pure and O(n): `visit` is `{ order: [key], snaps: {key: item} }` and is
 // returned updated rather than mutated, so re-applying the same fresh list is a
 // no-op (a lazily re-evaluated computed can call this more than once).
@@ -653,6 +658,55 @@ export function stableRows(fresh, visit, live = {}) {
   }
   for (const nk of anchored.get(null) || []) place(nk)
   return { rows, visit: { order, snaps: nextSnaps } }
+}
+
+// ---- Answer, then next (the one exception to the in-place rule) --------------
+//
+// Working down a queue, a list that never gets shorter makes the reader click
+// the next row by hand after every answer. So once the server confirms THEIR
+// answer, the row holds its ended badge for a beat, the next pending ask opens,
+// and the row collapses out of the visit. The container wires the timing; the
+// rules are here.
+
+// The done beat, the collapse, and how long the newly opened ask ignores input
+// (its buttons land where the last ask's were: a late second click must not
+// answer an ask the reader has not seen).
+export const ANSWER_BEAT_MS = 150
+export const ANSWER_COLLAPSE_MS = 200   // = the row's `duration-200` (PortalInboxList.vue)
+export const ANSWER_HOLD_MS = 300
+
+// A visit without `key`: its row is gone, not a ghost. Returned, never mutated.
+export function dropFromVisit(visit, key) {
+  const order = (Array.isArray(visit?.order) ? visit.order : []).filter((k) => k !== key)
+  const snaps = { ...((visit && visit.snaps) || {}) }
+  delete snaps[key]
+  return { order, snaps }
+}
+
+// The ask to open after `key` was answered: the first PENDING ask below it in
+// the order on screen, else the nearest one above. Ended rows are skipped, and
+// so is everything that is not an ask (on All a plain neighbour is a chat, and
+// opening it would read it). Null when there is none, or when `key` is not a row.
+const isPendingAsk = (it) => !!it && it.type === 'ask' && it.status === 'pending' && !isGhost(it)
+export function nextPendingAsk(rows, key) {
+  const list = Array.isArray(rows) ? rows : []
+  const at = list.findIndex((it) => it && it.key === key)
+  if (at < 0) return null
+  for (let i = at + 1; i < list.length; i++) if (isPendingAsk(list[i])) return list[i]
+  for (let i = at - 1; i >= 0; i--) if (isPendingAsk(list[i])) return list[i]
+  return null
+}
+
+// What the Inbox's live region says once an answer landed. A title is the
+// agent's markdown; spoken, it is plain text (the chat history row's rule).
+export function answeredAnnouncement({ next = null, caughtUp = false, fromLabel = null } = {}) {
+  if (next) {
+    const title = String(next.title || '').replace(/[*_`~]/g, '').trim()
+    if (!title) return 'Answered. Next ask.'
+    return `Answered. Next: ${title}${/[.?!]$/.test(title) ? '' : '.'}`
+  }
+  if (caughtUp) return fromLabel ? `Answered. Nothing is waiting on you from ${fromLabel}.` : 'Answered. All caught up.'
+  return 'Answered.'
 }
 
 // The one fallback for a selection the rendered rows do not hold — an old chat

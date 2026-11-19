@@ -182,7 +182,7 @@ def test_fable_5_1_is_present_and_selectable_end_to_end():
     ), "PUT /api/agents/{name}/public-channel-model would still 422 claude-fable-5-1"
 
 
-def test_at_most_one_latest_marker_per_family_and_fable_is_5_1():
+def test_at_most_one_latest_marker_per_family_and_fable_is_5_2():
     """#2726 AC 2, as a GENERAL invariant rather than a one-off id check.
 
     The bug this ticket fixes is precisely "two entries in one tier both claim
@@ -209,13 +209,14 @@ def test_at_most_one_latest_marker_per_family_and_fable_is_5_1():
 
     by_id = {m.id: m for m in model_catalog.MODEL_CATALOG}
     assert (
-        "(latest)" in by_id["claude-fable-5-1"].note
-    ), "AC 2: Claude Fable 5.1 must carry the '(latest)' marker in its tier"
-    assert (
-        "(latest)" not in by_id["claude-fable-5"].note
-    ), "AC 2: Claude Fable 5 is no longer the latest in its tier (#2726)"
-    assert latest_by_family.get("fable") == "claude-fable-5-1", (
-        "the Fable tier's '(latest)' marker must sit on claude-fable-5-1. This "
+        "(latest)" in by_id["claude-fable-5-2"].note
+    ), "#4528: Claude Fable 5.2 must carry the '(latest)' marker in its tier"
+    for prior in ("claude-fable-5-1", "claude-fable-5"):
+        assert (
+            "(latest)" not in by_id[prior].note
+        ), f"{prior} is no longer the latest in its tier (#2726, #4528)"
+    assert latest_by_family.get("fable") == "claude-fable-5-2", (
+        "the Fable tier's '(latest)' marker must sit on claude-fable-5-2. This "
         "pin is DELIBERATELY brittle: when the next Fable ships you MUST "
         "consciously edit this line — that is the point, not an inconvenience "
         "(the test_ent243 `_MINIMAL_PREFIXES` idiom)."
@@ -230,11 +231,15 @@ def test_per_model_flags():
     by_id = {m.id: m for m in model_catalog.MODEL_CATALOG}
 
     # #1080 (KEEP): Haiku is public-channel-selectable but NOT admin-default.
-    haiku = by_id["claude-haiku-4-5-20251001"]
-    assert haiku.public_channel and not haiku.admin_default_selectable, (
-        "Haiku must stay public-but-not-default (#1080) — do NOT add it to the "
-        "admin dropdown; that would let an admin default the fleet to the cheap tier."
-    )
+    # Every Haiku, not one id (#4528): the rule is about the tier.
+    haiku_ids = ("claude-haiku-5-5", "claude-haiku-4-5-20251001")
+    assert {m for m in by_id if "haiku" in m} == set(haiku_ids)
+    for haiku_id in haiku_ids:
+        haiku = by_id[haiku_id]
+        assert haiku.public_channel and not haiku.admin_default_selectable, (
+            "Haiku must stay public-but-not-default (#1080) — do NOT add it to the "
+            "admin dropdown; that would let an admin default the fleet to the cheap tier."
+        )
 
     # Legacy picker-only: neither public-channel nor admin-default.
     legacy_ids = ("claude-opus-4-5-20251101", "claude-sonnet-4-5-20250929")
@@ -246,8 +251,10 @@ def test_per_model_flags():
     current = (
         "claude-opus-5-5",
         "claude-opus-5",
+        "claude-fable-5-2",
         "claude-fable-5-1",
         "claude-fable-5",
+        "claude-sonnet-5-5",
         "claude-sonnet-5",
         "claude-opus-4-8",
         "claude-opus-4-7",
@@ -265,7 +272,7 @@ def test_per_model_flags():
     # group — so an 11th could be added and go entirely unasserted while green.
     from services.settings_service import PLATFORM_DEFAULT_MODEL_VALUE
 
-    checked = {haiku.id, *legacy_ids, *current} | {PLATFORM_DEFAULT_MODEL_VALUE}
+    checked = {*haiku_ids, *legacy_ids, *current} | {PLATFORM_DEFAULT_MODEL_VALUE}
     assert checked == set(by_id), (
         f"models not covered by any flag group: {sorted(set(by_id) - checked)} — "
         "add each to the group that states its intended policy"
@@ -405,6 +412,73 @@ def test_the_latest_marker_names_exactly_one_opus_and_it_is_5_5():
         "the Workspace 'Most capable' tier is ONE option — two entries claiming "
         "it would render a duplicate primary label"
     )
+
+
+# --- sonnet-5.5 selectable end-to-end (#4528) -------------------------------
+
+
+def test_sonnet_5_5_is_present_and_selectable_end_to_end():
+    """The same four surfaces as the Opus 5.5 test above, for #4528."""
+    model_catalog = _catalog()
+    by_id = {m.id: m for m in model_catalog.MODEL_CATALOG}
+    assert "claude-sonnet-5-5" in by_id, "claude-sonnet-5-5 missing from the catalog"
+    entry = by_id["claude-sonnet-5-5"]
+    assert entry.label == "Claude Sonnet 5.5"
+    assert entry.public_channel and entry.admin_default_selectable
+    from services.settings_service import is_valid_public_channel_model
+
+    assert is_valid_public_channel_model(
+        "claude-sonnet-5-5"
+    ), "PUT /api/agents/{name}/public-channel-model would still 422 claude-sonnet-5-5"
+    assert "claude-sonnet-5-5" in model_catalog.WORKSPACE_MODELS
+    assert entry.workspace_tier == "Balanced \u2014 fast and smart"
+    assert model_catalog.unrunnable_reason("claude-sonnet-5-5", "claude-code") is None
+
+
+@pytest.mark.parametrize(
+    "model_id,label,admin_default,workspace_tier",
+    [
+        ("claude-fable-5-2", "Claude Fable 5.2", True, ""),
+        # #1080 holds for the new Haiku; it takes the Workspace "Fastest" slot.
+        ("claude-haiku-5-5", "Claude Haiku 5.5", False, "Fastest"),
+    ],
+)
+def test_fable_5_2_and_haiku_5_5_are_selectable_end_to_end(
+    model_id, label, admin_default, workspace_tier
+):
+    model_catalog = _catalog()
+    entry = {m.id: m for m in model_catalog.MODEL_CATALOG}[model_id]
+    assert entry.label == label
+    assert entry.public_channel
+    assert entry.admin_default_selectable is admin_default
+    assert not entry.recommended, "the platform default does NOT move"
+    from services.settings_service import is_valid_public_channel_model
+
+    assert is_valid_public_channel_model(model_id)
+    assert (model_id in model_catalog.WORKSPACE_MODELS) is bool(workspace_tier)
+    assert entry.workspace_tier == workspace_tier
+    assert model_catalog.unrunnable_reason(model_id, "claude-code") is None
+
+
+def test_the_prior_haiku_keeps_its_flags_and_gives_up_the_workspace_slot():
+    model_catalog = _catalog()
+    prior = {m.id: m for m in model_catalog.MODEL_CATALOG}["claude-haiku-4-5-20251001"]
+    assert prior.public_channel and not prior.admin_default_selectable
+    assert not prior.workspace
+
+
+def test_the_latest_marker_names_exactly_one_sonnet_and_it_is_5_5():
+    """One `(latest)` per tier; the prior point release keeps its flags and
+    gives up the Workspace "Balanced" slot, which is one option."""
+    model_catalog = _catalog()
+    sonnet_latest = [
+        m for m in model_catalog.MODEL_CATALOG
+        if m.id.startswith("claude-sonnet-5") and "(latest)" in m.note
+    ]
+    assert [m.id for m in sonnet_latest] == ["claude-sonnet-5-5"]
+    prior = {m.id: m for m in model_catalog.MODEL_CATALOG}["claude-sonnet-5"]
+    assert prior.public_channel and prior.admin_default_selectable
+    assert not prior.workspace
 
 
 def test_the_workspace_tiers_are_unique():

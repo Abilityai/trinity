@@ -78,3 +78,15 @@ export function buildNavLinks({ path = '/', hasAnyEnterprise = false, opsCount =
 export function moreLabel(hiddenCount) {
   return hiddenCount > 0 ? `${hiddenCount} more` : 'More'
 }
+
+/**
+ * #3541 — the badge the phone menu button carries while its sheet is shut.
+ * Below `sm` no link is on screen, so a pending Operations count would
+ * otherwise vanish with the row. Returns the first badged link's count, or
+ * null when nothing is pending.
+ */
+export function menuBadge(links = []) {
+  const badged = links.filter((l) => l.badge)
+  if (!badged.length) return null
+  return { text: badged[0].badge, critical: badged.some((l) => l.badgeCritical) }
+}

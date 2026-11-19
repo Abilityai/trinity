@@ -2868,6 +2868,11 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // principle 21: loading behaviour lives in the store). Not awaited:
         // the roster must not wait for it, which is the entire point.
         if (briefingHydrationPlan(this.agents).batch) void this.hydrateBriefings()
+        // #4502: the read succeeded. Every failure path below resolves without
+        // this, so a caller about to make a claim from the roster (the ask
+        // card's "<agent> is picking this up.") can tell a roster it just read
+        // from the one a failed quiet refresh left in place.
+        return true
       } catch (err) {
         // ent#1201: a quiet refresh that fails changes nothing on screen — the
         // next tick reads again. A session that ended is still handled below.
@@ -2919,6 +2924,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // ent#1201: re-read the roster without re-entering the loading phase (no
     // skeleton, no reset `error`/`unavailable`, and a failed read is silent) —
     // the set-up landing's poll, and the re-read when a member's progress flips.
+    // Resolves `true` only when the roster was actually read (#4502).
     refreshRoster() {
       return this.fetchRoster({ quiet: true })
     },

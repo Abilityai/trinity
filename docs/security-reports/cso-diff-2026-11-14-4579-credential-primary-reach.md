@@ -77,3 +77,9 @@ None in daily mode.
 ## Trend
 
 Two earlier diff reports cover this surface (`cso-diff-2026-11-04-ent1095-readdress-primary-asks`, `cso-diff-2026-11-12-4501-approver-reach`): no findings then, none now.
+
+## Addendum (2026-11-17, #4599)
+
+This report was generated before the second commit of that change and does not cover the admin re-address arm: `ask_service.admin_readdress` re-running the credential reader chain for `to: rule`. That arm reads the same chain (`role_addressing.resolve_credential_reader`) and is covered by tests: `tests/unit/test_4579_credential_primary_reach.py::TestAdminReaddress` and `tests/unit/test_4599_credential_reader_doors.py::TestAdminReaddressWording`.
+
+The two doors that stayed open after that change, the queue-file channel and the client block, are closed by #4599.

@@ -145,8 +145,14 @@ const { views, activeViewId, isLoading, sortedViews } = storeToRefs(systemViewsS
 // systems it lists and the getting-started checklist below them. A saved
 // preference still wins. Open, it takes 176px from every dashboard pane, and
 // the list view's eleven-column grid only just fits at 1280.
+//
+// Below `sm` the default flips to collapsed: open, the 224px rail is 60% of a
+// 375px phone and leaves the fleet a ~150px column. Collapsed it is 48px and
+// one tap opens it. Only the DEFAULT changes; a saved preference still wins,
+// and the toggle saves one exactly as before.
 const savedCollapsed = localStorage.getItem('trinity-sidebar-collapsed')
-const isCollapsed = ref(savedCollapsed !== null ? savedCollapsed === 'true' : false)
+const onPhone = typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 639px)').matches
+const isCollapsed = ref(savedCollapsed !== null ? savedCollapsed === 'true' : onPhone)
 
 // Watch for collapse changes and persist
 function toggleCollapse() {
