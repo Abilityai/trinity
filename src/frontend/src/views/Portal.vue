@@ -3136,8 +3136,11 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
 // unshared URL shows that agent's composer. Landing still waits for the
 // thread list: a roster-only wake would mint a chat against an empty list,
 // and the later length change would treat that landing as already done.
+// `threadsLoaded` is a source because the body waits on it: a first read that
+// settles empty leaves `threads.length` at 0, so an agent clicked while that
+// read was in flight would otherwise never land.
 watch(
-  [activeAgentPageName, () => threads.value.length, () => store.rosterLoaded, () => store.sessionsFailed],
+  [activeAgentPageName, () => threads.value.length, () => store.rosterLoaded, () => store.sessionsFailed, threadsLoaded],
   ([name], [prevName]) => {
   if (!name || !store.isClientSignedIn) return
   // Wait for the roster verdict. Landing before it means `activeAgent` cannot

@@ -242,6 +242,37 @@ describe('#4517 — an agent click while the thread list failed', () => {
     expect(conversation(w).props('agent').name).toBe('sage')
     expect(conversation(w).props('newChat')).toBe(true)
   })
+
+  // The cold twin: the route is already the agent page when the shell mounts,
+  // so the only thing that can wake the landing is the list's failure itself.
+  it('a cold link to an agent lands on it as a new chat', async () => {
+    arm({ sessionsFail: true })
+    const { w, router } = await boot('/workspace/a/sage')
+    expect(router.currentRoute.value.path).toBe('/workspace/a/sage')
+    expect(conversation(w).props('agent').name).toBe('sage')
+    expect(conversation(w).props('newChat')).toBe(true)
+  })
+})
+
+describe('#4517 — an agent click while the first thread read is in flight', () => {
+  // With no chats the list comes back empty, so its length never changes: the
+  // read settling is the only event left to land the agent the person clicked.
+  it('lands on the clicked agent once the read settles empty', async () => {
+    arm()
+    let release
+    store.fetchAllSessions = vi.fn(() => new Promise((resolve) => { release = () => resolve([]) }))
+    const { w, router } = await boot('/workspace')
+    expect(release).toBeTypeOf('function')
+    w.findComponent({ name: 'PortalSidebar' }).vm.$emit('open-agent', 'sage')
+    await flushPromises(); await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/workspace/a/sage')
+
+    release()
+    await flushPromises(); await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/workspace/a/sage')
+    expect(conversation(w).props('agent').name).toBe('sage')
+    expect(conversation(w).props('newChat')).toBe(true)
+  })
 })
 
 describe('#3140 — a refused agent page offers no retry', () => {
