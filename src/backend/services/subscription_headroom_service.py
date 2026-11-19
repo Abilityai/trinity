@@ -49,7 +49,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 import httpx
 
 from database import db
-from db_models import HeadroomWindow, SubscriptionHeadroom, SubscriptionUsage
+from db_models import EnforcingWindow, HeadroomWindow, SubscriptionHeadroom, SubscriptionUsage
 from redis_breaker_util import get_breaker_redis, SingleFlightLock
 from utils.helpers import parse_iso_timestamp, utc_now_iso
 
@@ -114,6 +114,18 @@ _last_probe_at: Dict[str, float] = {}
 
 _H = "anthropic-ratelimit-unified-"
 
+# Maps provider header window prefixes to Python-safe names.
+# Unknown prefixes get a sanitized form; new provider windows arrive without a code change.
+_WINDOW_NAME_MAP = {"5h": "five_hour", "7d": "seven_day"}
+_WINDOW_SUFFIXES = ("-utilization", "-reset", "-status")
+
+
+def _normalize_window_name(prefix: str) -> str:
+    if prefix in _WINDOW_NAME_MAP:
+        return _WINDOW_NAME_MAP[prefix]
+    s = prefix.replace("-", "_")
+    return ("w_" + s) if s and s[0].isdigit() else s
+
 
 def is_auto_refresh_enabled() -> bool:
     """Default ON (operator ruling) — system_settings row wins."""
@@ -165,27 +177,120 @@ def parse_unified_headers(headers) -> Optional[dict]:
     Returns None when the header family is entirely absent (endpoint drift or
     a non-subscription token) — the caller degrades to observed, loudly.
     Missing individual fields degrade to None, never raise.
+
+    Discovery is generic over ``anthropic-ratelimit-unified-*``: any new window
+    the provider introduces (beyond 5h/7d) is captured without a code change.
+    The ``windows`` dict holds all discovered windows; ``enforcing`` names the
+    binding one.  ``five_hour``/``seven_day`` are preserved at the top level for
+    backward compatibility (#4656).
     """
     def h(name: str) -> Optional[str]:
         return headers.get(_H + name)
 
-    if not any(h(n) is not None for n in ("5h-utilization", "7d-utilization", "status")):
+    # Generic discovery: scan all header names for the unified prefix.
+    # ``headers`` may be an httpx.Headers or a plain dict; both support ``for key in``.
+    prefixes: set = set()
+    for key in headers:
+        lkey = key.lower()
+        if not lkey.startswith(_H):
+            continue
+        rest = lkey[len(_H):]
+        for suffix in _WINDOW_SUFFIXES:
+            if rest.endswith(suffix):
+                prefix = rest[: -len(suffix)]
+                if prefix:
+                    prefixes.add(prefix)
+                break
+
+    # Fallback: at least the top-level status header must be present.
+    if not prefixes and h("status") is None:
         return None
 
-    def window(prefix: str) -> Optional[dict]:
+    windows: dict = {}
+    for prefix in sorted(prefixes):  # deterministic order for tests
         util = _parse_utilization(h(f"{prefix}-utilization"))
         reset = _parse_reset(h(f"{prefix}-reset"))
         status = h(f"{prefix}-status")
         if util is None and reset is None and status is None:
-            return None
-        return {"utilization_pct": util, "resets_at": reset, "status": status}
+            continue
+        name = _normalize_window_name(prefix)
+        windows[name] = {"utilization_pct": util, "resets_at": reset, "status": status}
+
+    # Backward-compatible top-level fields.
+    five_hour = windows.get("five_hour")
+    seven_day = windows.get("seven_day")
+
+    representative_claim = h("representative-claim")
+    # Remap the provider's raw claim ("5h" / "7d") to the Python name when needed.
+    if representative_claim in _WINDOW_NAME_MAP:
+        representative_claim = _WINDOW_NAME_MAP[representative_claim]
+
+    enforcing = _derive_enforcing(windows, representative_claim)
 
     return {
-        "five_hour": window("5h"),
-        "seven_day": window("7d"),
-        "representative_claim": h("representative-claim"),
+        "five_hour": five_hour,
+        "seven_day": seven_day,
+        "windows": windows,
+        "enforcing": enforcing,
+        "representative_claim": representative_claim,
         "overage_status": h("overage-status"),
         "unified_status": h("status"),
+    }
+
+
+def _derive_enforcing(windows: dict, representative_claim: Optional[str]) -> Optional[dict]:
+    """Derive the enforcing window from discovered windows (#4656).
+
+    Priority:
+    1. A window with a blocking status → ``basis="blocking_status"``
+    2. The window named by the provider's representative-claim header → ``basis="representative_claim"``
+    3. The window with the highest utilization figure → ``basis="highest_utilization"``
+    4. ``None`` when windows is empty or no utilization figures exist.
+
+    ``remaining_pct`` is ``max(0, 100 - utilization_pct)``, rounded to 1 decimal;
+    ``None`` when no utilization figure was reported.
+    """
+    if not windows:
+        return None
+
+    # 1. Blocking windows take priority; pick the most utilised among them.
+    blocked = [
+        (name, w) for name, w in windows.items()
+        if w.get("status") and w["status"] not in NON_BLOCKING_WINDOW_STATUSES
+    ]
+    if blocked:
+        candidate_name, candidate_window = max(
+            blocked, key=lambda item: item[1].get("utilization_pct") or 0.0
+        )
+        basis = "blocking_status"
+    elif representative_claim and representative_claim in windows:
+        candidate_name = representative_claim
+        candidate_window = windows[representative_claim]
+        basis = "representative_claim"
+    else:
+        with_util = [
+            (name, w) for name, w in windows.items()
+            if w.get("utilization_pct") is not None
+        ]
+        if not with_util:
+            return None
+        candidate_name, candidate_window = max(
+            with_util, key=lambda item: item[1]["utilization_pct"]
+        )
+        basis = "highest_utilization"
+
+    util_pct = candidate_window.get("utilization_pct")
+    remaining = (
+        round(max(0.0, 100.0 - util_pct), 1) + 0.0
+        if util_pct is not None else None
+    )
+    return {
+        "window": candidate_name,
+        "basis": basis,
+        "utilization_pct": util_pct,
+        "remaining_pct": remaining,
+        "resets_at": candidate_window.get("resets_at"),
+        "status": candidate_window.get("status"),
     }
 
 
@@ -389,9 +494,14 @@ def _to_model(snapshot: Optional[dict]) -> Optional[SubscriptionHeadroom]:
     def win(d: Optional[dict]) -> Optional[HeadroomWindow]:
         return HeadroomWindow(**d) if d else None
 
+    def enf(d: Optional[dict]) -> Optional[EnforcingWindow]:
+        return EnforcingWindow(**d) if d else None
+
     return SubscriptionHeadroom(
         five_hour=win(snapshot.get("five_hour")),
         seven_day=win(snapshot.get("seven_day")),
+        windows=snapshot.get("windows") or {},
+        enforcing=enf(snapshot.get("enforcing")),
         representative_claim=snapshot.get("representative_claim"),
         overage_status=snapshot.get("overage_status"),
         fetched_at=snapshot.get("fetched_at"),
