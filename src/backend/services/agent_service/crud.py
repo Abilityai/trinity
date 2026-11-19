@@ -3236,13 +3236,17 @@ def _library_skills_attribution(current_user) -> Optional[str]:
         return None
 
 
-def _assign_declared_library_skills(
+async def _assign_declared_library_skills(
     agent_name: str, declared: list, owner_username: str,
     assigned_by_agent: Optional[str],
 ) -> list:
     """Assign each declared name the library has, as the owner. Returns the
     names now assigned. Names the library lacks are skipped and logged; the
-    route's own rule (assign only what the library has) applies here too."""
+    route's own rule (assign only what the library has) applies here too.
+
+    The gates follow the rows before anything is delivered (ent#753), as on
+    every other `agent_skills` writer; the reconcile never raises."""
+    from services import skill_gate_map_service
     from services.skill_service import skill_service
 
     assigned: list = []
@@ -3261,6 +3265,10 @@ def _assign_declared_library_skills(
             "for %s: %s", agent_name, missing,
         )
     if assigned:
+        await skill_gate_map_service.reconcile_library_gates(
+            agent_name,
+            ctx=skill_gate_map_service.GateContext(trigger="assignment"),
+        )
         logger.info("[§21.3.4] Assigned library skills to %s: %s", agent_name, assigned)
     return assigned
 
@@ -3398,7 +3406,7 @@ async def _materialize_agent_files(
     # inside the rollback fence: a raise must never cost a successful creation.
     if declared_library_skills and not config.ephemeral:
         try:
-            assigned = _assign_declared_library_skills(
+            assigned = await _assign_declared_library_skills(
                 config.name, declared_library_skills, owner_username,
                 library_skills_assigned_by_agent,
             )
