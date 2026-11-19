@@ -52,17 +52,17 @@ describe("#4654 chat ACL: admin role check, not username check", () => {
         keyName: "kn",
       },
     };
-    const result = JSON.parse(
-      await tools(makeClient()).chatWithAgent.execute(
-        { agent_name: "target", message: "hi" },
-        session as any,
-      ),
+    const raw = await tools(makeClient("other-owner")).chatWithAgent.execute(
+      { agent_name: "target", message: "hi" },
+      session as any,
     );
-    assert.ok(result.error || result.reason, "expected an access denial");
-    assert.match(
-      JSON.stringify(result),
-      /not found or not accessible|Access denied|access/i,
-    );
+    const result = JSON.parse(raw);
+    // The uniform #186 denial, exactly: the same words a non-existent agent
+    // gets, so a refused caller cannot tell the two apart.
+    assert.equal(result.error, "Access denied");
+    assert.equal(result.reason, "Agent 'target' not found or not accessible");
+    // ...and it never names who owns the agent.
+    assert.ok(!raw.includes("other-owner"), `denial discloses the owner: ${raw}`);
   });
 
   it("user with role 'admin' and a non-'admin' username is allowed access to a foreign agent", async () => {
