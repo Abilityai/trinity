@@ -40,6 +40,14 @@ export function keyAction(key, { open, active, count }) {
   return { action: 'none' }
 }
 
+/** The line under a picked person: "label · email", or the email alone when the label is the email. */
+export function chosenText(person) {
+  const email = person.email
+  const label = person.label
+  if (!label || String(label).trim().toLowerCase() === String(email || '').trim().toLowerCase()) return email
+  return `${label} · ${email}`
+}
+
 /** Is `text` exactly what picking `person` wrote? */
 export function isPickedText(text, person) {
   return !!person && String(text || '').trim().toLowerCase() === String(person.email || '').toLowerCase()

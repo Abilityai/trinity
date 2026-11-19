@@ -211,6 +211,70 @@ describe('#3140 — an agent URL that is not shared with you', () => {
   })
 })
 
+describe('#4517 — an unshared agent link when you have no chats yet', () => {
+  // The route is already set when the shell mounts. The roster verdict arrives
+  // afterwards, and the thread list comes back empty, so its length never
+  // changes. The #3140 tests above all have one chat, which is what used to
+  // re-arm the watcher.
+  it('shows you don\'t have access, and does not open your own agent', async () => {
+    arm()
+    store.fetchAllSessions = vi.fn(async () => [])
+    const { w, router } = await boot('/workspace/a/stranger')
+    expect(store.fetchAllSessions).toHaveBeenCalled()
+    expect(router.currentRoute.value.path).toBe('/workspace/a/stranger')
+    expect(w.text()).toContain("You don't have access to")
+    expect(w.text()).toContain('stranger')
+    expect(conversation(w).exists()).toBe(false)
+    expect(w.find('textarea').exists()).toBe(false)
+    expect(w.get('[data-testid="agent-unreachable-back"]').exists()).toBe(true)
+  })
+})
+
+describe('#4517 — an agent click while the thread list failed', () => {
+  // `threadsLoaded` only latches on a clean read; a failed list must not stop
+  // the agent page from landing, or the old conversation sits under the new URL.
+  it('lands on the clicked agent instead of keeping the previous one on stage', async () => {
+    arm({ sessionsFail: true })
+    const { w, router } = await boot('/workspace/c/t1')
+    w.findComponent({ name: 'PortalSidebar' }).vm.$emit('open-agent', 'sage')
+    await flushPromises(); await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/workspace/a/sage')
+    expect(conversation(w).props('agent').name).toBe('sage')
+    expect(conversation(w).props('newChat')).toBe(true)
+  })
+
+  // The cold twin: the route is already the agent page when the shell mounts,
+  // so the only thing that can wake the landing is the list's failure itself.
+  it('a cold link to an agent lands on it as a new chat', async () => {
+    arm({ sessionsFail: true })
+    const { w, router } = await boot('/workspace/a/sage')
+    expect(router.currentRoute.value.path).toBe('/workspace/a/sage')
+    expect(conversation(w).props('agent').name).toBe('sage')
+    expect(conversation(w).props('newChat')).toBe(true)
+  })
+})
+
+describe('#4517 — an agent click while the first thread read is in flight', () => {
+  // With no chats the list comes back empty, so its length never changes: the
+  // read settling is the only event left to land the agent the person clicked.
+  it('lands on the clicked agent once the read settles empty', async () => {
+    arm()
+    let release
+    store.fetchAllSessions = vi.fn(() => new Promise((resolve) => { release = () => resolve([]) }))
+    const { w, router } = await boot('/workspace')
+    expect(release).toBeTypeOf('function')
+    w.findComponent({ name: 'PortalSidebar' }).vm.$emit('open-agent', 'sage')
+    await flushPromises(); await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/workspace/a/sage')
+
+    release()
+    await flushPromises(); await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/workspace/a/sage')
+    expect(conversation(w).props('agent').name).toBe('sage')
+    expect(conversation(w).props('newChat')).toBe(true)
+  })
+})
+
 describe('#3140 — a refused agent page offers no retry', () => {
   // The band and the details panel read `denied` from this composable.
   function harness(status) {
