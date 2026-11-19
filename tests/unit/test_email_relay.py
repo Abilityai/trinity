@@ -74,11 +74,13 @@ def test_only_a_mail_that_names_its_relay_form_is_relayed(svc):
     assert state["relayed"] == [("agent_invite", "bo@example.com", {"agent": "a", "inviter": "Ada", "url": ""})]
 
 
-def test_a_relay_that_fails_is_not_reported_as_sent_and_the_code_is_left_in_the_log(svc):
+def test_a_relay_that_fails_is_not_reported_as_sent_and_the_code_stays_out_of_the_log(svc, caplog):
     service, _, state = svc
     state["ok"] = False
-    assert run(service.send_verification_code("ada@example.com", "482913")) is False
-    assert len(state["console"]) == 1 and "482913" in state["console"][0][1]
+    with caplog.at_level("DEBUG"):
+        assert run(service.send_verification_code("ada@example.com", "482913")) is False
+    # A sign-in code in the log is one hop from whoever reads the logs.
+    assert state["console"] == [] and "482913" not in caplog.text and "not sent" in caplog.text
     assert run(service.send_html("bo@example.com", "Hi", intro="x", relay=("agent_invite", {}))) is False
 
 

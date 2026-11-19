@@ -160,9 +160,11 @@ class EmailService:
         relayed = await self._relayed("code", to_email, {
             "code": code, "label": f"Trinity ({agent_name})" if agent_name else (context_label or "Trinity")})
         if relayed is not None:
-            if not relayed:   # leave the code where an operator can read it, and say it was not sent
-                self._send_console(to_email, subject, self._get_verification_email_body(
-                    code, agent_name=agent_name, context_label=context_label))
+            if not relayed:
+                # Say it was not sent, and nothing more: a sign-in code written to the log is one
+                # hop from whoever reads the logs. (The `console` provider prints codes because an
+                # operator chose it; a relay that refused is not that choice.)
+                logger.warning("Verification code not sent: the mail relay refused or did not answer.")
             return relayed
 
         body = self._get_verification_email_body(code, agent_name=agent_name, context_label=context_label)
