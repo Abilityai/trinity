@@ -113,6 +113,15 @@ describe('NavSheet (#3541)', () => {
     expect(sheet()).toBeNull()
   })
 
+  it('closes when the route changes underneath it (Back)', async () => {
+    await open(buildNavLinks({ path: '/' }))
+    expect(sheet()).not.toBeNull()
+    await router.push('/library')
+    await nextTick()
+    await nextTick()
+    expect(sheet()).toBeNull()
+  })
+
   it('carries the Operations badge on the menu button while shut', async () => {
     await render(buildNavLinks({ path: '/', opsCount: 4 }))
     const badge = document.querySelector('[data-nav-sheet-badge]')
