@@ -86,6 +86,12 @@ def get_docker_client():
         return docker_client
     try:
         _start_docker_connect()
+    except Exception as e:
+        # A thread that cannot start is a failed attempt: no client yet, and the
+        # caller gets None like any other reader instead of an exception.
+        _docker_connect_lock.release()
+        _warn_throttled("docker_connect", "Could not start a Docker connect attempt: %s", e)
+        return None
     except BaseException:
         _docker_connect_lock.release()
         raise
