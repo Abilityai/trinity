@@ -215,13 +215,24 @@ def test_a_thread_that_cannot_start_is_a_failed_attempt(docker_down, monkeypatch
     The readers call get_docker_client() outside their own `try`, so it must
     return None, not raise, and must not keep the connect lock."""
 
+    starts = []
+
     def cannot_start():
+        starts.append(1)
         raise RuntimeError("can't start new thread")
 
     monkeypatch.setattr(ds, "_start_docker_connect", cannot_start)
     assert ds.get_docker_client() is None
     assert ds._docker_connect_lock.acquire(blocking=False), "lock was left held"
     ds._docker_connect_lock.release()
+
+    # Like any failed attempt, the next one waits out the delay.
+    clock, _ = docker_down
+    assert ds.get_docker_client() is None
+    assert len(starts) == 1
+    clock.now += ds._DOCKER_RETRY_INITIAL_S
+    assert ds.get_docker_client() is None
+    assert len(starts) == 2
 
 
 def test_docker_still_unreachable_logs_at_info(docker_down, caplog):

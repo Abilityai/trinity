@@ -87,8 +87,10 @@ def get_docker_client():
     try:
         _start_docker_connect()
     except Exception as e:
-        # A thread that cannot start is a failed attempt: no client yet, and the
-        # caller gets None like any other reader instead of an exception.
+        # A thread that cannot start is a failed attempt: no client yet, the next
+        # attempt waits out the delay, and the caller gets None like any other
+        # reader instead of an exception.
+        _schedule_next_docker_attempt()
         _docker_connect_lock.release()
         _warn_throttled("docker_connect", "Could not start a Docker connect attempt: %s", e)
         return None
@@ -96,6 +98,13 @@ def get_docker_client():
         _docker_connect_lock.release()
         raise
     return None
+
+
+def _schedule_next_docker_attempt() -> None:
+    """After a failed attempt: the next one waits the current delay, which doubles."""
+    global _docker_retry_delay_s, _next_docker_attempt_monotonic
+    _next_docker_attempt_monotonic = time.monotonic() + _docker_retry_delay_s
+    _docker_retry_delay_s = min(_docker_retry_delay_s * 2, _DOCKER_RETRY_MAX_S)
 
 
 def _start_docker_connect() -> None:
@@ -112,8 +121,7 @@ def _attempt_docker_connect() -> None:
             client = docker.from_env()
         except Exception as e:
             # From when the attempt failed, so a slow failure still waits out the delay.
-            _next_docker_attempt_monotonic = time.monotonic() + _docker_retry_delay_s
-            _docker_retry_delay_s = min(_docker_retry_delay_s * 2, _DOCKER_RETRY_MAX_S)
+            _schedule_next_docker_attempt()
             # INFO: an install that runs without Docker on purpose (demo mode) logs
             # this once a minute while something polls the roster (#4406 review).
             _warn_throttled("docker_connect", "Docker still unreachable: %s", e, level=logging.INFO)

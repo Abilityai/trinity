@@ -8,15 +8,14 @@ on the first read skipped the guard; the client on the second built the agent
 and silently adopted the leftover workspace volume instead of returning 409.
 
 Create now reads the client once and passes the answer to the guard, so the
-guard and the build always agree.
+guard and the build always agree. The end-to-end case, Docker coming back
+between the two reads, is in test_1484_create_agent_characterization.py
+(it needs that file's create harness).
 """
 
 from __future__ import annotations
 
-import ast
 import asyncio
-import inspect
-import textwrap
 
 import pytest
 
@@ -24,60 +23,6 @@ import services.agent_service.crud as crud
 from models import AgentConfig
 
 pytestmark = pytest.mark.unit
-
-
-def _create_tree():
-    return ast.parse(textwrap.dedent(inspect.getsource(crud.create_agent_internal)))
-
-
-def test_the_guard_and_the_build_gate_use_the_same_single_read():
-    """One `get_docker_client()` read, stored once; the #1667 guard is given
-    that value, and the `if` that builds the container tests that same name.
-    Before the fix the guard did its own read, so the two could disagree."""
-    tree = _create_tree()
-    reads = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign)
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Name)
-        and node.value.func.id == "bool"
-        and any(
-            isinstance(a, ast.Call)
-            and isinstance(a.func, ast.Attribute)
-            and a.func.attr == "get_docker_client"
-            for a in node.value.args
-        )
-    ]
-    assert len(reads) == 1, "create must read the Docker client exactly once"
-    (name,) = [t.id for t in reads[0].targets]
-
-    guard_calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "_guard_leftover_workspace_volume"
-    ]
-    assert len(guard_calls) == 1
-    passed = {kw.arg: kw.value for kw in guard_calls[0].keywords}
-    assert isinstance(passed.get("docker_available"), ast.Name)
-    assert passed["docker_available"].id == name
-
-    other_reads = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "get_docker_client"
-    ]
-    assert len(other_reads) == 1, "no second read anywhere in create"
-    assert any(
-        isinstance(node, ast.If)
-        and isinstance(node.test, ast.Name)
-        and node.test.id == name
-        for node in ast.walk(tree)
-    ), "the container build must be gated on the same read"
 
 
 @pytest.fixture
@@ -111,6 +56,7 @@ def test_guard_follows_the_value_create_read_not_a_fresh_read(probe):
     # client, because create will refuse with 503 on the same None.
     assert _guard(docker_available=False) is None
     assert probe["probed"] == []
+    assert probe["get"] == 0, "the guard must not read the client itself"
 
 
 def test_guard_still_refuses_a_leftover_volume_when_docker_is_up(probe):

@@ -944,6 +944,24 @@ async def test_case10_leftover_volume_adopted(crud_env):
     ctx["docker_utils"].volume_create.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_case10_docker_returning_mid_create_does_not_adopt(crud_env):
+    """#4406: `get_docker_client()` can answer None and then the client while
+    Docker reconnects. Create reads it once, so the #1667 guard and the build
+    agree: no client means 503, never a build that adopts a leftover volume."""
+    crud, ctx = crud_env
+    ctx["docker_utils"].volume_get.side_effect = None
+    ctx["docker_utils"].volume_get.return_value = MagicMock()
+    ctx["docker_service"].get_docker_client.return_value = None
+    ctx["docker_service"].get_docker_client.side_effect = (
+        [None] + [MagicMock()] * 20)
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        await crud.create_agent_internal(_local_config("back-mid"), _user(), None)
+    assert exc.value.status_code == 503
+    ctx["docker_utils"].containers_run.assert_not_awaited()
+
+
 # ===========================================================================
 # Case 11 — existence guard (three truthy sources)
 # ===========================================================================
