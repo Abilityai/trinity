@@ -312,14 +312,16 @@ RUN set -eu; \
 # private config dir copies it again (ent#819: no links, Abilityai/lilu#627),
 # so no turn ever resolves from the
 # network. Root-owned and read-only to the agent by construction.
+#
+# Installed with `npm ci` from the tracked lockfile in ./opencode-providers
+# (#4435): lockfile-exact, fails on drift, so a rebuild never resolves a
+# provider package to whatever the registry published last. To move a version,
+# edit opencode-providers/package.json and regenerate the lockfile with
+# `npm install --package-lock-only` in that directory.
+COPY --chown=root:root ./opencode-providers/package.json ./opencode-providers/package-lock.json /opt/trinity/opencode/
 RUN set -eu; \
-    mkdir -p /opt/trinity/opencode; \
     cd /opt/trinity/opencode; \
-    npm init -y >/dev/null; \
-    npm install --no-audit --no-fund \
-        @ai-sdk/openai-compatible \
-        @ai-sdk/anthropic \
-        @ai-sdk/openai; \
+    npm ci --omit=dev --no-audit --no-fund; \
     test -d node_modules/@ai-sdk/openai-compatible; \
     chmod -R a+rX /opt/trinity/opencode
 

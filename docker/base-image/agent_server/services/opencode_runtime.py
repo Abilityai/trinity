@@ -1747,10 +1747,19 @@ class OpenCodeRuntime(AgentRuntime):
                              f"a retry needs"
                     )
                     # Never a success: an empty-stdout exit is a failed turn.
+                    # The stall's own text goes to the log; the answer is
+                    # fixed words (#4284: no exception text in a 5xx).
+                    logger.error(
+                        "%s execution %s: %s — %s",
+                        STALL_RETRY_MARKER, execution_id, stalled, reason,
+                    )
                     raise HTTPException(
                         status_code=504,
-                        detail=f"{stalled} {STALL_RETRY_MARKER} {reason}.",
-                    )
+                        detail=(
+                            "OpenCode produced no output (no `step_start` event). "
+                            f"Turn abandoned. {STALL_RETRY_MARKER} {reason}."
+                        ),
+                    ) from stalled
                 # One greppable marker, so an affected host is countable in the
                 # logs instead of looking like slow-but-fine.
                 logger.error(
@@ -1818,7 +1827,11 @@ class OpenCodeRuntime(AgentRuntime):
             except HTTPException:
                 raise
             except TimeoutError as exc:
-                raise HTTPException(status_code=504, detail=str(exc))
+                logger.error("[OpenCode] execution timed out: %s", exc)
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"OpenCode execution timed out ({type(exc).__name__})",
+                ) from exc
             except (BrokenPipeError, ConnectionResetError) as pipe_err:
                 logger.info("[OpenCode] subprocess pipe closed before completion: %s", pipe_err)
                 raise HTTPException(
@@ -1827,7 +1840,7 @@ class OpenCodeRuntime(AgentRuntime):
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.error("[OpenCode] execution error: %s", exc)
-                raise HTTPException(status_code=500, detail=f"Execution error: {exc}")
+                raise HTTPException(status_code=500, detail=f"Execution error: {type(exc).__name__}") from exc
             return response, log, metadata, raw
 
         # -- continuity hygiene (claude_code.py:796-814 pattern) --
@@ -1878,7 +1891,11 @@ class OpenCodeRuntime(AgentRuntime):
         except HTTPException:
             raise
         except TimeoutError as exc:
-            raise HTTPException(status_code=504, detail=str(exc))
+            logger.error("[OpenCode] execution timed out: %s", exc)
+            raise HTTPException(
+                status_code=504,
+                detail=f"OpenCode execution timed out ({type(exc).__name__})",
+            ) from exc
         except (BrokenPipeError, ConnectionResetError) as pipe_err:
             logger.info("[OpenCode] subprocess pipe closed before completion: %s", pipe_err)
             raise HTTPException(
@@ -1887,7 +1904,7 @@ class OpenCodeRuntime(AgentRuntime):
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("[OpenCode] execution error: %s", exc)
-            raise HTTPException(status_code=500, detail=f"Execution error: {exc}")
+            raise HTTPException(status_code=500, detail=f"Execution error: {type(exc).__name__}") from exc
 
         if session_id:
             agent_state.opencode_chat_session_id = session_id
@@ -1969,7 +1986,11 @@ class OpenCodeRuntime(AgentRuntime):
         except HTTPException:
             raise
         except TimeoutError as exc:
-            raise HTTPException(status_code=504, detail=str(exc))
+            logger.error("[OpenCode] execution timed out: %s", exc)
+            raise HTTPException(
+                status_code=504,
+                detail=f"OpenCode execution timed out ({type(exc).__name__})",
+            ) from exc
         except (BrokenPipeError, ConnectionResetError) as pipe_err:
             # 502 (not 503) so an early child exit doesn't trip the SUB-003
             # auth-switch — parity with the Claude/Gemini/Codex headless paths.
@@ -1980,7 +2001,7 @@ class OpenCodeRuntime(AgentRuntime):
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("[OpenCode] task execution error: %s", exc)
-            raise HTTPException(status_code=500, detail=f"Task execution error: {exc}")
+            raise HTTPException(status_code=500, detail=f"Task execution error: {type(exc).__name__}") from exc
 
         return response, log, metadata, session_id
 

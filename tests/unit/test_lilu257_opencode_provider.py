@@ -67,7 +67,7 @@ def test_emitted_config_for_a_pinned_ollama_model_is_exact():
     degrades to "unknown provider" without any error we would see.
     """
     env = {
-        ENV_BASE_URL: "http://100.93.125.91:11434",
+        ENV_BASE_URL: "http://ollama.example.com:11434",
         "AGENT_RUNTIME_MODEL": "ollama/gemma4:12b",
         "OPENCODE_OLLAMA_MODELS": "ministral-3:14b, ollama/qwen3.6:27b",
     }
@@ -80,7 +80,7 @@ def test_emitted_config_for_a_pinned_ollama_model_is_exact():
         "provider": {
             "ollama": {
                 "npm": "@ai-sdk/openai-compatible",
-                "options": {"baseURL": "http://100.93.125.91:11434/v1"},
+                "options": {"baseURL": "http://ollama.example.com:11434/v1"},
                 "models": {
                     "gemma4:12b": {},
                     "ministral-3:14b": {},

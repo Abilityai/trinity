@@ -25,7 +25,7 @@ and no file edited by hand inside the container. A block baked once by
 **Where the values come from.**
 
 ``OPENCODE_OLLAMA_BASE_URL``
-    The Ollama root, e.g. ``http://100.93.125.91:11434``. ``/v1`` is appended
+    The Ollama root, e.g. ``http://ollama.example.com:11434``. ``/v1`` is appended
     when absent — Ollama's OpenAI-compatible surface lives there, and the
     root URL is what an operator has at hand. **Unset and the turn is not on
     ``ollama/…`` ⇒ no block is emitted** and OpenCode's own providers are
