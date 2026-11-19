@@ -1,5 +1,5 @@
 <template>
-  <div :class="['bg-gray-100 dark:bg-gray-900', isFullscreenTab ? 'h-screen overflow-hidden flex flex-col' : isBoundedTab ? 'min-h-dvh flex flex-col' : 'min-h-screen']">
+  <div :class="['bg-gray-100 dark:bg-gray-900', isFullscreenTab ? 'min-h-dvh flex flex-col sm:h-screen sm:min-h-0 sm:overflow-hidden' : isBoundedTab ? 'min-h-dvh flex flex-col' : 'min-h-screen']">
     <NavBar />
 
     <!-- #954: w-full keeps <main> at its max width in BOTH layout modes. Without it,
@@ -76,7 +76,7 @@
         <!-- `sm:ml-16` makes room for the header avatar that hangs off the card's
              left edge. Below `sm` the avatar sits inside the card, so the page
              keeps its full width (#3542). -->
-        <div v-if="agent" :class="['sm:ml-16', isFullscreenTab ? 'flex-1 flex flex-col min-h-0' : isBoundedTab ? BOUNDED_LINK : '']">
+        <div v-if="agent" :class="['sm:ml-16', isFullscreenTab ? 'flex-1 flex flex-col sm:min-h-0' : isBoundedTab ? BOUNDED_LINK : '']">
           <!-- Agent Header Component -->
           <AgentHeader
             :agent="agent"
@@ -115,7 +115,7 @@
           />
 
           <!-- Tabs -->
-          <div :class="['bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : isBoundedTab ? BOUNDED_LINK : '']" data-testid="agent-tabs">
+          <div :class="['bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg', isFullscreenTab ? PHONE_TAB_CARD : isBoundedTab ? BOUNDED_LINK : '']" data-testid="agent-tabs">
             <!-- #1114: tabs overflow into a "More ▾" dropdown instead of horizontal scroll -->
             <!-- trinity-enterprise#887: Settings is pinned at the end of the
                  strip, outside the overflow — the one configuration home is
@@ -626,6 +626,15 @@ function redirectRetiredSessionLink() {
 // `flex-1 min-h-0 overflow-y-auto` scroll region (see TasksPanel).
 const FULLSCREEN_TABS = ['chat', 'tasks']
 const isFullscreenTab = computed(() => FULLSCREEN_TABS.includes(activeTab.value))
+// #4140: below `sm` a fullscreen tab does not lock the page to the screen (the
+// root is `min-h-dvh`, `sm:h-screen sm:overflow-hidden`). A phone's header card
+// alone is about 500px tall, so a locked page left Chat's composer below the
+// bottom edge with nothing to scroll. From `sm` up the card flex-fills the
+// locked page as before. Below `sm` the page scrolls, so the card takes a fixed
+// height instead:
+// one screen less main's and the wrapper's bottom padding (2 x py-2 = 1rem)
+// and the same again on top, so scrolled to the end it sits fully on screen.
+const PHONE_TAB_CARD = 'flex flex-col overflow-hidden shrink-0 h-[calc(100dvh-2rem)] sm:h-auto sm:shrink sm:flex-1'
 // trinity#3448: a tab whose list scrolls in a BoundedRegion that fills the window.
 // Unlike a fullscreen tab the page is `min-h-dvh`, so on a short window it scrolls
 // by the shortfall rather than clipping the region's 20rem floor. Every element
@@ -635,7 +644,7 @@ const BOUNDED_TABS = ['skills']
 const BOUNDED_LINK = 'grow basis-0 flex flex-col'
 const isBoundedTab = computed(() => BOUNDED_TABS.includes(activeTab.value))
 const tabLayoutClass = computed(() => {
-  if (isFullscreenTab.value) return 'flex-1 flex flex-col overflow-hidden'
+  if (isFullscreenTab.value) return 'flex-1 flex flex-col sm:overflow-hidden'
   return isBoundedTab.value ? BOUNDED_LINK : 'overflow-visible'
 })
 const showAvatarModal = ref(false)
