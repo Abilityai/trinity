@@ -6,6 +6,7 @@
     :style="canvasStyle"
     @pointerdown="onCanvasPointerDown"
     @pointermove="onCanvasPointerMove"
+    @dragstart="onCanvasDragStart"
     @pointerup="endPan"
     @pointercancel="endPan"
   >
@@ -883,6 +884,13 @@ function onCanvasPointerDown(e) {
   if (e.button > 0) return
   // A second touch during a tile drag must not start a pan (multi-touch).
   if (isPanning.value || draggingName.value) return
+  // A press on the canvas is a pan, never the start of a browser drag. If any
+  // canvas text is selected (a zone stat, the legend, a label after a
+  // double-click) the browser would otherwise start a native drag of that
+  // selection on the next press-and-move: a no-drop cursor, a pointercancel,
+  // and the pan dies. Drop the selection first, and refuse native drags below.
+  const sel = window.getSelection?.()
+  if (sel && !sel.isCollapsed) sel.removeAllRanges()
   isPanning.value = true
   panPointerId = e.pointerId
   canvasEl.value.setPointerCapture(e.pointerId)
@@ -890,6 +898,16 @@ function onCanvasPointerDown(e) {
   panSY = e.clientY
   panTX = vtx.value
   panTY = vty.value
+}
+
+// Nothing on the canvas is meant to be dragged by the browser: tiles and
+// zones move through their own pointer handlers. Images and links inside a
+// tile, and selected text, would otherwise start a native drag. Text inside a
+// field (rename input) keeps its own drag.
+function onCanvasDragStart(e) {
+  const el = e.target?.nodeType === 1 ? e.target : e.target?.parentElement
+  if (el?.closest('input, textarea, [contenteditable="true"]')) return
+  e.preventDefault()
 }
 
 function onCanvasPointerMove(e) {
@@ -1167,6 +1185,9 @@ onBeforeUnmount(() => {
 
 .fleet-canvas.panning {
   cursor: grabbing;
+  /* A pan that sweeps across zone headers and tiles must not select text. */
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .gv-world {
