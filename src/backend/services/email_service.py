@@ -11,7 +11,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import logging
-from typing import Optional, Sequence, Tuple
+from typing import Awaitable, Callable, Optional, Sequence, Tuple
 
 from config import (
     EMAIL_PROVIDER,
@@ -27,6 +27,29 @@ logger = logging.getLogger(__name__)
 # Socket timeout for each SMTP connect/read (#3637). Without it a slow or
 # unreachable server holds the send thread until the OS gives up on the socket.
 SMTP_TIMEOUT_SECONDS = 30
+
+
+# -- relay -------------------------------------------------------------------
+# An install with no mail provider configured cannot deliver anything itself:
+# the `console` provider prints the message to the log. A module may register a
+# relay, something able to deliver a small set of STRUCTURED mails for this
+# install (a kind and a few short fields, never a subject or a body, so the
+# relay words the mail itself). It is consulted only when no provider of this
+# install's own can deliver; a configured provider always wins.
+_relay: Optional[dict] = None
+
+
+def register_relay(available: Callable[[], bool], send: Callable[[str, str, dict], Awaitable[bool]]) -> None:
+    """Register the relay. ``available()`` is cheap and synchronous (it is read
+    on the unauthenticated auth-mode path); ``send(kind, to, fields)`` delivers
+    one mail and answers whether it did. Neither may raise."""
+    global _relay
+    _relay = {"available": available, "send": send}
+
+
+def clear_relay() -> None:
+    global _relay
+    _relay = None
 
 
 class EmailService:
@@ -59,7 +82,36 @@ class EmailService:
         )
 
     def can_deliver(self) -> bool:
-        """Can this install actually deliver an email right now? (#3655)
+        """Can this install deliver an email right now, by a provider of its own
+        or through a registered relay?"""
+        return self._provider_can_deliver() or self._relay_available()
+
+    @staticmethod
+    def _relay_available() -> bool:
+        if not _relay:
+            return False
+        try:
+            return bool(_relay["available"]())
+        except Exception:  # noqa: BLE001 - a relay that cannot answer is not there
+            logger.warning("[email] the relay could not say whether it is available", exc_info=True)
+            return False
+
+    async def _relayed(self, kind: str, to_email: str, fields: dict) -> Optional[bool]:
+        """Deliver through the relay when this install has no provider of its
+        own. None when the relay does not apply (the caller sends as before);
+        otherwise whether it delivered. A relay that fails is NOT reported as
+        sent: the `console` provider answering True for a mail nobody received
+        is the thing `can_deliver` exists to stop (#3655)."""
+        if self._provider_can_deliver() or not self._relay_available():
+            return None
+        try:
+            return bool(await _relay["send"](kind, to_email, fields))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[email] relay failed for a %s mail: %s", kind, type(e).__name__)
+            return False
+
+    def _provider_can_deliver(self) -> bool:
+        """Can a provider of this install's own deliver an email right now? (#3655)
 
         False when the provider resolved per send is `console`, unknown, or
         missing what it needs — every one of those falls back to printing the
@@ -104,6 +156,14 @@ class EmailService:
             subject = f'Your Trinity access code for "{agent_name}"'
         else:
             subject = f"Your {context_label or 'Trinity'} verification code"
+
+        relayed = await self._relayed("code", to_email, {
+            "code": code, "label": f"Trinity ({agent_name})" if agent_name else (context_label or "Trinity")})
+        if relayed is not None:
+            if not relayed:   # leave the code where an operator can read it, and say it was not sent
+                self._send_console(to_email, subject, self._get_verification_email_body(
+                    code, agent_name=agent_name, context_label=context_label))
+            return relayed
 
         body = self._get_verification_email_body(code, agent_name=agent_name, context_label=context_label)
         html_body = self._get_verification_email_html(code, agent_name=agent_name, context_label=context_label)
@@ -232,6 +292,7 @@ If you didn't request this code, you can safely ignore this email.
         intro: str,
         paragraphs: Optional[Sequence[Optional[str]]] = None,
         cta: Optional[Tuple[str, str]] = None,
+        relay: Optional[Tuple[str, dict]] = None,
     ) -> bool:
         """Send a mail rendered on the shared shell, with a plain-text twin.
 
@@ -242,7 +303,15 @@ If you didn't request this code, you can safely ignore this email.
         plain-text body is the same content unescaped, with ``label: url`` for
         the call to action. Delivery goes through ``send_email`` (provider
         resolution, best-effort semantics) unchanged.
+
+        ``relay`` is the same mail as ``(kind, fields)`` for a registered relay,
+        which words it itself. Used only when this install has no provider of
+        its own; a mail given no ``relay`` is never relayed.
         """
+        if relay:
+            relayed = await self._relayed(relay[0], to_email, relay[1])
+            if relayed is not None:
+                return relayed
         from html import escape
 
         lines = [p.strip() for p in (paragraphs or []) if p and p.strip()]
