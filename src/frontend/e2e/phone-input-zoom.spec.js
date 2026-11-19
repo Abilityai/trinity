@@ -2,10 +2,11 @@ import { test, expect, request } from '@playwright/test'
 
 /**
  * iOS Safari zooms the page in when a focused field's text is under 16px and
- * stays zoomed after it blurs. On a touch screen below `sm`, text fields,
- * selects and textareas render at 16px; on the desktop the dense text-xs /
- * text-sm controls keep their size.
- * @interactive: needs an agent for the Tasks page.
+ * stays zoomed after it blurs. On a touch screen (portrait or landscape), text
+ * fields, selects and textareas render at 16px; on the desktop the dense
+ * text-xs / text-sm controls keep their size.
+ * @smoke on the Operations and Events cases: they need no agent. The Tasks
+ * case needs an agent on the stack, so it is not tagged.
  */
 
 let AGENT = process.env.TABS_TEST_AGENT || ''
@@ -33,22 +34,30 @@ async function smallControls(page) {
     .filter((c) => c.size < 16), TEXT_CONTROLS)
 }
 
-test.describe('on a phone', () => {
-  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true })
-  for (const path of ['/operations?tab=executions', '/events', 'tasks']) {
-    test(`text controls are at least 16px on ${path}`, async ({ page }) => {
-      const url = path === 'tasks' ? `/agents/${AGENT}?tab=tasks` : path
-      test.skip(path === 'tasks' && !AGENT, 'no agent on this stack')
-      await page.goto(url)
-      await page.waitForLoadState('networkidle').catch(() => {})
-      const count = await page.locator(TEXT_CONTROLS).count()
-      expect(count).toBeGreaterThan(0)
-      expect(await smallControls(page)).toEqual([])
-    })
-  }
-})
+const PHONES = [
+  { name: 'portrait', viewport: { width: 390, height: 844 } },
+  { name: 'landscape', viewport: { width: 844, height: 390 } },
+]
 
-test('the desktop keeps its dense controls', async ({ page, isMobile }) => {
+for (const phone of PHONES) {
+  test.describe(`on a phone in ${phone.name}`, () => {
+    test.use({ viewport: phone.viewport, hasTouch: true, isMobile: true })
+    for (const path of ['/operations?tab=executions', '/events', 'tasks']) {
+      const tag = path === 'tasks' ? '' : '@smoke '
+      test(`${tag}text controls are at least 16px on ${path} (${phone.name})`, async ({ page }) => {
+        const url = path === 'tasks' ? `/agents/${AGENT}?tab=tasks` : path
+        test.skip(path === 'tasks' && !AGENT, 'no agent on this stack')
+        await page.goto(url)
+        await page.waitForLoadState('networkidle').catch(() => {})
+        const count = await page.locator(TEXT_CONTROLS).count()
+        expect(count).toBeGreaterThan(0)
+        expect(await smallControls(page)).toEqual([])
+      })
+    }
+  })
+}
+
+test('@smoke the desktop keeps its dense controls', async ({ page, isMobile }) => {
   test.skip(isMobile, 'desktop check')
   await page.setViewportSize({ width: 1280, height: 800 })
   await page.goto('/operations?tab=executions')
