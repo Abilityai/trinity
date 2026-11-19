@@ -31,7 +31,7 @@ from adapters.base import (
 )
 from services.agent_shared_files_service import create_share_from_bytes
 from services.turn_audience import whatsapp_recipient
-from services import login_policy_gate
+from services import channel_login_limit, login_policy_gate
 from services.email_service import EmailService
 from services.settings_service import get_public_chat_url
 
@@ -751,6 +751,14 @@ class WhatsAppAdapter(ChannelAdapter):
         email = arg.lower()
         if "@" not in email or " " in email or len(email) > 254:
             return "That doesn't look like an email address. Try */login you@example.com*."
+
+        # ent#1253: cap code requests per sender, address and bot before the
+        # ent#849 branch, so both paths are capped and the reply is the same
+        # for members and outsiders.
+        if not channel_login_limit.login_code_request_allowed(
+            "whatsapp", str(binding["id"]), str(message.sender_id), email
+        ):
+            return channel_login_limit.OVER_LIMIT_REPLY
 
         # ent#849: while the login policy refuses email codes, every address
         # takes the same background path: members get no code, and neither the

@@ -41,6 +41,21 @@ one turn for each. One turn per caller per window instead, and the frame says
 plainly that other runs may have ended in the same window — so the caller reads
 ``list_recent_executions`` rather than being told a half-truth.
 
+**A collision is parked, never dropped (#4536).** That collapse is true only for
+runs that had ended when the running wake claimed the window — the wake lists
+them. A run the wake turn itself started, and that ended while the wake still
+ran, is not on that list, and collapsing it stalls a fast delegate→wake loop.
+So: the window is held only while its wake runs and is released when it ends,
+so an ending after a finished wake wakes at once; an ending that ended after
+the running wake's claim is parked in Redis (``trinity:wake_missed:{caller}``,
+latest wins) and delivered once when the wake ends, on the follow-on key
+``caller_wake:{caller}:after:{wake_id}`` (released when the follow-on ends).
+Two drains: the wake row's own terminal (every terminal writer reaches it,
+restart included) and the holder after it returns or raises an ``Exception``.
+A holder cancelled or closed with its loop leaves the marker for the wake row's
+terminal. Bound: one running wake plus one pending per caller. Redis trouble on
+the park is audited ``skipped_window``.
+
 **The wake stands where the delegator stood (#4357).** A wake continues the
 delegator's own work, so it carries the delegator's standing, not one more hop:
 ``max(callee − 1, MAX(running caller), 0)``, NULL counted as 0. The callee row
@@ -83,11 +98,22 @@ that person when they are owner tier on the delegator, and nobody otherwise:
 
 ``source_user_email`` stays off the row either way (ent#886).
 
+**The wake stands as the turn that delegated (trinity-enterprise#1225).** The
+callee row records the caller's turn that dispatched it
+(``continues_execution_id``, written only while that turn ran). The wake
+carries that link and nobody on the row, and ``turn_tier_service.turn_actor``
+rates it exactly as the delegating turn: a shared person's delegation wakes as
+that person (reads narrowed to them, no shell), a ``delegated`` turn's keeps
+owner tier, a visitor's stays a visitor's. The person rule above is the
+fallback for a callee row with no link (one written before the column, or by
+a key that named no running turn).
+
 Never raises: this runs on the path of an already-billed terminal.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, List, Optional, Tuple
@@ -124,12 +150,27 @@ SUMMARY_MAX = 2000
 ASK_IDS_MAX = 10
 
 
+# #4536: an ending that collides with a running wake's window is parked here
+# (latest wins) and delivered when that wake ends. 24 h, the idempotency TTL,
+# so no wake turn outlives its marker.
+_MISSED_KEY_PREFIX = "trinity:wake_missed:"
+_MISSED_TTL_SECONDS = 86400
+
+# Strong references to follow-on wakes until they finish.
+_FOLLOW_ONS: set = set()
+
+
 def _bucket_for(now: float) -> int:
     return int(now // WAKE_BUCKET_SECONDS)
 
 
 def _idempotency_key(caller: str, now: Optional[float] = None) -> str:
     return f"caller_wake:{caller}:{_bucket_for(now if now is not None else time.time())}"
+
+
+def _follow_on_key(caller: str, wake_id: str) -> str:
+    """One follow-on per wake: both drains of one wake claim this same key."""
+    return f"caller_wake:{caller}:after:{wake_id}"
 
 
 # --- seams (each one its own function so a test can stub it) ---------------
@@ -194,12 +235,6 @@ def _begin_idempotency(scope: str, key: str):
     from services import idempotency_service
 
     return idempotency_service.begin(scope, key)
-
-
-def _complete_idempotency(decision, execution_id) -> None:
-    from services import idempotency_service
-
-    idempotency_service.complete(decision, execution_id, None)
 
 
 def _fail_idempotency(decision) -> None:
@@ -331,6 +366,95 @@ async def _within_wake_budget(callee: str, caller: str) -> Optional[int]:
     return limit
 
 
+def _spawn_followon(coro) -> None:
+    """Run a follow-on wake as its own task, never nested inside the drain."""
+    import asyncio
+
+    task = asyncio.get_running_loop().create_task(coro)
+    _FOLLOW_ONS.add(task)
+    task.add_done_callback(_FOLLOW_ONS.discard)
+
+
+def _as_utc(value):
+    from datetime import datetime, timezone
+
+    from utils.helpers import parse_iso_timestamp
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        return parse_iso_timestamp(str(value))
+    except Exception:  # noqa: BLE001 — unreadable counts as "not covered"
+        return None
+
+
+def _ended_by(row, claimed_at) -> bool:
+    """This run ended at or before ``claimed_at``, so a wake claimed then shows
+    it in ``list_recent_executions``. Unknown either way: not covered."""
+    ended = _as_utc(getattr(row, "completed_at", None))
+    claimed = _as_utc(claimed_at)
+    return ended is not None and claimed is not None and ended <= claimed
+
+
+def _covered(row, idem) -> bool:
+    return _ended_by(row, getattr(idem, "claimed_at", None))
+
+
+async def _park(caller: str, callee: str, execution_id: str, scope: str, key: str,
+                policy_source) -> None:
+    """Hold an ending for the running wake to deliver when it ends (#4536)."""
+    marker = f"{_MISSED_KEY_PREFIX}{caller}"
+    try:
+        _wake_budget_redis().set(marker, execution_id, ex=_MISSED_TTL_SECONDS)
+    except Exception as e:  # noqa: BLE001 — fail-open, but the drop is recorded
+        logger.warning("#4536: could not park %s for %s (%s); not woken", execution_id, caller, e)
+        await _audit(caller=caller, callee=callee, callee_execution_id=execution_id,
+                     execution_id=None, status="skipped_window", error=type(e).__name__,
+                     policy_source=policy_source)
+        return
+    await _audit(caller=caller, callee=callee, callee_execution_id=execution_id,
+                 execution_id=None, status="parked", error=None, policy_source=policy_source)
+
+    # The holder may have ended and drained between our replay and the SET.
+    # Still held: its end drains the marker. Free: nobody will, so take it.
+    try:
+        again = _begin_idempotency(scope, key)
+    except Exception:  # noqa: BLE001
+        logger.exception("#4536: re-check of %s failed; the next wake end drains it", key)
+        return
+    if getattr(again, "replay", False) and getattr(again, "in_flight", False):
+        return
+    if not getattr(again, "replay", False):
+        try:
+            _fail_idempotency(again)
+        except Exception:  # noqa: BLE001
+            logger.exception("#4536: idempotency release failed")
+    await _drain_missed(caller, None)
+
+
+async def _drain_missed(caller: str, wake_id: Optional[str]) -> None:
+    """Deliver the ending parked while ``wake_id`` ran, if any (#4536).
+
+    Called when a wake ends: from the wake row's own terminal (every terminal
+    writer reaches it, so a restart mid-turn still drains) and from the wake's
+    dispatch once it returns. Both claim ``_follow_on_key(caller, wake_id)``,
+    and the marker is taken with GETDEL, so one ending is delivered once.
+    """
+    try:
+        parked = _wake_budget_redis().getdel(f"{_MISSED_KEY_PREFIX}{caller}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("#4536: could not drain parked wake for %s: %s", caller, e)
+        return
+    if not parked:
+        return
+    if isinstance(parked, bytes):
+        parked = parked.decode()
+    key = _follow_on_key(caller, wake_id) if wake_id else None
+    _spawn_followon(maybe_wake_caller(parked, _key=key, _expect_caller=caller))
+
+
 async def _dispatch_wake(**kwargs):
     from services.task_execution_service import dispatch_and_await_terminal
 
@@ -414,12 +538,21 @@ def _framed_wake(row, ask_ids: List[str]) -> str:
 
 # --- the hook --------------------------------------------------------------
 
-async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
+async def maybe_wake_caller(
+    execution_id: Optional[str],
+    *,
+    _key: Optional[str] = None,
+    _expect_caller: Optional[str] = None,
+) -> Optional[str]:
     """Wake the agent that delegated ``execution_id``, at most once per window.
 
     Returns the wake's execution id, or None when nothing is owed a wake, the
-    caller has not opted in, is not running, the window was already claimed, or
-    the dispatch failed. Never raises — the terminal is already recorded.
+    caller has not opted in, is not running, the window is held (the ending is
+    then parked for that wake to deliver, #4536), or the dispatch failed. Never
+    raises — the terminal is already recorded.
+
+    ``_key`` / ``_expect_caller`` are the drain's: a parked ending is woken on
+    the ended wake's follow-on key, and only for the caller it was parked for.
     """
     if not execution_id:
         return None
@@ -432,6 +565,14 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
     if row is None:
         return None
 
+    triggered_by = getattr(row, "triggered_by", None)
+    if triggered_by and str(triggered_by) == TRIGGERED_BY_CALLER_WAKE:
+        # #4536: a wake's own end delivers what was parked while it ran. It
+        # wakes nobody for itself (the recursion break below still holds).
+        if getattr(row, "agent_name", None):
+            await _drain_missed(row.agent_name, getattr(row, "id", None))
+        return None
+
     caller = getattr(row, "source_agent_name", None)
     callee = getattr(row, "agent_name", None)
     # The caller is read from the row's principal-derived column and nowhere
@@ -440,10 +581,11 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
     # agent to bill (SELF-EXEC-001).
     if not caller or not callee or caller == callee:
         return None
+    if _expect_caller is not None and caller != _expect_caller:
+        return None
     if getattr(row, "fan_out_id", None):
         return None
 
-    triggered_by = getattr(row, "triggered_by", None)
     if triggered_by and str(triggered_by) in RESERVED_TRIGGERS:
         return None
 
@@ -471,18 +613,44 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
         return None
 
     idem = None
+    scope = _agent_scope(caller)
+    key = _key or _idempotency_key(caller)
     try:
-        idem = _begin_idempotency(_agent_scope(caller), _idempotency_key(caller))
+        idem = _begin_idempotency(scope, key)
     except Exception:  # noqa: BLE001
         logger.exception("ent#1102: idempotency begin failed — dispatching anyway")
 
     if idem is not None and getattr(idem, "replay", False):
+        if getattr(idem, "in_flight", False) and not _covered(row, idem):
+            # #4536: the wake holding the window is still running and this run
+            # ended after it claimed — it may never see it. Park, never drop.
+            await _park(caller, callee, execution_id, scope, key, verdict.source)
+            return None
         logger.info(
             "ent#1102: %s already woken in this window — no second wake for %s",
             caller, execution_id,
         )
         return None
 
+    wake_id = None
+    try:
+        wake_id = await _claimed_wake(row, caller, callee, execution_id, verdict, idem)
+    except asyncio.CancelledError:
+        # #4536: a stopping loop would never run the follow-on, and GETDEL
+        # would lose the marker. Leave it for the wake row's terminal.
+        raise
+    except Exception:
+        # GeneratorExit (a coroutine closed with its loop) passes through: the
+        # wake row's terminal drains, as for a cancel.
+        await _drain_missed(caller, None)
+        raise
+    # #4536: deliver what was parked while this claim was held (the wake
+    # row's terminal drains it too).
+    await _drain_missed(caller, wake_id)
+    return wake_id
+
+
+async def _claimed_wake(row, caller, callee, execution_id, verdict, idem):
     capped_at = await _within_wake_budget(callee, caller)
     if capped_at is not None:
         # Released, not completed: no turn ran, so the window holds nothing to
@@ -500,11 +668,17 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
     ask_ids = _pending_ask_ids(execution_id)
     callee_depth = getattr(row, "chain_depth", None)
     chain_depth = _standing_depth(caller, callee_depth)
-    # ent#1216: an owner's delegation wakes as the owner's turn; every other
-    # wake carries nobody, as before.
-    person = _standing_person(caller, row)
-    standing = "owner" if person is not None else "none"
-    attribution = {"source_user_id": person} if person is not None else {}
+    # ent#1225: the wake continues the caller's turn that delegated, and is
+    # rated as it. ent#1216 is the fallback for a callee row with no link: an
+    # owner's delegation wakes as the owner's turn, every other one as nobody.
+    origin = getattr(row, "continues_execution_id", None)
+    if isinstance(origin, str) and origin:
+        standing = "origin"
+        attribution = {"continues_execution_id": origin}
+    else:
+        person = _standing_person(caller, row)
+        standing = "owner" if person is not None else "none"
+        attribution = {"source_user_id": person} if person is not None else {}
 
     try:
         result = await _dispatch_wake(
@@ -531,9 +705,12 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
 
     if idem is not None:
         try:
-            _complete_idempotency(idem, result.execution_id)
+            # #4536: a finished wake covers nothing that ends after it, so its
+            # key (window or follow-on) is released and the next ending wakes
+            # at once. GETDEL already gives one follow-on per parked ending.
+            _fail_idempotency(idem)
         except Exception:  # noqa: BLE001
-            logger.exception("ent#1102: idempotency complete failed")
+            logger.exception("ent#1102: idempotency settle failed")
 
     await _audit(caller=caller, callee=callee, callee_execution_id=execution_id,
                  execution_id=result.execution_id, status=result.status,

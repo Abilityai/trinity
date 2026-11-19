@@ -57,10 +57,14 @@
           <option value="company">Company</option>
         </BaseSelect>
       </div>
-      <!-- ent#1169: what picking this steward does about the project-management
-           skills. Two lines are always reserved, so switching the steward (or
-           the read arriving) does not resize the dialog (principle 29). -->
-      <p class="-mt-2 min-h-[2.5rem] text-xs text-gray-600 dark:text-gray-300" data-testid="project-steward-skills-hint">{{ stewardHint }}</p>
+      <!-- ent#1169 / #4514: what picking this steward does about the
+           project-management skills. text-xs is a 1rem line. The longest hint
+           (the server's set.message) wraps to three lines at this dialog's
+           desktop width and four at 390px, so reserve 4rem below sm and 3rem
+           from sm up — the panel is already at max-w-lg by then. Switching
+           the steward, or the read arriving, does not resize the dialog
+           (principle 29). -->
+      <p class="-mt-2 min-h-[4rem] sm:min-h-[3rem] text-xs text-gray-600 dark:text-gray-300" data-testid="project-steward-skills-hint">{{ stewardHint }}</p>
       <BasePeopleInput
         v-if="form.steward === 'person'"
         id="project-steward-email"

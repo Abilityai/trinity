@@ -311,6 +311,38 @@ _DELIVERY_IN_LOOP_SECONDS = float(os.getenv("PULL_DELIVERY_IN_LOOP_SECONDS", "90
 # to retry it.
 _RESEND_TICK_SECONDS = float(os.getenv("PULL_RESEND_TICK_SECONDS", "60"))
 
+# #4635: the execution ids a worker of THIS process is delivering in-loop right
+# now, counted per worker. The resend tick and the boot sweep leave them alone:
+# that worker can still be answered "run it again on the next credential"
+# (#3487), while a resend says it cannot follow a retry
+# (`auth_override_capable: False`), which the backend answers with a terminal
+# FAILED. One process of asyncio tasks, so a check and the file read after it
+# run with nothing in between — no clock involved. Empty after a restart, so
+# the boot resend still sends every leftover.
+_DELIVERING_NOW: Dict[str, int] = {}
+
+
+def _mark_delivering(execution_id: str) -> None:
+    _DELIVERING_NOW[execution_id] = _DELIVERING_NOW.get(execution_id, 0) + 1
+
+
+def _unmark_delivering(execution_id: str) -> None:
+    left = _DELIVERING_NOW.get(execution_id, 0) - 1
+    if left > 0:
+        _DELIVERING_NOW[execution_id] = left
+    else:
+        _DELIVERING_NOW.pop(execution_id, None)
+
+
+def _file_identity(path: Path):
+    """`(inode, mtime_ns)` of a pending file, or None when it is gone. Every
+    write is tmp + rename, so a rewritten file never keeps both."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns)
+
 
 def _delivery_deadline(deadline: float, *, persisted: bool,
                        now: Optional[float] = None) -> float:
@@ -573,6 +605,11 @@ async def _run_and_report(
                 execution_id, timeout_seconds=turn_timeout, metadata={"type": "pull"},
             )
         replies: list = []
+        if persisted:
+            # #4635: the file is this worker's while it delivers it — the resend
+            # tick skips it. Nothing awaits between the write above and this
+            # line, so no sweep can see the file unmarked.
+            _mark_delivering(execution_id)
         try:
             # #4257: bound the in-loop window to `_DELIVERY_IN_LOOP_SECONDS`,
             # never past the lease deadline. Past it the terminal is already
@@ -590,6 +627,11 @@ async def _run_and_report(
             if hold:
                 registry.discard_pending(execution_id)
             raise
+        finally:
+            # Delivered, gave up or raised: from here a file still on disk is
+            # the resend tick's to send.
+            if persisted:
+                _unmark_delivering(execution_id)
         if delivered and persisted:
             _delete_pull_result(execution_id)
 
@@ -763,6 +805,12 @@ async def resend_pending_pull_results() -> None:
             # back-to-back in a tight loop.
             await asyncio.sleep(random.uniform(0, _SWEEP_PER_ENVELOPE_JITTER_SECONDS))
             execution_id = path.stem
+            if _DELIVERING_NOW.get(execution_id):
+                # #4635: a worker here is delivering this one in-loop and may be
+                # told to retry it; its own delivery removes the file, or leaves
+                # it for the next tick once the worker gives up.
+                continue
+            identity = _file_identity(path)
             try:
                 record = json.loads(path.read_text())
             except Exception:  # noqa: BLE001 — corrupt/partial file: drop it
@@ -778,7 +826,10 @@ async def resend_pending_pull_results() -> None:
             # to follow a retry instruction, so it must not ask for one.
             body = {**body, "metadata": {**(body.get("metadata") or {}), "auth_override_capable": False}}
             delivered = await _deliver_result(client, execution_id, body, backend_url, mcp_key, deadline)
-            if delivered:
+            # #4635: only the file this sweep sent. Its delivery can retry for
+            # minutes, and a worker that re-claimed the requeued row (same
+            # execution id) may have written a fresh terminal under this name.
+            if delivered and identity is not None and _file_identity(path) == identity:
                 _delete_pull_result(execution_id)
 
 

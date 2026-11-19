@@ -50,6 +50,8 @@ Mutation:
 - [ ] My code follows the project's style guidelines
 - [ ] I have updated the documentation (if applicable)
 - [ ] I have not committed any sensitive data (API keys, credentials, etc.)
+- [ ] My commits are signed off (`git commit -s`) — required for contributors outside the core team
+- [ ] If this PR was written with an AI assistant, I say so above, and I have read and can explain every line
 - [ ] I have added appropriate logging for new functionality
 
 ## Screenshots (if applicable)

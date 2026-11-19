@@ -125,6 +125,8 @@ export interface RunAgentChatParams {
    *  dispatches default to the platform turn without it); `manual` opts out.
    *  Which id goes out is `resolveReportBack`'s call — the header turn wins. */
   execution_id?: string;
+  /** ent#1105: the project to attribute the run to; forwarded only when set. */
+  project_id?: string;
 }
 
 /**
@@ -621,6 +623,7 @@ export async function runAgentChat(
     async: asyncMode,
     inject_result,
     chat_session_id,
+    project_id,
   } = params;
 
   // Get auth context from FastMCP session. Read unconditionally (mirrors
@@ -753,6 +756,8 @@ export async function runAgentChat(
     asyncMode ? "async" : "sync",
     message,
     ...(turnScope ? [`turn:${turnScope}`] : []),
+    // ent#1105: a different project is a different dispatch; absent → key unchanged.
+    ...(project_id ? [`project:${project_id}`] : []),
   ]);
 
   // Use parallel task mode or sequential chat mode based on parameter
@@ -776,6 +781,7 @@ export async function runAgentChat(
         // ent#224/#3232: carry the caller's turn so the child inherits the
         // originating channel/thread and its completion is reported back there.
         parent_execution_id: reportBack.parentExecutionId,
+        ...(project_id ? { project_id } : {}),  // ent#1105
       },
       sourceAgent,
       mcpKeyInfo,
@@ -811,7 +817,11 @@ export async function runAgentChat(
     const receipt = await apiClient.task(
       agent_name,
       message,
-      { async_mode: true, parent_execution_id: reportBack.parentExecutionId },
+      {
+        async_mode: true,
+        parent_execution_id: reportBack.parentExecutionId,
+        ...(project_id ? { project_id } : {}),  // ent#1105
+      },
       sourceAgent,
       mcpKeyInfo,
       idempotencyKey,
@@ -823,7 +833,7 @@ export async function runAgentChat(
   }
 
   // Sequential chat mode - uses queue, maintains context
-  const response = await apiClient.chat(agent_name, message, sourceAgent, mcpKeyInfo, idempotencyKey, callerTurn);
+  const response = await apiClient.chat(agent_name, message, sourceAgent, mcpKeyInfo, idempotencyKey, callerTurn, project_id);
 
   // trinity-enterprise#751: a gated skill — pending approval or refused by
   // name. Nothing ran; the model must not retry it or report it as done.
@@ -1002,6 +1012,15 @@ export function createChatTools(
           .string()
           .optional()
           .describe(EXECUTION_ID_PARAM_DESCRIPTION),
+        project_id: z
+          .string()
+          .min(1)
+          .max(64)
+          .optional()
+          .describe(
+            "Optional. The project to attribute this run to. Omit it: the platform attributes a run from your current turn on its own. " +
+            "Refused before anything runs when the platform does not attribute runs to projects or the project does not fit this call."
+          ),
       }),
       execute: async (
         {
@@ -1016,6 +1035,7 @@ export function createChatTools(
           inject_result,
           chat_session_id,
           execution_id,
+          project_id,
         }: {
           agent_name: string;
           message: string;
@@ -1028,6 +1048,7 @@ export function createChatTools(
           inject_result?: boolean;
           chat_session_id?: string;
           execution_id?: string;
+          project_id?: string;
         },
         context: any
       ) => {
@@ -1050,6 +1071,7 @@ export function createChatTools(
             inject_result,
             chat_session_id,
             execution_id,
+            project_id,
           },
           context,
           reportBackEnabled
@@ -1190,6 +1212,15 @@ export function createChatTools(
             "Return {fan_out_id, status: 'accepted'} immediately instead of waiting; " +
             "poll get_fan_out_result for the outcome (default: false)"
           ),
+        project_id: z
+          .string()
+          .min(1)
+          .max(64)
+          .optional()
+          .describe(
+            "Optional. The project to attribute every subtask to. Omit it: the platform attributes runs from your current turn on its own. " +
+            "Refused before anything runs when the platform does not attribute runs to projects or the project does not fit this call."
+          ),
       }),
       execute: async (
         {
@@ -1201,6 +1232,7 @@ export function createChatTools(
           system_prompt,
           allowed_tools,
           async_mode,
+          project_id,
         }: {
           agent_name: string;
           tasks: Array<{ id: string; message: string }>;
@@ -1210,6 +1242,7 @@ export function createChatTools(
           system_prompt?: string;
           allowed_tools?: string[];
           async_mode?: boolean;
+          project_id?: string;
         },
         context: any
       ) => {
@@ -1264,6 +1297,8 @@ export function createChatTools(
           // a sync call with the same tasks must not share its key.
           ...(async_mode ? ["async"] : []),
           ...(turnScope ? [`turn:${turnScope}`] : []),
+          // ent#1105: a different project is a different batch; absent → unchanged.
+          ...(project_id ? [`project:${project_id}`] : []),
         ]);
 
         const response = await apiClient.fanOut(
@@ -1276,6 +1311,7 @@ export function createChatTools(
             system_prompt,
             allowed_tools,
             async_mode,
+            ...(project_id ? { project_id } : {}),  // ent#1105
           },
           sourceAgent,
           mcpKeyInfo,

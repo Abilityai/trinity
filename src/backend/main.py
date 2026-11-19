@@ -885,6 +885,12 @@ async def _schedule_watch_loops() -> None:
             logger.error(f"Error resuming monitoring service: {e}")
     asyncio.create_task(_start_monitoring_delayed())
 
+    # #4483: fleet base-image check — one alert naming the running agents still
+    # on an old agent image. Read-only, leader-locked; stagger, rationale and
+    # the never-raises fence live in the service.
+    from services import fleet_image_service as _fleet_image_boot
+    _fleet_image_boot.fleet_image_check_service.start()
+
 
 async def _run_startup_recovery() -> None:
     """Orphaned-execution recovery (#128). Opens the #748 warming-up gate in `finally`.
@@ -1180,6 +1186,15 @@ async def _shutdown_loops_and_transports(app: FastAPI) -> None:
         logger.info("Skills library sync service stopped")
     except Exception as e:
         logger.error(f"Error stopping skills library sync service: {e}")
+
+    # #4483: fleet base-image check — releases its leader lease. Never raises.
+    from services import fleet_image_service as _fleet_image_stop
+    _fleet_image_stop.fleet_image_check_service.stop()
+
+    # #4635: the queue-stall monitor's leader lease, so a restarted worker need
+    # not wait out its TTL before the monitor runs again. Never raises.
+    from services import queue_stall_service as _queue_stall_stop
+    _queue_stall_stop.release_lease()
 
 
 async def _shutdown_probes_and_clients(app: FastAPI) -> None:

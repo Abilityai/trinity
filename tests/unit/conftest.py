@@ -494,6 +494,20 @@ def _restore_sys_modules_baseline_unit():
 
 
 @pytest.fixture(autouse=True)
+def _clear_rate_limiter_buckets():
+    """Empty the rate limiter's in-process buckets before every test.
+
+    They are module-global, so hits from one test count in the next. Channel
+    /login requests are capped per sender (ent#1253), and several files send
+    /login from the same fake sender, so without this the result depends on
+    test order. Looked up in sys.modules only: never imports the limiter."""
+    rl = sys.modules.get("services.rate_limiter")
+    if rl is not None:
+        rl.clear_inprocess()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def cleanup_after_test():
     """Override parent's cleanup_after_test that requires api_client.
 

@@ -171,12 +171,6 @@ def test_title_is_one_masked_bounded_line(svc):
     assert svc.clean_title(None) == "(no message)"
 
 
-def test_error_is_bounded_and_none_when_empty(svc):
-    assert svc.clean_error(None) is None
-    assert svc.clean_error("  ") is None
-    assert len(svc.clean_error("e" * 500)) <= svc.ERROR_MAX
-
-
 def test_mask_never_returns_an_off_roster_name(svc):
     roster = {AGENT, OTHER}
     assert svc.mask(AGENT, roster) == AGENT

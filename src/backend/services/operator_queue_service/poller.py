@@ -54,7 +54,8 @@ class PollerCoreMixin:
         self._skipped_native: set[tuple[str, str]] = set()
         # #3243: (agent, req_id) already logged for an entry held over the
         # authoring caps — once per process, bounded like the sets above.
-        self._cap_held_logged: set[tuple[str, str]] = set()
+        # #4599: and (agent, req_id, hold) for a held credential entry.
+        self._cap_held_logged: set[tuple] = set()
         self._file_channel_noticed: set[str] = set()
         # #1632: unique per worker process so the cross-worker leader lock only
         # ever refreshes/releases ITS OWN lease (mirror monitoring #1464).

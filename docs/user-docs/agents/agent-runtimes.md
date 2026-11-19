@@ -96,7 +96,7 @@ Set the runtime in the template's `template.yaml`:
 | Field | Values | Default | Notes |
 |-------|--------|---------|-------|
 | `runtime.type` | `claude-code`, `gemini-cli`, `codex` | `claude-code` | Selects the harness |
-| `runtime.model` | runtime-specific model id (e.g. `gpt-5.6-sol`) | runtime default | Optional override — pin it, so recorded cost is attributable |
+| `runtime.model` | runtime-specific model id (e.g. `gpt-5.6-sol`) | runtime default | Optional override — pin it, so recorded cost is attributable. On a Claude Code agent it is also saved as the agent's own model at creation, so turns the platform starts run on it too (see [Model Selection](agent-configuration.md#model-selection)) |
 
 A Codex agent reads its identity and instructions from `AGENTS.md`. At startup Trinity copies the template's `CLAUDE.md` to `AGENTS.md` when the workspace has none, so a single instruction file works across runtimes; an `AGENTS.md` you ship yourself is left as it is.
 
@@ -111,6 +111,7 @@ There is no API or MCP endpoint to switch an agent's runtime after creation. See
 - **Codex cannot resume a session.** In the Workspace, a Codex agent's turns replay the visible history as text instead of carrying its working memory forward — the conversation stays coherent, but tool results and mid-task state do not survive between turns.
 - **Gemini headless turns never resume a session.** Tasks, schedules and Workspace turns on a Gemini agent run without the previous turn's working memory. Only the Chat path resumes the agent's own Gemini session.
 - **No turn cap on Gemini or Codex.** Neither CLI has a per-run turn limit, so the guardrail `max_turns` settings are logged but not enforced there. The execution timeout bounds the run.
+- **Gemini runs are cut off by the clock.** A Gemini chat turn stops at the agent's `execution_timeout_sec` guardrail (default 1,800 seconds, the same cap as a Claude Code chat) and answers `504` *Chat execution timed out after N seconds*; a Gemini task stops at its timeout with `504` *Task exceeded Ns timeout*. A timer ends the run even when the CLI has gone silent, so a hung Gemini turn no longer holds a slot forever.
 - **The headless tool denial reaches an agent on its next container recreate** after the base image is rebuilt; the prompt guidance reaches every agent as soon as the platform is updated.
 - **No runtime switch after creation.** Recreate the agent from a different template to change runtimes — a post-creation runtime-switch endpoint is planned.
 - **Codex cost is estimated**, not metered exactly.

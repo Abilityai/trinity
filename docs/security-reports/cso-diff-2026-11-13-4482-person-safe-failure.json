@@ -1,0 +1,74 @@
+{
+  "version": "diff",
+  "date": "2026-11-13",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/4482-portal-failure-text",
+  "merge_base": "6bbff0d872e63a1cd93a614d60c69e5cc16f45e7",
+  "issue": "abilityai/trinity#4482",
+  "counts_as_full_run": false,
+  "docker_available": false,
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    9,
+    10,
+    12,
+    13,
+    14
+  ],
+  "phases_skipped_no_overlap": [
+    3,
+    4,
+    5,
+    6,
+    8,
+    11
+  ],
+  "stack_cve_quicklist": "not re-evaluated: diff changes no pin, Dockerfile, lockfile or workflow",
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": 0,
+    "changed_output_surfaces": [
+      "portal completion report body",
+      "Slack/Telegram completion report",
+      "GET Workspace work list error field",
+      "portal own-turn auth_switched 503 detail"
+    ],
+    "new_agent_context_ingress": 0
+  },
+  "findings": [],
+  "hypotheses": [
+    {
+      "title": "Refusal pass-through keys on marker substrings",
+      "detail": "person_safe_failure passes the sanitized error through when public_chat_service.is_turn_refused matches a marker substring anywhere in the text. An agent-server error containing a marker phrase would be shown in full (sanitized, capped). The matcher is shared with public links, which answer a refusal with a fixed line; this path passes the refusal text through, as the own-turn Workspace path does. The walk trail is checked before the refusal, so a trail never rides out on a refusal. Not counted.",
+      "confidence": 4
+    }
+  ],
+  "coverage_gaps": [
+    "Docker not running: no image-internal checks (none needed for this diff)",
+    "No dependency scanner run: diff changes no dependency"
+  ],
+  "supply_chain_summary": {
+    "scanner": "none (no dependency change in diff)"
+  },
+  "guard_tests": {
+    "tests/unit/test_2320_portal_failed_turn_visibility.py + test_186_enumeration_uniformity.py": "72 passed",
+    "tests/unit/test_4482_person_safe_failure.py and affected suites": "286 passed"
+  },
+  "filter_stats": {
+    "candidates": 2,
+    "reported": 0,
+    "demoted_to_hypothesis": 1,
+    "discarded": 1
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "diff run; no comparable prior fingerprint"
+}

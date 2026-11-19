@@ -3669,3 +3669,20 @@ SkillManagedAgentByName = Annotated[str, Depends(get_skill_managed_agent_by_name
 
 # Current user type alias
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+def check_requested_project(request: Any, current_user: Any, agent_name: str) -> None:
+    """Refuse a dispatch whose body names a ``project_id`` the platform will not
+    attribute (ent#1105). Call it BEFORE any admission, claim, slot or row.
+
+    The decision is the execution-attribution seam's; this only maps its
+    refusal onto the HTTP response — 422 ``project_attribution_unavailable``
+    when no edition attributes executions to projects.
+    """
+    from services import execution_attribution
+    try:
+        execution_attribution.check(
+            getattr(request, "project_id", None),
+            principal=current_user, agent_name=agent_name)
+    except execution_attribution.AttributionRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail())

@@ -163,11 +163,15 @@ RUN git config --system gc.auto 0 && \
 # Pinned, never `@latest` (#3012). Docker caches a RUN layer by its text, so
 # `@latest` is resolved once and then reused by every rebuild: an instance
 # rebuilt on 2026-09-24 still shipped 2.1.278, and `claude-opus-5-5` needs
-# >= 2.1.280. The ARG value is part of the layer's cache key, so bumping it is
+# >= 2.1.280 (`claude-fable-5-2` needs >= 2.1.321, #4528). The ARG value is
+# part of the layer's cache key, so bumping it is
 # what actually upgrades the CLI. `MODEL_CATALOG[*].min_claude_code`
 # (src/backend/services/model_catalog.py) must not exceed this value;
 # tests/unit/test_3012_claude_code_pin.py fails the build when it does.
-ARG CLAUDE_CODE_VERSION=2.1.281
+# Moving it also fails three tests that record the release the hook and
+# telemetry facts were checked on (ent#752, ent#787, ent#1093): re-check, then
+# move those markers in the same change.
+ARG CLAUDE_CODE_VERSION=2.1.322
 RUN set -eu; \
     npm install -g --include=optional --no-ignore-scripts --foreground-scripts \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \

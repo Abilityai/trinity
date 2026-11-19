@@ -44,3 +44,15 @@ def classify_env_read(body: object, path: str = ".env") -> Tuple[str, Optional[s
     if path in missing:
         return ABSENT, ""
     return UNCONFIRMED, None
+
+
+def image_predates_missing(body: object) -> bool:
+    """True when a credentials-read answer carries no ``missing`` list at all.
+
+    The current agent server always sends the key (empty when every path was
+    read), so its absence means the agent's image predates ent#1066 — the
+    agent kept its old image across an upgrade (#4483). For an ``UNCONFIRMED``
+    read that changes the remedy: the file is not at fault, and a stop and
+    start puts the agent on the current image. It does not change the rule
+    above — the write is refused either way."""
+    return isinstance(body, dict) and "missing" not in body

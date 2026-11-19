@@ -13,6 +13,7 @@ import {
   inboxLandingTarget, actionItems, unreadItems, allItems, inboxCounts,
   itemKey, parseItemKey, sidebarThreadsOf, inSidebar, defaultInboxTab,
   normalizeInboxTab, newLabel,
+  dropFromVisit, nextPendingAsk, answeredAnnouncement,
 } from '@/components/portal/portalInbox'
 import {
   totalUnread, unreadByAgent, WORKSPACE_INBOX, WORKSPACE_ROOT, shouldEscapeStage,
@@ -680,5 +681,59 @@ describe('stableRows — an ask that LEFT the fetched list is not drawn pending 
     expect(next.rows).toHaveLength(1)
     expect(next.rows[0].status).toBe('unavailable')
     expect(next.rows[0].endedInPlace).toBe(true)
+  })
+})
+
+describe('answer, then next: the rules behind crossing a row off', () => {
+  const pending = (id) => ({ key: `ask:${id}`, type: 'ask', id, status: 'pending', title: `Ask ${id}` })
+  const endedRow = (id) => ({ ...pending(id), status: 'answered', ghost: true, endedInPlace: true })
+  const chat = (id) => ({ key: `thread:${id}`, type: 'thread', id })
+
+  it('dropFromVisit removes the key from the order and the snapshots, and mutates nothing', () => {
+    const visit = { order: ['ask:a', 'ask:b', 'ask:c'], snaps: { 'ask:a': pending('a'), 'ask:b': pending('b'), 'ask:c': pending('c') } }
+    const out = dropFromVisit(visit, 'ask:b')
+    expect(out.order).toEqual(['ask:a', 'ask:c'])
+    expect(Object.keys(out.snaps)).toEqual(['ask:a', 'ask:c'])
+    expect(visit.order).toEqual(['ask:a', 'ask:b', 'ask:c'])
+    expect(Object.keys(visit.snaps)).toHaveLength(3)
+    expect(dropFromVisit(null, 'ask:x')).toEqual({ order: [], snaps: {} })
+  })
+
+  it('a dropped row is gone on the next pass, not a ghost: stableRows no longer knows it', () => {
+    const fresh = [pending('a'), pending('c')]
+    const visit = { order: ['ask:a', 'ask:b', 'ask:c'], snaps: { 'ask:a': pending('a'), 'ask:b': pending('b'), 'ask:c': pending('c') } }
+    const live = { ask: () => ({ status: 'answered' }) }
+    expect(stableRows(fresh, visit, live).rows.map((r) => r.key)).toEqual(['ask:a', 'ask:b', 'ask:c']) // the ghost
+    expect(stableRows(fresh, dropFromVisit(visit, 'ask:b'), live).rows.map((r) => r.key)).toEqual(['ask:a', 'ask:c'])
+  })
+
+  it('nextPendingAsk: the first pending ask below, else the nearest above', () => {
+    const list = [pending('a'), pending('b'), pending('c')]
+    expect(nextPendingAsk(list, 'ask:a').key).toBe('ask:b')
+    expect(nextPendingAsk(list, 'ask:b').key).toBe('ask:c')
+    expect(nextPendingAsk(list, 'ask:c').key).toBe('ask:b')
+  })
+
+  it('nextPendingAsk skips ended rows in both directions, and anything that is not an ask', () => {
+    expect(nextPendingAsk([pending('a'), endedRow('b'), chat('t'), pending('c')], 'ask:a').key).toBe('ask:c')
+    expect(nextPendingAsk([pending('a'), chat('t'), endedRow('b'), pending('c')], 'ask:c').key).toBe('ask:a')
+    // An ended ask that is still a member of the tab (All) is not "next" either.
+    expect(nextPendingAsk([pending('a'), { ...pending('b'), status: 'expired' }], 'ask:a')).toBeNull()
+    expect(nextPendingAsk([endedRow('a'), chat('t')], 'ask:a')).toBeNull()
+  })
+
+  it('nextPendingAsk answers null for a key that is not a row, and for no rows', () => {
+    expect(nextPendingAsk([pending('a')], 'ask:zz')).toBeNull()
+    expect(nextPendingAsk([], 'ask:a')).toBeNull()
+    expect(nextPendingAsk(null, 'ask:a')).toBeNull()
+  })
+
+  it('the announcement names the next ask in plain text, or says what is left', () => {
+    expect(answeredAnnouncement({ next: { title: 'Ship the **Q3** report' } })).toBe('Answered. Next: Ship the Q3 report.')
+    expect(answeredAnnouncement({ next: { title: 'Deploy `main` now?' } })).toBe('Answered. Next: Deploy main now?')
+    expect(answeredAnnouncement({ next: { title: '' } })).toBe('Answered. Next ask.')
+    expect(answeredAnnouncement({ caughtUp: true })).toBe('Answered. All caught up.')
+    expect(answeredAnnouncement({ caughtUp: true, fromLabel: 'Relay Bot' })).toBe('Answered. Nothing is waiting on you from Relay Bot.')
+    expect(answeredAnnouncement()).toBe('Answered.')
   })
 })

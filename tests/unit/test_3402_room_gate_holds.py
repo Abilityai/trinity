@@ -211,12 +211,13 @@ def test_a_refusal_the_same_request_would_get_again_is_recorded(room_env):
 
 
 def test_a_transient_refusal_records_nothing_and_the_post_is_delivered_again(room_env, monkeypatch):
-    calls = {"n": 0}
+    # Unreadable for the whole first wake: the room reads the map for the card
+    # (trinity#4505) and the backstop reads it again for the verdict.
+    locked = {"on": True}
     real = _GATE.list_skill_gates
 
     def _flaky(agent):
-        calls["n"] += 1
-        if calls["n"] == 1:
+        if locked["on"]:
             raise RuntimeError("database is locked")
         return real(agent)
 
@@ -224,6 +225,7 @@ def test_a_transient_refusal_records_nothing_and_the_post_is_delivered_again(roo
     _post(room_env, f"@{FIN} {HELD}")                       # refused: the map could not be read
     assert db.count_pending_gate_requests(FIN) == 0
     assert _count("room_gate_holds") == 0
+    locked["on"] = False
 
     _post(room_env, f"@{FIN} are you there?")               # the map reads again
     assert db.count_pending_gate_requests(FIN) == 1, "the post was dropped, not re-delivered"

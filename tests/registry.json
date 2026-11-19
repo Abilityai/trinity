@@ -1,6 +1,38 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4564_capacity_db_bound.py",
+      "feature": "#4564",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "capacity"
+      ],
+      "description": "#4564: set_max_parallel_tasks stores any value >= 1 (the upper bound is the fleet ceiling enforced by the router), no longer capped at a hardcoded 10."
+    },
+    {
+      "file": "unit/test_1105_execution_attribution.py",
+      "feature": "trinity-enterprise#1105",
+      "added": "2026-11-12",
+      "categories": [
+        "backend",
+        "executions",
+        "census"
+      ],
+      "description": "trinity-enterprise#1105: AST census — every create_task_execution( site in the platform backend calls execution_attribution.record_row or is allowlisted with a reason (stale entries fail; removing a record call turns it red); the internal execute-task route records the scheduler's row; OSS refuses a named project_id with 422 project_attribution_unavailable on /chat, /task and /fan-out before admission; record/annotate fail open; GET executions/{id} carries project_id from annotate."
+    },
+    {
+      "file": "unit/test_4482_person_safe_failure.py",
+      "feature": "#4482",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "client-portal",
+        "channels"
+      ],
+      "description": "#4482: a failed background turn's completion report (Workspace, Slack, Telegram), the Work card and the own-turn switch message show a fixed person-safe sentence; the subscription walk trail, subscription names and operator guidance stay on the execution row. An agent refusal passes through unless it carries the trail."
+    },
+    {
       "file": "unit/test_ent1221_web_delivery.py",
       "feature": "trinity-enterprise#1221",
       "added": "2026-11-11",
@@ -180,6 +212,18 @@
         "auth"
       ],
       "description": "trinity-enterprise#1148 F2: GET /api/executions and GET /api/activities/timeline, read by an agent key in a shared person's turn, omit every agent that person cannot open (fail-closed on an unreadable lookup); a key in no person's turn keeps its reach with no lookup."
+    },
+    {
+      "file": "unit/test_4536_wake_window.py",
+      "feature": "#4536",
+      "added": "2026-11-13",
+      "categories": [
+        "unit",
+        "backend",
+        "agent-collaboration",
+        "reliability"
+      ],
+      "description": "#4536: an ending that collides with a held 15 s wake window is parked (Redis trinity:wake_missed:{caller}) and delivered once when that wake ends, from the wake row's own terminal and from the holder after it releases; a finished wake releases its window, so twelve fast delegate->wake rounds are twelve wakes; endings from before the claim still collapse (300-row sweep = one wake); many endings during one wake give one follow-on; a holder releasing before the park still delivers; Redis down on the park audits skipped_window; a holder cancelled or closed (GeneratorExit) leaves the marker for the wake row's terminal, one that raises or returns FAILED still drains; a released follow-on key delivers a second parked ending; a drain wakes only its own caller; a finished wake covers nothing after it (a back-dated recovered run, a parked ending drained by a later window's wake, a FAILED wake in an earlier window all still wake). 19 tests. Real idempotency claim, fakeredis."
     },
     {
       "file": "unit/test_4357_wake_chain_depth.py",
@@ -9119,6 +9163,171 @@
         "security"
       ],
       "description": "ent#1216: a caller_wake turn carries the delegation's person when that person is owner tier on the delegator, so the agent's key keeps its execution reads while the wake runs. Real /task admission -> real maybe_wake_caller -> real ledger and acting_turn_user_id / viewer_row_scope on a real DB. A shared person's, a visitor's, a deleted user's and a cannot-open person's wake carry nobody, as before; the audit names the standing; auto-memory follows the owner rule."
+    },
+    {
+      "file": "unit/test_4541_proxy_listener_wait.py",
+      "feature": "#4541",
+      "added": "2026-11-13",
+      "categories": [
+        "unit",
+        "deploy"
+      ],
+      "description": "A hosted upgrade waits up to 90 s for the web container's PROXY-protocol listener before re-rendering Caddy: provision_wait_for_proxy_listener run with probe, sleep and date stubbed (retry count, 90 s default), and the real start.sh --hosted run (ent#873 harness) with the listener published from the 10th check ends on the protected listener in one run; never published falls back to 8081 with the warning after the full wait."
+    },
+    {
+      "file": "unit/test_ent1258_suspended_workspace_door.py",
+      "feature": "trinity-enterprise#1258",
+      "added": "2026-11-13",
+      "categories": [
+        "unit",
+        "backend",
+        "workspace",
+        "auth",
+        "security"
+      ],
+      "description": "ent#1258: a deactivated platform account (users.suspended_at) gets no code, no session and no /login hand-off at the Workspace door, with or without a share; the delegated exchange refuses it; the per-request gate refuses a session minted before the suspension and serves it again after reactivation. An outside client and an active account are unchanged (controls); a failed lookup denies; every decode_portal_session consumer goes through the gate."
+    },
+    {
+      "file": "unit/test_4501_approver_reach.py",
+      "feature": "#4501",
+      "added": "2026-11-12",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "asks",
+        "role-addressing",
+        "security"
+      ],
+      "description": "#4501: an ask addressed to: approver records only the seated approvers who can open the agent and is refused 422 role_cannot_open_agent when none can, so the answer fence never names a person who cannot see the ask. Real sink and real route on a real DB: nothing is written on the refusal (with a positive control), the refusal names the role and is logged, an admin approver and a replay are unaffected, primary and viewer are not filtered, and re-addressing to an unreachable approver leaves the row as it was."
+    },
+    {
+      "file": "unit/test_1096_admin_seat_fence.py",
+      "feature": "abilityai/trinity-enterprise#1096",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1096 (OSS sink): the admin decider seat on a gate approval — an empty audience raised only with the platform's admin stamp (R1); the admin arm admits an admin-gate person only, never an agent/connector/ops/system/loopback/stand-in principal (R8); addressed_view equals may_end; a re-address compares and clears stamps (R4) and an admin re-address is audited with its actor; an answer or cancel read before a re-address loses `readdressed` (R5); a bulk sweep skips fenced rows (R6); the refusal names seat and people for gate approvals only (R7); admin:<username> for an admin without email (R9); the per-family re-address resolver registry."
+    },
+    {
+      "file": "unit/test_1096_readdress_route.py",
+      "feature": "abilityai/trinity-enterprise#1096",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "api",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1096 (OSS routes): POST /api/operator-queue/{id}/readdress {to: rule|admin, reason} — admin + person only (agent, connector, ops and non-admin principals refused, nothing written), body validated, a registered family moved by its resolver (audit: admin actor + has_reason, no address or reason text), the rule landing on the admin seat, unchanged → 409 naming who it waits for, a role-addressed ask follows its role, a named family → 422 unknown_family, a skill-gate approval refused the admin seat (T3), an admin-seat card then decided by the admin; cancel by an admin on someone else's card needs a reason (422 reason_required); bulk-cancel reports skipped_fenced; the 403 not_addressee carries waiting_on + seat on the Operations and Workspace doors (admin verbs on Operations only); an answer read before a re-address is a 409 readdressed (people named on Operations, never on the Workspace); route registration, the require_admin + require_person gates and the R14 `# mcp:` header pinned."
+    },
+    {
+      "file": "unit/test_4475_terminate_audit_race.py",
+      "feature": "abilityai/trinity#4475",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "audit",
+        "unit"
+      ],
+      "description": "A terminate that ended the turn writes one execution_terminate row when the in-flight /task or /chat caller (or the parked dispatcher) wins the CANCELLED CAS. A Redis first-claim per agent and execution id dedupes repeats; with Redis None or raising the row is still written; a failed audit write releases the claim so the next terminate records the turn."
+    },
+    {
+      "file": "unit/test_ent1225_continuation_tier.py",
+      "feature": "trinity-enterprise#1225",
+      "added": "2026-11-13",
+      "categories": [
+        "unit",
+        "backend",
+        "agent-collaboration",
+        "security"
+      ],
+      "description": "ent#1225: caller_wake, operator_response, operator_ending and skill_gate rows name the turn they continue (continues_execution_id) and are rated exactly as it: owner, shared person, visitor, delegated. Only a running turn of the same agent is recorded; an agent-written context key is stripped; a link that cannot be followed, or one ending over asks from different turns, fails closed to (share, person, None). An answer or ending wake follows the link only when the answerer or canceller is owner tier or the asking turn's own person; a shared person ending the owner's ask fails closed (real ask_service.answer/cancel and wake filer). The pull claim carries the link for auto-memory. Real /task and /chat admission, real maybe_wake_caller, maybe_dispatch_resume/maybe_dispatch_ending, raise_ask, the gate notice, the ledger and acting_turn_user_id on a real DB."
+    },
+    {
+      "file": "unit/test_4579_credential_primary_reach.py",
+      "feature": "#4579",
+      "added": "2026-11-14",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "asks",
+        "role-addressing",
+        "credentials",
+        "security"
+      ],
+      "description": "#4579: a credential ask is recorded only for a reader who can open its Workspace secret field: the agent's primary person when the agent is on their roster, else its owner, else the raise is refused 422 role_cannot_open_agent and nothing is filed. Real sink, real door (_owned_ask) and real route on a real DB: a primary off the roster hands the ask to the owner, an admin or a deactivated account off the roster is not a reader, the owner is reached through the owned roster on real account, ownership and share rows, an unreadable roster fails closed and the log names nobody, a question ask and a replay are unchanged, and a seat change re-addresses a pending credential row by the same chain."
+    },
+    {
+      "file": "unit/test_4483_fleet_base_image_check.py",
+      "feature": "#4483",
+      "added": "2026-11-15",
+      "categories": [
+        "unit",
+        "backend",
+        "agent-lifecycle",
+        "reliability",
+        "operator-queue"
+      ],
+      "description": "#4483: the fleet base-image check names every running, non-ephemeral agent still on an older agent image in ONE platform alert (fleet_base_image_stale:fleet), updates it as the set changes and ends it when none are left; a base image whose version label is older than the backend is reported even with no drifted agent, with the source and hosted commands; Docker unreadable, an agent whose comparison failed and a base image with no parseable label are 'could not check' (no alert, no clear); no container is touched; only the lease holder runs a cycle (fail-open without Redis) and main.py starts the loop. Also: 409 env_unreadable names the older agent image and the restart when the agent's read answer carries no `missing` list (credential sink and Nevermined delegation)."
+    },
+    {
+      "file": "unit/test_ent1277_github_token_resolver.py",
+      "feature": "trinity-enterprise#1277",
+      "added": "2026-11-17",
+      "categories": [
+        "unit",
+        "backend",
+        "security",
+        "github"
+      ],
+      "description": "The repo-scoped GitHub token seam: resolve_github_token walks per-agent PAT, per-user PAT, the registered provider, then the platform PAT; with no provider the answer equals resolve_github_pat's; an uncovered repo falls through; a provider failure on a covered repo raises and never yields the platform PAT; a malformed repo never reaches the provider; resolve_github_pat and its candidates never consult the provider; the provider credential setting is encrypted at rest, refused in cleartext and covered by key rotation."
+    },
+    {
+      "file": "unit/test_4599_credential_reader_doors.py",
+      "feature": "#4599",
+      "added": "2026-11-17",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "asks",
+        "role-addressing",
+        "credentials",
+        "skill-gate",
+        "security"
+      ],
+      "description": "#4599: the remaining doors a credential ask could be recorded through for a reader who cannot fill it. The queue-file channel reads the reader chain of the native raise (real poller, real DB, real secret-field door): the platform picks the reader, the owner can be it, the address the agent wrote is ignored, an entry nobody can fill or one that fails the kind's checks is held by name in platform.ingestion and files no row, a failed lookup holds without a marker, the chain is read once per cycle, and the next cycle keeps the row confirmed. A blocked email is not a reader in on_workspace_roster; in can_open_agent the block stops an email with no account and a Workspace-only account, a blocked operator or admin stays reachable, a deactivated account is not. Each refusal names its real cause under the same code: nobody seated, the owner is the primary, a system agent, a lookup that failed (credential, approver, role id; the skill gate answers 503 gate_unavailable), and an admin's re-address by rule."
+    },
+    {
+      "file": "unit/test_4476_dev_proxy_host_urls.py",
+      "feature": "#4476",
+      "added": "2026-11-18",
+      "categories": [
+        "unit",
+        "backend",
+        "settings",
+        "mcp",
+        "webhooks"
+      ],
+      "description": "#4476: the URLs the backend hands a browser name the Host the dev proxy now delivers (its /api/ rule keeps the browser's Host; proxy half in src/frontend/tests/unit/viteApiProxyHost.spec.js). Real settings and schedules routers: the advertised MCP URL and default_url for localhost, a port-bearing host and another machine's address; an IPv6-literal Host keeps its brackets ([::1] reads as localhost); backend:8000 still yields backend:8080, so the fix belongs in the proxy; a loopback MCP_BIND_ADDRESS still wins; a minted or read webhook URL uses the delivered Host."
+    },
+    {
+      "file": "unit/test_4635_queue_stall_reads.py",
+      "feature": "#4635",
+      "added": "2026-11-18",
+      "categories": [
+        "unit",
+        "backend",
+        "operator-queue",
+        "scheduling",
+        "database",
+        "reliability"
+      ],
+      "description": "#4635 / #4636: the queue stall monitor's reads on the real DatabaseManager facade and the real schema (SQLite; PostgreSQL on the schema-parity tier). The stall rows are found by subject prefix past 1,001 other pending asks and the prefix is matched exactly (no LIKE wildcard, no case folding, no ended rows); every new keyword reaches the ops through the facade, and every db call the monitor makes exists on it; a drained agent's alert ends end to end while 1,001 unrelated rows stay pending; a higher reading rewrites the pending row's priority, title and text in place while a same-or-lower one only counts; and the effective cap for many agents costs one roster read and one ceiling read."
     }
   ]
 }

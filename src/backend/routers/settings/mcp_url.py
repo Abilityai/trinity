@@ -146,10 +146,11 @@ def _get_default_mcp_url(request: Request) -> str:
     if bind and bind not in ("0.0.0.0", "::"):
         return f"http://[{bind}]:8080/mcp" if ":" in bind else f"http://{bind}:8080/mcp"
     host = request.headers.get("host", "localhost:8080")
-    hostname = host.split(":")[0]
-    if hostname in ("localhost", "127.0.0.1"):
+    # An IPv6 literal keeps its colons inside brackets: `[::1]:80` (#4476).
+    hostname = host[1:].split("]", 1)[0] if host.startswith("[") else host.split(":")[0]
+    if hostname in ("localhost", "127.0.0.1", "::1"):
         return "http://localhost:8080/mcp"
-    return f"http://{hostname}:8080/mcp"
+    return f"http://[{hostname}]:8080/mcp" if ":" in hostname else f"http://{hostname}:8080/mcp"
 
 
 def resolve_mcp_url(request: Request) -> str:

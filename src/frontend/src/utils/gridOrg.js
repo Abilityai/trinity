@@ -197,17 +197,74 @@ export function zoneAt(zones, x, y) {
   return best
 }
 
-function edgePath(ax, ay, bx, by, vertical) {
-  const k = Math.min(120, Math.max(28, (vertical ? Math.abs(by - ay) : Math.abs(bx - ax)) * 0.4))
-  if (vertical) {
-    const s = by > ay ? 1 : -1
-    return `M ${ax} ${ay} C ${ax} ${ay + s * k}, ${bx} ${by - s * k}, ${bx} ${by}`
+/**
+ * Reporting-line routing (#2066). Lines are an org chart: they leave a
+ * manager at BOTTOM-centre and enter a report at TOP-centre, always, and run
+ * only through the lattice gaps:
+ *
+ *   - BUS_DROP: the horizontal "bus" sits this far below the manager row. It
+ *     is the corridor between a zone frame's bottom chrome and the next row's
+ *     zone header (ZONE_CHROME contract), so a bus never crosses a zone label.
+ *     Every report of one manager shares that bus, so siblings read as one
+ *     tree, not a fan of separate curves.
+ *   - LANE_X: vertical detours run this far right of a column's right edge:
+ *     the corridor between a zone frame's right chrome and the next column's
+ *     half-out avatar (AVATAR_OVERHANG).
+ *   - ELBOW_R: corner radius of every turn.
+ *   - ARRIVAL_SPREAD: a report with several managers gets one arrival point
+ *     per manager, this far apart and centred on top-centre, so each line
+ *     keeps its own final drop (its own hover/click target).
+ */
+const AVATAR_OVERHANG = 26 // AgentTile's .gtile-avatar: 52px, centred on the tile's left edge
+export const BUS_DROP = Math.round((ZONE_CHROME.bottom + GAP_Y - ZONE_CHROME.top) / 2)
+export const LANE_X = Math.round((ZONE_CHROME.right + GAP_X - AVATAR_OVERHANG) / 2)
+export const ELBOW_R = 8
+export const ARRIVAL_SPREAD = 16
+
+/**
+ * SVG path through orthogonal waypoints with rounded corners. Repeated and
+ * collinear waypoints are dropped first; each corner's radius is clamped to
+ * half of its shorter neighbouring segment so short jogs stay well-formed.
+ */
+export function orthogonalPath(points, r = ELBOW_R) {
+  const pts = []
+  for (const p of points) {
+    const last = pts[pts.length - 1]
+    if (last && last.x === p.x && last.y === p.y) continue
+    if (pts.length >= 2) {
+      const prev = pts[pts.length - 2]
+      if ((prev.x === last.x && last.x === p.x) || (prev.y === last.y && last.y === p.y)) {
+        pts[pts.length - 1] = p
+        continue
+      }
+    }
+    pts.push(p)
   }
-  const s = bx > ax ? 1 : -1
-  return `M ${ax} ${ay} C ${ax + s * k} ${ay}, ${bx - s * k} ${by}, ${bx} ${by}`
+  if (pts.length === 0) return ''
+  let d = `M ${pts[0].x} ${pts[0].y}`
+  for (let i = 1; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1]
+    const p1 = pts[i]
+    const p2 = pts[i + 1]
+    const lenIn = Math.abs(p1.x - p0.x) + Math.abs(p1.y - p0.y)
+    const lenOut = Math.abs(p2.x - p1.x) + Math.abs(p2.y - p1.y)
+    const k = Math.min(r, lenIn / 2, lenOut / 2)
+    const ux = Math.sign(p1.x - p0.x)
+    const uy = Math.sign(p1.y - p0.y)
+    const vx = Math.sign(p2.x - p1.x)
+    const vy = Math.sign(p2.y - p1.y)
+    d += ` L ${p1.x - ux * k} ${p1.y - uy * k} Q ${p1.x} ${p1.y} ${p1.x + vx * k} ${p1.y + vy * k}`
+  }
+  const end = pts[pts.length - 1]
+  if (pts.length > 1) d += ` L ${end.x} ${end.y}`
+  return d
 }
 
-/** Arrowhead polygon at the endpoint, oriented along the arrival axis. */
+/**
+ * Arrowhead polygon at the endpoint, oriented along the arrival axis.
+ * Reporting lines always arrive from above (`vertical`, `s = 1`); the other
+ * orientations are kept for callers drawing non-org arrows.
+ */
 export function arrowheadPath(bx, by, vertical, s) {
   if (vertical) {
     return `M ${bx} ${by} L ${bx - 4} ${by - s * 8} L ${bx + 4} ${by - s * 8} Z`
@@ -215,53 +272,174 @@ export function arrowheadPath(bx, by, vertical, s) {
   return `M ${bx} ${by} L ${bx - s * 8} ${by - 4} L ${bx - s * 8} ${by + 4} Z`
 }
 
+/** x of the vertical lane just right of column `c` (inside the gap). */
+function laneRightOf(c) {
+  return cellXY(c, 0)[0] + CELL_W + LANE_X
+}
+
 /**
- * Reporting edges as world-space cubic paths, manager → report (arrowhead at
- * the report — direction IS the payload, so every edge carries `ah`).
- * Anchors sit on the facing tile edges along the dominant axis. Edges whose
- * endpoint isn't placed (dangling tag, filtered roster) are skipped.
+ * Waypoints for one reporting line, manager cell `m` → report cell `r`,
+ * arriving at `bx` on the report's top edge. Three shapes:
+ *
+ *   1. Report one row below, or further below with every cell in between in
+ *      its column empty: trunk down to the bus, along the bus, straight drop.
+ *   2. Report further below with a tile in the way: trunk, bus, then down the
+ *      lane beside the report's column to the gap above its row, then in.
+ *   3. Report on the same row or above (the layout is the user's, so this
+ *      happens): trunk, bus, up the lane beside the manager's column to the
+ *      gap above the report's row, then in from above. The line loops, which
+ *      is the honest picture of an upside-down pair; Tidy / Group by dept
+ *      keep it rare.
  */
-export function computeEdges(layout, agents) {
-  const placed = new Set(Object.keys(layout))
-  const edges = []
-  for (const a of agents) {
-    for (const manager of managersOf(a)) {
-      if (manager === a.name) continue
-      if (!placed.has(a.name) || !placed.has(manager)) continue
-      const mp = layout[manager]
-      const rp = layout[a.name]
-      const [mx0, my0] = cellXY(mp.c, mp.r)
-      const [rx0, ry0] = cellXY(rp.c, rp.r)
-      const mx = mx0 + CELL_W / 2
-      const my = my0 + CELL_H / 2
-      const rx = rx0 + CELL_W / 2
-      const ry = ry0 + CELL_H / 2
-      const vertical = Math.abs(ry - my) >= Math.abs(rx - mx)
-      let ax, ay, bx, by, s
-      if (vertical) {
-        s = ry > my ? 1 : -1
-        ax = mx
-        ay = my + (s * CELL_H) / 2
-        bx = rx
-        by = ry - (s * CELL_H) / 2
-      } else {
-        s = rx > mx ? 1 : -1
-        ax = mx + (s * CELL_W) / 2
-        ay = my
-        bx = rx - (s * CELL_W) / 2
-        by = ry
+function routePoints(m, r, bx, occupied) {
+  const [mx0, my0] = cellXY(m.c, m.r)
+  const [, ry0] = cellXY(r.c, r.r)
+  const ax = mx0 + CELL_W / 2
+  const ay = my0 + CELL_H
+  const by = ry0
+  const busY = ay + BUS_DROP
+  const approachY = by - GAP_Y + BUS_DROP
+  const start = [{ x: ax, y: ay }, { x: ax, y: busY }]
+
+  if (r.r > m.r) {
+    let blocked = false
+    for (let row = m.r + 1; row < r.r; row++) {
+      if (occupied.has(`${r.c},${row}`)) {
+        blocked = true
+        break
       }
-      edges.push({
-        id: `${a.name}→${manager}`,
+    }
+    if (!blocked) return [...start, { x: bx, y: busY }, { x: bx, y: by }]
+    // Lane on the side of the report's column that faces the manager.
+    const lane = m.c <= r.c ? laneRightOf(r.c - 1) : laneRightOf(r.c)
+    return [...start, { x: lane, y: busY }, { x: lane, y: approachY }, { x: bx, y: approachY }, { x: bx, y: by }]
+  }
+
+  // Same row or above: detour up the lane on the report's side of the manager.
+  const lane = r.c < m.c ? laneRightOf(m.c - 1) : laneRightOf(m.c)
+  return [...start, { x: lane, y: busY }, { x: lane, y: approachY }, { x: bx, y: approachY }, { x: bx, y: by }]
+}
+
+/**
+ * Reporting edges as world-space orthogonal paths, manager → report
+ * (arrowhead at the report: direction IS the payload, so every edge carries
+ * `ah`). Every edge leaves the manager's bottom-centre and enters the
+ * report's top-centre (#2066); see `routePoints` for the three shapes.
+ *
+ * `d` is the full line. `hit` is the hover/click target: the line's tail
+ * back to the last point where it runs along any other line (`ownTail`). An
+ * only report gets its whole line; siblings that share a trunk, a bus or a
+ * lane get everything after it. A hover or a click-to-remove therefore always
+ * names one line, never an arbitrary sibling. `mid` sits on the final drop,
+ * for the hover chip.
+ *
+ * Known limit: two managers on the same row whose reports sit in the gap
+ * between them draw their buses at the same height, so those buses can
+ * overlap for part of their run. Each line stays readable by its own trunk
+ * and drop, and `hit` excludes the overlap.
+ *
+ * Obstacles are the placed agents and widget tiles only: a layout key left
+ * behind by a deleted agent never forces a detour.
+ * Edges whose endpoint isn't placed (dangling tag, filtered roster) are skipped.
+ */
+const segKey = (a, b) => (a.x === b.x ? `v${a.x}` : `h${a.y}`)
+
+/**
+ * The part of `pts` (a polyline ending at its report) that no other line
+ * runs along: walk back from the end and stop at the first collinear overlap.
+ * `lines` maps segKey → [{ lo, hi, id }] for every edge's segments.
+ */
+function ownTail(pts, id, lines) {
+  const out = [pts[pts.length - 1]]
+  for (let i = pts.length - 1; i > 0; i--) {
+    const q = pts[i]
+    const p = pts[i - 1]
+    if (p.x === q.x && p.y === q.y) continue
+    const along = p.x === q.x ? 'y' : 'x'
+    const dir = Math.sign(p[along] - q[along])
+    const segLo = Math.min(p[along], q[along])
+    const segHi = Math.max(p[along], q[along])
+    let stop = null
+    for (const o of lines.get(segKey(p, q)) || []) {
+      if (o.id === id) continue
+      const lo = Math.max(o.lo, segLo)
+      const hi = Math.min(o.hi, segHi)
+      if (hi - lo < 1) continue // disjoint, or touching at a corner
+      const near = dir > 0 ? lo : hi
+      if (stop === null || (dir > 0 ? near < stop : near > stop)) stop = near
+    }
+    if (stop !== null) {
+      if (stop !== q[along]) out.unshift(along === 'y' ? { x: q.x, y: stop } : { x: stop, y: q.y })
+      return out
+    }
+    out.unshift(p)
+  }
+  return out
+}
+
+export function computeEdges(layout, agents) {
+  const placed = new Set(agents.filter((a) => layout[a.name]).map((a) => a.name))
+  const occupied = new Set(
+    [...[...placed].map((n) => layout[n]), ...Object.values(nonAgentEntries(layout, agents))]
+      .map((p) => `${p.c},${p.r}`)
+  )
+  const edges = []
+  const routes = []
+  const lines = new Map()
+  for (const a of agents) {
+    if (!placed.has(a.name)) continue
+    const managers = managersOf(a).filter((m) => m !== a.name && placed.has(m))
+    managers.forEach((manager, i) => {
+      const rp = layout[a.name]
+      const [rx0, ry0] = cellXY(rp.c, rp.r)
+      const bx = rx0 + CELL_W / 2 + (i - (managers.length - 1) / 2) * ARRIVAL_SPREAD
+      const by = ry0
+      const pts = routePoints(layout[manager], rp, bx, occupied)
+      const id = `${a.name}→${manager}`
+      for (let k = 1; k < pts.length; k++) {
+        const [p, q] = [pts[k - 1], pts[k]]
+        if (p.x === q.x && p.y === q.y) continue
+        const along = p.x === q.x ? 'y' : 'x'
+        const key = segKey(p, q)
+        if (!lines.has(key)) lines.set(key, [])
+        lines.get(key).push({ lo: Math.min(p[along], q[along]), hi: Math.max(p[along], q[along]), id })
+      }
+      // The final drop: from the last turn into the report's top edge.
+      const turn = pts[pts.length - 2]
+      const edge = {
+        id,
         manager,
         report: a.name,
-        d: edgePath(ax, ay, bx, by, vertical),
-        ah: arrowheadPath(bx, by, vertical, s),
-        mid: { x: (ax + bx) / 2, y: (ay + by) / 2 },
-      })
-    }
+        d: orthogonalPath(pts),
+        hit: '',
+        ah: arrowheadPath(bx, by, true, 1),
+        mid: { x: bx, y: (turn.y + by) / 2 },
+      }
+      edges.push(edge)
+      routes.push([edge, pts])
+    })
   }
+  for (const [edge, pts] of routes) edge.hit = orthogonalPath(ownTail(pts, edge.id, lines))
   return edges
+}
+
+/**
+ * Edges bucketed for painting: dimmed first, then normal, then highlighted,
+ * so a highlighted line is never painted over by a sibling that shares its
+ * trunk or bus. Each tier is drawn as ONE translucent group, which keeps a
+ * segment shared by several edges the same tone as an unshared one (per-path
+ * opacity would stack and darken every shared trunk).
+ * `classOf(edge)` returns 'hot', 'dim' or '' (the overlay's edgeClass).
+ */
+export function paintTiers(edges, classOf) {
+  const tiers = { dim: [], base: [], hot: [] }
+  for (const e of edges) {
+    const cls = classOf(e)
+    tiers[cls === 'hot' || cls === 'dim' ? cls : 'base'].push(e)
+  }
+  return ['dim', 'base', 'hot']
+    .filter((cls) => tiers[cls].length > 0)
+    .map((cls) => ({ cls, edges: tiers[cls] }))
 }
 
 function blockCols(n) {

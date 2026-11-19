@@ -158,6 +158,8 @@ By default, any caller authenticated as an owner/shared identity for the agent m
 
 **AAuth callers are listed by identity.** An agent calling from another Trinity instance over AAuth has no Trinity key, so this list is the only thing that admits it: add its `aauth:<agent>@<issuer-host>` identity, exactly as the calling instance's Settings page shows it. For AAuth callers the list **fails closed** — an empty list means nobody, and a policy error refuses rather than admits. The calling instance's host must appear in at least one `aauth:` entry before Trinity will even fetch that instance's keys, so a stranger cannot make your backend go and look up a domain nobody listed. See [AAuth agent identity](#aauth-agent-identity--trinity-to-trinity-without-a-shared-key).
 
+On the agent's **A2A** tab, each allow-list entry carries a badge: **AAuth** for an `aauth:` identity, **Local** for an account on this instance. Typing an `aauth:` entry that does not look like `aauth:<agent-name>@<peer-host>` shows the expected format under the field before you add it.
+
 > **The allow-list is a restriction, not a security boundary.** It layers on top of authentication — every caller has already passed the `401` and the owner/shared access check before it is consulted. For callers holding a Trinity key it also **fails open**: if the policy backend errors, the request is allowed rather than denied, matching Trinity's availability bias (an AAuth caller is refused on the same error, because nothing else has authenticated it). Don't rely on it as the only thing standing between an untrusted caller and the agent; that job belongs to authentication and sharing.
 
 ---
@@ -254,6 +256,8 @@ an error event, because a status code cannot be sent once the stream has opened.
 ## Outbound endpoints
 
 The external A2A endpoints agents may call (name + URL + optional credential) are **one platform-wide list**, the one `call_a2a_agent` resolves. An admin manages it on the **Outbound A2A endpoints** panel in **Settings › Integrations**, with the routes in [Part 3](#register-an-endpoint-admin-human-only), or with `register_a2a_endpoint`; all three address the same list. Each endpoint has an authentication scheme: **Bearer credential** (the stored credential goes out as `Authorization: Bearer`) or **AAuth** (the call is signed as the calling agent and no credential is stored — see [AAuth agent identity](#aauth-agent-identity--trinity-to-trinity-without-a-shared-key)). Credentials are stored **encrypted and never shown again** — the UI only indicates whether an endpoint has one.
+
+A registered Trinity instance with a bearer credential can also be named as the destination of a credential an agent asks a person for: the value is delivered to an agent on that instance under the stored key, and the key needs inject rights there. See [Credential Management → Delivering a credential to another Trinity](../credentials/credential-management.md#delivering-a-credential-to-another-trinity).
 
 > **Endpoints registered on an agent's A2A tab before 1.0.** Earlier builds had a register form on the agent's A2A tab. It wrote a separate per-agent list that `call_a2a_agent` never read, so those endpoints answered `endpoint_not_found`. The form is gone. If any such rows remain, the tab lists them as **not callable** with a **Remove** button: re-add the ones you need in Settings › Integrations, then remove them from the tab.
 
@@ -520,7 +524,7 @@ With AAuth live, an exposed agent's Agent Card gains a second security scheme, `
 | `404` | The agent is not exposed, or does not exist — indistinguishable on purpose |
 | `503` | Redis is unavailable, so the replay check cannot run. AAuth refuses rather than admit a request it cannot prove unique |
 
-Limits on the inbound side: `message/stream` is refused for AAuth callers (`message/send` and polling only), and an AAuth caller can `tasks/get` / `tasks/cancel` only tasks it started. Every decision is audited with actor type `external_agent` and the identity — a refused signature is recorded only once the token itself verified, so a stranger cannot fill your audit log with identities it invented. Accepting signed calls relies on the per-agent inbound allow-list, which is part of the A2A inbound capability: an instance where the **A2A** tab is hidden can sign outbound calls but accepts none.
+Limits on the inbound side: `message/stream` is refused for AAuth callers (`message/send` and polling only), and an AAuth caller can `tasks/get` / `tasks/cancel` only tasks it started. A task an AAuth caller started records that caller on its execution: the execution's detail page shows **AAuth Caller** with the `aauth:<agent>@<host>` identity, so you can tell which remote agent triggered a run. Every decision is audited with actor type `external_agent` and the identity — a refused signature is recorded only once the token itself verified, so a stranger cannot fill your audit log with identities it invented. Accepting signed calls relies on the per-agent inbound allow-list, which is part of the A2A inbound capability: an instance where the **A2A** tab is hidden can sign outbound calls but accepts none.
 
 ### Discovery routes and `whoami`
 

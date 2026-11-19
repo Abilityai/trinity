@@ -1353,7 +1353,9 @@ export class TrinityClient {
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
     idempotencyKey?: string,
-    turn?: string
+    turn?: string,
+    /** ent#1105: the project to attribute the execution to; sent only when set. */
+    projectId?: string
   ): Promise<
     | Replayable<ChatResponse>
     | { error: string; queue_status: "busy" | "queue_full"; retry_after: number; agent: string; details?: Record<string, unknown> }
@@ -1425,7 +1427,7 @@ export class TrinityClient {
       response = await turnFetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/chat`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ message }),
+        body: JSON.stringify(projectId ? { message, project_id: projectId } : { message }),
         signal: controller.signal,
       });
     } catch (err) {
@@ -1657,6 +1659,8 @@ export class TrinityClient {
       // ent#224: the CALLER's execution id, so the delegated task inherits the
       // originating channel/thread and its completion can be reported back.
       parent_execution_id?: string;
+      // ent#1105: the project to attribute the execution to; sent only when set.
+      project_id?: string;
     },
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
@@ -1723,6 +1727,7 @@ export class TrinityClient {
       inject_result: options?.inject_result,
       chat_session_id: options?.chat_session_id,
       parent_execution_id: options?.parent_execution_id,   // ent#224
+      ...(options?.project_id ? { project_id: options.project_id } : {}),  // ent#1105
     };
 
     // #2661: sync mode is bounded by the MCP-server ceiling, not the platform
@@ -2022,6 +2027,8 @@ export class TrinityClient {
       system_prompt?: string;
       allowed_tools?: string[];
       async_mode?: boolean;
+      // ent#1105: the project to attribute the batch's executions to.
+      project_id?: string;
     },
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
@@ -2073,6 +2080,9 @@ export class TrinityClient {
     }
     if (options?.async_mode) {
       body.async_mode = true;
+    }
+    if (options?.project_id) {
+      body.project_id = options.project_id;  // ent#1105: only when set
     }
 
     // #2670: bounded by OUR ceiling, not the backend's. The old
@@ -4467,6 +4477,23 @@ export class TrinityClient {
 
   async setProjectHealth(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
     return this.projectRequest("POST", this.projectPath(projectId, "/health"), turn, body);
+  }
+
+  /**
+   * trinity-enterprise#1105: a project's runs, newest first. Only the filters
+   * that are set go on the query string; the cursor is opaque and passed back as-is.
+   */
+  async listProjectExecutions(
+    projectId: string,
+    filters: Record<string, string | number | undefined> = {},
+    turn?: string,
+  ): Promise<Record<string, unknown>> {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(filters)) {
+      if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+    }
+    const tail = qs.toString() ? `/executions?${qs.toString()}` : "/executions";
+    return this.projectRequest("GET", this.projectPath(projectId, tail), turn);
   }
 
   /**

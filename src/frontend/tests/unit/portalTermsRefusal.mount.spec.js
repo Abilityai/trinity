@@ -112,12 +112,14 @@ describe.each([
     refuse(TERMS)
     const { w } = await boot(path)
     const screen = w.findComponent({ name: 'PortalTerms' })
-    // The roster now answers: the accept ends the refusal and the shell reloads.
+    // The roster now answers. The refusal is NOT cleared by hand: it is what
+    // keeps the screen mounted for its emit (#4515), and the shell's reload
+    // is what ends it.
     portalHttp.defaults.adapter = async (config) => ({ status: 200, data: { agents: [{ name: 'scout' }] }, headers: {}, config, statusText: 'OK' })
-    store.termsRefusal = null
     screen.vm.$emit('accepted')
     await flushPromises(); await flushPromises()
     expect(w.findComponent({ name: 'PortalTerms' }).exists()).toBe(false)
+    expect(store.termsRefusal).toBe(null)
     expect(store.agents.map((a) => a.name)).toEqual(['scout'])
 
     refuse(TERMS)

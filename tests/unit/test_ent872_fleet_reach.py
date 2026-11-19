@@ -783,6 +783,9 @@ _ALLOW = {
         "the system-agent terminal authenticates a person (JWT) and checks the user row's role",
     ("services/settings_service.py", "get_agent_quota_for_role"):
         "maps a role to an agent-creation quota; selects no roster",
+    ("services/settings_service.py", "get_effective_max_parallel_tasks_for"):
+        "the queue-stall monitor's background tick (#4635): no principal; answers the caps of the agent "
+        "names it is handed, never a roster to a caller",
     ("services/access_candidate_service.py", "suggest"):
         "the role compare only decides whether a row SHOWS its role; selects no fleet, and the route is require_interactive (ent#450)",
     ("services/template_source_policy.py", "in_use"):

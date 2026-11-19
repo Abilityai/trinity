@@ -150,7 +150,7 @@ A classic PAT with `repo` scope grants access to **every repository your GitHub 
 
 The test shows your GitHub username and confirms repo access. The first-run setup asks for the same token on its optional keys step — see [Platform Keys](../credentials/platform-keys.md#github-access-token).
 
-**Saving auto-propagates to running agents.** When the platform PAT changes, Trinity pushes the new token into every running agent's `.env` file within seconds — no restart required. The save response lists which agents were updated, skipped, or failed. Agents with a per-agent PAT override, or agents that never configured GitHub, are skipped. Per-agent failures are reported but never block the save.
+**Saving auto-propagates to running agents.** When the platform PAT changes, Trinity pushes the new token into every running agent's `.env` file within seconds — no restart required. The save response lists which agents were updated, skipped, or failed. Agents with a per-agent PAT override, or agents that never configured GitHub, are skipped. So is an agent whose `.env` cannot be read as plain text: Trinity does not rewrite that file (doing so would replace every other credential in it), and Settings lists the agent as skipped with *.env not readable as text — not rewritten*. Per-agent failures are reported but never block the save.
 
 ### Option B: Fine-Grained Token (scoped, safer, more maintenance)
 

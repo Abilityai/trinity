@@ -77,3 +77,150 @@ describe('the answered card and the wake (ent#1108 AC #4)', () => {
     expect(w2.find('[data-testid="inbox-ask-wake-pending"]').exists()).toBe(false)
   })
 })
+
+// #4502 — the confirmation above the card said "Sent — <agent> is picking this
+// up." for an agent that was not running, beside the card's own (true) "Agent
+// not yet woken". `resume_requested` only says a wake was REQUESTED, and the
+// answer response cannot say it was deferred, so the card re-reads the roster
+// and the sentence needs a running agent.
+describe('the "Sent" line and an agent that is not running (#4502)', () => {
+  const pendingAsk = (id) => ask(id, { status: 'pending', ended_at: null, ended_by: null, answer: null })
+  const confirmation = (w) => w.find('[data-testid="inbox-ask-confirmation"]')
+
+  // `rosterRead`: 'ok' (resolves true, the store's verdict for a read that
+  // succeeded), 'quiet-fail' (resolves undefined: what a failed quiet refresh
+  // does), 'throws'.
+  async function answer({ rosterAfter, resume = true, rosterRead = 'ok', before = [] } = {}) {
+    const item = pendingAsk('q')
+    store.asks = [item]
+    store.agents = before
+    store.answerAsk = vi.fn(async (id) => {
+      const answered = { ...item, status: 'answered', ended_by: 'you', ended_at: ago(0), answer: 'Build it', resume_requested: resume }
+      store.asks = store.asks.map((a) => (a.id === id ? answered : a))
+      return answered
+    })
+    store.refreshRoster = vi.fn(async () => {
+      if (rosterRead === 'throws') throw new Error('roster read failed')
+      if (rosterRead === 'quiet-fail') return undefined
+      store.agents = rosterAfter
+      return true
+    })
+    wrapper = mount(PortalAsks, { props: { askIds: [item.id], testidPrefix: 'inbox-ask' } })
+    await flushPromises()
+    await wrapper.findAll('[data-testid="inbox-ask-option-q"]')[0].trigger('click')
+    await flushPromises()
+    expect(store.answerAsk).toHaveBeenCalledTimes(1)
+    return wrapper
+  }
+
+  it('a stopped agent gets "Sent." only, read from a roster fetched AFTER the answer', async () => {
+    // The roster in hand still says ready: it was read when the page loaded.
+    const w = await answer({ before: [{ name: 'scout', availability: 'ready' }], rosterAfter: [{ name: 'scout', availability: 'stopped' }] })
+    expect(store.refreshRoster).toHaveBeenCalledTimes(1)
+    expect(confirmation(w).text()).toBe('Sent.')
+    expect(w.text()).not.toContain('is picking this up')
+  })
+
+  it('an agent whose container is gone gets "Sent." only', async () => {
+    const w = await answer({ rosterAfter: [{ name: 'scout', availability: 'unavailable' }] })
+    expect(confirmation(w).text()).toBe('Sent.')
+  })
+
+  it('a running agent keeps the sentence', async () => {
+    const w = await answer({ rosterAfter: [{ name: 'scout', availability: 'ready' }] })
+    expect(confirmation(w).text()).toBe('Sent — scout is picking this up.')
+  })
+
+  it.each(['quiet-fail', 'throws'])('a roster read that fails (%s) says "Sent." only: the last roster is not evidence', async (rosterRead) => {
+    // The roster in hand says ready, but it is from page load: the agent may
+    // have been stopped since. Without a fresh read the sentence is not claimed.
+    const w = await answer({ before: [{ name: 'scout', availability: 'ready' }], rosterRead })
+    expect(store.refreshRoster).toHaveBeenCalledTimes(1)
+    expect(confirmation(w).text()).toBe('Sent.')
+    expect(w.text()).not.toContain('is picking this up')
+  })
+
+  it('an answer that requested no wake says "Sent." and reads no roster', async () => {
+    const w = await answer({ resume: false, rosterAfter: [{ name: 'scout', availability: 'ready' }] })
+    expect(store.refreshRoster).not.toHaveBeenCalled()
+    expect(confirmation(w).text()).toBe('Sent.')
+  })
+
+  it('a surface that takes the answer over (the Inbox pane) shows no "Sent" line and reads no roster', async () => {
+    const item = pendingAsk('q')
+    store.asks = [item]
+    store.answerAsk = vi.fn(async (id) => {
+      const answered = { ...item, status: 'answered', ended_by: 'you', ended_at: ago(0), resume_requested: true }
+      store.asks = store.asks.map((a) => (a.id === id ? answered : a))
+      return answered
+    })
+    store.refreshRoster = vi.fn(async () => {})
+    const notifyAnswered = vi.fn()
+    wrapper = mount(PortalAsks, { props: { askIds: [item.id], testidPrefix: 'inbox-ask', notifyAnswered } })
+    await flushPromises()
+    await wrapper.findAll('[data-testid="inbox-ask-option-q"]')[0].trigger('click')
+    await flushPromises()
+    expect(notifyAnswered).toHaveBeenCalledTimes(1)
+    expect(notifyAnswered).toHaveBeenCalledWith('q', expect.objectContaining({ status: 'answered' }))
+    expect(confirmation(wrapper).exists()).toBe(false)
+    expect(store.refreshRoster).not.toHaveBeenCalled()
+  })
+
+  it('a roster that does not answer does not hold the line back: after 1.5 s it says "Sent." only', async () => {
+    vi.useRealTimers()
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const item = pendingAsk('q')
+    store.asks = [item]
+    store.agents = [{ name: 'scout', availability: 'ready' }] // from page load: not evidence
+    store.answerAsk = vi.fn(async (id) => {
+      const answered = { ...item, status: 'answered', ended_by: 'you', ended_at: ago(0), resume_requested: true }
+      store.asks = store.asks.map((a) => (a.id === id ? answered : a))
+      return answered
+    })
+    store.refreshRoster = vi.fn(() => new Promise(() => {})) // never settles
+    wrapper = mount(PortalAsks, { props: { askIds: [item.id], testidPrefix: 'inbox-ask' } })
+    await flushPromises()
+    await wrapper.findAll('[data-testid="inbox-ask-option-q"]')[0].trigger('click')
+    await flushPromises()
+    // Nothing is said while the read is out: never the claim "for a moment".
+    expect(confirmation(wrapper).exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('is picking this up')
+    vi.advanceTimersByTime(1500)
+    await flushPromises()
+    expect(confirmation(wrapper).text()).toBe('Sent.')
+  })
+
+  it('an answer confirmed after the card unmounted reads no roster and starts nothing', async () => {
+    const item = pendingAsk('q')
+    store.asks = [item]
+    let release
+    store.answerAsk = vi.fn(() => new Promise((resolve) => {
+      release = () => resolve({ ...item, status: 'answered', ended_by: 'you', ended_at: ago(0), resume_requested: true })
+    }))
+    store.refreshRoster = vi.fn(async () => {})
+    wrapper = mount(PortalAsks, { props: { askIds: [item.id], testidPrefix: 'inbox-ask' } })
+    await flushPromises()
+    await wrapper.findAll('[data-testid="inbox-ask-option-q"]')[0].trigger('click')
+    await flushPromises()
+    wrapper.unmount()
+    wrapper = null
+    release()
+    await flushPromises()
+    expect(store.refreshRoster).not.toHaveBeenCalled()
+  })
+
+  it('a refused answer tells nobody: the hook is on the success path only', async () => {
+    const item = pendingAsk('q')
+    store.asks = [item]
+    store.answerAsk = vi.fn(async () => {
+      throw Object.assign(new Error('refused'), { response: { status: 409, data: { detail: { code: 'already_resolved', message: 'This ask was just answered elsewhere.' } } } })
+    })
+    const notifyAnswered = vi.fn()
+    wrapper = mount(PortalAsks, { props: { askIds: [item.id], testidPrefix: 'inbox-ask', notifyAnswered } })
+    await flushPromises()
+    await wrapper.findAll('[data-testid="inbox-ask-option-q"]')[0].trigger('click')
+    await flushPromises()
+    expect(notifyAnswered).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('This ask was just answered elsewhere.')
+  })
+})

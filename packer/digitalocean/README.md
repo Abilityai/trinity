@@ -119,7 +119,10 @@ identifier.
 
 Everything runs from a checkout of the release tag's content, and the scripts read
 `DIGITALOCEAN_TOKEN` (a token on the listing's team), `TRINITY_DO_APP_ID`,
-`TRINITY_SSH_KEY_ID` and `TRINITY_SSH_KEY_FILE`.
+`TRINITY_SSH_KEY_ID`, and the matching private key: `TRINITY_SSH_KEY_OP` (a 1Password
+reference such as `op://vault/item/field`; the key is read for the run and deleted when
+the script exits) or `TRINITY_SSH_KEY_FILE` (a file that stays). `op run` resolves every
+`op://` value in the environment, so run the scripts outside it.
 
 ```bash
 cd packer/digitalocean/scripts

@@ -88,7 +88,7 @@ You must set `ADMIN_PASSWORD` yourself — `start.sh` refuses to boot while it i
 
 ## How do I change the admin password?
 
-Edit `ADMIN_PASSWORD` in `.env` and **recreate** the backend container — `docker compose up -d backend` (with `-f docker-compose.prod.yml` or `-f docker-compose.hosted.yml` on a server), or re-run `./scripts/deploy/start.sh` (`--hosted` on a hosted install). A plain `docker compose restart` does not re-read `.env`, so the old password stays in force. `.env` is the source of truth: the backend re-applies that value on every boot, so a password changed anywhere else is overwritten at the next boot, and there is no change-password form in the UI. On a DigitalOcean Droplet the file is `/opt/trinity/.env`. See [First-Time Setup](../getting-started/setup.md).
+Sign in as `admin` and open **Settings → General → Password**: enter the current password and the new one twice. The change survives restarts and upgrades, signs out every other session, and can also revoke the MCP API keys you created. Then update `ADMIN_PASSWORD` in `.env` to match, because the MCP server's legacy password sign-in and your scripts still read it there. To reset a forgotten password, set a new `ADMIN_PASSWORD` in `.env` and **recreate** the backend container — `docker compose up -d backend` (with `-f docker-compose.prod.yml` or `-f docker-compose.hosted.yml` on a server), or re-run `./scripts/deploy/start.sh` (`--hosted` on a hosted install); the backend applies a value it has not applied before, and a plain `docker compose restart` does not re-read `.env`. On a DigitalOcean Droplet the file is `/opt/trinity/.env`. See [First-Time Setup](../getting-started/setup.md).
 
 ## I forgot the admin password on a hosted install or a claimed Droplet — how do I reset it?
 

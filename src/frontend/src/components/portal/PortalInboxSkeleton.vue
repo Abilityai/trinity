@@ -10,7 +10,7 @@
            (OverflowTabs over INBOX_TAB_SHELL, badge slots reserved), the list
            column at the width PortalInbox picks (`inboxLayout` over the same
            container width and rail allowance), and the pane block beside it.
-    rows   the list's rows at PortalInboxList's row box (px-2 / space-y-1,
+    rows   the list's rows at PortalInboxList's row box (px-2 / a 4px gap,
            rows px-3 py-2.5: icon, the agent line, the excerpt line, the badge
            line) — used by the shell AND by PortalInbox's own loading arm.
     pane   PortalInboxPane's header strip and body blocks.

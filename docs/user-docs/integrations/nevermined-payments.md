@@ -167,6 +167,13 @@ organization's key, bind is refused (409 `agent_key_present`) — remove it from
 the agent's credentials first. The same refusal covers a stale organization key
 left behind from before the key was rotated; remove it and bind again.
 
+**An unreadable `.env` is never overwritten.** Bind and revoke rewrite the agent's
+whole `.env`, so if Trinity cannot read that file as text (it is not UTF-8, or
+the read fails), bind is refused with `409 env_unreadable` and nothing is
+written or recorded. Revoke still revokes the mandate at Nevermined, but leaves
+the file untouched and says so in the response's `env_note`. Fix the file, then
+bind again or remove the keys by hand.
+
 ### Operator settings
 
 Every payment verify and settle is a call to the Nevermined facilitator, and every card-mandate check or revoke is a call to Nevermined too. Three optional environment variables bound those calls across the whole platform; all need a backend restart:

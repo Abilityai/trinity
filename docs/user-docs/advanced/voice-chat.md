@@ -1,6 +1,6 @@
 # Voice Chat
 
-Real-time voice conversations with agents, inside a Workspace chat. Audio streams bidirectionally through a backend WebSocket proxy to the Gemini Live API (~280ms latency). Gemini handles speech-to-speech; the agent itself remains the reasoning engine and is invoked on demand via tool calling — in a Workspace call, as the agent, in the chat the call belongs to.
+Real-time voice conversations with agents, inside a Workspace chat. Audio streams bidirectionally through a backend WebSocket proxy to the Gemini Live API (~280ms latency). Gemini handles speech-to-speech; the agent itself remains the reasoning engine and is invoked on demand via tool calling — in a Workspace call, as the agent, in the chat the call belongs to. A [Direct call](#direct-calls) skips the voice model: every spoken turn goes to the agent and its own reply is read aloud.
 
 > 📺 **Watch:** [I Gave My AI Three Years of My Notes — Then Interviewed It](https://youtu.be/xflQTzarEBQ) *(May 2026)* · [all videos](../videos.md)
 
@@ -49,6 +49,7 @@ Click **Mute** on the orb, or press **M**, to silence your microphone mid-sessio
 - `VOICE_ENABLED` must be on (default `true`; it does nothing without a Gemini key).
 - Browser microphone permission granted, on a secure (https) page.
 - A signed-in platform user. External clients signed in with an email code do not get a call button.
+- A [Direct call](#direct-calls) needs a Gemini or ElevenLabs key instead, not the Live API.
 
 The composer's **Speak your message** microphone is a different feature. It only types what you say into the message field, runs on ElevenLabs or the browser's own speech engine rather than Gemini, and is available to clients too. Its requirements, and why it may be missing, are in [Workspace → Dictation](../sharing-and-access/workspace.md#dictation).
 
@@ -60,7 +61,8 @@ The composer's **Speak your message** microphone is a different feature. It only
 | `VOICE_ENABLED` | Global toggle | `true` |
 | `VOICE_MODEL` | Gemini model ID (leave unset to use the built-in default) | `models/gemini-3.8-live` |
 | `VOICE_MAX_DURATION` | Max session duration in seconds for the legacy per-agent start route | `300` |
-| `WORKSPACE_VOICE_MAX_DURATION` | Max call duration in seconds (Workspace voice mode) | `1800` |
+| `WORKSPACE_VOICE_MAX_DURATION` | Max call duration in seconds (Workspace voice and Direct calls) | `1800` |
+| `DIRECT_VOICE_ENABLED` | Set `false` to turn [Direct calls](#direct-calls) off until an admin turns them on in Settings | on |
 
 ### Per-Agent Voice Prompt
 
@@ -137,11 +139,30 @@ While you talk, the agent draws on its own **`main`** canvas — the same one it
 
 The call owns only the blocks it draws: everything the agent put on the canvas itself survives a call untouched, and a refused verb (a bad image source, an empty diagram) writes nothing and tells the model why. All canvas content is sanitized before display — scripts never execute, images from the workspace load through an authenticated route, and paths are confined to the workspace. See [Agent Canvas](../agents/agent-canvas.md) for the block vocabulary and who can see the result.
 
+## Direct calls
+
+A **Direct call** has no voice model between you and the agent. What you say is transcribed, sent to the agent as an ordinary turn in the chat, and the agent's own reply is read aloud. It is slower than the voice call and answers in the agent's own words — with its skills, files and memory on every turn, not only when it is handed a task.
+
+![A Direct call in progress: the call bar shows the sentence being spoken with stop, mute and hang-up controls, the spoken message is in the thread marked spoken, and the agent's Working card has a Stop button](../../screenshots/workspace-direct-call.webp)
+
+Start one with **Start a Direct call**, the button beside **Start a voice call** in the composer. One call runs in a chat at a time, of either kind; the other button reads *Another call is on*.
+
+**While it runs.** A strip above the composer shows bars and one word for the state — **Connecting**, **Listening**, **Got it** (transcribing), **Thinking**, **Speaking**, **Yes or no?** — with **Stop**, **Mute** and **End call**. Your words appear as you are heard; a sentence that sounds unfinished is held for up to 3 seconds in case you carry on. Typed messages still work during the call and join it. Anything that does not read well aloud — code, a table, a list of links — is left in the chat (*The reply is in the chat.*), a very long reply ends with *The rest is in the chat.*, and a failed turn is spoken as *The agent couldn't answer that.* Credential values the agent has fetched are never spoken: they are said as "redacted".
+
+**Stopping the agent.** Say a stop phrase on its own — *stop*, *wait*, *hold on*, *never mind*, *enough*, *one second* and similar — or press **Stop**, and the agent stops speaking and its running turn is cancelled (*Stopped.*, or *Stopped. The full reply is in the chat.*). A sentence such as "stop the build" is words for the agent, not a stop. Talking over the agent also interrupts it. **Esc** silences the agent while it speaks; when it is quiet, **Esc** ends the call.
+
+**Approvals by voice.** When the agent raises an approval during the call, it is read aloud and the strip shows **Yes or no?**. A plain *yes* or *no* answers it (*Approved by voice* / *Rejected by voice*); anything longer is your next turn and the ask stays open on its card.
+
+**When it ends.** The call folds into one **Direct call · N min** block in the chat, and the agent's next typed turn carries on from the same conversation. A Direct call has the same 30-minute limit as the voice call (`WORKSPACE_VOICE_MAX_DURATION`).
+
+**For admins.** **Settings → General → Direct calls** has **Offer Direct calls** (on by default; `DIRECT_VOICE_ENABLED=false` in `.env` turns it off until an admin decides) and the **Speech provider**: **Automatic** (Gemini, then ElevenLabs), or Gemini or ElevenLabs alone, with no fallback. The line under it names the provider in use, or why calls are unavailable — *Direct calls need a speech key. Add a Gemini or ElevenLabs key in Settings.* ElevenLabs needs both a key and a default voice. Audio and transcripts go to the chosen speech provider. Changes apply to the next call.
+
 ## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/enterprise/client-portal/agents/{name}/voice/start` | POST | Start a Workspace voice call bound to a chat (`portal_session_id`). Platform users signed in to a session (not an API key). Returns `voice_session_id`, the WebSocket URL and a single-use `websocket_ticket`; 409 while a reply is in flight |
+| `/api/enterprise/client-portal/agents/{name}/voice/start` | POST | Start a Workspace voice call bound to a chat (`portal_session_id`); `mode: "direct"` starts a Direct call. Platform users signed in to a session (not an API key). Returns `voice_session_id`, the WebSocket URL and a single-use `websocket_ticket`; 409 while a reply is in flight or another call is on in that chat, 503 with the reason when Direct calls are unavailable |
+| `/api/settings/direct-voice` | GET / PUT | Direct call settings — `{enabled, provider}` (`auto`, `gemini` or `elevenlabs`). Admin only |
 | `/api/agents/{name}/voice/start` | POST | The original per-agent start route; pass `workspace_mode: true` for canvas tools. Signed-in sessions only (an API key is refused with 403). Returns the same `websocket_ticket`. Retained for API clients — Trinity's own UI no longer calls it |
 | `/api/agents/{name}/voice/stop` | POST | End session; returns transcript and cost. Retained; the Workspace call closes on the socket instead |
 | `/api/agents/{name}/voice/status` | GET | Get current session state. Retained |
@@ -194,7 +215,7 @@ A ticket works once, for the call it was issued for, by the account that started
 
 ## Limitations
 
-- Voice is available only to signed-in platform users, in the Workspace (not public links, and not to external clients signed in with an email code).
+- Voice and Direct calls are available only to signed-in platform users, in the Workspace (not public links, and not to external clients signed in with an email code).
 - After Trinity is updated, reload any open Workspace tab before starting a voice call; a tab from before the update says "Voice was updated. Reload this page, then start a new call." Administrators should apply their usual session invalidation and log-retention procedures when updating.
 - Maximum duration: 30 minutes in the Workspace (configurable). The call ends with a spoken and written notice.
 - The transcript appears in the chat when the call ends. It is saved turn by turn on the server, so a dropped connection or a restart mid-call loses nothing already said.

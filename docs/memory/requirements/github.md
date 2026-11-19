@@ -999,4 +999,19 @@
 - **Flow**: `docs/memory/feature-flows/git-sync-health.md`
 - **GitHub Issue**: abilityai/trinity-enterprise#706, abilityai/trinity-enterprise#707
 
+### 11.20 Repo-Scoped Token Seam (trinity-enterprise#1277)
+- **Status**: ✅ Implemented (seam only; no call site uses it yet)
+- **Priority**: P1
+- **Description**: An open-core seam through which a registered provider can supply a short-lived GitHub token scoped to one repository. With no provider registered, resolution is PAT-only and unchanged.
+- **Requirements**:
+  - **FR-1 — Seam**: `services/github_token_provider.py`. `register_provider(provider)`; `await provider.token_for_repo(repo, permissions=None)` returns a `RepoToken(token, expires_at)`, or `None` when the provider does not cover the repo.
+  - **FR-2 — Per-operation resolver**: `await settings_service.resolve_github_token(repo, agent_name, owner_id, permissions) -> (token, tier, expires_at)`. Order: `per_agent` PAT, `per_user` PAT, provider (`app`), `global` PAT, `none`. PAT tiers return `expires_at = None`.
+  - **FR-3 — Separate from the create path**: `resolve_github_pat`, `resolve_github_pat_candidates` and `get_github_pat_for_agent` never consult the provider. Their answers are persisted or baked into a container environment, and an `app` token expires within the hour.
+  - **FR-4 — No PAT fallback on failure**: when the provider covers the repo and cannot produce a token it raises `GithubTokenUnavailable`, and so does the resolver. The platform PAT is used only when the provider answers "not covered".
+  - **FR-5 — Repo form**: only `owner/repo` reaches the provider, with a trailing `.git` removed. A URL, a third segment or a `.`/`..` segment skips the provider tier.
+  - **FR-6 — Credential setting**: the provider's credential document, `github_app_credentials`, is a member of `SECRET_SETTING_KEYS`: encrypted at rest, refused in cleartext by the sink guard, included in key rotation.
+  - **FR-7 — Scrubbers**: installation tokens (`ghs_<appid>_<JWT>`, about 390 characters, containing `.`, `-`, `_`) are redacted whole by `utils/credential_sanitizer.py` (backend and agent-server copies), `src/frontend/src/utils/scrub.js` and `components/reports/reportSummary.js`.
+- **Tests**: `tests/unit/test_ent1277_github_token_resolver.py`, `tests/unit/test_credential_sanitizer_{backend,agent}.py`, `tests/unit/test_ec_input_hardening_properties.py`, `src/frontend/tests/unit/reportSummary.spec.js`
+- **GitHub Issue**: abilityai/trinity-enterprise#1277
+
 ---

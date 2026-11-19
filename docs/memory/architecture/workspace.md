@@ -62,7 +62,7 @@ either a password or the email login would admit it — email login on, the poli
 allow-listed; an allow-list row alone is not an account) gets no portal session: after its code verifies, `/auth/verify` answers
 409 `platform_login_required`, and the Workspace sends it to `/login` with a return path. Every
 platform login (`auth._finalizeLogin`) ends a leftover Workspace client sign-in, since `authHeader`
-prefers a held portal token. Detail: [workspace-only-role.md](../feature-flows/workspace-only-role.md). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
+prefers a held portal token. **Nor is it a door for a deactivated account (trinity-enterprise#1258).** A portal session carries an email and no account, so `users.suspended_at` (#995) is read explicitly: `service.email_account_suspended` refuses the three mint paths (inside `email_has_access`, and first in `/auth/request` and `/auth/verify`), and `portal_auth._reject_if_blocked` — the check every `decode_portal_session` consumer makes — refuses a live session on its next request. Suspension wins over a share; fail-closed. Detail: [workspace-only-role.md](../feature-flows/workspace-only-role.md). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
 reads (`WORKSPACE_WS_EVENT_TYPES` / `_FIELDS`, `architecture/integrations.md`). An agent whose owner
 is Workspace-only is refused at the rooms door.
 
@@ -1032,6 +1032,17 @@ Requirement §5.39 of `core-agent.md`; flow in `workspace-suggestions.md`.
 ask table (Action), the portal messages and addressed deliverables (Unread, All),
 and the #557 read cursor. It adds **no table, no store and no router**. Requirement
 §5.40 of `core-agent.md`; flow in `feature-flows/workspace-inbox.md`.
+
+**One seam from the ask card back to the Inbox: `notifyAnswered`.** A row leaves a tab
+visit only as a ghost (principle 5), with one exception: the reader's own confirmed answer
+crosses its row off Action and opens the next ask. The card tells the Inbox through a
+**function prop** handed down the pane (`PortalInbox.onAnswered` → `PortalInboxPane` →
+`PortalAsks` → `PortalCredentialField`), called on the answer's success path only. It is not
+an emit, because the pane is keyed by the item and an emit from a card unmounted
+mid-request is dropped; and it is not read off the data, because an ask a poll brings back
+ended must keep its ghost. The timing and the selection live in the container, the rules
+(`nextPendingAsk`, `dropFromVisit`, `answeredAnnouncement`) in `portalInbox.js`; still no
+store. A surface that passes the prop also takes over the "Sent" confirmation.
 
 **Unread is the #557 cursor, generalised to deliverables.** `client_portal/db.py`
 holds ONE fragment, `_UNREAD_ARRIVALS`, a `UNION ALL` of two arms that share the

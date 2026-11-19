@@ -2203,7 +2203,8 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   | `agent.task.*` event dispatch | the finished row's depth + 1 | unchanged; still a hop |
 
   Before #4357 a wake was stamped one hop deeper than the run that ended, and its next delegation counted that wake row, so every delegate→wake round added two and an orchestrator working through wakes was refused after about four rounds. A chain of hops from turns that are still running grows by one per hop and is refused at `max + 1` exactly as before.
-- **Wake budget (#4357)**: depth no longer bounds how many wakes follow one another, so a per-pair hourly budget does. Ops setting `caller_wake_max_per_hour` (**default 120**, validated 0–10000, `0` or less = unlimited; resolved `system_settings` row → env `CALLER_WAKE_MAX_PER_HOUR` → default) caps the wakes one callee's ended runs may send one delegator per one-hour window (Redis `INCR` + `EXPIRE NX`, key `trinity:wake_fires:{callee}:{caller}`, the event-budget shape below). Only a wake about to be dispatched spends a unit; a wake collapsed into the 15-second per-caller window spends nothing. A wake past the budget is skipped and audited `skipped_budget`, the delegator gets one notification per window, and the ending stays readable through `get_execution_result`. Fails open when Redis is unavailable.
+- **Wake budget (#4357)**: depth no longer bounds how many wakes follow one another, so a per-pair hourly budget does. Ops setting `caller_wake_max_per_hour` (**default 120**, validated 0–10000, `0` or less = unlimited; resolved `system_settings` row → env `CALLER_WAKE_MAX_PER_HOUR` → default) caps the wakes one callee's ended runs may send one delegator per one-hour window (Redis `INCR` + `EXPIRE NX`, key `trinity:wake_fires:{callee}:{caller}`, the event-budget shape below). Only a wake about to be dispatched spends a unit; a wake collapsed into the 15-second per-caller window spends nothing. A wake past the budget is skipped and audited `skipped_budget`, the delegator gets one notification per window, and the ending stays readable through `get_execution_result`. Fails open when Redis is unavailable. The budget is per pair, so it does not bound a chain spread across many callees; the window below bounds a sweep.
+- **Window collisions are parked, never dropped (#4536)**: the 15-second per-caller window (`caller_wake:{caller}:{bucket}`) is held while its wake runs and **released when the wake ends**, so an ending after a finished wake wakes at once. An ending that ended at or before the claim of the wake still running collapses into it (that wake's `list_recent_executions` shows it), so a cleanup sweep inside one window is one wake. An ending after the claim that lands while the wake still runs is parked in Redis (`trinity:wake_missed:{caller}`, latest wins, 24 h TTL, audited `parked` once per ending) and delivered once when that wake ends, on the follow-on key `caller_wake:{caller}:after:{wake_id}`, which is released when the follow-on ends. Two drains claim that key: the wake row's own terminal (reached by every terminal writer, so a restart mid-turn still drains) and the holder after it returns or raises. A holder cancelled by a backend stop, or closed with its loop, leaves the marker for the wake row's terminal. Bound: one running wake plus one pending per caller. Redis trouble on the park does not raise and is audited `skipped_window`. Residual: a backend restart mid-wake plus an ending parked in the seconds after that wake's terminal drained is delivered by the caller's next wake end, or not at all if none comes within 24 h.
 - **Named residuals** (the guarantee holds for a call made with an agent-scoped credential while the calling agent has a running execution): **(a)** a non-agent credential held by an agent (a hand-pasted user-scoped key, detected by #1854) resolves to the human owner and counts as a root; **(b)** agent-key calls with no running row (a web-terminal session, a spawned background process, an orphan after its row went terminal) count as depth 1, or max+1 over any other running rows. An exact parent link needs a platform-injected execution id (#2392).
 - **New roots closed (#2973)**: four agent-initiated paths inherit the caller's depth instead of starting at 0, each refused at the max with the same 403 contract (mapped by an app-level exception handler, `error_handlers.inter_agent_depth_exceeded`):
   - **Loops** — `POST /api/agents/{name}/loops` computes the depth at start and persists it on `agent_loops.chain_depth`; every iteration row carries it, because later iterations run after the starter's turn has ended.
@@ -2656,6 +2657,20 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   an `operator_resume_dispatch` audit entry (ent#329). An absent or false
   `resume_requested` says only "Sent." — reading `null` as "started" would be
   the over-claim ent#430 spent a blocker removing.
+  **An agent that is not running also gets only "Sent."** (#4502):
+  `resume_requested` says a wake was
+  requested, not that it could be delivered, and the response is projected
+  before the dispatch learns the agent is stopped. So the card re-reads the
+  roster after such an answer and keeps "is picking this up" only when the
+  agent's `availability` is not `stopped` / `unavailable` (and the row does not
+  already say `wake_state: pending`); `unknown` — Docker could not be asked —
+  keeps it, as the dispatch itself still tries. Nothing is said while the read
+  is out, and a read that fails or takes longer than 1.5 s says only "Sent.":
+  the roster in hand is from page load, so it is not evidence the agent still
+  runs. The line is drawn only where the card outlives the answer — a project's
+  "Needs you" card. The Inbox pane shows none (it opens the next ask, §5.40),
+  and the tile in a chat never did: it becomes its history row, which is the
+  confirmation there.
 - The confirmation cannot live on the ask row, because answering removes it.
   `PortalAsks.visible` therefore also stays true while a confirmation is up —
   gating on `items.length` alone unmounted the surface at the same instant the
@@ -3240,9 +3255,10 @@ to localStorage in the clear.
 - **AC-1 — curation is a policy dimension on the ONE catalog**: `workspace` +
   `workspace_tier` are appended to `ModelEntry` (`services/model_catalog.py`,
   §47.2 in `public-access.md`), never a second hand-typed list — the drift the
-  #2086 registry exists to prevent. Three entries carry it: `claude-opus-5`
-  ("Most capable"), `claude-sonnet-5` ("Balanced — fast and smart"),
-  `claude-haiku-4-5-20251001` ("Fastest"). Fable 5 is out (its `note` also reads
+  #2086 registry exists to prevent. Three entries carry it, one per tier, and
+  the id behind a tier moves with the lineup: today `claude-opus-5-5`
+  ("Most capable"), `claude-sonnet-5-5` ("Balanced — fast and smart"),
+  `claude-haiku-5-5` ("Fastest"). Fable 5 is out (its `note` also reads
   "Most capable"; Opus-vs-Fable is an operator distinction), and every "Legacy"
   entry is out — a client-facing surface offering "Claude Opus 4.6 — Legacy" *is*
   the combobox this reacts against. Two import-time assertions make the
@@ -3976,15 +3992,27 @@ to localStorage in the clear.
   read from that, never parsed out of the body (an agent reply that begins "**Finished**" is
   not a run outcome).
 - **The pane (AC 3)**: an ask renders the existing ask card for that one ask (select-option,
-  note, Send — never a one-tap Approve) and stays selected after an answer, shown ended in
-  place. A chat renders its newest arrivals (from the first unread message) and its
+  note, Send — never a one-tap Approve). **Answer, then next**: once the server confirms the
+  reader's OWN answer given in the pane (a typed answer, an approval, a one-click gate
+  Approve / Reject, "Got it", a credential), the row holds its ended badge for a short beat,
+  the next pending ask in the visible order opens (the one below, else the one above; ended
+  rows are skipped; `?item=` is replaced, never pushed) and the row collapses out of the list
+  — about 350 ms in all, at once under `prefers-reduced-motion`. After the last one the pane
+  says "All caught up" with a next action; a `?from=` filter the reader's own answers emptied
+  is kept, with "Show all agents". On All the row stays (it is a member for 7 days) and only
+  the selection moves on. An ask that ends any other way — another person's answer, an
+  expiry, a withdrawal, the reader's own answer from another tab, a Dismiss (which keeps its
+  Undo), a failed answer — stays selected, shown ended in place. For 300 ms after the next
+  ask opens this way its answer controls ignore input, so a late second click cannot answer
+  an ask the reader has not seen. A chat renders its newest arrivals (from the first unread message) and its
   deliverables through `ReportRenderer` with the summary fallback. Opening a chat row (or
   arriving on its `?item=` deep link) marks it read only AFTER the pane has rendered it —
   history, deliverables and every deliverable payload on screen (§3g S5, D-3); a failed load
   leaves it unread, a failed write says so in the pane, and the pane's **Mark read** (shown
   while the chat has new messages) reads it on demand. The row keeps its place, drawn read, for the rest of the tab visit (§3g S1: a row that
   leaves any tab stays as a ghost — a chat drawn read, an ask drawn ended — and a poll never
-  re-sorts; leaving the tab, clicking it again or a completed Mark all read starts a new visit). **Open
+  re-sorts; leaving the tab, clicking it again or a completed Mark all read starts a new visit; the
+  one exception is the reader's own answer in Action, above, which removes its row). **Open
   in chat** / **Reply in chat** open the chat at the first arrival (`?anchor=`), with the
   composer focused for Reply (A2 — no composer in the pane). **Reply to one message** works
   through both doors (ent#738): each agent message in the pane, and each persisted agent

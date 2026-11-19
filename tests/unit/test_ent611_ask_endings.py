@@ -820,7 +820,8 @@ class TestWakeObserverRouting:
         assert resume == [] and len(ending) == 1
         got_rows, kw = ending[0]
         assert [r["request_id"] for r in got_rows] == ["e1", "e2"]
-        assert kw == {"disposition": disposition, "disposed_by_email": None, "reason": "r", "batch_id": "b-1"}
+        assert kw == {"disposition": disposition, "disposed_by_email": None, "disposed_by_id": None,
+                      "reason": "r", "batch_id": "b-1"}
 
     def test_an_expiry_wakes_nobody(self, monkeypatch):
         """abilityai/trinity-enterprise#1108 (merge-train ruling): the sweep
@@ -1076,7 +1077,8 @@ class TestEndingRoutes:
 
     def test_bulk_cancel_that_ends_nothing_has_no_batch(self, routes):
         res = routes.client.post("/api/operator-queue/bulk-cancel", json={"ids": ["no-such-uuid"]})
-        assert res.json() == {"cancelled": 0, "skipped": 1, "batch_id": None}
+        # trinity-enterprise#1096 (R6): the fenced rows among the skipped
+        assert res.json() == {"cancelled": 0, "skipped": 1, "batch_id": None, "skipped_fenced": 0}
 
 
 class TestTheWakeGetsOnlyWhatEnded:
