@@ -1,21 +1,97 @@
 <template>
-  <!-- Launcher: the same corner the help button uses -->
+  <!-- A first visit: the assistant says hello beside its button, so nobody has to guess what the circle is -->
+  <div
+    v-if="store.peek && !isOpen && !firstRun.overlayOpen"
+    class="assistant-peek fixed z-50 bottom-24 left-4 md:bottom-auto md:top-[4.25rem] md:left-2 max-w-[250px] flex items-start gap-1 rounded-2xl rounded-bl-sm md:rounded-bl-2xl md:rounded-tl-sm bg-action-primary-600 text-white shadow-xl shadow-action-primary-600/30"
+    data-testid="assistant-peek"
+  >
+    <button type="button" class="flex-1 text-left text-[13.5px] leading-snug pl-3.5 py-2.5 focus:outline-none focus-visible:underline" data-testid="assistant-peek-open" @click="open()">
+      Hi, I'm your Trinity assistant. Want a hand getting an agent working for you?
+    </button>
+    <button
+      type="button"
+      class="w-7 h-7 mt-1 mr-1 flex-none rounded-full text-white/80 hover:text-white hover:bg-white/15 flex items-center justify-center"
+      aria-label="Not now"
+      data-testid="assistant-peek-close"
+      @click="store.dismissPeek()"
+    >
+      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18L18 6M6 6l12 12" /></svg>
+    </button>
+  </div>
+
+  <!--
+    Collapsed: a slim rail down the left edge of every page. The page is laid
+    out beside it (App.vue pads for it), so it never covers anything. Its top
+    corner belongs to the top bar: the assistant's button is the logo there,
+    with "Trinity" beside it, open or collapsed. On a phone there is no room
+    for a rail and the button floats in the bottom-left corner instead.
+  -->
+  <div
+    v-if="!isOpen"
+    class="assistant-corner hidden md:block fixed top-0 left-0 z-40 w-12 h-16 bg-white dark:bg-gray-800 shadow dark:shadow-gray-900"
+    aria-hidden="true"
+  ></div>
+  <!-- One "Trinity" for both states: on opening it glides up and turns white
+       into the header's title line instead of being swapped for another. -->
+  <router-link
+    to="/"
+    class="hidden md:flex fixed top-0 left-[3.25rem] z-50 h-16 items-center text-xl font-bold leading-tight hover:opacity-80 transition-[transform,color,opacity] duration-300 ease-out motion-reduce:transition-none"
+    :class="isOpen ? 'text-white -translate-y-[9px]' : 'text-gray-900 dark:text-white'"
+    data-testid="assistant-wordmark"
+  >Trinity</router-link>
+  <div
+    v-if="!isOpen"
+    class="hidden md:flex fixed top-16 bottom-0 left-0 z-40 w-12 flex-col items-center pt-3 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-750"
+    data-testid="assistant-rail"
+  >
+    <button
+      type="button"
+      class="w-8 h-8 rounded-md flex items-center justify-center text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-750 focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500"
+      aria-label="Expand the Trinity assistant"
+      :title="`Open the assistant (${toggleKeys})`"
+      data-testid="assistant-expand"
+      @click="open()"
+    >
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 5l7 7-7 7M5 5l7 7-7 7" /></svg>
+    </button>
+    <!-- Written down the rail, so the strip says what it is without being opened. -->
+    <button
+      type="button"
+      class="assistant-rail-label mt-3 flex-1 min-h-0 w-full text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 hover:text-action-primary-700 dark:hover:text-action-primary-400 focus:outline-none"
+      tabindex="-1"
+      aria-hidden="true"
+      @click="open()"
+    >Assistant</button>
+  </div>
+
   <button
-    v-if="!isOpen && !hideLauncher"
     type="button"
     data-testid="assistant-launcher"
-    class="fixed bottom-6 right-6 w-14 h-14 bg-action-primary-600 hover:bg-action-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-transform hover:scale-105 motion-reduce:transition-none motion-reduce:hover:scale-100 focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2 dark:focus:ring-offset-gray-900 z-50"
-    :aria-label="store.unread ? 'Open the Trinity assistant: it has an answer for you' : busy ? 'Open the Trinity assistant: it is working' : 'Open the Trinity assistant'"
-    @click="open"
+    :aria-expanded="isOpen ? 'true' : 'false'"
+    class="assistant-orb fixed z-50 bottom-5 left-4 w-14 h-14 md:bottom-auto md:top-3.5 md:left-1.5 md:w-9 md:h-9 bg-gradient-to-b from-action-primary-500 to-action-primary-700 hover:from-action-primary-500 hover:to-action-primary-600 text-white rounded-full shadow-xl md:shadow-md shadow-action-primary-600/40 ring-1 ring-inset flex items-center justify-center transition-transform hover:scale-105 active:scale-100 motion-reduce:transition-none motion-reduce:hover:scale-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900"
+    :class="[isOpen ? 'ring-white/50' : 'ring-white/25', { 'max-md:hidden': hideLauncher || isOpen }]"
+    :aria-label="isOpen ? 'Collapse the Trinity assistant' : store.unread ? 'Open the Trinity assistant: it has an answer for you' : busy ? 'Open the Trinity assistant: it is working' : 'Open the Trinity assistant'"
+    @click="isOpen ? close() : open()"
   >
+    <!-- Depth: light from above, and a soft shadow on the page below it. -->
+    <span class="absolute inset-x-2 top-1 h-1/2 rounded-full bg-gradient-to-b from-white/30 to-transparent pointer-events-none" aria-hidden="true"></span>
+    <span class="assistant-orb-ground md:hidden" aria-hidden="true"></span>
+    <!-- Now and then a ripple leaves it; sooner when there is something to read. -->
+    <span
+      v-if="!busy && !isOpen"
+      class="assistant-halo"
+      :class="{ eager: store.unread > 0 }"
+      data-testid="assistant-launcher-halo"
+      aria-hidden="true"
+    ></span>
     <!-- Working while closed: a slow ring. An answer waiting: a count. -->
     <span
-      v-if="busy && !store.unread"
+      v-if="busy && !store.unread && !isOpen"
       class="absolute inset-0 rounded-full ring-2 ring-action-primary-400 animate-ping motion-reduce:animate-none"
       data-testid="assistant-launcher-busy"
       aria-hidden="true"
     ></span>
-    <img src="../../assets/trinity-logo-white.svg" alt="" class="w-7 h-7" />
+    <img src="../../assets/trinity-logo-white.svg" alt="" class="relative w-8 h-8 md:w-6 md:h-6 drop-shadow" />
     <span
       v-if="store.unread"
       class="absolute -top-1 -right-1 min-w-5 h-5 px-1 rounded-full bg-status-danger-600 text-white text-[11px] font-bold tabular-nums flex items-center justify-center ring-2 ring-white dark:ring-gray-900"
@@ -24,23 +100,41 @@
     >{{ store.unread }}</span>
   </button>
 
+  <Transition name="assistant-dock">
   <section
     v-if="isOpen"
     ref="panelEl"
     data-testid="assistant-panel"
-    class="fixed top-20 bottom-6 right-6 w-[27rem] max-w-[calc(100vw-2rem)] bg-white dark:bg-gray-800 rounded-xl shadow-2xl flex flex-col z-50 border border-gray-200 dark:border-gray-700 overflow-hidden"
-    role="dialog"
+    class="assistant-dock fixed inset-y-0 left-0 z-40 w-full md:w-[var(--assistant-w,24rem)] max-w-full bg-white dark:bg-gray-800 flex flex-col rounded-r-2xl border-r-[3px] border-gray-300 dark:border-gray-600 shadow-2xl overflow-hidden"
+    role="complementary"
     aria-label="Trinity assistant"
-    @keydown.escape="close"
+    @keydown.escape="wide || close()"
   >
-    <!-- Header -->
-    <header class="flex items-center gap-2.5 pl-4 pr-2 py-3 bg-action-primary-600 text-white shrink-0">
-      <span class="w-8 h-8 rounded-full bg-white/15 flex items-center justify-center flex-none">
-        <img src="../../assets/trinity-logo-white.svg" alt="" class="w-5 h-5" />
-      </span>
+    <!-- Its right edge can be dragged: the panel is as wide as the person wants it. -->
+    <div
+      class="hidden md:block absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-action-primary-500/40 focus:outline-none focus-visible:bg-action-primary-500/60 transition-colors"
+      :class="{ 'bg-action-primary-500/60': resizing }"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the assistant"
+      :aria-valuenow="width"
+      :aria-valuemin="MIN_W"
+      :aria-valuemax="maxWidth()"
+      tabindex="0"
+      title="Drag to resize. Double-click for the usual width."
+      data-testid="assistant-resize"
+      @pointerdown="startResize"
+      @dblclick="setWidth(DEFAULT_W, true)"
+      @keydown.left.prevent="setWidth(width - 24, true)"
+      @keydown.right.prevent="setWidth(width + 24, true)"
+    ></div>
+
+    <!-- Header. The button at its left is the one the collapsed rail shows, in the same place. -->
+    <header class="flex items-center gap-2.5 pl-4 md:pl-[3.25rem] pr-2 h-16 bg-action-primary-600 text-white shrink-0">
       <div class="flex-1 min-w-0">
-        <p class="flex items-center gap-1.5 text-[15px] font-semibold leading-tight">
-          Trinity
+        <p class="flex items-center gap-1.5 text-xl font-bold leading-tight">
+          <!-- Held open for the gliding wordmark above on md+; shown as is on a phone. -->
+          <span class="md:invisible" data-testid="assistant-title">Trinity</span>
           <span v-if="store.subscribed" class="px-1.5 py-0.5 text-[10px] font-bold leading-none rounded bg-white/20">PRO</span>
         </p>
         <p class="text-[12.5px] text-white/90 truncate" data-testid="assistant-plan">{{ store.planLine }}</p>
@@ -59,11 +153,89 @@
         type="button"
         class="w-9 h-9 rounded-lg text-white/90 hover:text-white hover:bg-white/10 flex items-center justify-center"
         aria-label="Close the assistant"
+        title="Collapse to the side"
         @click="close"
       >
-        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18L18 6M6 6l12 12" /></svg>
+        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 19l-7-7 7-7M19 19l-7-7 7-7" /></svg>
       </button>
     </header>
+
+    <!--
+      Getting started: the same server-derived steps the systems rail shows where
+      there is no assistant (stores/onboarding.js). One quiet line that says what
+      is next; it opens into the list. A step added to the server's catalogue
+      shows here with nothing changed on this side. Gone when all are done or
+      the person has said not to show it.
+    -->
+    <section
+      v-if="setup.visible"
+      class="shrink-0 border-b border-action-primary-200 dark:border-action-primary-500/40 bg-action-primary-50 dark:bg-action-primary-500/16 text-action-primary-700 dark:text-action-primary-200"
+      data-testid="assistant-setup"
+    >
+      <button
+        type="button"
+        class="w-full flex items-center gap-2 px-4 py-2 text-left text-[12.5px] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-action-primary-500"
+        :aria-expanded="setupOpen ? 'true' : 'false'"
+        :aria-label="`Getting started: ${setup.completedCount} of ${setup.totalCount} done.${nextStep ? ' Next: ' + nextStep.title : ''}`"
+        data-testid="assistant-setup-toggle"
+        @click="toggleSetup"
+      >
+        <span class="font-semibold flex-none">Getting started</span>
+        <!-- One mark per step, so the length of the road is seen at a glance. -->
+        <span class="flex items-center gap-1 flex-none" aria-hidden="true">
+          <span
+            v-for="i in setup.items"
+            :key="i.key"
+            class="w-1.5 h-1.5 rounded-full"
+            :class="i.done ? 'bg-status-success-500' : 'bg-current opacity-30'"
+          ></span>
+        </span>
+        <span class="flex-none tabular-nums opacity-80">{{ setup.completedCount }} of {{ setup.totalCount }}</span>
+        <span v-if="!setupOpen && nextStep" class="min-w-0 truncate opacity-80">· Next: {{ nextStep.title }}</span>
+        <svg
+          class="ml-auto w-3.5 h-3.5 flex-none transition-transform motion-reduce:transition-none"
+          :class="setupOpen ? 'rotate-180' : ''"
+          fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" aria-hidden="true"
+        ><path d="M19 9l-7 7-7-7" /></svg>
+      </button>
+
+      <div v-if="setupOpen" class="px-4 pb-3 space-y-2.5">
+        <ul class="space-y-2">
+          <li
+            v-for="i in setup.items"
+            :key="i.key"
+            class="flex items-start gap-2 text-[13px]"
+            :data-testid="`assistant-setup-item-${i.key}`"
+            :data-done="i.done ? 'true' : 'false'"
+          >
+            <span
+              class="flex-none mt-0.5 w-4 h-4 rounded-full flex items-center justify-center"
+              :class="i.done ? 'bg-status-success-500 text-white' : 'border border-current opacity-50'"
+              aria-hidden="true"
+            >
+              <svg v-if="i.done" class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" /></svg>
+            </span>
+            <div class="min-w-0 flex-1">
+              <p :class="i.done ? 'line-through opacity-60' : 'font-medium'">
+                {{ i.title }}<span v-if="i.done" class="sr-only"> (done)</span>
+              </p>
+              <!-- Only the next step explains itself and offers a hand: one thing to do, not a wall of buttons. -->
+              <template v-if="nextStep && i.key === nextStep.key">
+                <p v-if="i.description" class="text-[12.5px] opacity-80 mt-0.5">{{ i.description }}</p>
+                <BaseButton size="sm" class="mt-1.5" :disabled="store.sending" data-testid="assistant-setup-help" @click="helpWith(i)">Do this with me</BaseButton>
+              </template>
+            </div>
+          </li>
+        </ul>
+        <button
+          type="button"
+          class="text-[12px] underline opacity-70 hover:opacity-100 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500"
+          title="Hides these steps for good: they do not come back"
+          data-testid="assistant-setup-dismiss"
+          @click="setup.dismiss()"
+        >Don't show this again</button>
+      </div>
+    </section>
 
     <!-- Two tabs: the assistant, and the documentation's Ask -->
     <div class="px-4 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0">
@@ -72,7 +244,7 @@
 
     <!-- Ask: free, always there, needs nothing -->
     <div v-show="tab === 'ask'" class="flex flex-col flex-1 min-h-0" data-testid="assistant-ask">
-      <HelpChatWidget embedded />
+      <HelpChatWidget embedded ask-only />
     </div>
 
     <template v-if="tab === 'trinity'">
@@ -92,17 +264,11 @@
         <div ref="messagesEl" class="flex-1 min-h-0 overflow-y-auto p-4 space-y-3 text-sm bg-gray-50 dark:bg-gray-900" aria-live="polite">
           <div v-if="store.messages.length === 0" class="space-y-3" data-testid="assistant-welcome">
             <p class="text-gray-900 dark:text-gray-100">
-              I can look at your agents and tell you what's going on, fix what I can, and build new agents with you. It works right away: there's nothing to set up.
+              I help you set Trinity up and get agents working for you: I build them with you, check on them and fix what I can.
             </p>
             <p class="text-[12.5px] text-gray-500 dark:text-gray-400">
-              Anything that switches something on or gives access, I'll ask you to confirm first.
+              Found a problem or have an idea? Tell me and I'll pass it to the Trinity team. Anything that switches something on or gives access, I ask you to confirm first.
             </p>
-            <div v-for="g in starters" :key="g.heading" class="space-y-1.5" data-testid="assistant-starters">
-              <p class="font-mono text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">{{ g.heading }}</p>
-              <div class="flex flex-wrap gap-2">
-                <BaseButton v-for="s in g.items" :key="s.label" variant="secondary" size="sm" @click="pick(s)">{{ s.label }}</BaseButton>
-              </div>
-            </div>
           </div>
 
           <template v-for="m in store.messages" :key="m.id">
@@ -111,11 +277,29 @@
               class="text-[12.5px] text-gray-500 dark:text-gray-400 text-center"
               data-testid="assistant-note"
             >{{ noteWords(m.content) }}</p>
-            <ChatBubble v-else-if="m.content" :role="m.role" :content="m.content" boxed />
+            <!-- Its replies keep a little space on the right, as the person's do on the left. -->
+            <div v-else-if="m.content" :class="m.role === 'user' ? '' : 'pr-6'">
+              <ChatBubble :role="m.role" :content="m.content" boxed />
+            </div>
 
+            <template v-for="c in m.cards || []" :key="c.id">
+            <!-- A question answered with a click (or by writing instead) -->
+            <div v-if="c.card.action === 'choice'" class="space-y-1.5" data-testid="assistant-choice">
+              <p class="font-medium text-gray-900 dark:text-gray-100">{{ c.card.question }}</p>
+              <div class="flex flex-wrap gap-2">
+                <BaseButton
+                  v-for="o in c.card.options"
+                  :key="o"
+                  size="sm"
+                  :variant="c.picked === o ? 'primary' : 'secondary'"
+                  :aria-pressed="c.picked === o"
+                  :disabled="store.sending || !['open', 'picked'].includes(c.state)"
+                  @click="store.answerChoice(m.id, c.id, o, route)"
+                >{{ o }}</BaseButton>
+              </div>
+            </div>
             <div
-              v-for="c in m.cards || []"
-              :key="c.id"
+              v-else
               data-testid="assistant-card"
               class="rounded-lg border p-3 space-y-2 border-action-primary-200 dark:border-action-primary-500/40 bg-action-primary-50 dark:bg-action-primary-500/16"
             >
@@ -137,6 +321,12 @@
                   </li>
                 </ul>
               </template>
+              <!-- A note to the Trinity team: all of what will be sent -->
+              <p
+                v-if="c.card.action === 'feedback' && c.card.details"
+                class="text-[12.5px] text-gray-900 dark:text-gray-100 whitespace-pre-wrap break-words max-h-40 overflow-y-auto"
+                data-testid="assistant-feedback"
+              >{{ c.card.details }}</p>
               <!-- A change that cannot be undone: exactly what will run, in the page's own words -->
               <dl v-if="c.card.action === 'tool'" class="text-[12.5px] text-gray-900 dark:text-gray-100 space-y-0.5" data-testid="assistant-tool">
                 <div v-for="d in toolWords(c.card).details" :key="d.key" class="flex gap-2">
@@ -166,12 +356,17 @@
                   <span>{{ c.progress || 'Starting' }}…</span>
                   <span class="tabular-nums flex-none">{{ elapsed(c.since) }}</span>
                 </p>
+                <!-- Their agents, their instance: on by default so nothing waits on a second click -->
+                <label v-if="c.card.action === 'job'" class="flex items-center gap-2 text-[12.5px] text-gray-900 dark:text-gray-100">
+                  <input v-model="c.auto" type="checkbox" class="rounded" data-testid="assistant-auto-create" />
+                  Create them here as soon as they're ready
+                </label>
               </div>
               <div v-else-if="c.state === 'open' || c.state === 'running'" class="flex flex-wrap gap-2 pt-1">
                 <BaseButton
                   size="sm"
                   :loading="c.state === 'running'"
-                  :loading-label="c.card.action === 'build' ? 'Building…' : 'Confirming…'"
+                  :loading-label="LOADING[c.card.action] || 'Confirming…'"
                   :disabled="store.sending"
                   @click="answer(m.id, c.id, true)"
                 >{{ CONFIRM[c.card.action] || 'Confirm' }}</BaseButton>
@@ -191,11 +386,22 @@
                 <span>{{ c.reason ? `${OUTCOME[c.state].words} ${c.reason}` : OUTCOME[c.state].words }}</span>
               </p>
             </div>
+            </template>
           </template>
+
+          <!-- What it can do, offered until the person has said something: also under a line it opened with -->
+          <div v-if="fresh && !store.sending" class="space-y-3">
+            <div v-for="g in starters" :key="g.heading" class="space-y-1.5" data-testid="assistant-starters">
+              <p class="font-mono text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">{{ g.heading }}</p>
+              <div class="flex flex-wrap gap-2">
+                <BaseButton v-for="s in g.items" :key="s.label" variant="secondary" size="sm" @click="pick(s)">{{ s.label }}</BaseButton>
+              </div>
+            </div>
+          </div>
 
           <!-- The turn in hand: what it said it would do, each step so far, and how long -->
           <div v-if="store.sending" class="space-y-1.5" data-testid="assistant-working">
-            <ChatBubble v-if="store.saying" role="assistant" :content="store.saying" boxed />
+            <div v-if="store.saying" class="pr-6"><ChatBubble role="assistant" :content="store.saying" boxed /></div>
             <ul v-if="store.steps.length" class="space-y-0.5 text-[12.5px] text-gray-600 dark:text-gray-300">
               <li v-if="store.steps.length > SHOWN_STEPS" class="text-gray-500 dark:text-gray-400">{{ store.steps.length - SHOWN_STEPS }} earlier steps</li>
               <li v-for="(step, i) in store.steps.slice(-SHOWN_STEPS)" :key="i" class="flex items-start gap-1.5">
@@ -278,11 +484,32 @@
               <input v-model="accepted" type="checkbox" class="mt-0.5 rounded" data-testid="assistant-terms" />
               <span>
                 I accept the
-                <a v-if="store.account.terms?.url" :href="store.account.terms.url" target="_blank" rel="noopener" class="underline text-action-primary-600 dark:text-action-primary-400">Trinity terms</a>
-                <template v-else>Trinity terms</template>
+                <a v-if="store.account.terms?.url" :href="store.account.terms.url" target="_blank" rel="noopener" class="underline text-action-primary-600 dark:text-action-primary-400" data-testid="assistant-full-terms-link">Trinity terms</a>
+                <button
+                  v-else
+                  type="button"
+                  class="underline text-action-primary-700 dark:text-action-primary-300"
+                  :aria-expanded="fullTermsOpen"
+                  data-testid="assistant-full-terms-link"
+                  @click.prevent="toggleFullTerms"
+                >Trinity terms</button>
                 <span class="text-gray-500 dark:text-gray-400"> (version {{ store.account.terms?.version }})</span>.
+                They turn on anonymous usage sharing (counts and versions only), which you can turn off in Settings.
               </span>
             </label>
+            <div
+              v-if="fullTermsOpen"
+              class="max-h-48 overflow-y-auto rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2"
+              data-testid="assistant-full-terms-text"
+            >
+              <InlineError v-if="store.termsError" :message="store.termsError" retryable @retry="store.readFullTerms()" />
+              <div
+                v-else-if="store.fullTermsText"
+                class="prose prose-sm dark:prose-invert max-w-none prose-headings:my-2 prose-p:my-1.5 prose-ul:my-1.5 prose-li:my-0 text-[12.5px]"
+                v-html="renderMarkdown(store.fullTermsText)"
+              ></div>
+              <p v-else class="text-[12.5px] text-gray-500 dark:text-gray-400 animate-pulse motion-reduce:animate-none">Loading the terms…</p>
+            </div>
             <div class="flex flex-wrap gap-2">
               <BaseButton type="submit" size="sm" :loading="store.account.busy" loading-label="Checking…">Continue</BaseButton>
               <BaseButton variant="ghost" size="sm" :disabled="store.account.busy" @click="store.backToEmail()">Use a different email</BaseButton>
@@ -308,7 +535,7 @@
           data-testid="assistant-terms-first"
         >
           <p class="text-[12.5px] text-gray-900 dark:text-gray-100">
-            To answer you, your messages and details of your agents are sent to Ability AI, the company behind Trinity. It's free to try, with no sign-up. By continuing you agree to the
+            To answer you, your messages and details of your agents are sent to Ability AI, the company behind Trinity, which also keeps what you tell it about your work so its help fits you. Agreeing also turns on anonymous usage sharing (counts and versions only; you can turn it off in Settings). It's free to try, with no sign-up. By continuing you agree to the
             <a
               v-if="store.status?.trial_terms?.url"
               :href="store.status.trial_terms.url"
@@ -347,11 +574,16 @@
           </BaseButton>
         </div>
 
-        <!-- Enter sends; Shift+Enter starts a new line -->
-        <form class="flex items-end gap-2 p-3 border-t border-gray-200 dark:border-gray-700 shrink-0" @submit.prevent="send(draft)">
+        <!-- It goes where the person goes: say what it is looking at, so "this agent" and "here" mean something. -->
+        <p class="flex items-center gap-1.5 px-3 pt-2 text-[12px] text-gray-500 dark:text-gray-400 border-t border-gray-200 dark:border-gray-700 shrink-0" data-testid="assistant-page">
+          <svg class="w-3.5 h-3.5 flex-none" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /></svg>
+          <span class="truncate">Looking at: {{ page.label }}</span>
+        </p>
+        <!-- Enter sends; Shift+Enter starts a new line. No button: the line under the box says so. -->
+        <form class="flex flex-col gap-1 px-3 pb-2 pt-2 shrink-0" @submit.prevent="send(draft)">
           <BaseTextarea
             v-model="draft"
-            class="flex-1 min-w-0"
+            class="w-full"
             :rows="3"
             aria-label="Message the assistant"
             placeholder="Ask, or tell Trinity what to do"
@@ -359,11 +591,14 @@
             data-testid="assistant-input"
             @keydown.enter.exact.prevent="send(draft)"
           />
-          <BaseButton type="submit" :disabled="store.sending || !draft.trim()">Send</BaseButton>
+          <p class="text-[11.5px] text-gray-500 dark:text-gray-400 truncate" data-testid="assistant-keys">
+            <kbd class="font-sans font-medium">Enter</kbd> to send<span class="hidden md:inline"> · <kbd class="font-sans font-medium">{{ toggleKeys }}</kbd> to hide or show</span>
+          </p>
         </form>
       </template>
     </template>
   </section>
+  </Transition>
 </template>
 
 <script setup>
@@ -377,6 +612,8 @@ import InlineError from '../InlineError.vue'
 import ChatBubble from '../chat/ChatBubble.vue'
 import HelpChatWidget from '../HelpChatWidget.vue'
 import { useAssistantStore } from '../../stores/assistant'
+import { useOnboardingStore } from '../../stores/onboarding'
+import { useFirstRunStore } from '../../stores/firstRun'
 import { toolWords } from '../../utils/assistantCards'
 import { describePage } from '../../utils/assistantContext'
 import { starterGroups } from '../../utils/assistantStarters'
@@ -398,13 +635,16 @@ const OUTCOME = Object.freeze({
   refused: { words: "That didn't work.", tone: 'text-status-danger-700 dark:text-status-danger-400', icon: 'M6 18L18 6M6 6l12 12' },
   unsure: { words: 'Not sure it all worked.', tone: 'text-status-warning-700 dark:text-status-warning-400', icon: 'M12 8v5M12 16.5h.01' },
 })
-const CONFIRM = Object.freeze({ build: 'Build', upgrade: 'Continue' })
-const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running' })
+const CONFIRM = Object.freeze({ build: 'Build', upgrade: 'Continue', feedback: 'Send' })
+const LOADING = Object.freeze({ build: 'Building…', feedback: 'Sending…' })
+const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running', feedback: 'For the Trinity team' })
 const SHOWN_STEPS = 4
 const FOLLOWED = ['job', 'run']
 // A followed card's heading follows what happened to it.
 const ENDED = Object.freeze({ done: 'Finished', refused: "Didn't finish", unsure: 'Still going' })
-const heading = (c) => (FOLLOWED.includes(c.card.action) && c.state !== 'making' && ENDED[c.state]) || HEADING[c.card.action] || 'Needs your OK'
+const BUILT = Object.freeze({ running: 'Creating', done: 'Created', refused: "Couldn't create", unsure: 'Partly created' })
+const heading = (c) => (FOLLOWED.includes(c.card.action) && c.state !== 'making' && ENDED[c.state])
+  || (c.card.action === 'build' && BUILT[c.state]) || HEADING[c.card.action] || 'Needs your OK'
 
 
 const route = useRoute()
@@ -416,10 +656,82 @@ const email = ref('')
 const code = ref('')
 const accepted = ref(false)
 const panelEl = ref(null)
+// Where the person is, in words: told to the assistant with every message, and shown above the box.
+const page = computed(() => describePage(route))
 const messagesEl = ref(null)
 
 // What the empty screen offers, for this page and this fleet.
-const starters = computed(() => starterGroups(describePage(route), store.fleet))
+const starters = computed(() => {
+  const groups = starterGroups(describePage(route), store.fleet, { known: Boolean(store.status?.profile_known) })
+  // Under its own hello there is one question to answer, not a menu: the rest comes once they have.
+  return store.messages.length === 1 && store.messages[0].local ? groups.slice(0, 1) : groups
+})
+
+// Nothing said by the person yet: the only messages, if any, are lines the assistant opened with.
+const fresh = computed(() => store.messages.every((m) => m.opener))
+
+// What the assistant opens with for someone it does not know: written here, sent nowhere.
+// The agents a new install comes with are examples, not theirs: a new person
+// is taken to an agent of their own.
+function hello() {
+  const examples = firstRun.seededAgents || []
+  const own = store.fleet.filter((a) => !examples.includes(a.name)).length
+  if (own) {
+    return `Hi, I'm Trinity's assistant 👋\n\nYou have ${own} ${own === 1 ? 'agent' : 'agents'} here. I can check how they're doing, fix what's failing, set them to run by themselves, or build the next one with you.\n\nTell me one thing about you first, so what I suggest fits your work.`
+  }
+  const shown = examples.length
+    ? `\n\nThe ${examples.length === 1 ? 'agent' : 'agents'} on the dashboard came with Trinity as ${examples.length === 1 ? 'an example' : 'examples'}.`
+    : ''
+  return `Hi, I'm Trinity's assistant 👋\n\nLet's get you **an agent of your own** working in a few minutes: tell me a little about your work, I'll suggest one, build it and run it once so you see what it produces.${shown}`
+}
+function startTalking() {
+  if (!isOpen.value || !store.status || store.status.profile_known || store.messages.length) return
+  store.welcome(hello())
+}
+
+// While the setup overlay has the screen the assistant stays out of its way,
+// and takes over when it closes: open beside the page where there is room,
+// a hello beside its button where there is not.
+const firstRun = useFirstRunStore()
+watch(() => firstRun.overlayOpen, (now, was) => {
+  if (now) {
+    if (isOpen.value) {
+      isOpen.value = false
+      store.setOpen(false)          // not remembered: the person did not choose this
+    }
+    return
+  }
+  if (!was) return
+  firstRun.fetchState(true)
+  let chosen = null
+  try {
+    chosen = localStorage.getItem(OPEN_KEY)
+  } catch { /* no choice known */ }
+  if (wide.value && chosen !== 'false') open({ quiet: true })
+  else store.peek = true
+})
+
+// Getting started. The steps and their ticks are the server's; this only
+// remembers whether the list is open (closed to begin with: one line, no more).
+const setup = useOnboardingStore()
+const SETUP_OPEN_KEY = 'trinity-assistant-setup-open'
+const setupOpen = ref(false)
+try {
+  setupOpen.value = localStorage.getItem(SETUP_OPEN_KEY) === 'true'
+} catch { /* closed */ }
+function toggleSetup() {
+  setupOpen.value = !setupOpen.value
+  try {
+    localStorage.setItem(SETUP_OPEN_KEY, String(setupOpen.value))
+  } catch { /* not remembered */ }
+}
+const nextStep = computed(() => setup.items.find((i) => !i.done) || null)
+// The assistant does the step with them, here, instead of sending them off to a page.
+function helpWith(step) {
+  setupOpen.value = false
+  tab.value = 'trinity'
+  send(`Help me with this getting-started step: "${step.title}".`)
+}
 
 // Nothing leaves this instance until someone here has agreed to the trial's terms.
 const needsAgreement = computed(() => Boolean(store.status) && !store.agreed)
@@ -428,6 +740,12 @@ const termsOpen = ref(false)
 function toggleTerms() {
   termsOpen.value = !termsOpen.value
   if (termsOpen.value) store.readTerms()
+}
+
+const fullTermsOpen = ref(false)
+function toggleFullTerms() {
+  fullTermsOpen.value = !fullTermsOpen.value
+  if (fullTermsOpen.value) store.readFullTerms()
 }
 
 // Something is going on that the person is waiting for.
@@ -460,20 +778,92 @@ const noteWords = (content) => String(content || '').split(/(?<=[.!?])\s/)[0]
 
 const focusInput = () => nextTick(() => panelEl.value?.querySelector('textarea[data-testid="assistant-input"]')?.focus())
 
-async function open() {
+// Whether the panel is open is the person's choice and is kept. With no choice
+// made yet it starts open where there is room for it beside the page.
+const OPEN_KEY = 'trinity-assistant-open'
+function rememberOpen(open) {
+  try {
+    localStorage.setItem(OPEN_KEY, String(open))
+  } catch { /* it simply starts collapsed next time */ }
+}
+// Wide enough for the page to sit beside the panel; narrower, the panel lies over it.
+const WIDE = '(min-width: 1280px)'
+const wide = ref(false)
+let wideQuery = null
+const onWide = (e) => { wide.value = e.matches }
+
+/** `quiet` opens it without taking the keyboard: the page did it, not the person. */
+async function open({ quiet = false } = {}) {
   isOpen.value = true
   store.setOpen(true)
-  focusInput()
+  if (!quiet) {
+    rememberOpen(true)
+    focusInput()
+  }
   // What the empty screen offers depends on the agents; reading them is local.
-  if (!store.messages.length) store.refreshFleet().catch(() => {})
+  setup.fetchChecklist(true)
+  const fleet = store.messages.length ? null : store.refreshFleet().catch(() => {})
   if (!store.status) await store.loadStatus()
-  focusInput()
+  await Promise.all([fleet, firstRun.fetchState()])     // which agents are the install's examples: read once, kept
+  startTalking()
+  if (!quiet) focusInput()
+}
+
+// Option+Z on a Mac, Alt+Z elsewhere, opens or collapses the panel from
+// anywhere, the message box included. Matched on the physical key: on a Mac
+// Option turns the letter into "Ω", so e.key never says "z".
+const isMac = /Mac|iPhone|iPad/i.test(navigator.userAgentData?.platform || navigator.platform || '')
+const toggleKeys = isMac ? '⌥Z' : 'Alt+Z'
+function onKey(e) {
+  if (e.code !== 'KeyZ' || !e.altKey) return
+  if (e.ctrlKey || e.metaKey || e.shiftKey || e.repeat || e.isComposing) return
+  if (document.querySelector('[aria-modal="true"]')) return       // a dialog has the keyboard
+  e.preventDefault()
+  isOpen.value ? close() : open()
 }
 
 function close() {
   isOpen.value = false
   store.setOpen(false)
+  rememberOpen(false)
 }
+
+// How wide the open panel is: the person's to choose, by dragging its edge, and
+// kept. The page beside it follows (App.vue pads by the same variable).
+const WIDTH_KEY = 'trinity-assistant-width'
+const DEFAULT_W = 384
+const MIN_W = 320
+const width = ref(DEFAULT_W)
+const resizing = ref(false)
+// Never so wide that the page beside it has no room left.
+const maxWidth = () => Math.max(MIN_W, Math.min(720, (window.innerWidth || 1280) - 560))
+function setWidth(px, keep = false) {
+  width.value = Math.round(Math.min(maxWidth(), Math.max(MIN_W, Number(px) || DEFAULT_W)))
+  document.documentElement.style.setProperty('--assistant-w', `${width.value}px`)
+  if (!keep) return
+  try {
+    localStorage.setItem(WIDTH_KEY, String(width.value))
+  } catch { /* the usual width next time */ }
+}
+function startResize(e) {
+  if (e.button !== 0) return
+  e.preventDefault()
+  resizing.value = true
+  store.resizing = true
+  const move = (ev) => setWidth(ev.clientX)
+  const up = () => {
+    resizing.value = false
+    store.resizing = false
+    setWidth(width.value, true)
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', up)
+    window.removeEventListener('pointercancel', up)
+  }
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', up)
+  window.addEventListener('pointercancel', up)
+}
+const onWindowResize = () => setWidth(width.value)
 
 function send(text) {
   const message = String(text || '').trim()
@@ -494,7 +884,45 @@ function answer(messageId, cardId, confirm) {
   store.answerCard(messageId, cardId, confirm, route)
 }
 
-onMounted(() => { if (!store.status) store.loadStatus() })
+let stopKeeping = null
+onMounted(() => {
+  if (!store.status) store.loadStatus()
+  setup.fetchChecklist()
+  store.restore(route)
+  stopKeeping = store.$subscribe(() => store.keep())
+  let savedWidth = null
+  try {
+    savedWidth = localStorage.getItem(WIDTH_KEY)
+  } catch { /* the usual width */ }
+  setWidth(savedWidth || DEFAULT_W)
+  window.addEventListener('resize', onWindowResize)
+  window.addEventListener('keydown', onKey)
+  wideQuery = typeof window.matchMedia === 'function' ? window.matchMedia(WIDE) : null
+  wide.value = Boolean(wideQuery?.matches)
+  wideQuery?.addEventListener?.('change', onWide)
+  let chosen = null
+  try {
+    chosen = localStorage.getItem(OPEN_KEY)
+  } catch { /* no choice known */ }
+  firstRun.fetchState()
+  if (wide.value && chosen !== 'false' && !firstRun.overlayOpen) open({ quiet: true })
+})
+onBeforeUnmount(() => {
+  stopKeeping?.()
+  wideQuery?.removeEventListener?.('change', onWide)
+  window.removeEventListener('resize', onWindowResize)
+  window.removeEventListener('keydown', onKey)
+  store.setOpen(false)
+})
+
+// What the assistant just did may have ticked a step: read them again when a turn ends.
+watch(() => store.sending, (on, was) => { if (was && !on) setup.fetchChecklist(true) })
+
+// A new conversation with someone it does not know starts the same way.
+watch(() => store.messages.length, (n) => { if (!n) startTalking() })
+
+// Moving about the app is a chance to hear of a next step, at most every ten minutes.
+watch(() => route.path, () => store.recheck())
 
 watch(() => store.account.step, (step) => {
   code.value = ''
@@ -509,3 +937,95 @@ watch(
   })
 )
 </script>
+
+<style scoped>
+/* The launcher sits a little above the page: a soft contact shadow under it. */
+.assistant-orb-ground {
+  position: absolute;
+  left: 15%;
+  right: 15%;
+  bottom: -9px;
+  height: 8px;
+  border-radius: 9999px;
+  background: theme('colors.action-primary.700 / 35%');
+  filter: blur(5px);
+  pointer-events: none;
+}
+/* The corner under the logo is part of the top bar: its shadow falls only below it. */
+.assistant-corner {
+  clip-path: inset(0 0 -8px 0);
+}
+/* The rail's name, read bottom to top like the spine of a book. */
+.assistant-rail-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  text-align: right;
+  padding-bottom: 4px;
+}
+/* The panel slides out of the edge it is docked to, and back into it. */
+.assistant-dock-enter-active {
+  transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.18s ease-out;
+}
+.assistant-dock-leave-active {
+  transition: transform 0.16s ease-in, opacity 0.16s ease-in;
+}
+.assistant-dock-enter-from,
+.assistant-dock-leave-to {
+  opacity: 0;
+  transform: translateX(-32px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .assistant-dock-enter-active,
+  .assistant-dock-leave-active { transition: opacity 0.1s linear; }
+  .assistant-dock-enter-from,
+  .assistant-dock-leave-to { transform: none; }
+}
+
+/* The button arrives: it grows from a point with a small overshoot, like a bubble surfacing. */
+.assistant-orb {
+  animation: assistant-orb-in 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;   /* backwards only: the hover lift keeps working after it */
+}
+@keyframes assistant-orb-in {
+  from { opacity: 0; transform: scale(0.3) translateY(12px); }
+  60% { opacity: 1; }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .assistant-orb { animation: none; }
+}
+
+/* The hello arrives a moment after the page, so it reads as something said. */
+.assistant-peek {
+  animation: assistant-peek 0.4s ease-out 1.2s both;
+}
+@keyframes assistant-peek {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .assistant-peek { animation: none; }
+}
+
+/* One slow ripple, then a long rest. Sooner when an answer is waiting. */
+.assistant-halo {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  border: 2px solid theme('colors.action-primary.400');
+  opacity: 0;
+  pointer-events: none;
+  animation: assistant-halo 14s ease-out infinite;
+}
+.assistant-halo.eager {
+  animation-duration: 4.5s;
+}
+@keyframes assistant-halo {
+  0% { transform: scale(1); opacity: 0; }
+  3% { opacity: 0.55; }
+  18% { transform: scale(1.6); opacity: 0; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .assistant-halo { animation: none; }
+}
+</style>

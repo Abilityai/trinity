@@ -11,8 +11,10 @@
  * fields that action takes, and every agent it names is one the page itself
  * read from the instance.
  *
- * Two cards are not in the catalog because the panel handles them itself:
- * `build` (a design the person approves) and `upgrade` (the subscription).
+ * Some cards are not in the catalog because the panel handles them itself:
+ * `build` (a design the person approves), `upgrade` (the subscription),
+ * `choice` (a question answered with a click) and `feedback` (a note to the
+ * makers of Trinity, sent on the person's click).
  */
 
 const enc = encodeURIComponent
@@ -191,6 +193,29 @@ export function validRun(raw, fleet) {
   return { action: 'run', agent: raw.agent, execution_id: raw.execution_id, title: String(raw.title ?? '').slice(0, 120) || 'A run' }
 }
 
+/** A question the person answers with a click: its words and two to five answers. */
+export function validChoice(raw) {
+  if (!raw || raw.action !== 'choice' || typeof raw.question !== 'string' || !raw.question.trim()) return null
+  const options = (Array.isArray(raw.options) ? raw.options : [])
+    .filter((o) => typeof o === 'string' && o.trim()).map((o) => o.trim().slice(0, 80)).slice(0, 5)
+  if (options.length < 2) return null
+  return { action: 'choice', question: raw.question.trim().slice(0, 200), options }
+}
+
+const FEEDBACK_KINDS = Object.freeze({ bug: 'Bug report', idea: 'Idea', feedback: 'Feedback' })
+
+/** A note to the makers of Trinity. The person sees all of it before it goes. */
+export function validFeedback(raw) {
+  if (!raw || raw.action !== 'feedback' || !Object.hasOwn(FEEDBACK_KINDS, raw.kind)) return null
+  if (typeof raw.summary !== 'string' || !raw.summary.trim()) return null
+  return {
+    action: 'feedback', kind: raw.kind, summary: raw.summary.trim().slice(0, 200),
+    details: String(raw.details ?? '').trim().slice(0, 4000),
+  }
+}
+
+export const feedbackKind = (card) => FEEDBACK_KINDS[card.kind] || 'Feedback'
+
 const TOOL_NAME = /^[a-z0-9_]{2,80}$/
 
 /**
@@ -235,6 +260,8 @@ export function acceptCards(raw, fleet) {
     else if (item?.action === 'tool') card = validTool(item)
     else if (item?.action === 'job') card = validJob(item)
     else if (item?.action === 'run') card = validRun(item, fleet)
+    else if (item?.action === 'choice') card = validChoice(item)
+    else if (item?.action === 'feedback') card = validFeedback(item)
     else if (item?.action === 'upgrade' && Object.keys(item).length === 1) card = { action: 'upgrade' }
     else card = validCard(item, fleet)
     const duplicate = card && cards.some((c) => JSON.stringify(c) === JSON.stringify(card))
@@ -246,6 +273,8 @@ export function acceptCards(raw, fleet) {
 export function cardLabel(card, fleet) {
   if (card.action === 'job') return `Making "${card.title}"`
   if (card.action === 'run') return `${card.title} on ${card.agent}`
+  if (card.action === 'choice') return card.question
+  if (card.action === 'feedback') return `Send ${feedbackKind(card).toLowerCase()}: ${card.summary}`
   if (card.action === 'build') return `Build "${card.design.title}"`
   if (card.action === 'upgrade') return 'Subscribe to Trinity Pro'
   if (card.action === 'tool') {
@@ -258,8 +287,10 @@ export function cardLabel(card, fleet) {
 
 /** The line under a card's title. Every change to an agent runs as the person. */
 export function cardNote(card) {
-  if (card.action === 'job') return "Each agent is made with the standard tools and checked. This takes a few minutes. Keep talking or close this panel: I'll come back when it's ready."
+  if (card.action === 'job') return "Each agent is made with the standard tools and checked. This takes a few minutes. Keep talking or close this panel: I'll come back when they're ready."
   if (card.action === 'run') return "Running on the agent. Keep talking or close this panel: I'll come back with the result."
+  if (card.action === 'choice') return ''
+  if (card.action === 'feedback') return 'Goes to the people who make Trinity, with the page you are on and your Trinity version. Nothing else is attached.'
   if (card.action === 'build') return 'Creates these agents on this instance, as you. Nothing is switched on.'
   if (card.action === 'tool') return 'This cannot be undone. It runs as you.'
   if (card.action === 'upgrade') return 'A larger allowance and bigger teams. You sign in with your email first.'

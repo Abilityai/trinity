@@ -17,22 +17,47 @@ const BUILD = Object.freeze({
   ],
 })
 
+// Asked first, of someone the assistant knows nothing about: one click, and
+// what it suggests from then on fits them.
+const ABOUT = Object.freeze({
+  heading: 'First, what describes you best?',
+  items: [
+    { label: 'Founder or owner', text: "I'm a founder or business owner." },
+    { label: 'Operations', text: 'I work in operations.' },
+    { label: 'Engineering', text: "I'm an engineer." },
+    { label: 'Sales or marketing', text: 'I work in sales or marketing.' },
+    { label: 'Just exploring', text: "I'm just exploring what Trinity can do." },
+  ],
+})
+
+const TELL = Object.freeze({
+  heading: 'Tell the Trinity team',
+  items: [
+    start('Report a problem…', "Something isn't working: "),
+    start('Suggest an idea…', "Here's an idea for Trinity: "),
+  ],
+})
+
 /**
  * @param {{ label: string, agent: string|null }} page - describePage(route)
  * @param {Array<{ name: string, status?: string }>} fleet
+ * @param {{ known?: boolean }} person - whether the assistant already knows who it is talking to
  */
-export function starterGroups(page, fleet) {
+export function starterGroups(page, fleet, person = {}) {
   const agents = (fleet || []).filter((a) => a?.name)
   const here = page?.agent && agents.some((a) => a.name === page.agent) ? page.agent : null
+  const about = person.known ? [] : [ABOUT]
 
   if (!agents.length) {
     return [
+      ...about,
       { heading: 'Start here', items: [ask('Build my first agent'), ...BUILD.items.slice(1)] },
       { heading: 'Find your way', items: [ask('How does Trinity work?'), ask('What do I still need to set up?')] },
+      TELL,
     ]
   }
 
-  const groups = []
+  const groups = [...about]
   if (here) {
     groups.push({
       heading: 'This agent',
@@ -66,5 +91,6 @@ export function starterGroups(page, fleet) {
     })
   }
   groups.push(here ? { ...BUILD, items: BUILD.items.slice(0, 1) } : BUILD)
+  groups.push(TELL)
   return groups
 }

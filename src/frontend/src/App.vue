@@ -1,5 +1,17 @@
 <template>
-  <div id="app" class="min-h-screen bg-gray-100 dark:bg-gray-900">
+  <!-- The assistant is docked on the left of every page: a slim rail when
+       collapsed, a panel when open. The page is padded to sit beside it, so it
+       covers nothing; below the `xl` width the open panel lies over the page
+       instead of squeezing it. The panel's width is the person's
+       (dragged at its edge); `--assistant-w` carries it here. -->
+  <div
+    id="app"
+    class="min-h-screen bg-gray-100 dark:bg-gray-900 transition-[padding] duration-200 motion-reduce:transition-none"
+    :class="[
+      showAssistant ? (assistantStore.panelOpen ? 'md:pl-12 xl:pl-[var(--assistant-w,24rem)]' : 'md:pl-12') : '',
+      { '!transition-none select-none': assistantStore.resizing },
+    ]"
+  >
     <!-- AgentDetail is cached across navigation. #2198 re-examined whether it
          still should be, because the stated reason had gone stale: the Terminal
          tab is hidden for all users, `TerminalPanelContent` is imported but
@@ -41,14 +53,14 @@
       :hide-launcher="helpLauncherHidden"
     />
     <HelpChatWidget
-      v-else-if="authStore.isAuthenticated && !route.meta.hideHelpWidget"
+      v-else-if="authStore.isAuthenticated && !route.meta.hideHelpWidget && !cornerUndecided"
       :hide-launcher="helpLauncherHidden"
     />
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 import { readStoredToken } from './utils/platformSession'
@@ -84,6 +96,30 @@ const mayHaveAssistant = computed(() =>
 )
 watch(mayHaveAssistant, (may) => {
   if (may && !assistantStore.status && !assistantStore.absent) assistantStore.loadStatus()
+}, { immediate: true })
+// One button in the corner, never one swapped for another. While it is not yet
+// known which this person gets (their profile, the build's entitlements, the
+// instance's answer about the assistant), the corner stays empty. A read that
+// never answers must not cost anyone the help button, so the wait is bounded.
+const CORNER_WAIT_MS = 4000
+const cornerWaitOver = ref(false)
+let cornerTimer = null
+watch(() => authStore.isAuthenticated, (signedIn) => {
+  clearTimeout(cornerTimer)
+  cornerWaitOver.value = false
+  if (signedIn) cornerTimer = setTimeout(() => { cornerWaitOver.value = true }, CORNER_WAIT_MS)
+}, { immediate: true })
+const cornerUndecided = computed(() =>
+  !cornerWaitOver.value && (
+    !authStore.profileVerified ||
+    !enterpriseStore.featureFlagsLoaded ||
+    (mayHaveAssistant.value && !assistantStore.status && !assistantStore.absent && !assistantStore.statusError)
+  )
+)
+// Other parts of the page arrange themselves by it (the getting-started steps
+// live in the assistant when there is one, and in the systems rail when not).
+watch([showAssistant, cornerUndecided], ([assistant, undecided]) => {
+  assistantStore.corner = assistant ? 'assistant' : undecided ? 'undecided' : 'help'
 }, { immediate: true })
 // #3446: a route may name tabs on which the floating launcher would cover one
 // of the page's own controls (the agent Chat composer's Send).

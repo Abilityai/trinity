@@ -307,6 +307,11 @@
         </div>
       </template>
     </div>
+    <p
+      v-else-if="embedded && askOnly && buildInfo"
+      class="p-4 text-sm opacity-70"
+      data-testid="ask-off"
+    >Asking the documentation is switched off on this instance.</p>
   </Transition>
 </template>
 
@@ -343,6 +348,9 @@ const props = defineProps({
   // Drawn inside another panel as one of its tabs: no launcher, no header of
   // its own, always showing, and it fills the space it is given.
   embedded: { type: Boolean, default: false },
+  // Only the documentation's Ask, with no tabs: the host has its own way to
+  // send a bug, an idea or feedback.
+  askOnly: { type: Boolean, default: false },
 })
 
 const isOpen = ref(props.embedded)
@@ -378,7 +386,7 @@ const { info: buildInfo, load: loadBuildInfo } = useBuildInfo()
 // build-time flag can still turn reporting off; it can no longer turn it on.
 const docsQaEnabled = computed(() => buildInfo.value?.help?.docs_qa === true)
 const bugReportingEnabled = computed(() => bugReportingBuilt && buildInfo.value?.help?.bug_reporting === true)
-const visibleTabs = computed(() => tabs.filter((t) => (t.id === 'ask' ? docsQaEnabled.value : bugReportingEnabled.value)))
+const visibleTabs = computed(() => tabs.filter((t) => (t.id === 'ask' ? docsQaEnabled.value : !props.askOnly && bugReportingEnabled.value)))
 const anyChannel = computed(() => visibleTabs.value.length > 0)
 
 const panelRef = ref(null)

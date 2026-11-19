@@ -1,6 +1,11 @@
 <template>
   <nav class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900">
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <!-- Where the assistant is docked, its button is the logo and "Trinity" sits
+         beside it in this bar's top-left corner; the bar keeps clear of both. -->
+    <div
+      class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8"
+      :class="brandDocked ? (assistantStore.panelOpen ? 'md:max-w-none md:!pl-24 xl:!pl-6' : 'md:max-w-none md:!pl-24') : ''"
+    >
       <!-- #1789 — `gap-4` guarantees breathing room between the two clusters at
            the width where they finally meet, so a link clipped by the scroll
            boundary never butts up against the connection dot. -->
@@ -12,7 +17,7 @@
              overflow INTO each other, which `justify-between` parks in the
              middle of the bar (Connected landing on top of Enterprise PRO). -->
         <div class="flex min-w-0 flex-1">
-          <router-link to="/" class="flex-shrink-0 flex items-center hover:opacity-80 transition-opacity">
+          <router-link to="/" class="flex-shrink-0 flex items-center hover:opacity-80 transition-opacity" :class="{ 'md:hidden': brandDocked }">
             <img src="../assets/trinity-logo.svg" alt="Trinity Logo" class="h-8 w-8 mr-2 dark:hidden" />
             <img src="../assets/trinity-logo-white.svg" alt="Trinity Logo" class="h-8 w-8 mr-2 hidden dark:block" />
             <h1 class="text-xl font-bold text-gray-900 dark:text-white">Trinity</h1>
@@ -407,6 +412,7 @@ import ThemeChoice from './base/ThemeChoice.vue'
 import { useNotificationsStore } from '../stores/notifications'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useEnterpriseStore } from '../stores/enterprise'
+import { useAssistantStore } from '../stores/assistant'
 import { useWebSocket } from '../utils/websocket'
 import { useBuildInfo } from '../composables/useBuildInfo'
 import { buildNavLinks, moreLabel } from '../utils/navLinks'
@@ -421,6 +427,8 @@ const operatorQueueStore = useOperatorQueueStore()
 // #847 Phase 0 — feature-flags load is fired on mount below; the
 // `Enterprise` nav link template is `v-if="enterpriseStore.hasAnyEnterprise"`.
 const enterpriseStore = useEnterpriseStore()
+const assistantStore = useAssistantStore()
+const brandDocked = computed(() => assistantStore.corner === 'assistant')
 const { isConnected } = useWebSocket()
 
 // #926: cached fetch of /api/version (singleton across NavBar + Settings)

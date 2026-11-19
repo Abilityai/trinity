@@ -19,7 +19,8 @@
  */
 import { defineStore } from 'pinia'
 import api from '../api'
-import { buildContext, buildFleet } from '../utils/assistantContext'
+import { useOnboardingStore } from './onboarding'
+import { buildContext, buildFleet, describePage } from '../utils/assistantContext'
 import { acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, validBuild } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
 
@@ -31,7 +32,18 @@ const BUILD_TIMEOUT_MS = 600000
 const MAX_STEPS = 40
 const JOB_POLL_MS = 4000
 const RUN_FIRST_POLL_MS = 1500   // a short run is over before the first slow poll
+// A plain yes to a design that is waiting. Nothing longer: "yes but change the name" is a message.
+const SAID_YES = /^(yes|yep|yeah|ok|okay|sure|go|go ahead|do it|build it|build|create it|create them|make it|please do|yes please|yes go ahead|ok build it|yes build it)[.! ]*$/i
 const FOLLOWED = ['job', 'run']    // cards the page follows instead of asking about
+// Until the person has opened the assistant once, the launcher says there is something to read.
+const SEEN_KEY = 'trinity-assistant-seen'
+const neverOpened = () => {
+  try {
+    return !localStorage.getItem(SEEN_KEY)
+  } catch {
+    return false
+  }
+}
 const JOB_POLL_LIMIT = 450 // 30 minutes
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -45,7 +57,48 @@ const words = (error, fallback) => {
   return (typeof d === 'string' ? d : d?.message) || fallback
 }
 
+// The conversation is kept in this browser so a reload does not lose it, or the
+// builds and runs being followed. A day old, it is let go.
+const KEEP_KEY = 'trinity-assistant-conversation'
+const KEEP_MS = 24 * 3600 * 1000
+const KEEP_MESSAGES = 80
+
 const closedAccount = () => ({ step: null, email: '', devCode: '', terms: null, busy: false, error: '' })
+
+
+const LOW_MESSAGES = 5
+
+/** The getting-started steps the person sees in the panel, for the assistant to steer by. Titles and ticks only. */
+function setupSteps() {
+  const setup = useOnboardingStore()
+  if (!setup.visible) return {}
+  return { setup: setup.items.slice(0, 12).map((i) => ({ title: String(i.title || '').slice(0, 80), done: Boolean(i.done) })) }
+}
+
+// Whether this browser session has already had the hello, opened or waved away.
+const HELLO_KEY = 'trinity-assistant-hello'
+function helloGiven() {
+  try {
+    return Boolean(sessionStorage.getItem(HELLO_KEY))
+  } catch {
+    return true      // storage refused: say nothing rather than say it on every page
+  }
+}
+function markHelloGiven() {
+  try {
+    sessionStorage.setItem(HELLO_KEY, '1')
+  } catch { /* it is simply offered again */ }
+}
+
+/** When the oldest use frees up, in words: "in about 3 hours", "on Friday". Empty when unknown or past. */
+function backIn(resetsAt) {
+  const at = resetsAt ? new Date(resetsAt) : null
+  if (!at || Number.isNaN(at.getTime())) return ''
+  const hours = Math.round((at.getTime() - Date.now()) / 3600000)
+  if (hours < 0) return ''
+  if (hours <= 1) return 'within the hour'
+  return hours < 24 ? `in about ${hours} hours` : `on ${at.toLocaleDateString(undefined, { weekday: 'long' })}`
+}
 
 export const useAssistantStore = defineStore('assistant', {
   state: () => ({
@@ -60,12 +113,20 @@ export const useAssistantStore = defineStore('assistant', {
     saying: '',          // what it said it is about to do, while it does it
     startedAt: 0,        // when the turn in hand began
     panelOpen: false,    // set by the panel
-    unread: 0,           // answers that arrived while the panel was closed
+    resizing: false,     // the panel's edge is being dragged: the page follows it without easing
+    unread: neverOpened() ? 1 : 0,   // answers that arrived while the panel was closed; one to start with, on a first visit
+    opening: '',         // a line the assistant opened with, told to it with the person's reply
+    keptSince: undefined, // set for a conversation restored from this browser: when Trinity first knew the instance it was had with
+    openingKey: '',      // which line that was, until Trinity has been told the person saw it
+    corner: 'undecided', // which button the corner of the app holds: 'assistant', 'help', or not yet known (set by App.vue)
+    peek: neverOpened(), // a first visit: the launcher says hello in a few words, until opened or waved away
+    checkedAt: 0,        // when the status was last read
     held: '',            // the message the limit stopped, to ask again after subscribing
     waiting: '',         // what the person wrote before agreeing to the terms; sent once they agree
     agreeing: false,
     agreeError: '',
     termsText: '',       // the trial's terms, read when the person asks to see them
+    fullTermsText: '',   // the terms accepted at sign-in, read the same way
     termsError: '',
     sendError: '',
     limit: null,         // the allowance, when the last answer was "limit"
@@ -88,8 +149,12 @@ export const useAssistantStore = defineStore('assistant', {
       const a = s.allowance
       if (s.plan === 'pro') return 'Trinity Pro'
       if (!a) return 'Free'
+      const left = `Free · ${a.messages_left} ${a.messages_left === 1 ? 'message' : 'messages'} left`
+      // Running low: say when more come back, before the limit says it for us.
+      const back = a.messages_left <= LOW_MESSAGES ? backIn(a.resets_at) : ''
+      if (back) return `${left} · more ${back}`
       const period = a.period_hours === 24 ? 'today' : a.period_hours === 168 ? 'this week' : 'for now'
-      return `Free · ${a.messages_left} ${a.messages_left === 1 ? 'message' : 'messages'} left ${period}`
+      return `${left} ${period}`
     },
   },
 
@@ -99,6 +164,15 @@ export const useAssistantStore = defineStore('assistant', {
         const { data } = await api.get(`${BASE}/status`)
         this.status = data
         this.statusError = ''
+        this.checkedAt = Date.now()
+        this.greet(data?.nudge)
+        this.dropStale()
+        // Nobody here has started with the assistant yet: it says hello once per
+        // browser session until someone does, whatever this browser saw before.
+        if (data?.available && !this.agreed && !this.panelOpen && !helloGiven()) {
+          this.peek = true
+          this.unread = Math.max(this.unread, 1)
+        }
       } catch (error) {
         const code = error?.response?.status
         if (code === 404 || code === 403) {
@@ -107,6 +181,87 @@ export const useAssistantStore = defineStore('assistant', {
         }
         this.statusError = "Couldn't load the assistant. Check your connection and try again."
       }
+    },
+
+    /**
+     * The assistant speaks first: one line about the step worth taking next,
+     * which Trinity gives once per stage. It shows as a message of its own and
+     * lights the launcher; nothing is sent, and it costs the person nothing.
+     */
+    greet(nudge) {
+      const text = typeof nudge?.text === 'string' ? nudge.text.trim().slice(0, 400) : ''
+      if (!text || this.sending) return
+      this.messages = this.messages.filter((m) => !m.local)      // its own line takes the place of the page's hello
+      this.messages.push({ id: newId(), role: 'assistant', content: text, opener: true })
+      this.opening = text
+      this.openingKey = typeof nudge?.key === 'string' ? nudge.key : ''
+      if (!this.panelOpen) this.unread += 1
+      else this.sawOpening()
+    },
+
+    /**
+     * A conversation this browser kept belongs to the Trinity record it was
+     * had with. If Trinity has never heard from this instance, or first heard
+     * from it at another time than the conversation was kept under, that
+     * record is gone (a reset, another instance at the same address) and so is
+     * everything the assistant knew: showing the old talk would be showing a
+     * memory it does not have. Only ever judged on a real answer from Trinity.
+     */
+    dropStale() {
+      const s = this.status
+      if (!s?.available || this.keptSince === undefined) return
+      // Kept without a time (it began before Trinity had said one): only "never heard of you" settles it.
+      const gone = s.contacted === false || (s.reachable === true && s.since && this.keptSince && s.since !== this.keptSince)
+      if (!gone) return
+      this.keptSince = undefined
+      if (this.sending) return
+      this.newConversation()
+      if (s.contacted === false) {
+        try {
+          sessionStorage.removeItem(HELLO_KEY)      // it is new here again: it may say hello again
+        } catch { /* it simply stays quiet */ }
+        if (!this.panelOpen) {
+          this.peek = true
+          this.unread = Math.max(this.unread, 1)
+        }
+      }
+    },
+
+    /**
+     * The assistant starts the conversation with someone it does not know yet.
+     * The page writes this line itself, so it needs nothing sent anywhere and
+     * works before anyone has agreed to anything. The assistant is told it was
+     * said, with the person's reply.
+     */
+    welcome(text) {
+      if (this.messages.length || this.sending || !text) return
+      this.messages.push({ id: newId(), role: 'assistant', content: text, opener: true, local: true })
+      this.opening = text
+    },
+
+    /** The person waved the launcher's hello away without opening the panel. */
+    dismissPeek() {
+      this.peek = false
+      markHelloGiven()
+    },
+
+    /**
+     * Tell Trinity the person has seen the line it opened with, once. It stops
+     * speaking first to someone who never looks, so it has to know who does.
+     */
+    sawOpening() {
+      const key = this.openingKey
+      if (!key) return
+      this.openingKey = ''
+      api.post(`${BASE}/opened`, { key }).catch(() => { /* worth telling, never worth an error */ })
+    },
+
+    /** Read the status again when it has gone stale, so a next step can be said without a reload. */
+    recheck() {
+      if (this.absent || this.sending || this.panelOpen || !this.status?.contacted) return
+      if (Date.now() - this.checkedAt < 10 * 60 * 1000) return
+      this.checkedAt = Date.now()
+      this.loadStatus()
     },
 
     /** The fleet as this person's session sees it. A failed read keeps the last one. */
@@ -133,12 +288,24 @@ export const useAssistantStore = defineStore('assistant', {
      * it shows as a short note, not as something the person said, and it is
      * not counted against their messages.
      */
-    async send(text, route, { shown = true } = {}) {
+    async send(text, route, { shown = true, counted = shown } = {}) {
       const message = String(text || '').trim()
       if (!message || this.sending) return
       this.sendError = ''
       this.limit = null
+      // "yes, build it" said in words, with one design waiting: that is them pressing its button.
+      const waitingBuild = shown && SAID_YES.test(message.trim()) ? this.openBuilds() : []
+      if (waitingBuild.length === 1) {
+        this.messages.push({ id: newId(), role: 'user', content: message })
+        return this.answerCard(waitingBuild[0].messageId, waitingBuild[0].cardId, true, route)
+      }
+      // Answers already clicked on questions they then chose to write about go along.
+      const clicked = shown ? this.messages.flatMap((m) => (m.cards || [])
+        .filter((c) => c.card.action === 'choice' && c.state === 'picked').map((c) => `${c.card.question} ${c.picked}`)) : []
+      if (shown) this.closeChoices()
       this.messages.push({ id: newId(), role: shown ? 'user' : 'note', content: message })
+      const said = this.opening
+      this.opening = ''
       this.sending = true
       this.activity = ''
       this.steps = []
@@ -148,9 +315,9 @@ export const useAssistantStore = defineStore('assistant', {
         const fleet = await this.refreshFleet()
         let { data } = await api.post(`${BASE}/turn`, {
           conversation_id: this.conversationId,
-          message,
-          context: buildContext(route, fleet),
-          counted: shown,
+          message: clicked.length ? `${clicked.join('\n')}\n${message}` : message,
+          context: { ...buildContext(route, fleet), ...(said ? { said } : {}), ...setupSteps() },
+          counted,
         }, { timeout: STEP_TIMEOUT_MS })
 
         for (let step = 0; data.status === 'working' && step < MAX_STEPS; step++) {
@@ -185,8 +352,9 @@ export const useAssistantStore = defineStore('assistant', {
           content: data.text || (cards.length ? '' : 'Done.'),
           cards: cards.map((card) => ({
             id: newId(), card, label: cardLabel(card, after), note: cardNote(card),
-            state: FOLLOWED.includes(card.action) ? 'making' : 'open', reason: '', progress: '',
+            state: FOLLOWED.includes(card.action) ? 'making' : 'open', reason: '', progress: '', picked: '',
             since: Date.now(), fraction: null,
+            auto: card.action === 'job',       // create the agents as soon as they are ready; the person can untick it
           })),
         }
         this.messages.push(reply)
@@ -247,7 +415,12 @@ export const useAssistantStore = defineStore('assistant', {
         entry.label = cardLabel(design)
         entry.note = cardNote(design)
         entry.state = 'open'
-        line = `The design "${design.design.title}" is made and passed the standard's check. The person now sees it with a Build button.`
+        if (entry.auto) {
+          // They asked for these agents and left "create when ready" ticked: no second click.
+          for (let i = 0; this.sending && i < 300; i++) await wait(1000)
+          return this.answerCard(messageId, cardId, true, route)
+        }
+        line = `The design "${design.design.title}" is made and passed the standard's check. The person chose to look first: they now see it with a Build button.`
       } else {
         entry.state = 'refused'
         entry.reason = seen?.status === 'failed' ? 'It did not pass the check.' : 'It took too long.'
@@ -316,6 +489,19 @@ export const useAssistantStore = defineStore('assistant', {
       }
     },
 
+    /** The terms accepted at sign-in, when the person asks to read them. */
+    async readFullTerms() {
+      if (this.fullTermsText) return
+      this.termsError = ''
+      try {
+        const { data } = await api.get(`${BASE}/terms/subscription`)
+        this.fullTermsText = data?.text || ''
+        if (!this.fullTermsText) this.termsError = "The terms couldn't be loaded. Try again in a moment."
+      } catch (error) {
+        this.termsError = words(error, "The terms couldn't be loaded. Check your connection and try again.")
+      }
+    },
+
     /** What the person wrote before agreeing: kept, and sent the moment they agree. */
     hold(message) {
       this.waiting = message
@@ -340,12 +526,103 @@ export const useAssistantStore = defineStore('assistant', {
       const waiting = this.waiting
       this.waiting = ''
       if (waiting && this.agreed) await this.send(waiting, route)
+      else if (this.agreed) await this.loadStatus()      // nothing asked yet: let it say where to start
+    },
+
+    /** Write the conversation down. Cheap, and called on every change. */
+    keep() {
+      try {
+        if (!this.messages.some((m) => !m.local)) return localStorage.removeItem(KEEP_KEY)   // the page's own hello is not a conversation
+        localStorage.setItem(KEEP_KEY, JSON.stringify({
+          at: Date.now(), conversationId: this.conversationId, messages: this.messages.slice(-KEEP_MESSAGES),
+          since: this.status?.since || this.keptSince || null,
+        }))
+      } catch { /* storage full or refused: the conversation simply is not kept */ }
+    },
+
+    /**
+     * Pick up where the person left off after a reload: the conversation as it
+     * stood, and every build or run that was being followed is followed again.
+     */
+    restore(route) {
+      if (this.messages.length) return
+      let kept = null
+      try {
+        kept = JSON.parse(localStorage.getItem(KEEP_KEY) || 'null')
+      } catch { /* unreadable: start fresh */ }
+      if (!kept || !Array.isArray(kept.messages) || Date.now() - kept.at > KEEP_MS) return
+      const messages = kept.messages.filter((m) => m && typeof m.id === 'string' && typeof m.content === 'string')
+      for (const m of messages) {
+        nextId = Math.max(nextId, (parseInt(m.id.slice(1), 10) || 0) + 1)
+        for (const c of m.cards || []) {
+          nextId = Math.max(nextId, (parseInt(String(c.id).slice(1), 10) || 0) + 1)
+          if (c.state === 'running') c.state = 'open'          // a click whose answer the reload lost: ask again
+        }
+      }
+      this.messages = messages
+      this.conversationId = kept.conversationId || null
+      this.keptSince = kept.since || null      // judged against Trinity's answer, now or when it comes
+      this.dropStale()
+      for (const m of this.messages) {
+        for (const c of m.cards || []) {
+          if (c.state !== 'making') continue
+          if (c.card.action === 'job') this.followJob(m.id, c.id, route)
+          if (c.card.action === 'run') this.followRun(m.id, c.id, route)
+        }
+      }
     },
 
     /** The panel was opened or closed. Opening it is reading it. */
     setOpen(open) {
       this.panelOpen = open
-      if (open) this.unread = 0
+      if (!open) return
+      this.unread = 0
+      this.peek = false
+      markHelloGiven()
+      this.sawOpening()
+      try {
+        localStorage.setItem(SEEN_KEY, '1')
+      } catch { /* the launcher simply says so again next time */ }
+    },
+
+    /**
+     * The person clicked an answer to a question. With one question that is
+     * their reply; with several, the reply goes once each has an answer. A
+     * click is not counted against their messages: it answers what was asked.
+     */
+    async answerChoice(messageId, cardId, option, route) {
+      const cards = this.messages.find((m) => m.id === messageId)?.cards || []
+      const entry = cards.find((c) => c.id === cardId)
+      if (!entry || entry.card.action !== 'choice' || !['open', 'picked'].includes(entry.state) || this.sending) return
+      if (!entry.card.options.includes(option)) return
+      entry.picked = option
+      entry.state = 'picked'
+      const asked = cards.filter((c) => c.card.action === 'choice')
+      if (asked.some((c) => c.state === 'open')) return
+      const reply = asked.length === 1 ? option : asked.map((c) => `${c.card.question} ${c.picked}`).join('\n')
+      for (const c of asked) c.state = 'done'
+      await this.send(reply, route, { counted: false })
+    },
+
+    /**
+     * The person wrote instead of clicking: questions still open are closed,
+     * and any answer already clicked goes along with what they wrote.
+     */
+    closeChoices() {
+      for (const m of this.messages) {
+        for (const c of m.cards || []) {
+          if (c.card.action !== 'choice') continue
+          if (c.state === 'open') c.state = 'declined'
+          if (c.state === 'picked') c.state = 'done'
+        }
+      }
+    },
+
+    /** Designs waiting for their Build button. */
+    openBuilds() {
+      return this.messages.flatMap((m) => (m.cards || [])
+        .filter((c) => c.card.action === 'build' && c.state === 'open')
+        .map((c) => ({ messageId: m.id, cardId: c.id })))
     },
 
     /** The person answered a card. Confirm makes the change as them. */
@@ -369,6 +646,8 @@ export const useAssistantStore = defineStore('assistant', {
         outcome = await this.build(entry.card)
       } else if (entry.card.action === 'tool') {
         outcome = await this.confirmTool(entry.card, entry.label)
+      } else if (entry.card.action === 'feedback') {
+        outcome = await this.sendFeedback(entry.card, entry.label, route)
       } else {
         const result = await runCard(api, entry.card, this.fleet)
         outcome = { kind: result.kind, reason: result.reason || '', line: outcomeLine(result.kind, entry.label, result.reason) }
@@ -390,6 +669,19 @@ export const useAssistantStore = defineStore('assistant', {
         const reason = words(error, code ? `Trinity refused it (${code}).` : "Couldn't reach Trinity, so it may not have been built.")
         const kind = code && code < 500 ? 'refused' : 'unsure'
         return { kind, reason, line: outcomeLine(kind, cardLabel(card), reason) }
+      }
+    },
+
+    /** The person read the note and pressed Send: it goes to the makers of Trinity as shown. */
+    async sendFeedback(card, label, route) {
+      try {
+        await api.post(`${BASE}/feedback`, { kind: card.kind, summary: card.summary, details: card.details, page: describePage(route).label })
+        return { kind: 'done', reason: '', line: outcomeLine('done', label) }
+      } catch (error) {
+        const code = error?.response?.status
+        const reason = words(error, code ? `Trinity refused it (${code}).` : "Couldn't reach Trinity, so it may not have been sent.")
+        const kind = code && code < 500 ? 'refused' : 'unsure'
+        return { kind, reason, line: outcomeLine(kind, label, reason) }
       }
     },
 
@@ -504,6 +796,8 @@ export const useAssistantStore = defineStore('assistant', {
       this.sendError = ''
       this.limit = null
       this.held = ''
+      this.opening = ''
+      this.keep()
     },
   },
 })

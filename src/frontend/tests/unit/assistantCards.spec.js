@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { CARD_ACTIONS, MAX_CARDS_PER_REPLY, acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, toolWords, validBuild, validCard, validJob, validTool } from '@/utils/assistantCards'
+import { CARD_ACTIONS, MAX_CARDS_PER_REPLY, acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, toolWords, validBuild, validCard, validChoice, validFeedback, validJob, validTool } from '@/utils/assistantCards'
 
 const fleet = [
   { name: 'issue-digest', schedules: [{ id: 's1', name: 'Mondays 09:00' }] },
@@ -180,5 +180,29 @@ describe('assistant cards: a build in the making', () => {
     expect(card).toEqual({ action: 'job', job_id: DESIGN_ID, title: 'Review summary' })
     expect(cardLabel(card)).toBe('Making "Review summary"')
     expect(validJob({ action: 'job', job_id: '../x', title: 't' })).toBeNull()
+  })
+})
+
+describe('assistant cards: a question, and a note to the Trinity team', () => {
+  it('accepts a question with two to five answers, trimmed, and nothing else', () => {
+    expect(validChoice({ action: 'choice', question: ' What starts it? ', options: ['A time', ' Someone asking ', 7, ''] }))
+      .toEqual({ action: 'choice', question: 'What starts it?', options: ['A time', 'Someone asking'] })
+    expect(validChoice({ action: 'choice', question: 'Sure?', options: ['Yes'] })).toBeNull()
+    expect(validChoice({ action: 'choice', question: '', options: ['a', 'b'] })).toBeNull()
+    expect(validChoice({ action: 'choice', question: 'q', options: ['a', 'b', 'c', 'd', 'e', 'f'] }).options).toHaveLength(5)
+  })
+
+  it('accepts feedback of a known kind with a summary, and says what goes with it', () => {
+    const card = validFeedback({ action: 'feedback', kind: 'idea', summary: ' Dark mode for reports ', details: 'It would help at night.', extra: 'x' })
+    expect(card).toEqual({ action: 'feedback', kind: 'idea', summary: 'Dark mode for reports', details: 'It would help at night.' })
+    expect(cardLabel(card)).toBe('Send idea: Dark mode for reports')
+    expect(cardNote(card)).toContain('Nothing else is attached')
+    expect(validFeedback({ action: 'feedback', kind: 'rant', summary: 'x' })).toBeNull()
+    expect(validFeedback({ action: 'feedback', kind: 'bug', summary: ' ' })).toBeNull()
+  })
+
+  it('takes both through the reply\'s cards', () => {
+    const cards = acceptCards([{ action: 'choice', question: 'q', options: ['a', 'b'] }, { action: 'feedback', kind: 'bug', summary: 's' }], [])
+    expect(cards.map((c) => c.action)).toEqual(['choice', 'feedback'])
   })
 })
