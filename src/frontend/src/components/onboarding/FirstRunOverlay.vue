@@ -189,14 +189,21 @@ const sessions = useSessionsStore()
 const firstRun = useFirstRunStore()
 const telemetry = useProductTelemetryStore()
 
-// Per-browser, read once so a change in another tab cannot pop it mid-render.
-const closed = ref(readFirstRunClosed())
+// Per-browser and per-install: read once the install is known, and not again,
+// so a change in another tab cannot pop it mid-render.
+const closedHere = ref(false)
+const closedBefore = computed(() => firstRun.loaded && readFirstRunClosed(firstRun.install))
+const closed = computed(() => closedHere.value || closedBefore.value)
 const skipped = ref(readFirstRunSkipped())
 // Session-only: steps that emitted `complete` since the overlay opened. Never
 // persisted — completion is otherwise derived from state.
 const completed = ref([])
 
 const forced = computed(() => route.query.onboarding === '1')
+
+// Others on the page (the assistant) keep quiet while setup has the screen.
+watch(open, (now) => { firstRun.overlayOpen = now }, { immediate: true })
+onBeforeUnmount(() => { firstRun.overlayOpen = false })
 
 /**
  * The registry context. Step components receive it read-only; C's credential
@@ -301,8 +308,8 @@ watch(
 )
 
 function close() {
-  persistFirstRunClosed()
-  closed.value = true
+  persistFirstRunClosed(firstRun.install)
+  closedHere.value = true
   open.value = false
   if (nextRoute.value) {
     router.push(nextRoute.value).catch(() => {})

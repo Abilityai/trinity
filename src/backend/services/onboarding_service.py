@@ -88,6 +88,18 @@ def _pick_demo_agent(seeded_present: List[str]) -> Optional[str]:
     return sorted(seeded_present)[0] if seeded_present else None
 
 
+def _install_marker() -> Optional[str]:
+    """A short, opaque mark of this install, so a browser that closed setup on
+    a previous install of the same address is offered it again on a new one.
+    The first 8 characters of the durable installation id; None if unreadable."""
+    try:
+        from services.operator_intake_service import get_or_create_installation_id
+        return get_or_create_installation_id()[:8] or None
+    except Exception:  # pragma: no cover - a missing mark only means the old per-browser behaviour
+        logger.debug("[onboarding] install marker unavailable", exc_info=True)
+        return None
+
+
 def get_first_run_state(current_user: User) -> dict:
     """Assemble the caller's first-run state. Read-only, DB-only, never raises.
 
@@ -109,6 +121,7 @@ def get_first_run_state(current_user: User) -> dict:
             "seeded_agents": sorted(seeded_present),
             "own_agent_count": len(own_agents),
             "demo_agent": _pick_demo_agent(seeded_present),
+            "install": _install_marker(),
         }
     except Exception:  # pragma: no cover - the surface is a nudge, never a gate
         logger.warning("[onboarding] first-run state unavailable", exc_info=True)
