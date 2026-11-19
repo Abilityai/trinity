@@ -37,7 +37,7 @@ test.describe('a dialog taller than the screen (#3571)', () => {
     })
   }
 
-  test('a dialog that fits stays vertically centred', async ({ page }) => {
+  test('@smoke a dialog that fits stays vertically centred', async ({ page }) => {
     const dialog = await openNewView(page, { width: 1280, height: 1400 })
     const panel = dialog.locator(':scope > div').first()
     const r = await panel.evaluate((el) => { const b = el.getBoundingClientRect(); return { top: b.top, bottom: b.bottom } })
