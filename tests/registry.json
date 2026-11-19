@@ -9314,6 +9314,20 @@
         "webhooks"
       ],
       "description": "#4476: the URLs the backend hands a browser name the Host the dev proxy now delivers (its /api/ rule keeps the browser's Host; proxy half in src/frontend/tests/unit/viteApiProxyHost.spec.js). Real settings and schedules routers: the advertised MCP URL and default_url for localhost, a port-bearing host and another machine's address; an IPv6-literal Host keeps its brackets ([::1] reads as localhost); backend:8000 still yields backend:8080, so the fix belongs in the proxy; a loopback MCP_BIND_ADDRESS still wins; a minted or read webhook URL uses the delivered Host."
+    },
+    {
+      "file": "unit/test_4635_queue_stall_reads.py",
+      "feature": "#4635",
+      "added": "2026-11-18",
+      "categories": [
+        "unit",
+        "backend",
+        "operator-queue",
+        "scheduling",
+        "database",
+        "reliability"
+      ],
+      "description": "#4635 / #4636: the queue stall monitor's reads on the real DatabaseManager facade and the real schema (SQLite; PostgreSQL on the schema-parity tier). The stall rows are found by subject prefix past 1,001 other pending asks and the prefix is matched exactly (no LIKE wildcard, no case folding, no ended rows); every new keyword reaches the ops through the facade, and every db call the monitor makes exists on it; a drained agent's alert ends end to end while 1,001 unrelated rows stay pending; a higher reading rewrites the pending row's priority, title and text in place while a same-or-lower one only counts; and the effective cap for many agents costs one roster read and one ceiling read."
     }
   ]
 }

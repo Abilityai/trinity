@@ -67,8 +67,13 @@ class _Client:
 @pytest.fixture(autouse=True)
 def _reset_noted():
     pull_worker._NOTED_CLAIM_STATUS.clear()
+    delivering = getattr(pull_worker, "_DELIVERING_NOW", None)
+    if delivering is not None:
+        delivering.clear()
     yield
     pull_worker._NOTED_CLAIM_STATUS.clear()
+    if delivering is not None:
+        delivering.clear()
 
 
 def _claim(client, worker="alpha#w0"):
@@ -317,3 +322,169 @@ def test_the_tick_is_not_installed_without_worker_credentials(monkeypatch):
     app = _FakeApp()
     pull_worker.schedule_pending_pull_result_resend(app)
     assert app.handlers == {}
+
+
+# ---------------------------------------------------------------------------
+# #4635: the resend tick never pre-empts the worker's own in-loop delivery.
+# A resend says `auth_override_capable: False` (right after a restart: the
+# worker no longer holds the claim), and the backend answers that with a
+# terminal FAILED — so a sweep landing inside the 90 s window threw away the
+# retry a refused credential was owed (#3487).
+# ---------------------------------------------------------------------------
+
+
+import json  # noqa: E402
+import types  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+from unittest.mock import AsyncMock  # noqa: E402
+
+
+@pytest.fixture
+def pull_env(monkeypatch, tmp_path):
+    """A pending dir in tmp, no jitter, a refused-credential runtime, a real
+    process registry. `deliveries` records every POST as
+    `(execution_id, auth_override_capable, "worker" | "sweep")`."""
+    from fastapi import HTTPException
+
+    import agent_server.services.process_registry as pr
+
+    pending = tmp_path / "pending-pull-results"
+    monkeypatch.setattr(pull_worker, "_PENDING_PULL_DIR", pending)
+    monkeypatch.setattr(pull_worker, "_worker_creds_present", lambda: True)
+    monkeypatch.setattr(pull_worker, "_SWEEP_INITIAL_JITTER_SECONDS", 0)
+    monkeypatch.setattr(pull_worker, "_SWEEP_PER_ENVELOPE_JITTER_SECONDS", 0)
+    monkeypatch.setenv("TRINITY_BACKEND_URL", "http://backend")
+    monkeypatch.setenv("TRINITY_MCP_API_KEY", "key")
+    registry = pr.ProcessRegistry()
+    monkeypatch.setattr(pr, "get_process_registry", lambda: registry)
+    runtime = SimpleNamespace(
+        supports_auth_override=True,
+        execute_headless=AsyncMock(side_effect=HTTPException(status_code=429, detail="limit")),
+    )
+    stub = types.ModuleType("agent_server.services.runtime_adapter")
+    stub.get_runtime = lambda: runtime
+    monkeypatch.setitem(sys.modules, "agent_server.services.runtime_adapter", stub)
+
+    env = SimpleNamespace(pending=pending, deliveries=[], on_worker=None, on_sweep=None)
+
+    async def _deliver(client, execution_id, body, backend_url, mcp_key, deadline,
+                       reply_sink=None):
+        by = "worker" if reply_sink is not None else "sweep"
+        env.deliveries.append((execution_id, body["metadata"]["auth_override_capable"], by))
+        hook = env.on_worker if by == "worker" else env.on_sweep
+        if hook is not None:
+            return await hook(execution_id, reply_sink)
+        return True
+
+    monkeypatch.setattr(pull_worker, "_deliver_result", _deliver)
+    return env
+
+
+def _leftover(env, execution_id, claim_token="t-old"):
+    env.pending.mkdir(parents=True, exist_ok=True)
+    (env.pending / f"{execution_id}.json").write_text(json.dumps({
+        "execution_id": execution_id,
+        "body": {"claim_token": claim_token, "status": "failed", "error_code": "billing",
+                 "metadata": {"auth_override_capable": True}},
+    }))
+
+
+def _claim_for(execution_id="exec-w"):
+    return {"execution_id": execution_id, "claim_token": "t0",
+            "envelope": {"payload": {"message": "hi", "task_overrides": {"timeout_seconds": 600}}}}
+
+
+def _report(claim):
+    return asyncio.run(pull_worker._run_and_report(claim, None, "http://b", "k", "alpha"))
+
+
+def test_a_resend_inside_the_in_loop_window_leaves_the_result_to_the_worker(pull_env):
+    """The tick fires while the worker is still reporting a refused attempt.
+    The leftover from an earlier crash is the control: the sweep did run."""
+    _leftover(pull_env, "exec-other")
+
+    async def _tick_fires_now(execution_id, reply_sink):
+        await pull_worker.resend_pending_pull_results()
+        reply_sink.append({"applied": True})
+        return True
+
+    pull_env.on_worker = _tick_fires_now
+
+    _report(_claim_for("exec-w"))
+
+    assert pull_env.deliveries == [
+        ("exec-w", True, "worker"),
+        ("exec-other", False, "sweep"),
+    ]
+    assert not (pull_env.pending / "exec-w.json").exists(), "the worker's own delivery removes it"
+
+
+def test_once_the_worker_gives_up_the_next_tick_sends_it(pull_env):
+    async def _gave_up(execution_id, reply_sink):
+        return False
+
+    pull_env.on_worker = _gave_up
+
+    _report(_claim_for("exec-w"))
+    assert (pull_env.pending / "exec-w.json").exists()
+    assert "exec-w" not in pull_worker._DELIVERING_NOW
+
+    asyncio.run(pull_worker.resend_pending_pull_results())
+
+    assert pull_env.deliveries[-1] == ("exec-w", False, "sweep")
+    assert not (pull_env.pending / "exec-w.json").exists()
+
+
+def test_a_cancelled_delivery_leaves_the_file_and_takes_the_id_off_the_list(pull_env):
+    async def _shutdown(execution_id, reply_sink):
+        raise asyncio.CancelledError()
+
+    pull_env.on_worker = _shutdown
+
+    with pytest.raises(asyncio.CancelledError):
+        _report(_claim_for("exec-w"))
+
+    assert (pull_env.pending / "exec-w.json").exists(), "B6: the boot resend still has it"
+    assert "exec-w" not in pull_worker._DELIVERING_NOW
+
+
+def test_the_sweep_never_unlinks_a_result_rewritten_while_it_was_sending(pull_env):
+    """The sweep's own delivery can retry for minutes. A worker that re-claimed
+    the requeued row (same execution id) writes a fresh terminal under the
+    same name meanwhile; unlinking it would lose that turn's work."""
+    _leftover(pull_env, "exec-x", claim_token="t-stale")
+
+    async def _rewritten_meanwhile(execution_id, reply_sink):
+        pull_worker._persist_pull_result(execution_id, {
+            "execution_id": execution_id,
+            "body": {"claim_token": "t-fresh", "status": "success", "metadata": {}},
+        })
+        return True  # the stale token: 409, permanent
+
+    pull_env.on_sweep = _rewritten_meanwhile
+
+    asyncio.run(pull_worker.resend_pending_pull_results())
+
+    left = json.loads((pull_env.pending / "exec-x.json").read_text())
+    assert left["body"]["claim_token"] == "t-fresh"
+
+
+def test_a_delivered_resend_still_removes_its_file(pull_env):
+    _leftover(pull_env, "exec-y")
+
+    asyncio.run(pull_worker.resend_pending_pull_results())
+
+    assert pull_env.deliveries == [("exec-y", False, "sweep")]
+    assert not (pull_env.pending / "exec-y.json").exists()
+
+
+def test_an_id_two_workers_deliver_stays_listed_until_both_end():
+    """Counted, not a set: the design does not lean on "never two in-loop
+    holders of one id" (the lease arithmetic) to stay exact."""
+    pull_worker._mark_delivering("e1")
+    pull_worker._mark_delivering("e1")
+    pull_worker._unmark_delivering("e1")
+    assert pull_worker._DELIVERING_NOW.get("e1")
+
+    pull_worker._unmark_delivering("e1")
+    assert "e1" not in pull_worker._DELIVERING_NOW
