@@ -3239,13 +3239,20 @@ def _library_skills_attribution(current_user) -> Optional[str]:
 async def _assign_declared_library_skills(
     agent_name: str, declared: list, owner_username: str,
     assigned_by_agent: Optional[str],
+    *,
+    current_user=None,
+    request: Optional[Request] = None,
 ) -> list:
     """Assign each declared name the library has, as the owner. Returns the
     names now assigned. Names the library lacks are skipped and logged; the
     route's own rule (assign only what the library has) applies here too.
 
     The gates follow the rows before anything is delivered (ent#753), as on
-    every other `agent_skills` writer; the reconcile never raises."""
+    every other `agent_skills` writer; the reconcile never raises. It runs as
+    `current_user`, the creating principal, so a default gate applied here is
+    set by and audited to whoever created the agent, with the request's ip,
+    endpoint and id when there is a request (a system deploy has none). A
+    caller that supplies no principal gets the actor-less `system` context."""
     from services import skill_gate_map_service
     from services.skill_service import skill_service
 
@@ -3265,10 +3272,20 @@ async def _assign_declared_library_skills(
             "for %s: %s", agent_name, missing,
         )
     if assigned:
-        await skill_gate_map_service.reconcile_library_gates(
-            agent_name,
-            ctx=skill_gate_map_service.GateContext(trigger="assignment"),
-        )
+        if current_user is None:
+            gate_ctx = skill_gate_map_service.GateContext(trigger="assignment")
+        else:
+            # Built as `skill_assignment_service.sync_gates` builds it.
+            gate_ctx = skill_gate_map_service.gate_context(
+                current_user, trigger="assignment",
+                ip=request.client.host if request is not None and request.client else None,
+                endpoint=request.scope.get("path") if request is not None else None,
+                request_id=(
+                    getattr(request.state, "request_id", None)
+                    if request is not None else None
+                ),
+            )
+        await skill_gate_map_service.reconcile_library_gates(agent_name, ctx=gate_ctx)
         logger.info("[§21.3.4] Assigned library skills to %s: %s", agent_name, assigned)
     return assigned
 
@@ -3335,6 +3352,8 @@ async def _materialize_agent_files(
     *,
     declared_library_skills: Optional[list] = None,
     library_skills_assigned_by_agent: Optional[str] = None,
+    current_user=None,
+    request: Optional[Request] = None,
 ) -> None:
     """Materialize the S4 persistent-state allowlist (#383), the declared
     data_paths (#1169), the declared `plugins:` (#1704) and the declared
@@ -3400,7 +3419,9 @@ async def _materialize_agent_files(
             )
 
     # §21.3.4: assign the template's declared `library_skills:` as the owner,
-    # then deliver them once the agent is ready. `declared_library_skills` has
+    # reconcile the agent's skill gates as the creating principal
+    # (`current_user`, with `request` for the audit row; both optional), then
+    # deliver them once the agent is ready. `declared_library_skills` has
     # already passed the §21.3.1 fence (`_permitted_library_skills`). Ghost-
     # skipped (an ephemeral agent never persists an assignment), and non-fatal
     # inside the rollback fence: a raise must never cost a successful creation.
@@ -3409,6 +3430,7 @@ async def _materialize_agent_files(
             assigned = await _assign_declared_library_skills(
                 config.name, declared_library_skills, owner_username,
                 library_skills_assigned_by_agent,
+                current_user=current_user, request=request,
             )
             if assigned:
                 _spawn_library_skill_delivery(config.name)
@@ -4355,8 +4377,13 @@ async def create_agent_internal(
                 auto_assigned_subscription_id,
                 declared_model=tr.declared_model,
             )
-            permitted_library_skills = await _permitted_library_skills(
-                request, current_user, tr.declared_library_skills, config.name,
+            # Nothing is assigned to an ephemeral agent, so the fence is not
+            # run for one: it would leave a capability audit row for a
+            # capability that was neither used nor refused.
+            permitted_library_skills = [] if config.ephemeral else (
+                await _permitted_library_skills(
+                    request, current_user, tr.declared_library_skills, config.name,
+                )
             )
             # ent#1173 (AC-2): install a GitHub template's bundled avatar bytes
             # (fetched during _resolve_template). Best-effort — the agent is
@@ -4386,6 +4413,8 @@ async def create_agent_internal(
                 tr.declared_metrics,
                 declared_library_skills=permitted_library_skills,
                 library_skills_assigned_by_agent=_library_skills_attribution(current_user),
+                current_user=current_user,
+                request=request,
             )
             return agent_status
         except Exception as e:

@@ -49,14 +49,20 @@ _permitted_library_skills(request, current_user, declared, config.name)
   │        ─► [] + log + capability_refused audit row
   │           (target = the new agent, details.library_skills = the names)
   │  never raises: a failure here costs the skills, never the creation
+  │  not run for an ephemeral (ghost) agent: nothing is assigned, no audit row
   ▼
 _materialize_agent_files(..., declared_library_skills=<permitted>,
-                         library_skills_assigned_by_agent=acting_agent_name(user))
+                         library_skills_assigned_by_agent=acting_agent_name(user),
+                         current_user=<creator>, request=<request or None>)
   │  skipped for ephemeral (ghost) agents
   ▼
 _assign_declared_library_skills
   │  skill_service.get_skill(name) ─ missing ─► skipped, logged
   │  db.assign_skill(agent, name, owner, assigned_by_agent=<creating agent>)
+  │  (only when something was assigned)
+  │  skill_gate_map_service.reconcile_library_gates(agent, ctx=<creating principal>)
+  │    trigger = assignment; a skill the library marks `approval: recommended`
+  │    gets its default gate here, before any package is delivered
   ▼  (only when something was assigned)
 _spawn_library_skill_delivery ─► asyncio task, strongly referenced
   ▼
@@ -89,6 +95,15 @@ at creation and the start-path injection runs once `/health` answers.
   (`principal_actor`, R29).
 - **Attribution.** `assigned_by` is the owner; `assigned_by_agent` is the
   creating agent when an agent created it.
+- **Gates before delivery, as the creator.** The assignment reconciles the
+  agent's skill gates before delivery is spawned, so a skill the library
+  recommends gating never lands ungated. The reconcile runs as the creating
+  principal: the default gate's `set_by` and its `skill_gate_default_applied`
+  audit row name the creator (with the request's ip, endpoint and id when
+  there is a request), not `system`.
+- **No fence for ghosts.** An ephemeral agent is assigned nothing, so the
+  fence is skipped for it and no `capability_refused` / `capability_used` row
+  is written for a capability that was never exercised.
 - **Names only.** The reader takes the library's own charset and refuses skill
   sets by name (sets have their own resolution rules, §21.3.2).
 
@@ -103,8 +118,11 @@ editing `template.yaml` later changes nothing on existing agents.
 - `tests/unit/test_4387_template_library_skills.py` — the reader, both catalog
   builders, all three resolver branches (copy snapshot included), the fence and
   its audit rows (including the real writer with `request=None`), assignment,
-  ghost skip, non-fatal failures, readiness-gated delivery.
+  ghost skip, non-fatal failures, readiness-gated delivery, and the gate
+  reconcile: a recommended skill's default gate row exists, set by the
+  creator, at the moment delivery is spawned.
 - `tests/unit/test_1484_create_agent_characterization.py` (`test_4387_*`) — a
   whole `create_agent_internal` run pins the call site: a person gets the
   names, an agent key without the grant gets none plus a refusal row, an agent
-  key with the grant gets them attributed to itself.
+  key with the grant gets them attributed to itself, and an ephemeral creation
+  writes no capability row and passes no names.

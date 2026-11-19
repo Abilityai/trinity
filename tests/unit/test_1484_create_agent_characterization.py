@@ -1879,3 +1879,31 @@ async def test_4387_an_agent_key_holding_skills_manage_gets_them_attributed(
     assert kw["library_skills_assigned_by_agent"] == "orchestrator"
     ctx["db"].agent_has_capability.assert_any_call("orchestrator", "skills.manage")
     assert [r["action"] for r in audit] == ["capability_used"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("holds_grant", [False, True])
+async def test_4387_an_ephemeral_creation_never_runs_the_library_skills_fence(
+    library_skills_env, monkeypatch, holds_grant,
+):
+    """Nothing can be assigned to an ephemeral agent, so an agent key spawning
+    one from a template that declares `library_skills` must leave neither a
+    `capability_refused` nor a `capability_used` row. The real
+    `_permitted_library_skills` and `capability_refusal` are in place — only
+    the audit sink is captured — so a row here would mean the fence ran."""
+    crud, ctx, audit, materialized = library_skills_env
+    _entitle(monkeypatch, crud)
+    ctx["db"].get_agent_ephemeral_info.return_value = {"is_ephemeral": False}
+    ctx["db"].agent_has_capability.return_value = holds_grant
+    config = AgentConfig(
+        name="lib-ghost", template="local:libtpl", ephemeral={"max_executions": 3})
+    await crud.create_agent_internal(config, _agent_key_user(), None)
+
+    assert config.ephemeral  # the creation really took the ephemeral path
+    (kw,) = materialized
+    assert kw["declared_library_skills"] == []
+    assert audit == []
+    assert "skills.manage" not in [
+        c.args[1] for c in ctx["db"].agent_has_capability.call_args_list
+        if len(c.args) > 1
+    ]

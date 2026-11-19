@@ -16,6 +16,8 @@ Covered, in the shape of `test_1704_crud_materialize_plugins.py`:
     no assignment, people and the system key do;
   * `_materialize_agent_files` assigns only names the library has, ghost-skips,
     is non-fatal, and spawns delivery only when something was assigned;
+  * the assignment reconciles the agent's skill gates as the creating
+    principal, and the default gate row exists before delivery is spawned;
   * delivery waits for readiness and reuses the start-path injection.
 """
 
@@ -353,7 +355,7 @@ def test_refusal_audit_is_safe_without_a_request(db_backend, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _materialize(crud, monkeypatch, config, skills, by_agent=None):
+def _materialize(crud, monkeypatch, config, skills, by_agent=None, **principal):
     async def _noop(*a, **k):
         return None
 
@@ -364,6 +366,7 @@ def _materialize(crud, monkeypatch, config, skills, by_agent=None):
             config, {}, None, None, None, None, OWNER, None, None,
             declared_library_skills=skills,
             library_skills_assigned_by_agent=by_agent,
+            **principal,
         )
     )
 
@@ -475,6 +478,135 @@ def test_a_raising_library_is_not_fatal(db_backend, monkeypatch, spawned, caplog
         _materialize(crud, monkeypatch, _config(), ["user-research"])  # must not raise
     assert any("library skills" in r.message.lower() for r in caplog.records)
     assert spawned == []
+
+
+# ---------------------------------------------------------------------------
+# The gates follow the assignment, as the creator, before delivery
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gated_library(monkeypatch, library):
+    """`user-research` is `approval: recommended` in the library, so assigning
+    it owes the agent a default gate. The real reconcile runs against the real
+    SQLite; only Docker (the agent is not running yet) and the audit sink are
+    stubbed. Returns the audit rows."""
+    from services import skill_gate_map_service
+    from services.platform_audit_service import platform_audit_service
+    from services.skill_service import skill_service
+
+    monkeypatch.setattr(
+        skill_service, "list_skills",
+        lambda: [{"name": "user-research", "approval": "recommended"},
+                 {"name": "survey-setup"}],
+    )
+
+    async def _not_running(agent_name):
+        return False
+
+    monkeypatch.setattr(skill_gate_map_service, "_container_running", _not_running)
+    logged = []
+
+    async def _log(**kw):
+        logged.append(kw)
+
+    monkeypatch.setattr(platform_audit_service, "log", _log)
+    return logged
+
+
+@pytest.fixture
+def gates_at_spawn(monkeypatch):
+    """What the agent's gate map held at the moment delivery was spawned."""
+    crud = _crud()
+    from database import db
+
+    seen = []
+    monkeypatch.setattr(
+        crud, "_spawn_library_skill_delivery",
+        lambda name: seen.append(
+            {g["skill_name"]: g for g in db.list_agent_skill_gates(name)}
+        ),
+    )
+    return seen
+
+
+_REQUEST = SimpleNamespace(
+    client=SimpleNamespace(host="203.0.113.7"),
+    scope={"path": "/api/agents"},
+    state=SimpleNamespace(request_id="req-4387"),
+)
+
+
+def test_recommended_skill_is_gated_as_the_creator_before_delivery(
+    db_backend, monkeypatch, gated_library, gates_at_spawn
+):
+    crud = _crud()
+    seed_user(1, OWNER, "creator")
+    seed_agent(AGENT, owner_id=1)
+    creator = _user(mcp_scope=None)
+    _materialize(
+        crud, monkeypatch, _config(), ["user-research", "survey-setup"],
+        current_user=creator, request=_REQUEST,
+    )
+
+    # The default gate row already existed when delivery was spawned, and only
+    # for the recommended skill.
+    (gates,) = gates_at_spawn
+    assert list(gates) == ["user-research"]
+    assert gates["user-research"]["origin"] == "library_default"
+    # ... set by the creating principal, not by `system`.
+    assert gates["user-research"]["set_by"] == OWNER
+
+    (row,) = [r for r in gated_library if r["event_action"] == "skill_gate_default_applied"]
+    assert row["actor_user"] is creator
+    assert row["source"] == "api"
+    assert row["target_id"] == AGENT
+    assert row["details"]["trigger"] == "assignment"
+    assert row["details"]["via"] == "ui"
+    assert row["details"]["skills"] == ["user-research"]
+    assert row["actor_ip"] == "203.0.113.7"
+    assert row["endpoint"] == "/api/agents"
+    assert row["request_id"] == "req-4387"
+
+
+def test_gate_reconcile_names_the_creating_agent_and_tolerates_no_request(
+    db_backend, monkeypatch, gated_library, gates_at_spawn
+):
+    """A system deploy and an agent-spawned creation reach here with
+    `request=None`; the gate is still attributed to the creating key."""
+    crud = _crud()
+    seed_user(1, OWNER, "creator")
+    seed_agent(AGENT, owner_id=1)
+    creator = _user(mcp_scope="agent", agent_name="orchestrator")
+    _materialize(
+        crud, monkeypatch, _config(), ["user-research"], by_agent="orchestrator",
+        current_user=creator, request=None,
+    )
+
+    (gates,) = gates_at_spawn
+    assert gates["user-research"]["set_by"] == OWNER
+    (row,) = [r for r in gated_library if r["event_action"] == "skill_gate_default_applied"]
+    assert row["actor_agent_name"] == "orchestrator"
+    assert row["details"]["via"] == "orchestrator"
+    assert row["details"]["trigger"] == "assignment"
+    assert row["actor_ip"] is None and row["endpoint"] is None
+
+
+def test_gate_reconcile_without_a_principal_stays_a_system_write(
+    db_backend, monkeypatch, gated_library, gates_at_spawn
+):
+    """A caller that supplies no principal keeps the actor-less context: the
+    gate is still applied before delivery, recorded as `system`."""
+    crud = _crud()
+    seed_user(1, OWNER, "creator")
+    seed_agent(AGENT, owner_id=1)
+    _materialize(crud, monkeypatch, _config(), ["user-research"])
+
+    (gates,) = gates_at_spawn
+    assert gates["user-research"]["set_by"] == "system"
+    (row,) = [r for r in gated_library if r["event_action"] == "skill_gate_default_applied"]
+    assert row["source"] == "system" and "actor_user" not in row
+    assert row["details"]["trigger"] == "assignment"
 
 
 # ---------------------------------------------------------------------------
