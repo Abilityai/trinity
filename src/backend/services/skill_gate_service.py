@@ -54,6 +54,7 @@ from services.skill_gate_errors import (  # noqa: F401 — re-exported for entri
     SkillGateRefused,
 )
 from services.skill_packaging import SKILL_NAME_RE
+from utils import request_memo
 from utils.credential_sanitizer import sanitize_text
 from utils.helpers import to_utc_iso, utc_now
 from utils.skill_invocation import find_gated_invocations
@@ -2203,6 +2204,7 @@ def outcome_delivery(kind: Optional[str], *, agent_name: Optional[str] = None,
 SKILL_DESCRIPTION_MAX_CHARS = 300
 
 
+@request_memo.memoized
 def _skill_descriptions(agent_name: str) -> Dict[str, str]:
     """Each skill's description from the agent's last-known listing (Redis,
     display-only, fail-open): a card without one still names the skill."""

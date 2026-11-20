@@ -1,6 +1,27 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4671_asks_query_count.py",
+      "feature": "#4671",
+      "added": "2026-11-20",
+      "categories": [
+        "backend",
+        "workspace",
+        "performance"
+      ],
+      "description": "#4671: list_asks_page runs a fixed number of queries whatever it lists (was ~4 per row plus 2 per agent); visibility, the per-agent roster re-check and the 503 asks_unavailable contract are unchanged."
+    },
+    {
+      "file": "unit/test_4671_request_memo.py",
+      "feature": "#4671",
+      "added": "2026-11-20",
+      "categories": [
+        "backend",
+        "performance"
+      ],
+      "description": "#4671/#4672: utils/request_memo contract (no cache outside a scope, nothing outlives one, no cross-principal answer, failures not remembered) and the db batch readers match their per-item twins."
+    },
+    {
       "file": "unit/test_4564_capacity_db_bound.py",
       "feature": "#4564",
       "added": "2026-11-13",
