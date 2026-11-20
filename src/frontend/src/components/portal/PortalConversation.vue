@@ -985,7 +985,7 @@ import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
 import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, viewerIsMemberTier, assistantStarting, memberTierRefusal, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags, isNewChatTranscript } from './portalUtils'
-import { tailSignature, tailLimit, adoptLocalIds, freshRows, tailOverflowed, TAIL_LIMIT_CAP } from './portalThreadTail'
+import { tailSignature, tailLimit, adoptLocalIds, freshRows, tailOverflowed, tailHeld, TAIL_LIMIT_CAP } from './portalThreadTail'
 // ent#621: the same wrap the typeahead's roving selection uses — one modulo.
 import { cycleIndex } from './portalKeymap'
 // ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
@@ -1876,6 +1876,8 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
       messages.value.push({ ...assistantRow({ content: data.response, id: data.id, my_rating: data.myRating,
         ...turnGateFlags(data) }),
       at: data.at || null })
+      settleOwnTail(currentSessionId.value, data.tailRows)
+      store.noteWorkspaceChange?.()
       refreshAsksAfterTurn()
       // A reattached reply is still a reply the user just watched land, so it
       // has to announce itself like `deliver()` does. Without this the thread
@@ -2489,6 +2491,10 @@ async function deliver(text, { replyId = null, attachments = null, tags = null }
       }),
       at: data.at || null,
     })
+    settleOwnTail(data.session_id || currentSessionId.value, data.tailRows)
+    // #4671: the turn ended — every list refresh that follows must describe
+    // the Workspace AFTER it, never join a read that left before the reply.
+    store.noteWorkspaceChange?.()
     refreshAsksAfterTurn()
     terminalOutcome.value = null   // ent#525: the reply IS the outcome
     // ent#534: never narrate over a live voice call — the orb owns playback
@@ -2780,7 +2786,9 @@ async function awaitPersistedReply(sessionId, baseline, budgetSeconds,
     // #3166: matched on THIS turn's id — another turn on the thread may have
     // written its reply after our baseline was read.
     const reply = replyFromHistory(data.messages, baseline, executionId)
-    if (reply) return { ...reply, session_id: data.sessionId || sessionId }
+    // #4671: the rows the reply was found in ride along — they are a tail read
+    // already paid for (`settleOwnTail`).
+    if (reply) return { ...reply, session_id: data.sessionId || sessionId, tailRows: data.messages }
     // #2320: the server told us how this turn ended. Authoritative regardless
     // of the marker — a verdict naming THIS execution means it is over — and
     // read before the idle timer so a diagnosed failure is reported at once
@@ -3760,6 +3768,32 @@ async function reconcileTail(sid, { limit = REPLY_POLL_ROWS } = {}) {
   return fresh
 }
 
+// #4671: a turn's own path already read the thread's tail — the reply poll
+// found the reply IN the newest rows, and those rows came back with it. Fold
+// them in here, exactly as `reconcileTail` would after a fetch (adopt the id of
+// the person's own question, append anything that arrived on its own while the
+// turn ran), and remember that this thread's tail is settled. The watcher below
+// then finds the row's newest instant already on screen (`tailHeld`) and does
+// not read history again for what it was just handed — the read that made
+// every turn end fetch the same rows twice.
+//
+// Nothing is settled when the rows are missing (the synchronous fallback has
+// none), belong to another thread (a switch mid-turn), or overflow the read
+// (a gap deeper than the poll's window): the watcher fetches as before.
+let settledTailFor = null
+function settleOwnTail(sid, rows) {
+  settledTailFor = null
+  if (!sid || !Array.isArray(rows) || currentSessionId.value !== sid) return
+  if (tailOverflowed(messages.value, rows, REPLY_POLL_ROWS)) return
+  adoptLocalIds(messages.value, rows)
+  const fresh = freshRows(messages.value, rows)
+  if (fresh.length) {
+    messages.value = [...messages.value, ...fresh.map(historyRow)]
+    onMessagesArrived(fresh.length)
+  }
+  settledTailFor = sid
+}
+
 // What the open thread's row last looked like when this component read its
 // tail — compared as a STRING (`tailSignature`), because `decorate()` hands
 // down new objects every tick. Set only when a reconcile actually ran, so a move
@@ -3781,6 +3815,13 @@ watch(
     if (inTurn || inCall || loading) return
     const before = reconciledSignature
     reconciledSignature = sig
+    // #4671: the person's own turn moved the row, and its rows are already
+    // here. The mark stands while the row's newest instant is still one the
+    // transcript holds — a long turn moves the row twice (the question on a
+    // 20 s tick, the reply on the turn-end refresh) — and is dropped the
+    // moment the row is ahead: that move is something else's, and is read.
+    if (settledTailFor === sid && tailHeld(currentThread.value, messages.value)) return
+    settledTailFor = null
     const fresh = await reconcileTail(sid, { limit: tailLimit(currentThread.value?.unread, REPLY_POLL_ROWS, TAIL_LIMIT_CAP) })
     if (currentSessionId.value !== sid) return
     if (fresh.length) {
