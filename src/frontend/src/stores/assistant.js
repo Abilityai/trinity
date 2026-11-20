@@ -63,7 +63,8 @@ const KEEP_KEY = 'trinity-assistant-conversation'
 const KEEP_MS = 24 * 3600 * 1000
 const KEEP_MESSAGES = 80
 
-const closedAccount = () => ({ step: null, email: '', devCode: '', terms: null, busy: false, error: '' })
+// `stale`: the account is known but the terms it accepted are no longer the current ones.
+const closedAccount = () => ({ step: null, email: '', devCode: '', terms: null, busy: false, error: '', stale: false })
 
 
 const LOW_MESSAGES = 5
@@ -137,6 +138,13 @@ export const useAssistantStore = defineStore('assistant', {
   getters: {
     available: (state) => !state.absent && Boolean(state.status?.available),
     subscribed: (state) => state.status?.plan === 'pro',
+    // False only when the account is known and the terms it accepted are not the
+    // current version. No current version to compare with: let Trinity decide.
+    termsCurrent: (state) => {
+      const s = state.status
+      if (!s?.email || !s.terms?.version) return true
+      return s.terms_accepted === s.terms.version
+    },
     /** Someone at this instance has agreed to the trial's terms. Nothing is sent before that. */
     agreed: (state) => Boolean(state.status?.trial_terms?.accepted),
     /** How many builds and runs are being followed right now. */
@@ -702,7 +710,13 @@ export const useAssistantStore = defineStore('assistant', {
 
     // -- signing in and subscribing ---------------------------------------
     openAccount() {
-      this.account = { ...closedAccount(), step: this.status?.email ? 'subscribe' : 'email' }
+      const email = this.status?.email
+      if (email && !this.termsCurrent) {
+        // The current terms are accepted with a code, as at any sign-in.
+        this.account = { ...closedAccount(), step: 'email', email, stale: true }
+        return this.startAccount(email)
+      }
+      this.account = { ...closedAccount(), step: email ? 'subscribe' : 'email' }
     },
 
     closeAccount() {
@@ -780,6 +794,10 @@ export const useAssistantStore = defineStore('assistant', {
         if (held) await this.send(`${done} Now answer what they asked just before, which the limit stopped: "${held}"`, route, { shown: false })
         else if (this.conversationId) await this.send(done, route, { shown: false })
       } catch (error) {
+        if (detail(error)?.code === 'sign_in_first') {   // the terms changed since the status was read
+          await this.loadStatus()
+          if (this.status?.email && !this.termsCurrent) return this.openAccount()
+        }
         this.account.error = words(error, "Couldn't start the subscription. Try again.")
       } finally {
         this.account.busy = false
