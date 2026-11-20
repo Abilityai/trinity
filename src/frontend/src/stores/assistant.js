@@ -796,7 +796,7 @@ export const useAssistantStore = defineStore('assistant', {
       } catch (error) {
         if (detail(error)?.code === 'sign_in_first') {   // the terms changed since the status was read
           await this.loadStatus()
-          if (this.status?.email && !this.termsCurrent) return this.openAccount()
+          if (this.status?.email && !this.termsCurrent) return await this.openAccount()
         }
         this.account.error = words(error, "Couldn't start the subscription. Try again.")
       } finally {

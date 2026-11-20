@@ -460,6 +460,9 @@
           </form>
 
           <form v-else-if="store.account.step === 'code'" class="space-y-3" @submit.prevent="store.verifyAccount(code, accepted)">
+            <p v-if="store.account.stale" class="text-[12.5px] text-gray-600 dark:text-gray-300" data-testid="assistant-terms-changed">
+              The terms have changed since you last accepted them. Read the current terms and accept them to continue.
+            </p>
             <p class="text-gray-900 dark:text-gray-100">
               Enter the 6-digit code sent to <span class="font-medium">{{ store.account.email }}</span>.
             </p>
@@ -929,6 +932,8 @@ watch(() => route.path, () => store.recheck())
 watch(() => store.account.step, (step) => {
   code.value = ''
   if (step !== 'code') accepted.value = false
+  // A code that could not be sent to a known address leaves that address filled in.
+  if (step === 'email' && store.account.email) email.value = store.account.email
 })
 
 watch(
