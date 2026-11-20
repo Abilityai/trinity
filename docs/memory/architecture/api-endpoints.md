@@ -286,7 +286,7 @@ Access: admins see all; non-admins only owned/shared agents (`accessible_agent_n
 ### First-Run Front Desk (ent#319)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/api/onboarding/first-run` | Any authenticated user | Is the caller still looking at a seed-only install, and which seeded agent should the "Show me" door open. `first_run` stays true while every visible agent is one Trinity seeded — the seed deploys under the admin account, so the seeded set is derived from the seeder's naming contract (`system_seed_service.seeded_agent_names()` + Cornelius), not from `audit_log` actors. DB-only (renders with containers down); never raises — a failure reads as `first_run: false` so the card stays hidden |
+| GET | `/api/onboarding/first-run` | Any authenticated user | Is the caller still looking at a seed-only install, and which seeded agent should the "Show me" door open. `first_run` stays true while every visible agent is one Trinity seeded — the seed deploys under the admin account, so the seeded set is derived from the seeder's naming contract (`system_seed_service.seeded_agent_names()` + Cornelius), not from `audit_log` actors. DB-only (renders with containers down); never raises — a failure reads as `first_run: false` so the card stays hidden. Also returns `install`, a short opaque mark of this install (first 8 characters of the installation id, read with the NON-minting accessor, so `null` until something has created the id): the browser keeps "setup closed" against it, so a fresh install at the same address offers setup again |
 
 ### Agent Overview Analytics (#1107)
 | Method | Path | Auth | Description |

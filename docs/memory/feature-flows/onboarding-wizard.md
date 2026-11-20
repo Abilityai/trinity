@@ -61,7 +61,14 @@ decision is spec-reachable. Each step has `eligible` (who it is for) and
 - **Completion is derived** (`stepState`): done when the predicate went false
   after a refresh, or the step emitted `complete` this session (the only way
   `keys` reads done). Persisted per browser: `trinity_first_run_closed` ("Finish
-  later" / "Done") and `trinity_first_run_skipped` (JSON array). A dismissal
+  later" / "Done") and `trinity_first_run_skipped` (JSON array). The close is
+  remembered **against the install**: `GET /api/onboarding/first-run` returns a
+  short opaque `install` mark (first 8 characters of the installation id) and
+  that is the value stored, so a fresh install at the same address offers
+  setup again. A bare `1` (written before installs were told apart, and by
+  `e2e/auth.setup.js`) still counts as closed, so an upgrade reopens nothing.
+  While the overlay is open it sets `firstRun.overlayOpen`, which other
+  surfaces on the page read to keep out of its way. A dismissal
   given to a replaced card (`trinity_hardening_guide_dismissed`,
   `trinity-admin-email-nudge-dismissed`, `trinity_front_desk_dismissed`,
   `trinity_onboarding_dismissed_v1`, an unexpired telemetry snooze) reads as a

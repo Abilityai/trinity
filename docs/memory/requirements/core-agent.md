@@ -2470,6 +2470,22 @@ with a `template.yaml` allow-list ceiling + #1083 detached-execution integration
 issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
 
 ---
+- **FR-12 — Ambient (watch-only) mode (trinity-enterprise#1302)**: one control and one key (`M`) switch
+  the orb into a hands-off view for a wall screen; any deliberate key, click or scroll returns to the
+  interactive orb with selection, scope and camera as they were (a moving pointer does nothing). With no
+  input it shows: a plain-language line for the current run's step, the notes used in the current or most
+  recent run (lit on the graph, listed by title, the camera glides to them), live stats (status, running /
+  last run, next scheduled, queued, context, 24h runs / failures / cost, note and link counts), and a
+  **mood** — one word from a fixed first-match ladder (unknown · asleep · struggling · strained · working ·
+  backed up · digesting · neglected · resting) with the deciding signal shown beside it. **Frontend-only
+  and read-only**: it composes existing viewer-scoped `GET` routes (agent, executions list / stream / log,
+  queue, schedules, brain-orb data) and issues nothing else — no new endpoint, no write, no run, no voice
+  session. **Withheld by construction**: prompt text, reply text, reasoning, raw commands, search queries,
+  web addresses and the names of files that are not notes; a run is named only when it is a playbook
+  (`/name`) or a named schedule. **Honest status**: a stopped agent, a lost feed and an expired sign-in are
+  each stated in words and the visuals drop to rest; the idle replay of the last run is labelled "not live";
+  a viewer who cannot read the agent's runs sees graph + status and is told what is hidden. Buffers are
+  capped and every scene object it creates is disposed, so it can run for hours.
 
 ## Default Cornelius Agent — Auto-Seed on Fresh Install (trinity-enterprise#107)
 
