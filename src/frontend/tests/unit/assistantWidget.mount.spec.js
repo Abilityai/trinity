@@ -16,6 +16,8 @@ let status
 let turns        // answers to /turn and /turn/continue, in order
 let scheduleOn
 let verifyFails
+let startFails       // /account/start answers 502
+let refuseSubscribe  // /subscription/start answers 409 sign_in_first, and the terms move on
 let jobs         // answers to the job's status, in order
 let runs = []    // answers to a run's status, in order
 let afterAgreeing = null   // the line Trinity opens with once someone has agreed
@@ -43,10 +45,18 @@ vi.mock('@/api', () => {
     if (url === '/api/enterprise/assistant/feedback') return { ok: true }
     if (url === '/api/enterprise/assistant/opened') return { ok: true }
     if (url === '/api/enterprise/onboarding/checklist') return checklist
+    if (url === '/api/enterprise/assistant/account/start' && startFails) {
+      throw { response: { status: 502, data: { detail: { code: 'mail_failed', message: "The code couldn't be sent right now." } } } }
+    }
     if (url === '/api/enterprise/assistant/account/start') return { email: body.email, dev_code: '424242', terms: { version: 't1', url: '' } }
     if (url === '/api/enterprise/assistant/account/verify') {
       if (verifyFails) throw { response: { status: 400, data: { detail: { code: 'wrong_code', message: "That code didn't match." } } } }
       return { plan: 'free', email: body.email, terms_accepted: 't1' }
+    }
+    if (url === '/api/enterprise/assistant/subscription/start' && refuseSubscribe) {
+      refuseSubscribe = false
+      status = { ...status, terms_accepted: 't0', terms: { version: 't1', url: '' } }
+      throw { response: { status: 409, data: { detail: { code: 'sign_in_first', message: 'Accept the current terms first.' } } } }
     }
     if (url === '/api/enterprise/assistant/subscription/start') return { plan: 'pro', billing: 'unbilled', checkout_url: null, email: 'ada@example.com' }
     if (url === '/api/agents') return [{ name: 'trinity-system', status: 'running', is_system: true }, { name: 'issue-digest', status: 'running' }]
@@ -92,6 +102,8 @@ describe('assistant panel', () => {
     turns = []
     scheduleOn = false
     verifyFails = false
+    startFails = false
+    refuseSubscribe = false
     jobs = []
     runs = []
     afterAgreeing = null
@@ -894,5 +906,96 @@ describe('assistant panel', () => {
     await flushPromises()
     expect(sent('/api/enterprise/assistant/account/start')).toHaveLength(0)
     expect(wrapper.get('[data-testid="assistant-account"]').text()).toContain('full email address')
+  })
+
+  describe('subscribing with an account already known', () => {
+    const NOTICE = 'The terms have changed since you last accepted them.'
+    const START = '/api/enterprise/assistant/account/start'
+    const SUBSCRIBE = '/api/enterprise/assistant/subscription/start'
+    const offerUpgrade = async () => {
+      turns = [final('Subscribe?', [{ action: 'upgrade' }])]
+      await openPanel()
+      await say('I want more')
+      await button('Continue').trigger('click')
+      await flushPromises()
+    }
+    const account = () => wrapper.get('[data-testid="assistant-account"]')
+    const known = async (fields) => {
+      status = { ...status, ...fields }
+      const { useAssistantStore } = await import('@/stores/assistant')
+      await useAssistantStore().loadStatus()
+    }
+
+    it('asks a known account whose terms are out of date to accept the current ones before subscribing', async () => {
+      await known({ email: 'ada@example.com', terms_accepted: 't0', terms: { version: 't1', url: '' } })
+      turns = [{ status: 'limit', conversation_id: 'c1', text: '', cards: [],
+        allowance: { ...ALLOWANCE, messages_left: 0, reached: 'messages', resets_at: null } }]
+      await openPanel()
+      await say('one more thing')
+      await wrapper.get('[data-testid="assistant-upgrade"]').trigger('click')
+      await flushPromises()
+
+      expect(sent(START).map((c) => c.body)).toEqual([{ email: 'ada@example.com' }])
+      expect(account().text()).toContain(NOTICE)
+      expect(account().text()).toContain('version t1')
+      expect(wrapper.find('[data-testid="assistant-terms"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="assistant-subscribe"]').exists()).toBe(false)
+
+      await wrapper.get('[data-testid="assistant-code"]').setValue('424242')
+      await account().find('form').trigger('submit')
+      await flushPromises()
+      expect(account().text()).toContain('Accept the terms to continue.')
+      expect(sent('/api/enterprise/assistant/account/verify')).toHaveLength(0)
+
+      await wrapper.get('[data-testid="assistant-terms"]').setValue(true)
+      await account().find('form').trigger('submit')
+      await flushPromises()
+      expect(sent('/api/enterprise/assistant/account/verify')[0].body).toMatchObject({ email: 'ada@example.com', accept_terms: true, terms_version: 't1' })
+
+      await wrapper.get('[data-testid="assistant-subscribe"]').trigger('click')
+      await flushPromises()
+      expect(sent(SUBSCRIBE)).toHaveLength(1)
+    })
+
+    it('goes straight to subscribing when the accepted terms are the current ones', async () => {
+      await known({ email: 'ada@example.com', terms_accepted: 't1', terms: { version: 't1', url: '' } })
+      await offerUpgrade()
+      expect(wrapper.find('[data-testid="assistant-subscribe"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="assistant-terms"]').exists()).toBe(false)
+      expect(account().text()).not.toContain(NOTICE)
+      expect(sent(START)).toHaveLength(0)
+    })
+
+    it('asks for an email, and sends nothing, when no account is known', async () => {
+      await known({ email: null, terms_accepted: null, terms: { version: 't1', url: '' } })
+      await offerUpgrade()
+      expect(wrapper.find('[data-testid="assistant-email"]').exists()).toBe(true)
+      expect(sent(START)).toHaveLength(0)
+    })
+
+    it('turns a refusal over changed terms into the accept step, not a dead end', async () => {
+      await known({ email: 'ada@example.com', terms_accepted: 't1', terms: { version: 't1', url: '' } })
+      refuseSubscribe = true
+      await offerUpgrade()
+      await wrapper.get('[data-testid="assistant-subscribe"]').trigger('click')
+      await flushPromises()
+
+      expect(sent(SUBSCRIBE)).toHaveLength(1)
+      expect(account().text()).not.toContain('Accept the current terms first.')
+      expect(account().text()).toContain(NOTICE)
+      expect(wrapper.find('[data-testid="assistant-terms"]').exists()).toBe(true)
+      expect(sent(START).map((c) => c.body)).toEqual([{ email: 'ada@example.com' }])
+    })
+
+    it('keeps the address and says why when the code cannot be sent', async () => {
+      await known({ email: 'ada@example.com', terms_accepted: 't0', terms: { version: 't1', url: '' } })
+      startFails = true
+      await offerUpgrade()
+
+      expect(sent(START)).toHaveLength(1)
+      expect(account().text()).toContain("The code couldn't be sent right now.")
+      expect(wrapper.get('[data-testid="assistant-email"]').element.value).toBe('ada@example.com')
+      expect(wrapper.find('[data-testid="assistant-subscribe"]').exists()).toBe(false)
+    })
   })
 })
