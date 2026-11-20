@@ -33,12 +33,22 @@
       <section class="formwrap">
         <div class="card">
           <h2>Create your admin account</h2>
-          <p class="sub">This sets up the owner of this Trinity instance.</p>
+          <p class="sub">{{ linkMode
+            ? 'Choose a password to finish setting up your instance.'
+            : 'This sets up the owner of this Trinity instance.' }}</p>
 
-          <form @submit.prevent="handleSubmit" novalidate>
+          <!-- trinity-enterprise#1312: a setup link that cannot be used names
+               the next step instead of showing a form that would be refused. -->
+          <div v-if="linkProblem" class="linkproblem" data-testid="setup-link-problem" role="alert">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+            <span>{{ LINK_PROBLEM_TEXT[linkProblem] }}</span>
+          </div>
+
+          <form v-else @submit.prevent="handleSubmit" novalidate>
             <!-- EC2 instance ID (#3004): an AWS install's first admin proves
-                 they control this server. -->
-            <div v-if="claimRequired" class="field">
+                 they control this server. An emailed setup link carries its
+                 code instead (trinity-enterprise#1312). -->
+            <div v-if="claimRequired && !linkMode" class="field">
               <div class="labrow">
                 <label for="instanceId">EC2 instance ID <span class="req">*</span></label>
                 <span v-if="claimCode.trim() && !claimValid" class="match bad">Format: i-0abc123…</span>
@@ -64,19 +74,21 @@
 
             <!-- Admin email (required; optional on an instance-ID claim, #3004) -->
             <div class="field">
-              <label for="adminEmail">Admin email <span v-if="claimRequired" class="opt">(optional)</span><span v-else class="req">*</span></label>
+              <label for="adminEmail">Admin email <span v-if="claimRequired && !linkMode" class="opt">(optional)</span><span v-else class="req">*</span></label>
               <div class="ipt">
                 <input
                   type="email"
                   id="adminEmail"
                   v-model="email"
                   :disabled="loading"
+                  :readonly="emailLocked"
+                  :aria-readonly="emailLocked ? 'true' : undefined"
                   placeholder="you@company.com"
                   autocomplete="email"
-                  :required="!claimRequired"
+                  :required="!claimRequired || linkMode"
                 />
               </div>
-              <p class="hint">{{ claimRequired
+              <p class="hint">{{ claimRequired && !linkMode
                 ? "Leave blank to sign in as admin."
                 : "You'll sign in with this email and your password." }}</p>
             </div>
@@ -183,15 +195,29 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 import { clearSetupCache, getSetupClaimRequired } from '../router'
 import { useAuthStore } from '../stores/auth'
+import { readSetupLink, LINK_CLAIM_RE, SETUP_LINK_FLAG } from '../utils/setupLink'
 import TrinityMark from '../components/TrinityMark.vue'
 
 const router = useRouter()
+const route = useRoute()
 const authStore = useAuthStore()
+
+// trinity-enterprise#1312: an emailed setup link carries the setup code and the
+// admin email. Read once, then cleared from the address bar at once (whatever
+// the install), so the code is not left in the URL or the history entry. The
+// code is held only here, never stored; a reload is told to open the link again.
+const link = readSetupLink(route)
+let reopened = false
+try {
+  if (link.present) sessionStorage.setItem(SETUP_LINK_FLAG, '1')
+  else reopened = sessionStorage.getItem(SETUP_LINK_FLAG) === '1'
+} catch { /* storage unavailable: a reload then shows the typed form */ }
+if (link.present) router.replace({ path: '/setup' })
 
 // #3004: 'instance-id' when this install's first admin must give the EC2
 // instance ID, null when not. Fetched by the router guard before this page
@@ -199,6 +225,20 @@ const authStore = useAuthStore()
 // than render a form that may be missing the ID field.
 const claimMode = ref(getSetupClaimRequired())
 const claimRequired = computed(() => claimMode.value === 'instance-id')
+// Only an instance-id install takes a link; anywhere else its values are ignored.
+const linkMode = computed(() => claimRequired.value && (link.present || reopened))
+const linkRefused = ref(false)
+const linkProblem = computed(() => {
+  if (!linkMode.value) return null
+  if (linkRefused.value) return 'refused'
+  if (!link.present) return 'reopen'
+  return LINK_CLAIM_RE.test(link.claim) ? null : 'incomplete'
+})
+const LINK_PROBLEM_TEXT = {
+  refused: "This setup link isn't valid any more. Open the latest link from your email, or ask for a new one.",
+  incomplete: 'This setup link is incomplete. Open the latest link from your email, or ask for a new one.',
+  reopen: 'To finish setting up, open the link from your email again.',
+}
 onMounted(async () => {
   if (claimMode.value !== undefined) return
   try {
@@ -216,6 +256,9 @@ const claimCode = ref('')
 const claimValid = computed(() => CLAIM_RE.test(claimCode.value.trim().toLowerCase()))
 
 const email = ref('')
+// The server refuses any other address for a link, so the one it carried is fixed.
+const emailLocked = computed(() => linkMode.value && !!link.email)
+watch(emailLocked, (locked) => { if (locked) email.value = link.email }, { immediate: true })
 const password = ref('')
 const confirmPassword = ref('')
 const company = ref('')
@@ -261,7 +304,9 @@ const strengthColor = computed(() => {
 
 const isValid = computed(() =>
   claimMode.value !== undefined &&
-  (claimRequired.value ? claimValid.value && (!email.value.trim() || emailValid.value) : emailValid.value) &&
+  (claimRequired.value && !linkMode.value
+    ? claimValid.value && (!email.value.trim() || emailValid.value)
+    : emailValid.value) &&
   passwordRequirements.value.every(r => r.met) && passwordsMatch.value
 )
 
@@ -280,8 +325,9 @@ async function handleSubmit() {
       company: company.value.trim() || null,
       // The opt-in sends the email, so there is nothing to consent to without one.
       consent_updates: consentUpdates.value && !!emailValue,
-      ...(claimRequired.value ? { claim_code: claimCode.value.trim() } : {}),
+      ...(claimRequired.value ? { claim_code: linkMode.value ? link.claim : claimCode.value.trim() } : {}),
     })
+    try { sessionStorage.removeItem(SETUP_LINK_FLAG) } catch { /* nothing stored */ }
 
     // Clear the cache so the router knows setup is done.
     clearSetupCache()
@@ -300,8 +346,13 @@ async function handleSubmit() {
     router.push(signedIn ? '/' : '/login')
   } catch (e) {
     if (e.response?.status === 403 && e.response?.data?.detail === CLAIM_MISMATCH) {
-      // A wrong instance ID: stay here so it can be corrected.
-      error.value = CLAIM_MISMATCH
+      // A refused link (replaced, used, or another email) cannot be corrected
+      // here: say to use the latest one. A wrong instance ID stays editable.
+      if (linkMode.value) linkRefused.value = true
+      else error.value = CLAIM_MISMATCH
+    } else if (e.response?.status === 403 && linkMode.value) {
+      error.value = 'This instance is already set up.'
+      router.push({ path: '/login', query: { notice: 'setup-complete' } })
     } else if (e.response?.status === 403) {
       // Setup already completed — endpoint self-disabled. Send them to login.
       error.value = 'Setup has already been completed.'
@@ -438,6 +489,8 @@ async function handleSubmit() {
 .cta .spin{width:18px;height:18px;animation:rot .8s linear infinite}
 .cta .spin .o25{opacity:.25}.cta .spin .o75{opacity:.75}
 @keyframes rot{to{transform:rotate(360deg)}}
+.linkproblem{display:flex;gap:10px;align-items:flex-start;padding:4px 0 8px;font-size:13px;line-height:1.5;color:var(--ink)}
+.linkproblem svg{width:18px;height:18px;color:var(--indigo-400);flex:none;margin-top:1px}
 .secnote{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:12px;font-size:11px;color:var(--muted2)}
 .secnote svg{width:13px;height:13px;color:var(--indigo-400);flex:none}
 .footnote{text-align:center;font-size:11.5px;color:var(--muted2);margin-top:10px;line-height:1.5}
