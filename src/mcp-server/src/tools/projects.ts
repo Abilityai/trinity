@@ -26,6 +26,7 @@ import { TrinityClient, ApiError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import { agentKeyToolAccess, projectToolAccess, resolveActingAgent } from "../access.js";
 import { deriveMcpIdempotencyKey } from "./chat.js";
+import { PersonProjectClient } from "./projects_person_client.js";
 
 /**
  * The project tools cannot be driven by an admin's user key acting for an agent
@@ -43,7 +44,25 @@ const AGENT_KEY_ONLY_MESSAGE =
 /** trinity-enterprise#1024: the tool refused to act for the named agent itself. */
 class ActAsRefusal extends Error {}
 
+/** trinity-enterprise#1322: the key's scope has no project route, or a person's key named an agent. */
+class ScopeRefusal extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+  }
+}
+const ACT_AS_NOT_OFFERED =
+  "The project tools don't act for an agent. Omit agent_name and the call acts as you, with your own Workspace permissions.";
+const KEY_NOT_SUPPORTED = "Project tools take a person's own user key or an agent's own key.";
+
+/** The read methods both doors answer, by the same name and shape. */
+type ProjectReader = Pick<TrinityClient, "getMyProject" | "listProjectTasks" | "getProjectLog" | "readProjectContext" | "getStewardDigest" | "listProjectExecutions"> & {
+  listMyProjects(turn?: string, includeArchived?: boolean): Promise<Array<Record<string, unknown>>>;
+};
+
 function parseError(error: unknown): { status?: number; code?: string; message: string; detailIsString: boolean } {
+  if (error instanceof ScopeRefusal) {
+    return { code: error.code, message: error.message, detailIsString: false };
+  }
   if (error instanceof ActAsRefusal) {
     return { code: "act_as_refused", message: error.message, detailIsString: false };
   }
@@ -121,6 +140,24 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       throw new ActAsRefusal(e instanceof Error ? e.message : String(e));
     }
     return session?.scope === "user" ? base.asAgent(agent) : base;
+  };
+
+  /**
+   * trinity-enterprise#1322: the door a read tool calls, picked by the key's
+   * scope from an allow-list. `agent` keeps today's request (and its refusal of
+   * a named other agent); `user` reads as the person on the Workspace routes;
+   * no key (keyless dev mode: no session, or one without a scope, which a keyed
+   * session never is — authenticate maps a scope-less key to `user`) is today's
+   * path; any other scope is refused.
+   */
+  const readerFor = (context: { session?: McpAuthContext } | undefined, requested?: string): ProjectReader => {
+    const session = context?.session;
+    if (session?.scope === undefined || session.scope === "agent") return clientFor(context, requested);
+    if (session.scope === "user") {
+      if (typeof requested === "string" && requested.trim() !== "") throw new ScopeRefusal("act_as_not_offered", ACT_AS_NOT_OFFERED);
+      return new PersonProjectClient(getClient(session));
+    }
+    throw new ScopeRefusal("key_not_supported", KEY_NOT_SUPPORTED);
   };
 
   /** A write or read refusal as a structured result — never a throw. */
@@ -206,12 +243,14 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "conversation starts with a '[Project]' line, it names one of these projects by id.",
       parameters: z.object({
         agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
+        include_archived: z.boolean().optional().describe("A person's own user key only: also list archived projects. An agent key's list is unchanged."),
       }),
-      execute: async (params: { agent_name?: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (params: { agent_name?: string; include_archived?: boolean }, context?: { session?: McpAuthContext }) => {
         try {
-          const projects = await clientFor(context, params.agent_name).listMyProjects(turnOf(context));
+          const projects = await readerFor(context, params.agent_name).listMyProjects(turnOf(context), params.include_archived === true);
           return JSON.stringify({ enabled: true, count: projects.length, projects }, null, 2);
         } catch (e) {
+          if (e instanceof ScopeRefusal) return fail(e);
           const { status, code, message, detailIsString } = parseError(e);
           return JSON.stringify(
             { enabled: false, count: 0, projects: [], message: explain(status, code, detailIsString), detail: message },
@@ -239,9 +278,10 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       }),
       execute: async (params: { project_id: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const project = await clientFor(context, params.agent_name).getMyProject(params.project_id, turnOf(context));
+          const project = await readerFor(context, params.agent_name).getMyProject(params.project_id, turnOf(context));
           return JSON.stringify({ success: true, ...(project as object) }, null, 2);
         } catch (e) {
+          if (e instanceof ScopeRefusal) return fail(e);
           const { status, code, message, detailIsString } = parseError(e);
           const flags: Record<string, unknown> = {};
           if (status === 404 && code === "project_not_found") {
@@ -287,7 +327,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       }),
       execute: async (p: { project_id: string; status?: string; view?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const tasks = await clientFor(context, p.agent_name).listProjectTasks(
+          const tasks = await readerFor(context, p.agent_name).listProjectTasks(
             p.project_id, p.status || "open", turnOf(context), p.view);
           return ok({ count: tasks.length, tasks });
         } catch (e) {
@@ -387,7 +427,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       }),
       execute: async (p: { project_id: string; item_id: string; offset?: number } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const part = await clientFor(context, p.agent_name).readProjectContext(p.project_id, p.item_id, p.offset ?? 0, turnOf(context));
+          const part = await readerFor(context, p.agent_name).readProjectContext(p.project_id, p.item_id, p.offset ?? 0, turnOf(context));
           return ok(part);
         } catch (e) {
           return fail(e);
@@ -406,7 +446,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       parameters: z.object({ agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION), project_id: projectId, limit: z.number().int().min(1).max(200).optional() }),
       execute: async (p: { project_id: string; limit?: number } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const entries = await clientFor(context, p.agent_name).getProjectLog(p.project_id, p.limit ?? 50, turnOf(context));
+          const entries = await readerFor(context, p.agent_name).getProjectLog(p.project_id, p.limit ?? 50, turnOf(context));
           return ok({ count: entries.length, entries });
         } catch (e) {
           return fail(e);
@@ -478,7 +518,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       }),
       execute: async (params: { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const projects = await clientFor(context, params.agent_name).getStewardDigest(turnOf(context));
+          const projects = await readerFor(context, params.agent_name).getStewardDigest(turnOf(context));
           return JSON.stringify({ success: true, count: projects.length, projects }, null, 2);
         } catch (e) {
           return fail(e);
@@ -626,7 +666,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       ) => {
         try {
           const { project_id, agent_name: _actAs, ...filters } = p;
-          return ok(await clientFor(context, p.agent_name).listProjectExecutions(project_id, filters, turnOf(context)));
+          return ok(await readerFor(context, p.agent_name).listProjectExecutions(project_id, filters, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
