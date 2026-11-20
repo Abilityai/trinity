@@ -22,7 +22,7 @@ from fastapi import BackgroundTasks
 pytestmark = pytest.mark.unit
 
 PW = "Sup3rSecret!!"
-EMAIL = "owner@acme.com"
+EMAIL = "owner@example.com"
 SECRET = "a1" * 32
 GENERIC = {"success": True, "message": "If your email is registered, you'll receive a code shortly"}
 BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -161,7 +161,7 @@ def test_another_address_still_creates_nothing_with_the_same_body(fake, monkeypa
     monkeypatch.delenv("ADMIN_PASSWORD_SOURCE", raising=False)
     _setup_password(setup)
 
-    assert _request(auth, "stranger@acme.com") == GENERIC
+    assert _request(auth, "stranger@example.com") == GENERIC
     assert db.codes == [] and sent == []
 
 
@@ -177,28 +177,78 @@ def test_setup_without_email_allow_lists_nothing(fake, monkeypatch):
 
 def test_backfill_covers_an_install_set_up_before_the_fix(fake):
     db, sent, _, auth, _ = fake
-    from services.admin_email_allowlist import allow_list_admin_email
+    from services.admin_email_allowlist import backfill_admin_email_once
 
     # As a pre-fix setup left it: admin email set, no allow-list row.
     db.users["admin"]["email"] = EMAIL
     db.settings["setup_completed"] = "true"
-    assert allow_list_admin_email() is True
-    assert allow_list_admin_email() is False, "idempotent: a second boot writes nothing"
+    assert backfill_admin_email_once() is True
+    assert backfill_admin_email_once() is False, "a second boot writes nothing"
 
     _request(auth, EMAIL)
     assert db.codes == [EMAIL] and sent == [EMAIL]
 
 
-def test_backfill_never_raises(fake, monkeypatch):
+def test_backfill_does_not_overrule_an_operator_removal(fake):
+    """Runs once per install: an operator who removes the admin's address from
+    the allow-list is not overruled by the next restart."""
     db, *_ = fake
-    from services.admin_email_allowlist import allow_list_admin_email
+    from services.admin_email_allowlist import backfill_admin_email_once
 
     db.users["admin"]["email"] = EMAIL
+    db.settings["setup_completed"] = "true"
+    assert backfill_admin_email_once() is True
+    del db.whitelist[EMAIL]  # DELETE /api/settings/email-whitelist/{email}
+    assert backfill_admin_email_once() is False
+    assert EMAIL not in db.whitelist, "a restart must not put the row back"
+
+
+def test_setup_removal_is_not_overruled_by_the_first_boot_after_it(fake, monkeypatch):
+    db, _, setup, _, _ = fake
+    from services.admin_email_allowlist import backfill_admin_email_once
+
+    monkeypatch.delenv("ADMIN_PASSWORD_SOURCE", raising=False)
+    _setup_password(setup)
+    del db.whitelist[EMAIL]
+    backfill_admin_email_once()
+    assert EMAIL not in db.whitelist
+
+
+def test_backfill_marker_is_set_even_when_nothing_was_written(fake):
+    db, *_ = fake
+    from services.admin_email_allowlist import BACKFILL_MARKER, backfill_admin_email_once
+
+    db.settings["setup_completed"] = "true"  # admin has no email: nothing to write
+    assert backfill_admin_email_once() is False
+    assert db.settings.get(BACKFILL_MARKER) == "true"
+
+    db.users["admin"]["email"] = EMAIL  # bound later: /me/email owns that path
+    assert backfill_admin_email_once() is False
+    assert EMAIL not in db.whitelist
+
+
+def test_backfill_runs_only_on_a_completed_setup(fake):
+    db, *_ = fake
+    from services.admin_email_allowlist import BACKFILL_MARKER, backfill_admin_email_once
+
+    db.users["admin"]["email"] = EMAIL
+    assert db.settings["setup_completed"] == "false"
+    assert backfill_admin_email_once() is False
+    assert db.whitelist == {}
+    assert BACKFILL_MARKER not in db.settings, "an unfinished setup must not spend the one run"
+
+
+def test_backfill_never_raises(fake, monkeypatch):
+    db, *_ = fake
+    from services.admin_email_allowlist import backfill_admin_email_once
+
+    db.users["admin"]["email"] = EMAIL
+    db.settings["setup_completed"] = "true"
 
     def boom(*a, **k):
         raise RuntimeError("unique constraint")
     monkeypatch.setattr(db, "add_to_whitelist", boom)
-    assert allow_list_admin_email() is False
+    assert backfill_admin_email_once() is False
 
 
 def _calls_in(path: Path, func_name: str):
@@ -212,11 +262,55 @@ def _calls_in(path: Path, func_name: str):
 
 def test_boot_runs_the_backfill():
     """Pins the boot wiring (importing main is too heavy for the unit island):
-    the first lifespan phase calls the backfill."""
-    assert "allow_list_admin_email" in _calls_in(
+    the first lifespan phase calls the backfill, whose own setup_completed
+    check is executed above."""
+    assert "backfill_admin_email_once" in _calls_in(
         BACKEND / "main.py", "_init_logging_and_first_run_notice")
 
 
-def test_the_admins_email_change_allow_lists_the_new_address():
-    """The other writer of the admin's email (PUT /api/users/me/email)."""
-    assert "allow_list_admin_email" in _calls_in(BACKEND / "routers" / "users.py", "update_my_email")
+@pytest.fixture
+def me_email(fake, monkeypatch):
+    """PUT /api/users/me/email, driven through the real handler with a valid code."""
+    import routers.users as users
+    import routers.auth as auth
+
+    db = fake[0]
+    db.users["someone"] = {"username": "someone", "id": 2, "email": None}
+    db.get_user_by_email = lambda e: next(
+        (u for u in db.users.values() if (u.get("email") or "") == e), None)
+    db.verify_login_code = lambda email, code, purpose=None: code == "123456"
+    monkeypatch.setattr(users, "db", db)
+    monkeypatch.setattr(auth, "check_otp_rate_limit", lambda scope: None)
+    monkeypatch.setattr(auth, "record_otp_attempt", lambda scope, success: None)
+
+    async def _log(**kw):
+        return None
+    monkeypatch.setattr(users.platform_audit_service, "log", _log)
+
+    class _R:
+        scope = {"path": "/api/users/me/email"}
+
+        class state:
+            request_id = None
+
+    def change(username, role, email):
+        from models import User
+        user = User(id=db.users[username]["id"], username=username, role=role)
+        body = users.UpdateMyEmailRequest(email=email, code="123456")
+        return asyncio.run(users.update_my_email(body, _R(), user))
+    return db, change
+
+
+def test_the_admins_email_change_allow_lists_the_new_address(me_email):
+    db, change = me_email
+    assert change("admin", "admin", "new-owner@example.com")["success"] is True
+    assert "new-owner@example.com" in db.whitelist
+
+
+def test_another_users_email_change_allow_lists_nothing(me_email):
+    """Only the setup admin's address joins the list; any other account's
+    email change, even another admin's, adds nothing."""
+    db, change = me_email
+    assert change("someone", "admin", "someone@example.com")["success"] is True
+    assert db.users["someone"]["email"] == "someone@example.com"
+    assert db.whitelist == {}

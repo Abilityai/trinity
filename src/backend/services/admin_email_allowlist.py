@@ -10,8 +10,10 @@ route: that route's anti-enumeration contract (#186) stays byte-for-byte as it
 was, and the allow-list stays the one gate every redeemer asks — accepting "any
 address bound to a user" there would also let a de-listed account back in.
 
-Writers: setup (both forms), the admin's own email change, and a boot-time
-backfill for installs set up before this fix. The row's `default_role` is
+Writers: setup (both forms), the admin's own email change, and a one-time
+boot backfill for installs set up before this fix. The backfill runs once per
+install, behind a stored marker (also set by setup), so an operator who removes
+the admin's address from the allow-list is not overruled by a restart. The row's `default_role` is
 `user`: the admin's address resolves to the existing admin row, so the role is
 used only if that address ever creates a NEW account (after the admin moves to
 another address), and that account must not be an admin.
@@ -26,6 +28,32 @@ from utils.admin_identity import admin_username
 logger = logging.getLogger(__name__)
 
 ADMIN_ALLOWLIST_SOURCE = "setup"
+BACKFILL_MARKER = "admin_email_allowlist_backfilled"
+
+
+def mark_backfill_done() -> None:
+    try:
+        db.set_setting(BACKFILL_MARKER, "true")
+    except Exception as e:
+        logger.warning("Could not record the admin email backfill: %s", type(e).__name__)
+
+
+def backfill_admin_email_once() -> bool:
+    """Boot: allow-list the admin's email once per install, on a completed setup.
+
+    The marker is set whether or not a row was written. Returns True when a row
+    was written."""
+    try:
+        if db.get_setting_value("setup_completed", "false") != "true":
+            return False
+        if db.get_setting_value(BACKFILL_MARKER) == "true":
+            return False
+    except Exception as e:
+        logger.warning("Could not read the admin email backfill state: %s", type(e).__name__)
+        return False
+    written = allow_list_admin_email()
+    mark_backfill_done()
+    return written
 
 
 def allow_list_admin_email(email=None) -> bool:

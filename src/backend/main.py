@@ -464,9 +464,9 @@ async def _init_logging_and_first_run_notice() -> None:
         )
     else:
         # #4693: installs set up before the admin's email was allow-listed at
-        # setup. Idempotent, never raises, logs no address.
-        from services.admin_email_allowlist import allow_list_admin_email
-        allow_list_admin_email()
+        # setup. Once per install, never raises, logs no address.
+        from services.admin_email_allowlist import backfill_admin_email_once
+        backfill_admin_email_once()
 
 
 async def _start_event_bus() -> None:

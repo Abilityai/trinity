@@ -82,7 +82,7 @@ from database import db
 from dependencies import hash_password
 from services.system_seed_service import ensure_first_run_seeded
 from services.operator_intake_service import submit_operator_intake
-from services.admin_email_allowlist import allow_list_admin_email
+from services.admin_email_allowlist import allow_list_admin_email, mark_backfill_done
 from utils.password_validation import validate_password_strength, PASSWORD_REQUIREMENTS_MESSAGE
 from utils.admin_identity import admin_username, is_usable_password_hash
 from routers.auth import check_login_rate_limit, record_login_attempt
@@ -453,6 +453,7 @@ async def set_admin_password(
     # which every email-code request and redeemer asks. Both forms land here.
     if email_registered:
         allow_list_admin_email(normalized_email)
+    mark_backfill_done()  # this install needs no boot backfill
 
     # Mark setup as completed.
     db.set_setting('setup_completed', 'true')
