@@ -81,7 +81,7 @@ describe("ent#661 projects — honest refusals, never a throw", () => {
         throw apiError(403, { code: "agent_key_required", message: "x" });
       },
     });
-    assert.match(JSON.parse(await notAgent.list_projects.execute({}, {})).message, /agent context/);
+    assert.match(JSON.parse(await notAgent.list_projects.execute({}, {})).message, /for an agent's own key/);
     assert.doesNotMatch(JSON.parse(await notAgent.list_projects.execute({}, {})).message, /pass agent_name/);
   });
 

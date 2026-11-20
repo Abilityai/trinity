@@ -35,11 +35,10 @@ import { PersonProjectClient } from "./projects_person_client.js";
  * (and the user-key wording below) in the same change.
  */
 const PROJECT_AGENT_NAME_DESCRIPTION =
-  "Not usable with a user key: the project tools refuse an admin's user key acting for an agent. " +
-  "Call them with the agent's own key, which always acts as itself — omit this.";
+  "Omit this. A person's own key acts as the person, and an agent's key acts as itself; " +
+  "the project tools don't act for another agent.";
 const AGENT_KEY_ONLY_MESSAGE =
-  "These tools act as an agent; call them from an agent context (an agent-scoped key), from the agent itself. " +
-  "A user key, including an admin's, is refused.";
+  "This tool is for an agent's own key: it acts as that agent. A person's key, including an admin's, can't call it.";
 
 /** trinity-enterprise#1024: the tool refused to act for the named agent itself. */
 class ActAsRefusal extends Error {}
@@ -304,7 +303,8 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       canAccess: projectToolAccess,
       description:
         "List the Workspace projects you are working on: each project's id, name, goal, status, " +
-        "steward and tracker link. Only projects your owner approved you for are listed. When a " +
+        "steward and tracker link. An agent's key lists the projects its owner approved it for; a person's " +
+        "own key lists the projects they work on. When a " +
         "conversation starts with a '[Project]' line, it names one of these projects by id.",
       parameters: z.object({
         agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),

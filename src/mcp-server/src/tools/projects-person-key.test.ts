@@ -165,6 +165,17 @@ describe("trinity-enterprise#1322 the write tools route by the key's scope", () 
     assert.deepEqual(sent, []);
   });
 
+  it("the two agent-only tools answer a user key that this tool is for an agent's key, with no request and no path", async () => {
+    for (const [tool, args] of [["start_project_task", { project_id: "prj_1", task_id: "T-001" }], ["propose_project_changes", { project_id: "prj_1", summary: "x" }]] as const) {
+      const out = JSON.parse(await tools()[tool].execute(args as never, as("user")));
+      assert.equal(out.success, false, tool);
+      assert.match(out.error, /for an agent's own key/, tool);
+      assert.match(out.error, /A person's key, including an admin's, can't call it/, tool);
+      assert.doesNotMatch(out.error, /agent context|from the agent itself|\b[a-z]+_[a-z_]+\b/, tool);
+    }
+    assert.deepEqual(sent, []);
+  });
+
   it("no write tool listed to a user key answers it 'needs an agent key'", async () => {
     for (const [tool, args] of [...WRITES, ["import_project", { path: "p", agent: "alpha" }] as const]) {
       const out = await tools()[tool].execute(args, as("user"));

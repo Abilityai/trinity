@@ -962,7 +962,7 @@ describe("trinity-enterprise#1322 project tools are listed to exactly the keys t
 
   it("a key calling a project tool it is not shown gets 'not found', and the backend is never asked", async () => {
     let refused = 0;
-    for (const key of ["user", "system", "ops"]) {
+    for (const key of ["agent", "user", "system", "ops"]) {
       const hidden = Object.keys(EXPECTED).filter((tool) => !EXPECTED[tool].includes(KEYS[key].scope));
       srv.requests.length = 0;
       await asKey(srv.url, key, async (c) => {
@@ -977,8 +977,29 @@ describe("trinity-enterprise#1322 project tools are listed to exactly the keys t
       });
       assert.deepEqual(srv.requests, [], `a ${key} key's refused calls reached the backend: ${srv.requests.join(", ")}`);
     }
-    // 2 agent-only tools for the user key; all 22 for the system and ops keys.
-    assert.equal(refused, 2 + 22 + 22);
+    // 5 person tools for the agent key; 2 agent-only tools for the user key; all 22 for the system and ops keys.
+    assert.equal(refused, 5 + 2 + 22 + 22);
+  });
+
+  // Text built from a backend answer: get_project's waiting-proposal pointer,
+  // which the fake backend above never returns.
+  it("the proposal pointer a person's key reads names only tools a user key is listed", async () => {
+    const withProposal = await bootKeyedServer({ user: { scope: "user" } }, (method, path) =>
+      method === "GET" && path === "/api/enterprise/projects/prj_1"
+        ? { status: 200, body: { id: "prj_1", proposal: { ask_id: "ask_1", summary: "x" } } }
+        : { status: 200, body: {} });
+    try {
+      const res = await asKey(withProposal.url, "user", (c) => c.callTool({ name: "get_project", arguments: { project_id: "prj_1" } }));
+      const out = JSON.parse(((res as { content: Array<{ text: string }> }).content[0]).text);
+      const pointer = String(out.proposal?.how_to_decide ?? "");
+      assert.ok(pointer, `no how_to_decide on the proposal: ${JSON.stringify(out)}`);
+      const universe = new Set(Object.values(listing).flat());
+      const named = (pointer.match(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g) ?? []).filter((w) => universe.has(w));
+      assert.ok(named.length > 0, "the pointer names no tool, so this test checks nothing");
+      assert.deepEqual(named.filter((n) => !listing.user.includes(n)), [], `the pointer names tools a user key is not listed: ${pointer}`);
+    } finally {
+      await withProposal.stop();
+    }
   });
 
   /**
