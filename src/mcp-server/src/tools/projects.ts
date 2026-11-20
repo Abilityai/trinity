@@ -72,6 +72,28 @@ const personsAct = (act: string, agentPath: string) =>
 const ASK_A_PERSON = "Ask a person on the project with ask_operator.";
 const PROPOSE_IT = "Propose it with propose_project_changes; your primary contact decides.";
 const MEMBER_BATCH_CAP = 20;
+/**
+ * trinity-enterprise#1322: one id of a runs/approve|decline answer. The backend
+ * answers HTTP 200 with `{id, outcome}` per id — the run's state when the
+ * decision was applied, a refusal code otherwise (`run_not_found`,
+ * `already_decided`, `not_permitted`, …).
+ */
+const RUN_APPLIED: Record<"approve" | "decline", ReadonlySet<string>> = {
+  approve: new Set(["started", "ended"]),
+  decline: new Set(["declined"]),
+};
+const RUN_REFUSED_WHY: Record<string, string> = {
+  run_not_found: "This project has no waiting run with this id.",
+  already_decided: "This proposal was already decided.",
+  not_permitted: "Only someone who works on this project gives a task its go.",
+  mode_track: "In Track a person starts each task's run.",
+  dispatch_failed: "The run couldn't be started right now. Try again.",
+};
+function runDecision(decision: "approve" | "decline", r: Record<string, unknown>): Record<string, unknown> {
+  const outcome = String(r.outcome ?? "");
+  if (RUN_APPLIED[decision].has(outcome)) return { id: r.id, outcome, applied: true };
+  return { id: r.id, outcome, applied: false, why: RUN_REFUSED_WHY[outcome] ?? `Not applied (${outcome || "no outcome"}).` };
+}
 const IMPORT_NEEDS_AGENT = "Name the agent whose folder project this is in `agent`; the import reads that agent's files.";
 
 /** The write methods both doors answer, by the same name and body. */
@@ -964,8 +986,9 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       description:
         "The runs a project's steward proposed that wait for a person's go (Propose mode, or a task " +
         "held for a person). With no ids, lists them (`runs`, each with its id). With `approve` and/or " +
-        "`decline` ids, decides each on its own and passes the per-id results through (`approved`, " +
-        "`declined`); a `note` goes with a decline. An id in both lists is refused." +
+        "`decline` ids, decides each on its own and reports each id (`approved`, `declined`: `applied`, " +
+        "the backend's `outcome`, and `why` when not applied); `success` only when every id was applied. " +
+        "A `note` goes with a decline. An id in both lists is refused." +
         PROJECT_PERSON_WHO_MAY_CALL,
       parameters: z.object({
         project_id: projectId,
@@ -984,9 +1007,26 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
           }
           const both = approve.filter((id) => decline.includes(id));
           if (both.length) throw new ScopeRefusal("id_in_both", `In both approve and decline: ${both.join(", ")}. Pick one.`);
-          const approved = approve.length ? await person.decideRuns(p.project_id, "approve", approve) : [];
-          const declined = decline.length ? await person.decideRuns(p.project_id, "decline", decline, p.note) : [];
-          return ok({ approved, declined });
+          // Each request is its own outcome: an approve that went through stays
+          // reported when the decline request after it fails.
+          const decide = async (decision: "approve" | "decline", ids: string[]) => {
+            if (!ids.length) return { rows: [] as Array<Record<string, unknown>>, failed: false };
+            try {
+              const results = await person.decideRuns(p.project_id, decision, ids, decision === "decline" ? p.note : undefined);
+              return { rows: results.map((r) => runDecision(decision, r)), failed: false };
+            } catch (e) {
+              const r = JSON.parse(fail(e)) as { error: string; code?: string };
+              return { rows: ids.map((id) => ({ id, applied: false, ...(r.code ? { outcome: r.code } : {}), why: r.error })), failed: true };
+            }
+          };
+          const a = await decide("approve", approve);
+          const d = await decide("decline", decline);
+          const rows = [...a.rows, ...d.rows];
+          const notApplied = rows.filter((r) => !r.applied).length;
+          const error = !notApplied ? undefined
+            : d.failed && approve.length && !a.failed ? `The approvals were applied; the declines were not (${d.rows[0]?.why}).`
+            : `${notApplied} of ${rows.length} not applied; see approved and declined.`;
+          return JSON.stringify({ success: notApplied === 0, ...(error ? { error } : {}), approved: a.rows, declined: d.rows }, null, 2);
         } catch (e) {
           return fail(e);
         }

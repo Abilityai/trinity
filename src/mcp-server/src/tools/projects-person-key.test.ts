@@ -328,16 +328,50 @@ describe("trinity-enterprise#1322 decide_project_runs", () => {
     assert.deepEqual(reqs(), [`GET ${P}/prj_1/runs/waiting`]);
   });
 
-  it("approves and declines, passing the backend's per-id results through", async () => {
+  // The backend's shape (enterprise projects `runs._batch`): HTTP 200, one
+  // `{id, outcome}` per id — a run state when applied (`started` for an approve,
+  // `declined` for a decline), a refusal code otherwise.
+  it("approves and declines; success only when every id was applied", async () => {
     answer({
-      [`POST ${P}/prj_1/runs/approve`]: { status: 200, body: { results: [{ id: "run_1", ok: true }] } },
-      [`POST ${P}/prj_1/runs/decline`]: { status: 200, body: { results: [{ id: "run_2", ok: true }] } },
+      [`POST ${P}/prj_1/runs/approve`]: { status: 200, body: { results: [{ id: "run_1", outcome: "started" }] } },
+      [`POST ${P}/prj_1/runs/decline`]: { status: 200, body: { results: [{ id: "run_2", outcome: "declined" }] } },
     });
     const out = await run("decide_project_runs", { project_id: "prj_1", approve: ["run_1"], decline: ["run_2"], note: "not now" });
     assert.equal(out.success, true, JSON.stringify(out));
     assert.deepEqual(sent.map((s) => s.body), [{ ids: ["run_1"] }, { ids: ["run_2"], note: "not now" }]);
-    assert.deepEqual(out.approved, [{ id: "run_1", ok: true }]);
-    assert.deepEqual(out.declined, [{ id: "run_2", ok: true }]);
+    assert.deepEqual(out.approved, [{ id: "run_1", outcome: "started", applied: true }]);
+    assert.deepEqual(out.declined, [{ id: "run_2", outcome: "declined", applied: true }]);
+  });
+
+  it("an id the backend answers run_not_found is not applied, and success is false", async () => {
+    answer({ [`POST ${P}/prj_1/runs/approve`]: { status: 200, body: { results: [
+      { id: "run_1", outcome: "started" }, { id: "run_x", outcome: "run_not_found" },
+    ] } } });
+    const out = await run("decide_project_runs", { project_id: "prj_1", approve: ["run_1", "run_x"] });
+    assert.equal(out.success, false, JSON.stringify(out));
+    assert.match(out.error, /1 of 2 not applied/);
+    assert.deepEqual(out.approved.map((r: any) => [r.id, r.applied]), [["run_1", true], ["run_x", false]]);
+    assert.match(out.approved[1].why, /no waiting run/i);
+  });
+
+  it("an id the backend answers already_decided is not applied, and success is false", async () => {
+    answer({ [`POST ${P}/prj_1/runs/decline`]: { status: 200, body: { results: [{ id: "run_2", outcome: "already_decided" }] } } });
+    const out = await run("decide_project_runs", { project_id: "prj_1", decline: ["run_2"] });
+    assert.equal(out.success, false, JSON.stringify(out));
+    assert.deepEqual(out.declined.map((r: any) => [r.id, r.outcome, r.applied]), [["run_2", "already_decided", false]]);
+    assert.match(out.declined[0].why, /already decided/i);
+  });
+
+  it("approvals that went through are reported when the decline request then fails", async () => {
+    answer({
+      [`POST ${P}/prj_1/runs/approve`]: { status: 200, body: { results: [{ id: "run_1", outcome: "started" }] } },
+      [`POST ${P}/prj_1/runs/decline`]: { status: 503, body: { detail: "upstream unavailable" } },
+    });
+    const out = await run("decide_project_runs", { project_id: "prj_1", approve: ["run_1"], decline: ["run_2"] });
+    assert.equal(out.success, false, JSON.stringify(out));
+    assert.deepEqual(out.approved, [{ id: "run_1", outcome: "started", applied: true }]);
+    assert.deepEqual(out.declined.map((r: any) => [r.id, r.applied]), [["run_2", false]]);
+    assert.match(out.error, /approvals were applied/i);
   });
 
   it("an id in both lists is refused with no request", async () => {
