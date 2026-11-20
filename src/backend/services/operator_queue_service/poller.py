@@ -19,6 +19,7 @@ import os
 import uuid
 from typing import Optional
 
+from services import loop_health
 from services import operator_queue_service as _oq
 from utils.helpers import utc_now_iso
 
@@ -150,7 +151,8 @@ class PollerCoreMixin:
         """Main polling loop."""
         while self._running:
             try:
-                await self._poll_cycle()
+                with loop_health.tick("operator_queue_sync"):
+                    await self._poll_cycle()
             except asyncio.CancelledError:
                 break
             except Exception as e:
