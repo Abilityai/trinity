@@ -206,7 +206,8 @@ def test_a_failure_says_so_rather_than_vanishing(ccr):
     body = ccr._portal_body(executing_agent=AGENT, session_agent=AGENT,
                             status="failed", summary_or_error="quota exhausted")
     assert "Didn't finish" in body and "failed" in body
-    assert "quota exhausted" in body
+    # #4482: the reason is a person-safe sentence, never the row's raw error.
+    assert body.endswith(ccr.GENERIC_FAILURE)
 
 
 def test_success_does_not_name_the_agent_when_it_is_the_one_youre_talking_to(ccr):
@@ -274,11 +275,12 @@ def test_the_portal_body_is_credential_sanitized_like_every_other_channel():
     from services import channel_completion_report as mod
 
     leaky = "boom: ANTHROPIC_API_KEY=sk-ant-api03-DEADBEEFDEADBEEFDEADBEEF while cloning"
+    # Success text: a failure never posts its error at all (#4482).
     body = mod._portal_body(executing_agent="a", session_agent="a",
-                            status="failed", summary_or_error=leaky)
+                            status="success", summary_or_error=leaky)
 
     assert "sk-ant-api03-DEADBEEFDEADBEEFDEADBEEF" not in body
-    assert "Didn't finish" in body
+    assert "while cloning" in body
 
 
 def test_every_channel_shares_one_sanitize_then_truncate_rule():

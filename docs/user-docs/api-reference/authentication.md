@@ -30,6 +30,8 @@ curl -s -X POST http://localhost:8000/api/token \
 
 Both steps take a JSON object. A body that is not valid JSON, or not an object, answers `422` with `Request body must be a JSON object`; a missing or malformed field answers `422` in FastAPI's validation shape. On `/verify` a malformed body also counts as a failed attempt for the per-address rate limit, so it is not a free probe. `POST /api/access/request` parses its body the same way.
 
+Code requests share one budget per address: 3 in 10 minutes, counted together across the web sign-in, the MCP email sign-in and the Telegram, WhatsApp and Slack `/login` steps. A request over the budget gets the same answer as any other, and no email is sent.
+
 The verify step re-checks the email allow-list before redeeming a code. An address that is not allow-listed gets the same 401 as a wrong code, whatever channel minted the code.
 
 A sign-in email belongs to at most one account, compared case-insensitively. Every sign-in path finds the account by its email, so whoever holds an address holds that identity — which is why changing it needs proof (see [Changing your sign-in email](#changing-your-sign-in-email)).
@@ -99,6 +101,16 @@ Binding a new sign-in email takes proof that you own the mailbox:
 2. `PUT /api/users/me/email` with `{"email": "new@example.com", "code": "123456"}` binds it.
 
 A bind code completes only your own bind and never signs anyone in; a sign-in code never binds. Wrong guesses are capped as for email sign-in. An address another account already holds is refused with `409 email_in_use`. On an install that cannot deliver email (no email provider configured), an admin may bind without a code, and the bind is audited as unverified; anyone else gets `409 email_verification_unavailable`. Both routes accept a signed-in session only. In the UI this is **Settings → General → Admin sign-in email**, or the **Sign-in email** step of first-run setup.
+
+### Changing your password
+
+`PUT /api/users/me/password` with `{"current_password": "...", "new_password": "...", "revoke_api_keys": false}` changes the password of the signed-in account (in the UI: **Settings → General → Password**). It takes a signed-in session (MCP keys are refused) and an account that already has a password; an email-only account gets `409`. The new password must meet the first-run rules. Five wrong current passwords in 15 minutes block further attempts for the window.
+
+A change signs every other session of the account out: a token issued before the change is refused everywhere, the WebSocket and terminal sockets included, and the response carries a fresh token for the caller. MCP keys are not sessions, so they keep working unless `revoke_api_keys` is true, which revokes the keys you created (never an agent's own key); the response says how many still work. The change survives a backend restart; a **new** `ADMIN_PASSWORD` value in `.env` still overrides it at the next start. See [Setup → Changing the admin password](../getting-started/setup.md#changing-the-admin-password).
+
+### Terms of use
+
+A person signed in to the app who has not accepted the instance's current terms gets `403` with `{"code": "terms_required", "version": "..."}` on every call except signing out, `GET /api/users/me` and the terms routes themselves; the app then shows the terms screen. Logins from scripts and the CLI, MCP keys of operators and above, and agent keys are never asked. See [Setup → Terms of use](../getting-started/setup.md#terms-of-use).
 
 ### Using Tokens
 
@@ -176,7 +188,18 @@ An agent-scoped key carries its owner's role, but on the backend's own routes it
 - **Agents it spawned** with its current key. It can call and manage those.
 - **The owner's other agents, on the routes a granted permission covers** — for example another agent's schedule routes for an agent holding **Change other agents' schedules**. See [Permissions to Change Itself](../agents/agent-configuration.md#permissions-to-change-itself).
 
+While the agent is working for someone, its key is also held to that person's limits. When the person is someone the agent is shared with, the key reads only that person's executions and is refused every owner-tier route (configuration, creating or deploying agents, schedules and other standing work). The key's calls carry the running turn, and a call without it is judged against the turn running on the agent, so a command run from the agent's shell is held too. See [Agent Sharing](../sharing-and-access/agent-sharing.md#what-the-agent-does-for-someone-you-share-it-with).
+
 Any other agent is refused with the same answer as an agent the key may not access (usually `404`, as for one that does not exist), so the key learns nothing about it. This applies whether the agent calls through MCP tools or straight against the backend with its injected key. The operator queue an agent key reads is narrowed the same way, and an agent key never gets the admin view of every user's chat history or sessions. Fleet-wide routes with no agent in the path — the agent list, execution and sync-health summaries, tag counts, telemetry, subscriptions and the `/ws/events` stream among them — answer an agent key with the same reach, never its owner's whole fleet. Two fleet health sweeps keep the owner's view, and a few routes are for people only. The full list is in [Agent Permissions](../collaboration/agent-permissions.md). People, `user` keys and the system key are not affected.
+
+### An admin's key acting for an agent
+
+Some MCP tools act as the calling agent itself: raising and withdrawing asks (`ask_operator`, `get_my_ask`, `withdraw_ask`), `report`, `record_metrics`, `get_objectives`, `refresh_metric_definitions` and the canvas tools. The Workspace project tools are not among them: a request that passes `agent_name` to a project tool from an admin's key is refused. An agent's own key always acts as its own agent. An **admin's** `user` key can act for any agent by passing `agent_name` to the tool: the MCP server sends the request with an `X-Trinity-Act-As-Agent` header, and the request is held to that agent as if the agent had made it. This lets a hub running on your own key raise an ask, file a report or write a canvas for an agent.
+
+- Only a `user`-scoped key whose owner is an admin may act for an agent. Every other caller that sends the header (an agent or system key, any other scope, a non-admin's key, a browser session) gets `403 act_as_not_permitted`; a blank or over-long name is `400 act_as_invalid`.
+- A `user` key that leaves `agent_name` out is refused, naming the parameter. Nothing picks a default agent.
+- Each admitted request writes one `acted_as_agent` audit entry naming both you and the agent, and an ask raised this way records who raised it on the agent's behalf.
+- Credentials stay out of this: `ask_for_credential` and the credential vault still need the agent's own key.
 
 ### WebSocket Authentication
 
@@ -185,7 +208,9 @@ Two real-time endpoints, two credentials:
 | Endpoint | Credential | Who sees what |
 |----------|-----------|---------------|
 | `/ws?ticket=<ticket>` | A single-use, 30-second ticket from `POST /api/ws/ticket` (JWT in `Authorization`). The browser uses this; an MCP client never opens `/ws`. | Scoped to the agents the ticket's user can access: an event naming agents is delivered only when every agent it names is one you may access. Admins see everything. Both live delivery and the reconnect replay are filtered. An unknown or suspended account is closed with code 4001. |
-| `/ws/events?token=trinity_mcp_…` | An MCP key in the query string (Trinity Connect and external listeners) | Events for the agents the key's owner can access; an `agent` key gets only its own reach (see [What an agent key reaches](#what-an-agent-key-reaches)), re-read when an agent is created, deleted, shared or renamed. Only `user`, `agent` (non-ephemeral agents only) and `system` keys may open it; `ops`, `ops_write`, `connector` and `portal_delegate` keys are closed with code 4003. |
+| `/ws/events?token=trinity_mcp_…` | An MCP key in the query string (Trinity Connect and external listeners) | Events for the agents the key's owner can access; an `agent` key gets only its own reach (see [What an agent key reaches](#what-an-agent-key-reaches)). The agent list is re-read from the owner's current account when an agent is created, deleted, shared, unshared or renamed, and about once a minute. Only `user`, `agent` (non-ephemeral agents only) and `system` keys may open it; `ops`, `ops_write`, `connector` and `portal_delegate` keys are closed with code 4003. |
+
+**Live connections follow the account.** An open `/ws` socket, `/ws/events` stream or agent terminal closes when the account behind it changes. A role change, a password change and a key revocation close it at once, and every worker also re-checks its open connections about every 15 seconds, so a suspension or an email change reaches it within that time. A connection whose account is gone, suspended, or whose key was revoked closes with code `4001`; any other change closes with `4000`, and the client reconnects at the new scope. A terminal sends an error frame first (*Your access changed. Open the terminal again to continue.* or *Your access to this terminal has ended.*), closes with `4003` and ends its shell session in the container. Revoking or deleting an MCP key closes only the event streams opened with that key.
 
 ### API Endpoints
 
@@ -198,7 +223,8 @@ Two real-time endpoints, two credentials:
 | `/api/auth/mode` | GET | None | Get auth mode configuration — `email_auth_enabled`, `email_code_login_enabled`, `email_delivery_available` (`false` when no email provider can send; the login page then says the code is in the backend log), `setup_completed` |
 | `/api/auth/logout` | POST | JWT | Revoke the current token immediately (idempotent; no-op for MCP keys) |
 | `/api/auth/validate` | GET | JWT | Validate current token (rejects revoked tokens) |
-| `/api/users/me` | GET | JWT | Get current user info |
+| `/api/users/me` | GET | JWT | Get current user info, including `has_password` |
+| `/api/users/me/password` | PUT | JWT only (MCP keys refused) | Change your password — body `{current_password, new_password, revoke_api_keys?}`; signs your other sessions out |
 | `/api/users/me/email/code` | POST | JWT only (MCP keys refused) | Send a confirmation code to a new sign-in email |
 | `/api/users/me/email` | PUT | JWT only (MCP keys refused) | Bind a new sign-in email — body `{email, code}` |
 | `/api/setup/status` | GET | None | First-time setup status |

@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 from models import Token
 from services.platform_audit_service import platform_audit_service, AuditEventType
-from services import login_policy_gate
+from services import channel_login_limit, login_policy_gate
 from config import (
     SECRET_KEY,
     ALGORITHM,
@@ -630,6 +630,12 @@ async def request_email_login_code(request: Request):
         "success": True,
         "message": "If your email is registered, you'll receive a code shortly",
     }
+
+    # ent#1253: the per-address budget shared with the channels and MCP login.
+    # Charged before the whitelist check, so every address spends it alike.
+    if not channel_login_limit.address_allowed(email):
+        logger.warning("email-code suppressed: shared rate limit for %r", email)
+        return generic_response
 
     # Non-whitelisted: return the generic body without revealing membership.
     if not db.is_email_whitelisted(email):

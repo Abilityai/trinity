@@ -55,9 +55,9 @@ The `trinity` plugin itself is also **provided by the platform**: Trinity's agen
 
 ## The 5 Plugins
 
-Versions and skill counts below are those published in the marketplace on 2026-10-10.
+Versions and skill counts below are those published in the marketplace on 2026-11-09.
 
-### create-agent — 6 skills (v2.2.1)
+### create-agent — 6 skills (v2.4.0)
 
 Create new Claude Code agents from an interview, or review, adjust, and clone existing ones.
 
@@ -68,16 +68,16 @@ Create new Claude Code agents from an interview, or review, adjust, and clone ex
 | Wizard | What it creates |
 |--------|-----------------|
 | `/create-agent:custom` | Any agent, from an interview — role, skills, schedules, credentials, Trinity wiring |
-| `/create-agent:website` | Next.js website (no agent) |
+| `/create-agent:website` | Next.js website (no agent); also runs headless inside a deployed website-builder agent, delivering through `GITHUB_TOKEN` and `VERCEL_TOKEN` with no interactive login |
 | `/create-agent:clone` | Clone an existing agent repo |
 | `/create-agent:review` | Read-only audit of an existing agent — prioritized findings, no changes |
 | `/create-agent:adjust` | Apply best-practice improvements to an existing agent |
 
 The eight pre-built domain wizards (prospector, chief-of-staff, webmaster, recon, receptionist, ghostwriter, kb-agent, doctor) were retired in 2.0.0 — `custom` builds every one of those shapes from the same interview, and a knowledge base is `custom` plus `/agent-dev:add-memory`. Every agent `custom` creates includes `CLAUDE.md`, 2–4 starter skills, `template.yaml` (with `plugins:`, `schedules:`, credential declarations, and a `metrics:` block for the agent's business KPIs), `dashboard.yaml`, and an onboarding tracker. The generated `/update-dashboard` writes `dashboard.yaml` and records the same numbers as metric points with the `record_metrics` MCP tool, skipping that step silently off Trinity. Generated `CLAUDE.md` guidelines carry the playbook-call rule, and every generated schedule message is a one-line playbook call — `/create-agent:review` reports prose delegation between agents, and prose schedule messages, as findings.
 
-`custom` also has a **headless mode** for builder agents — a deployed Trinity agent that creates other agents. The brief carries every answer, real gaps go out as one `ask_operator` question, a single approval ask comes before anything is pushed or created, and the new agent is created on the builder's own instance (from a private repo when a GitHub token is available, otherwise from local files with a warning that it has no reproducible source). Creating or deploying an agent from inside an agent needs the **Manage other agents** permission, which an instance admin grants in the builder agent's Settings; without it the create is refused and the wizard says which permission is missing. See the [create-agent plugin page](../abilities/create-agent-plugin.md#headless-mode-inside-a-deployed-agent).
+`custom` also has a **headless mode** for builder agents — a deployed Trinity agent that creates other agents. The brief carries every answer, real gaps go out as one `ask_operator` question, a single approval ask comes before anything is pushed or created, and the new agent is created on the builder's own instance (from a private repo when a GitHub token is available, otherwise from local files with a warning that it has no reproducible source). Creating or deploying an agent from inside an agent needs the **Manage other agents** permission, which an instance admin grants in the builder agent's **Settings → Guardrails → Permissions to change itself**; without it the create is refused and the wizard says which permission is missing. See the [create-agent plugin page](../abilities/create-agent-plugin.md#headless-mode-inside-a-deployed-agent).
 
-### agent-dev — 31 skills (v1.22.3)
+### agent-dev — 31 skills (v1.24.0)
 
 Extend and develop existing agents: playbooks, memory, git-backed state, a full GitHub Issues dev cycle, long-running pipelines, cross-actor project management, a shared canonical-data layer, and multi-agent orchestration — plus tooling to assess and migrate an existing fleet.
 
@@ -85,7 +85,7 @@ Extend and develop existing agents: playbooks, memory, git-backed state, a full 
 /agent-dev:create-playbook    # Add a new skill/playbook (three tiers, bundled templates; optional propose-only self-improvement)
 /agent-dev:adjust-playbook    # Modify an existing skill — incl. "make callable by other agents"; --review-proposals
 /agent-dev:add-memory         # Add a memory system
-/agent-dev:add-git-sync       # Git-as-state hooks (auto-commit, rebase, snapshot)
+/agent-dev:add-git-sync       # Git-as-state hooks for local sessions (auto-commit, rebase, snapshot)
 /agent-dev:add-backlog        # Install the GitHub Issues dev cycle (copies the nine runtime skills below)
 /agent-dev:add-orchestrator   # Make the agent a system-aware orchestrator of other agents
 /agent-dev:claim              # Claim the next issue
@@ -102,9 +102,9 @@ Plus `backlog`, `close`, `groom`, `roadmap`, `add-pipeline-instance`, `add-pipel
 Six are the **project-management runtime** — the skills `add-project-management` installs (and `add-orchestrator` copies for a fleet), standalone so they can also be assigned from the bundled community skills catalog on Trinity:
 
 ```bash
-/agent-dev:project-init       # Create or adopt a managed project; --canon = shared in the canon repo, --internal = tasks as files
+/agent-dev:project-init       # Create or adopt a managed project, kickoff kit first; --canon = shared in the canon repo, --internal = tasks as files
 /agent-dev:project-task       # Create a task issue in the uniform format; --headless for crons
-/agent-dev:project-steward    # Autonomous sweep: verify, dispatch, escalate, close loops, digest
+/agent-dev:project-steward    # Autonomous sweep: verify, dispatch, read build chains, escalate, close loops, digest, evening brief
 /agent-dev:project-reconcile  # Sync a projection adapter (Google Tasks v1) back into the registry
 /agent-dev:project-intake     # Headless intake: route items from any source into the registry
 /agent-dev:project-status     # Daily status for one project: what moved, what waits on you, projected finish date
@@ -120,7 +120,7 @@ Five more cover fleet-scale work:
 /agent-dev:agent-fleet-migrate    # Execute that work order into a verified Claude Code fleet
 ```
 
-**Shared projects and internal tracking.** A project lives either in the managing agent's repo (`project_files/<slug>/`) or, with `/project-init --canon`, as a shared project in the canon repo's root `projects/` zone, which every agent and person on the canon writes directly. Its tasks are tracked either in GitHub Issues (the default) or, with `--internal`, as one file per task inside the project folder — no GitHub access needed. The charter, steward, intake, and decision ledger work the same in every combination. A stand-alone agent and a fleet orchestrator run the same six files; only the configuration block at the top of `PROJECT_STANDARD.md` differs.
+**Shared projects and internal tracking.** A project lives either in the managing agent's repo (`project_files/<slug>/`) or, with `/project-init --canon`, as a shared project in the canon repo's root `projects/` zone, which every agent and person on the canon writes directly. Its tasks are tracked either in GitHub Issues (the default) or, with `--internal`, as one file per task inside the project folder — no GitHub access needed. The charter, steward, intake, and decision ledger work the same in every combination. Since the standard's second revision, `/project-init` writes a day-zero kickoff kit (intent, delegation boundary, rulings, a probed setup manifest, a participation table per owner agent, declared project metrics) before anything is created, and blocks on a missing item by default; see the [agent-dev plugin page](../abilities/agent-dev-plugin.md#fleet-scale-skills). A stand-alone agent and a fleet orchestrator run the same six files; only the configuration block at the top of `PROJECT_STANDARD.md` differs.
 
 **On a Trinity instance with Projects enabled**, the same skills also work against the platform's project record: a new project is created there too (the agent needs the **Start projects** permission, which an instance admin grants), the steward records health and one shared-log entry per outcome so the project's members see what it did, and `/project-init platform <slug>` brings an existing folder project onto the platform in one import. Adding people and changing who can see a project stay a person's. Off Trinity, or without Projects, nothing changes.
 
@@ -141,7 +141,7 @@ Five more cover fleet-scale work:
 | `json-state` | Structured state, counters, config |
 | `workspace` | Multi-session project tracking |
 
-### trinity — 7 skills (v2.11.5)
+### trinity — 7 skills (v2.12.1)
 
 Connect, deploy, operate, and sync agents on Trinity.
 
@@ -152,7 +152,7 @@ Connect, deploy, operate, and sync agents on Trinity.
 /trinity:sync                 # Git-based sync between your repo and the deployed agent
 /trinity:loop                 # Run an agent in a sequential, bounded loop (remote or local)
 /trinity:create-dashboard     # Generate an /update-dashboard skill; declares metrics: and records them
-/trinity:deploy-new-instance  # Deploy a Trinity instance (DigitalOcean installer, SSH server, or local Docker) + ops agent
+/trinity:deploy-new-instance  # Deploy a Trinity instance (DigitalOcean installer, Marketplace image, SSH server, or local Docker) + ops agent
 ```
 
 **`/trinity:start-here` is the recommended entry point.** Install just `trinity@abilityai` and run it: it walks you from "what is Trinity" through getting an instance, connecting MCP (with a live smoke test), and creating your first working agent, handing off to the other skills as needed. It's resumable, so you can stop and pick it up later.

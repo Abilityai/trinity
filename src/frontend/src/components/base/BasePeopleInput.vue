@@ -77,6 +77,7 @@ import {
 import {
   PEOPLE_INPUT_DEBOUNCE_MS,
   PEOPLE_INPUT_MIN_QUERY,
+  chosenText,
   defaultNoMatch,
   isPickedText,
   keyAction,
@@ -150,7 +151,7 @@ const pickError = computed(() => mustPickError({
 const shownError = computed(() => props.error || (touched.value ? pickError.value : ''))
 const chosenLine = computed(() =>
   props.mode === 'pick' && chosen.value && isPickedText(text.value, chosen.value)
-    ? `${chosen.value.label || chosen.value.email} · ${chosen.value.email}` : '')
+    ? chosenText(chosen.value) : '')
 const describedBy = computed(() => {
   if (shownError.value) return `${controlId.value}-error`
   if (chosenLine.value || props.help) return `${controlId.value}-help`

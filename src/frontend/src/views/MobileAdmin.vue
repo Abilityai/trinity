@@ -694,7 +694,7 @@ import {
   SOMETHING_ELSE, SOMETHING_ELSE_LABEL, offeredChips, decidedByOptions,
   QUEUE_RESPONSE_NOT_RECORDED, respondRefusedAsNotPending, queueSyncBadge,
   QUEUE_RESPONSE_DIVERGED, respondRefusedAsDiverged,
-  QUEUE_RESPONSE_NOT_ADDRESSEE, respondRefusedAsNotAddressee } from '../utils/operatorQueue'
+  notAddresseeMessage, respondRefusedAsNotAddressee } from '../utils/operatorQueue'
 // trinity-enterprise#611: a second line so the #2370 import pin above stays byte-exact.
 import { queueEnding, queueEndingText, queueSeenLine, recentlyEnded } from '../utils/operatorQueue'
 import { readQueueSnapshot, pendingPartialLine } from '../utils/operatorQueueRead'
@@ -1377,7 +1377,8 @@ async function sendQueueResponse(item, body) {
       // trinity-enterprise#751: a gated-skill approval addressed to someone else.
       // Refused, nothing recorded, and a retry can never succeed — say why,
       // beside the control (p18), and keep the card.
-      respondErrors[id] = { message: QUEUE_RESPONSE_NOT_ADDRESSEE }
+      // trinity-enterprise#1096: the server names who the card waits for.
+      respondErrors[id] = { message: notAddresseeMessage(e) }
       return false
     }
     if (respondRefusedAsNotPending(e)) {

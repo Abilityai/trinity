@@ -1,6 +1,6 @@
 # create-agent Plugin
 
-Create new Claude Code agents from an interview (create-agent v2.2.1). The `custom` wizard asks about your domain and builds a fully configured, Trinity-compatible agent; `website` scaffolds a site; `review`, `adjust`, and `clone` work on agents you already have.
+Create new Claude Code agents from an interview (create-agent v2.4.0). The `custom` wizard asks about your domain and builds a fully configured, Trinity-compatible agent; `website` scaffolds a site; `review`, `adjust`, and `clone` work on agents you already have.
 
 > **create-agent 2.0.0 (2026-09-14):** the eight pre-built domain wizards (prospector, chief-of-staff, webmaster, recon, receptionist, ghostwriter, kb-agent, doctor) were retired. Describe the same domain to `/create-agent:custom` and the interview builds it. If you used `kb-agent`, run `/create-agent:custom` and then `/agent-dev:add-memory` for the knowledge graph.
 
@@ -18,7 +18,7 @@ Create new Claude Code agents from an interview (create-agent v2.2.1). The `cust
 |--------|---------|-----------------|
 | **create** | `/create-agent:create` | Discovery entry point — shows all wizards and lets you pick interactively |
 | **custom** | `/create-agent:custom` | Any agent, from an interview — role, skills, schedules, credentials, Trinity wiring |
-| **website** | `/create-agent:website` | Single Next.js website scaffold (no agent, just a site) |
+| **website** | `/create-agent:website` | Single Next.js website scaffold (no agent, just a site); also runs headless inside a deployed agent |
 | **clone** | `/create-agent:clone` | Clone an existing agent repository as starting point |
 | **review** | `/create-agent:review` | Read-only audit of an existing agent — prioritized findings report, no changes made |
 | **adjust** | `/create-agent:adjust` | Apply best-practice improvements to an existing agent |
@@ -75,9 +75,14 @@ The wizard ends by handing off to `/trinity:onboard`, which deploys from the age
 - **The brief is the answer.** Purpose, name, skills, plugins, credentials, and schedules come from the argument. Decorative choices take their defaults silently.
 - **Real gaps go out as one ask.** Anything the new agent cannot work without and the brief does not say (a data source, an account, a locale) is collected and raised as a single `ask_operator` question, never guessed.
 - **One approval before anything leaves the workspace.** The skill outlines, schedules, and credentials needed travel in one approval ask. Nothing is pushed or created until a person approves it.
-- **The agent is created on the builder's own instance.** With a usable GitHub token it creates a private repo and calls `create_agent` from it. Without one it falls back to `deploy_local_agent` and says plainly that the new agent has no reproducible source and no auto-sync. Either call needs the builder agent to hold the **Manage other agents** permission, which an instance admin grants in that agent's Settings; without it the create is refused and the skill names the missing permission instead of retrying.
+- **The agent is created on the builder's own instance.** With a usable GitHub token it creates a private repo and calls `create_agent` from it. Without one it falls back to `deploy_local_agent` and says plainly that the new agent has no reproducible source and no auto-sync. Either call needs the builder agent to hold the **Manage other agents** permission, which an instance admin grants in that agent's **Settings → Guardrails → Permissions to change itself**; without it the create is refused and the skill names the missing permission instead of retrying.
 - **The approval ask has real endings.** It offers explicit options; a person can pick one, answer *something else* (which approves none of them), cancel, dismiss, or let it expire, and the wizard proceeds only on an approving choice.
+- **A moot ask is withdrawn.** When a new brief answers a question the builder already asked, it ends that pending ask with `withdraw_ask`; when the facts changed, it replaces the ask instead of repeating it.
 - **Schedules stay declared `enabled: false`** until a person reviews the new agent.
+
+### Headless websites
+
+`/create-agent:website` runs the same way inside a deployed agent, such as a website-builder agent. The brief carries the answers (pages default to Home, About and Contact), decorative choices take defaults, and a real gap — usually the brand name or what the business does — goes out as one `ask_operator` question. Prices, addresses and phone numbers are never invented: the section is left out or marked `TBD` and listed in the summary. Each site is its own git repo under `~/sites/<project>`, and re-running on an existing site edits it rather than re-scaffolding. Delivery uses keys the agent already holds, never an interactive login: a private GitHub repo through `GITHUB_TOKEN` or the platform git credential (the token is read at push time, never written into the remote URL), and a Vercel deploy through `VERCEL_TOKEN`. A missing key does not stop the build; the summary names the key a person should add as a credential in the agent's settings.
 
 ## Usage Examples
 

@@ -25,7 +25,7 @@ from starlette.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
-from config import CORS_ORIGINS, VOICE_ENABLED
+from config import ASK_TRINITY_ENABLED, BUG_REPORTING_ENABLED, CORS_ORIGINS, VOICE_ENABLED
 from models import User
 from dependencies import get_current_user, is_workspace_only_role, owner_is_suspended, owner_is_workspace_only, scope_may_open_event_stream, terms_route, workspace_route
 from services.docker_service import docker_client, list_all_agents_fast
@@ -887,6 +887,12 @@ async def _schedule_watch_loops() -> None:
             logger.error(f"Error resuming monitoring service: {e}")
     asyncio.create_task(_start_monitoring_delayed())
 
+    # #4483: fleet base-image check — one alert naming the running agents still
+    # on an old agent image. Read-only, leader-locked; stagger, rationale and
+    # the never-raises fence live in the service.
+    from services import fleet_image_service as _fleet_image_boot
+    _fleet_image_boot.fleet_image_check_service.start()
+
 
 async def _run_startup_recovery() -> None:
     """Orphaned-execution recovery (#128). Opens the #748 warming-up gate in `finally`.
@@ -1182,6 +1188,15 @@ async def _shutdown_loops_and_transports(app: FastAPI) -> None:
         logger.info("Skills library sync service stopped")
     except Exception as e:
         logger.error(f"Error stopping skills library sync service: {e}")
+
+    # #4483: fleet base-image check — releases its leader lease. Never raises.
+    from services import fleet_image_service as _fleet_image_stop
+    _fleet_image_stop.fleet_image_check_service.stop()
+
+    # #4635: the queue-stall monitor's leader lease, so a restarted worker need
+    # not wait out its TTL before the monitor runs again. Never raises.
+    from services import queue_stall_service as _queue_stall_stop
+    _queue_stall_stop.release_lease()
 
 
 async def _shutdown_probes_and_clients(app: FastAPI) -> None:
@@ -2061,7 +2076,7 @@ def _build_version_payload(
             "agent_server": version,
             "base_image": f"trinity-agent-base:{version}"
         },
-        "runtimes": ["claude-code", "gemini-cli", "codex"],
+        "runtimes": ["claude-code", "gemini-cli", "codex", "opencode"],
         # #1814: the version baked into the running image. Equal to `version`
         # on a normally-built stack; DIFFERENT means the image is stale
         # relative to the code being executed (an in-place upgrade without
@@ -2120,10 +2135,16 @@ async def get_version(current_user: User = Depends(get_current_user)):
     # #2380: resolved here, not inside the builder — that function is
     # exec-sliced by its own tests and must stay stdlib-only.
     install_source = _settings_service.get_install_source()
-    return _build_version_payload(
+    payload = _build_version_payload(
         VOICE_ENABLED and bool(_settings_service.get_gemini_api_key()),
         edition, features, install_source,
     )
+    # #4499: the help widget's two vendor-hosted channels, decided at RUN time
+    # (`BUG_REPORTING_ENABLED` / `ASK_TRINITY_ENABLED` / `DO_NOT_TRACK`). Added
+    # here, not in the builder: that function is exec-sliced by its tests and
+    # reads no module state. The widget shows a tab only for a literal `true`.
+    payload["help"] = {"docs_qa": ASK_TRINITY_ENABLED, "bug_reporting": BUG_REPORTING_ENABLED}
+    return payload
 
 
 # User info endpoint

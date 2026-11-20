@@ -378,6 +378,16 @@ export const QUEUE_RESPONSE_NOT_ADDRESSEE =
   'This approval was addressed to someone else; only they can decide it.'
 
 /**
+ * abilityai/trinity-enterprise#1096 — the refusal names who the card waits for
+ * (the seat and the person, worded by the server). Prefer the server's
+ * `detail.message`; keep the generic line when it sends none (an older backend).
+ */
+export function notAddresseeMessage(err) {
+  const message = err?.response?.data?.detail?.message
+  return typeof message === 'string' && message.trim() ? message : QUEUE_RESPONSE_NOT_ADDRESSEE
+}
+
+/**
  * trinity-enterprise#611 — how an item ENDED, as ONE rule every surface renders
  * (ResolvedCard, the `/m` "Recently ended" strip, PortalAsks). `null` while the
  * item is still pending.
@@ -457,6 +467,12 @@ function ledgerKind(item) {
   return null
 }
 
+/** #4139 — a platform alert: type `alert`, or a kind that keeps its own row
+ *  type since #4016 (`sync_failing`, `git_bloat`, …) and is keyed by `subject`. */
+function isPlatformAlert(item) {
+  return item.type === 'alert' || Boolean(item.subject)
+}
+
 export function queueEnding(item) {
   if (!item || typeof item !== 'object') return null
   const kind = endingKind(item)
@@ -486,7 +502,7 @@ export function queueEnding(item) {
   } else {
     who = item.disposed_by_email || (kind === 'answered' ? item.responded_by_email : null) || null
   }
-  return { kind, label: ENDING_LABELS[kind], who, when, reason, alert: item.type === 'alert' }
+  return { kind, label: ENDING_LABELS[kind], who, when, reason, alert: isPlatformAlert(item) }
 }
 
 /** The ending in words: "Cancelled by op@…", "Answered by you",
@@ -555,10 +571,10 @@ function relativeAgo(iso, now) {
  * #3246 — a pending platform alert is ONE row per condition, updated in place by
  * every new reading, so a row seen many times must not read as a fresh alert.
  * "seen N times · last seen 5m ago" when `context.seen_count > 1`; `''` for an
- * ended row, a row seen once, and anything that is not an alert.
+ * ended row, a row seen once, and anything that is not a platform alert.
  */
 export function queueSeenLine(item, now = Date.now()) {
-  if (!item || item.status !== 'pending' || item.type !== 'alert') return ''
+  if (!item || item.status !== 'pending' || !isPlatformAlert(item)) return ''
   const n = Number(item.context && item.context.seen_count)
   if (!Number.isInteger(n) || n < 2) return ''
   const ago = item.last_seen_at ? relativeAgo(item.last_seen_at, now) : null

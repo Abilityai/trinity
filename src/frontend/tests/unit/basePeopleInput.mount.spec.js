@@ -220,6 +220,15 @@ describe('must-pick', () => {
     expect(w.text()).toContain('Pat Doe')
   })
 
+  it('shows the email once when the label is the email', async () => {
+    const same = { email: 'sam@example.com', label: 'Sam@Example.com' }
+    const { w } = render({ mode: 'pick' }, { text: same.email, picked: same })
+    await flushPromises()
+    const help = w.find('[id$="-help"]')
+    expect(help.text()).toBe('sam@example.com')
+    expect(w.text()).not.toContain('·')
+  })
+
   it('clearing a pre-filled pick clears the person', async () => {
     const { w, state } = render({ mode: 'pick' }, { text: PAT.email, picked: PAT })
     await input(w).setValue('')

@@ -29,6 +29,7 @@ Explicit permission model controlling which agents can communicate with which. R
 - The same check gates starting a loop on another agent (`run_agent_loop`) and reading or stopping that loop (`get_loop_status`, `stop_loop`). See [Agent Loops](../automation/agent-loops.md#permission-checks-on-the-loop-tools).
 - Permissions also gate shared folder access and event subscriptions between agents.
 - A grant also lets the calling agent read the target's declared metrics (`get_metrics` with `agent` set to the target). These cross-agent reads count against the reader's own rate budget and are recorded in the audit log.
+- **A delegated run carries the person it is for.** When Agent A works for a person and calls Agent B, B's run records that person. If the person can open B, B runs at that person's own level. If they cannot, B runs at its owner's level (full tools, and it can set up later work) only when A's owner is B's owner or an admin; otherwise it runs at a shared user's level. A person shared on A therefore never gets more on B than A's owner has there, and A's key cannot read B's executions on behalf of a person who cannot open B.
 - A permitted call can still be refused if it is too deep in a chain of agent-to-agent calls. See [Agent Network → Chain-Depth Limit](agent-network.md#concepts).
 - Every blocked call is recorded in the [audit log](../operations/audit-trail.md) as a refusal, so an admin can see which agent tried to reach which.
 

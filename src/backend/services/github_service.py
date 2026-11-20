@@ -6,6 +6,7 @@ Handles all GitHub API interactions:
 - Organization detection
 - Repository creation
 - Token validation
+- Issue / pull request reads (abilityai/trinity-enterprise#1240)
 """
 import httpx
 import logging
@@ -50,11 +51,24 @@ class GitHubError(Exception):
     so a caller can tell a token GitHub refused (401/403) from an outage
     without parsing the message. ``None`` for network errors and for raises
     that predate it; ``str(e)`` is unchanged either way.
+
+
+    ``reset`` and ``rate_limited`` are set by ``get_issue`` (ent#1240): a
+    403/429 with an exhausted budget is a rate limit, not a refusal, and
+    ``reset`` is GitHub's ``x-ratelimit-reset`` (epoch seconds) when sent.
     """
 
-    def __init__(self, *args, status: Optional[int] = None):
+    def __init__(
+        self,
+        *args,
+        status: Optional[int] = None,
+        reset: Optional[int] = None,
+        rate_limited: bool = False,
+    ):
         super().__init__(*args)
         self.status = status
+        self.reset = reset
+        self.rate_limited = rate_limited
 
 
 def github_error_words(error_class: type, status: Optional[int]) -> str:
@@ -113,6 +127,133 @@ class GitHubService:
                 **kwargs
             )
             return response
+
+    @staticmethod
+    def issue_client(transport: Optional[httpx.AsyncBaseTransport] = None) -> httpx.AsyncClient:
+        """The bounded client ``get_issue`` reads with: 5 s, one redirect.
+
+        One redirect lets a renamed or transferred repo answer from its new
+        home; a second hop is an error, and so is a hop off ``API_BASE``'s
+        origin (scheme, host, port) — refused before it is sent, so the
+        token never leaves the API host. A caller reading many items shares
+        one of these across the batch (ent#1240).
+        """
+        base = httpx.URL(GitHubService.API_BASE)
+        origin = (base.scheme, base.host, base.port)
+
+        async def same_origin(request: httpx.Request) -> None:
+            if (request.url.scheme, request.url.host, request.url.port) != origin:
+                raise GitHubError("Redirect off the GitHub API refused")
+
+        return httpx.AsyncClient(
+            timeout=5.0, follow_redirects=True, max_redirects=1, transport=transport,
+            event_hooks={"request": [same_origin]},
+        )
+
+    async def get_issue(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        client: Optional[httpx.AsyncClient] = None,
+    ) -> dict:
+        """Read one issue or pull request: ``GET /repos/{owner}/{repo}/issues/{n}``.
+
+        The issues endpoint answers for a PR too, carrying
+        ``pull_request.merged_at``. GET only — nothing here writes to GitHub.
+        Raises ``GitHubError`` on a non-200 (``status``, ``reset``,
+        ``rate_limited``) and on a network error (``status=None``, the
+        message never carries httpx's text, which can echo the token, #4284).
+        """
+        if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+            raise ValueError("number must be a positive integer")
+        url = f"{self.API_BASE}/repos/{owner}/{repo}/issues/{number}"
+        own = client is None
+        if own:
+            client = self.issue_client()
+        try:
+            response = await client.get(url, headers=self._headers)
+        except httpx.RequestError as e:
+            raise GitHubError(f"Network error: {type(e).__name__}") from None
+        finally:
+            if own:
+                await client.aclose()
+        if response.status_code == 200:
+            return self._issue_json(response)
+        raise self._issue_error(response)
+
+    @staticmethod
+    def _issue_json(response: httpx.Response):
+        """The body of a 200 issue read; a non-JSON one (a proxy's HTML page)
+        is a ``GitHubError`` with ``status=200``, never a bare ``ValueError``."""
+        try:
+            return response.json()
+        except ValueError:
+            raise GitHubError("GitHub API error: unexpected body", status=200) from None
+
+    @staticmethod
+    def _issue_error(response: httpx.Response) -> GitHubError:
+        """The ``GitHubError`` for a non-200 issue read: ``status``, and
+        ``reset`` / ``rate_limited`` when the budget is exhausted."""
+        status = response.status_code
+        remaining = response.headers.get("x-ratelimit-remaining")
+        limited = status == 429 or (
+            status == 403 and (remaining == "0" or "retry-after" in response.headers)
+        )
+        reset_raw = response.headers.get("x-ratelimit-reset")
+        reset = int(reset_raw) if reset_raw and reset_raw.isdigit() else None
+        return GitHubError(
+            f"GitHub API error: {status}",
+            status=status, reset=reset if limited else None, rate_limited=limited,
+        )
+
+    async def list_sub_issues(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        client: Optional[httpx.AsyncClient] = None,
+        limit: int = 100,
+    ) -> list:
+        """List one issue's native sub-issues, in GitHub's order:
+        ``GET /repos/{owner}/{repo}/issues/{n}/sub_issues`` (ent#1163).
+
+        100 per page; the next page is requested by number, and only while
+        GitHub sends ``Link: rel="next"`` — no URL from a response is ever
+        requested. Stops at ``limit`` items (pass one more than you keep to
+        learn whether there were more). GET only, on the same bounded client
+        and with the same errors as ``get_issue``.
+        """
+        if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+            raise ValueError("number must be a positive integer")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        url = f"{self.API_BASE}/repos/{owner}/{repo}/issues/{number}/sub_issues"
+        own = client is None
+        if own:
+            client = self.issue_client()
+        out: list = []
+        page = 1
+        try:
+            while len(out) < limit:
+                try:
+                    response = await client.get(
+                        url, headers=self._headers, params={"per_page": 100, "page": page})
+                except httpx.RequestError as e:
+                    raise GitHubError(f"Network error: {type(e).__name__}") from None
+                if response.status_code != 200:
+                    raise self._issue_error(response)
+                items = self._issue_json(response)
+                if not isinstance(items, list):
+                    raise GitHubError("GitHub API error: unexpected sub-issues body", status=200)
+                out.extend(i for i in items if isinstance(i, dict))
+                if not items or 'rel="next"' not in response.headers.get("link", ""):
+                    break
+                page += 1
+        finally:
+            if own:
+                await client.aclose()
+        return out[:limit]
 
     async def validate_token(self) -> Tuple[bool, Optional[str]]:
         """

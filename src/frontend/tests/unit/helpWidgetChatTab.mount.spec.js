@@ -19,10 +19,18 @@ import { createPinia, setActivePinia } from 'pinia'
 import { h } from 'vue'
 
 vi.mock('../../src/utils/websocket', () => ({ useWebSocket: () => ({ followToken: vi.fn() }) }))
+// #4499: the widget shows only when the backend's run-time switches say a help
+// channel is on (`GET /api/version` → `help`); here both are.
+vi.mock('../../src/composables/useBuildInfo', async () => {
+  const { ref } = await import('vue')
+  const info = ref({ version: 'test', help: { docs_qa: true, bug_reporting: true } })
+  return { useBuildInfo: () => ({ info, load: async () => info.value }) }
+})
 
 import App from '../../src/App.vue'
 import { routes } from '../../src/router'
 import { useAuthStore } from '../../src/stores/auth'
+import { useEnterpriseStore } from '../../src/stores/enterprise'
 
 const LAUNCHER = '[aria-label="Open help chat"]'
 const PANEL = '[role="dialog"][aria-label="Help chat"]'
@@ -50,6 +58,10 @@ async function mountApp(start) {
   const pinia = createPinia()
   setActivePinia(pinia)
   useAuthStore().isAuthenticated = true
+  // A known non-admin on a build whose flags have been read: the corner is decided, and it holds the help button.
+  useAuthStore().profileVerified = true
+  useAuthStore().user = { role: 'user' }
+  useEnterpriseStore().featureFlagsLoaded = true
   wrapper = mount(App, { global: { plugins: [router, pinia] }, attachTo: document.body })
   await flushPromises()
   const go = async (to) => { await router.push(to); await flushPromises() }

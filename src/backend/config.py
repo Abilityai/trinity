@@ -68,6 +68,23 @@ TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS = int(
     os.getenv("TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS", "30")
 )
 
+# --- Vendor-hosted help channels (#4499) ---------------------------------
+# The two remaining requests an instance makes to a vendor-operated host: the
+# help widget's bug / feature / feedback report (#1116) and the docs Q&A service
+# behind the widget's Ask tab and the `ask_trinity` MCP tool (ent#328). Both
+# are read here at RUN time, so the published images honour them without a
+# rebuild; the SPA reads them from `GET /api/version` (`help`), and the MCP
+# server reads the same two variables from its own environment.
+# `DO_NOT_TRACK=1` turns both off, with the two channels above: it is the one
+# setting after which no request leaves for a vendor-operated host.
+_DO_NOT_TRACK = os.getenv("DO_NOT_TRACK", "0").strip().lower() not in ("0", "", "false")
+BUG_REPORTING_ENABLED = (
+    os.getenv("BUG_REPORTING_ENABLED", "true").strip().lower() != "false" and not _DO_NOT_TRACK
+)
+ASK_TRINITY_ENABLED = (
+    os.getenv("ASK_TRINITY_ENABLED", "true").strip().lower() != "false" and not _DO_NOT_TRACK
+)
+
 # JWT Settings
 # SECURITY: SECRET_KEY must be set via environment variable in production
 # Generate with: openssl rand -hex 32

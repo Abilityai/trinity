@@ -62,7 +62,7 @@ either a password or the email login would admit it — email login on, the poli
 allow-listed; an allow-list row alone is not an account) gets no portal session: after its code verifies, `/auth/verify` answers
 409 `platform_login_required`, and the Workspace sends it to `/login` with a return path. Every
 platform login (`auth._finalizeLogin`) ends a leftover Workspace client sign-in, since `authHeader`
-prefers a held portal token. Detail: [workspace-only-role.md](../feature-flows/workspace-only-role.md). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
+prefers a held portal token. **Nor is it a door for a deactivated account (trinity-enterprise#1258).** A portal session carries an email and no account, so `users.suspended_at` (#995) is read explicitly: `service.email_account_suspended` refuses the three mint paths (inside `email_has_access`, and first in `/auth/request` and `/auth/verify`), and `portal_auth._reject_if_blocked` — the check every `decode_portal_session` consumer makes — refuses a live session on its next request. Suspension wins over a share; fail-closed. Detail: [workspace-only-role.md](../feature-flows/workspace-only-role.md). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
 reads (`WORKSPACE_WS_EVENT_TYPES` / `_FIELDS`, `architecture/integrations.md`). An agent whose owner
 is Workspace-only is refused at the rooms door.
 
@@ -1033,6 +1033,17 @@ ask table (Action), the portal messages and addressed deliverables (Unread, All)
 and the #557 read cursor. It adds **no table, no store and no router**. Requirement
 §5.40 of `core-agent.md`; flow in `feature-flows/workspace-inbox.md`.
 
+**One seam from the ask card back to the Inbox: `notifyAnswered`.** A row leaves a tab
+visit only as a ghost (principle 5), with one exception: the reader's own confirmed answer
+crosses its row off Action and opens the next ask. The card tells the Inbox through a
+**function prop** handed down the pane (`PortalInbox.onAnswered` → `PortalInboxPane` →
+`PortalAsks` → `PortalCredentialField`), called on the answer's success path only. It is not
+an emit, because the pane is keyed by the item and an emit from a card unmounted
+mid-request is dropped; and it is not read off the data, because an ask a poll brings back
+ended must keep its ghost. The timing and the selection live in the container, the rules
+(`nextPendingAsk`, `dropFromVisit`, `answeredAnnouncement`) in `portalInbox.js`; still no
+store. A surface that passes the prop also takes over the "Sent" confirmation.
+
 **Unread is the #557 cursor, generalised to deliverables.** `client_portal/db.py`
 holds ONE fragment, `_UNREAD_ARRIVALS`, a `UNION ALL` of two arms that share the
 cursor-or-baseline predicate: (i) assistant messages in the viewer's own chats
@@ -1744,6 +1755,21 @@ is the edition-agnostic surface it plugs into:
   `tabPassesDoor` checks a declared capability fail-closed against
   `session.capabilities`, so a session without it — including a platform
   session on a build without the module — sees exactly the tabs it saw before.
+- **Tasks board (trinity-enterprise#957)** — the Tasks tab is one task surface
+  with two views, List | Board (`BaseSegmented`, remembered per person in
+  `localStorage`). `ProjectTaskBoard.vue` only draws and emits; the columns and
+  every rule are pure data in `projectsUtils.js` (`BOARD_COLUMNS`, `columnOf`,
+  `boardColumns`, `boardMove`), so a new step of the path is one array entry and
+  a status no column names lands in the first column instead of vanishing.
+  `ProjectTasks.vue` owns the writes: a move is the existing status-only task
+  update (`store.moveTask` — the answer is merged into the rows at once and the
+  re-reads reconcile in the background), tracked in ONE in-flight map
+  (`useTaskBoardMoves`) shared with Confirm. The dragged task is component
+  state; the drag payload is never read back, because task ids repeat across
+  projects. Tasks are re-read while the tab is visible (`useVisiblePolling`),
+  `fetchTasks` lets only the newest read of a project write (success and error
+  alike), and fresh rows are held while a drag or a keyboard pick is in
+  progress. Under `boardMinWidth()` of container width the list renders.
 - **Project page (v2)** — `OverflowTabs` over Overview / Tasks
   (`ProjectTasks.vue`) / Log (`ProjectLog.vue`) / Files & reports
   (`ProjectMaterial.vue`, reusing `ReportRenderer`). An invited guest gets one

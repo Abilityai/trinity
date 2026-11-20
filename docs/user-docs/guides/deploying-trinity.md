@@ -69,7 +69,7 @@ Starts all platform services (backend, frontend, MCP server, Redis, scheduler, V
 
 Open `http://localhost` (or `http://localhost:$FRONTEND_PORT` if you remapped) and log in with `admin` + the password from `.env`. Because `ADMIN_PASSWORD` was set, the admin account already exists — there is no setup screen. The Dashboard then opens the first-run setup sequence; connecting a Claude credential is its one required step. See [First-Time Setup](../getting-started/setup.md) for what a fresh install contains.
 
-To change the admin password later, edit `ADMIN_PASSWORD` in `.env` and recreate the backend container (`docker compose up -d backend`) — a plain `restart` does not re-read `.env`. The backend re-applies the value on every boot; there is no change-password form in the UI.
+To change the admin password later, sign in as `admin` and use the **Password** panel under **Settings → General** (current password, new password, confirm). The change survives restarts and upgrades, and signs out every other session. Then update `ADMIN_PASSWORD` in `.env` too, because the MCP server's legacy password sign-in and any scripts still read it there. The backend re-applies `ADMIN_PASSWORD` only when the value in `.env` changes, so to reset a forgotten password set a new value there and recreate the backend container (`docker compose up -d backend`) — a plain `restart` does not re-read `.env`.
 
 ### Step 5: Connect from Claude Code
 

@@ -181,6 +181,12 @@ def _format_model_name(model_id: str) -> str:
         # wins); `claude-opus-5` itself stays unmapped because its fallback is
         # already correct, and mapping it here would swallow this line.
         "claude-opus-5-5": "Claude Opus 5.5",
+        # #4528: the same for the three ids that release added ("Claude Sonnet
+        # 5 5"). `claude-sonnet-5` stays unmapped for the same reason as
+        # `claude-opus-5`; the other two share a prefix with no mapped entry.
+        "claude-sonnet-5-5": "Claude Sonnet 5.5",
+        "claude-fable-5-2": "Claude Fable 5.2",
+        "claude-haiku-5-5": "Claude Haiku 5.5",
         "claude-sonnet-4": "Claude Sonnet 4",
         "claude-opus-4": "Claude Opus 4",
         "claude-haiku-4": "Claude Haiku 4",

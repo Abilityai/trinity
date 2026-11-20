@@ -1034,6 +1034,10 @@
                   </p>
                 </div>
 
+                <!-- trinity-enterprise#1240: which GitHub owners' private repos
+                     Projects may read with the platform token above. -->
+                <ProjectsGithubReadOwnersSetting v-if="enterpriseStore.isEntitled('projects')" />
+
                 <!-- ent#582: the email-provider and Gemini keys — the same field
                      the first-run flow uses, so a key set there is managed here. -->
                 <PlatformKeyField provider="resend" class="mt-6" />
@@ -2407,6 +2411,7 @@ import AAuthPanel from '../components/settings/AAuthPanel.vue'
 import A2AEndpointsPanel from '../components/settings/A2AEndpointsPanel.vue'
 import NeverminedOrganizationPanel from '../components/settings/NeverminedOrganizationPanel.vue'
 import PlatformKeyField from '../components/settings/PlatformKeyField.vue'
+import ProjectsGithubReadOwnersSetting from '../components/settings/ProjectsGithubReadOwnersSetting.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import BaseBadge from '../components/base/BaseBadge.vue'
 import BaseButton from '../components/base/BaseButton.vue'
@@ -2415,6 +2420,7 @@ import DirectVoiceSettings from '../components/settings/DirectVoiceSettings.vue'
 import { WORKSPACE_ONLY_ROLE_LABEL, existingAccountNotice } from '../utils/workspaceOnly'
 import { HELP_CLASS } from '../components/base/fieldClasses'
 import InlineError from '../components/InlineError.vue'
+import { unitsAgo } from '../utils/timestamps'
 
 const router = useRouter()
 const route = useRoute()
@@ -3679,7 +3685,7 @@ function formatDate(dateString) {
   if (diffInDays === 0) return 'Today'
   if (diffInDays === 1) return 'Yesterday'
   if (diffInDays < 7) return `${diffInDays} days ago`
-  if (diffInDays < 30) return `${Math.floor(diffInDays / 7)} weeks ago`
+  if (diffInDays < 30) return unitsAgo(Math.floor(diffInDays / 7), 'week')
 
   return date.toLocaleDateString()
 }

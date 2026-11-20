@@ -106,6 +106,35 @@ class TestTrySpawnGating:
         monkeypatch.setenv("TRINITY_MCP_API_KEY", "trinity_mcp_k")
         assert rc.try_spawn_async(_req()) is False
 
+    @pytest.mark.parametrize(
+        "runtime,expected",
+        [("opencode", True), ("codex", False), ("gemini-cli", False), ("claude-code", True)],
+    )
+    def test_async_gate_reads_runtime_capabilities(self, monkeypatch, runtime, expected):
+        """Abilityai/lilu#655: the gate is `capabilities().async_dispatch` (plus
+        Claude by name), not `is_claude_runtime` alone — OpenCode opts in,
+        Codex and Gemini stay sync exactly as before."""
+        monkeypatch.setattr(rc.agent_state, "agent_runtime", runtime)
+        monkeypatch.setenv("AGENT_RUNTIME", runtime)
+        assert rc.runtime_supports_async() is expected
+
+    def test_opencode_runtime_spawns_detached_task(self, monkeypatch):
+        monkeypatch.setattr(rc.agent_state, "agent_runtime", "opencode")
+        monkeypatch.setenv("AGENT_RUNTIME", "opencode")
+        monkeypatch.setenv("TRINITY_BACKEND_URL", "http://backend:8000")
+        monkeypatch.setenv("TRINITY_MCP_API_KEY", "trinity_mcp_k")
+
+        async def _go():
+            with patch.object(rc, "_run_and_report", AsyncMock()) as m:
+                ok = rc.try_spawn_async(_req())
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                return ok, m
+
+        ok, m = asyncio.run(_go())
+        assert ok is True
+        m.assert_awaited_once()
+
     def test_missing_execution_id_returns_false(self, monkeypatch):
         monkeypatch.setattr(rc.agent_state, "agent_runtime", "claude-code")
         monkeypatch.setenv("TRINITY_BACKEND_URL", "http://backend:8000")

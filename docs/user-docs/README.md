@@ -54,8 +54,9 @@ Trinity is the operating system for the AI-native company — open source, self-
 - [Agent Terminal](agents/agent-terminal.md) — Ephemeral key-based SSH access; the WebSocket terminal for API clients
 - [Agent Files](agents/agent-files.md) — File browser, virtual filesystem, shared folders
 - [Agent Logs](agents/agent-logs.md) — Log viewing, telemetry, Vector aggregation
-- [Agent Configuration](agents/agent-configuration.md) — The Settings home: General, Guardrails, People, Channels, Integrations and Storage panes, the restart banner, capacity, resources, timeout
-- [Agent Guardrails](agents/agent-guardrails.md) — Deterministic safety enforcement, bash deny-lists, credential protection, tamper-proof hook registration
+- [Agent Configuration](agents/agent-configuration.md) — The Settings home: General, Credentials, Guardrails, People, Channels, Integrations and Storage panes, the restart banner, capacity, resources, timeout
+- [Agent Memory](agents/agent-memory.md) — Person memory (notes and summary, owner view with history and undo) and retrieval memory (capture, recall, search)
+- [Agent Guardrails](agents/agent-guardrails.md) — Tool-access profiles, deterministic safety enforcement, bash deny-lists, credential protection, tamper-proof hook registration
 - [Recommended Trinity Prompt](agents/recommended-fleet-prompt.md) — Research-backed fleet rules for the instance-wide Trinity prompt, and what not to put there
 - [Self-Execute](agents/self-execute.md) — Background tasks during chat, result injection
 

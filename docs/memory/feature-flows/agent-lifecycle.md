@@ -535,6 +535,22 @@ behaviour is byte-identical: `unknown → True`, `match → True`, `drift → Fa
 comparison, one place: `system_agent_service` must contain **no** hand-rolled image-id comparison
 (source-pinned).
 
+**Fleet report (#4483):** the same 3-state predicate feeds `services/fleet_image_service.py`, which
+reports and never acts. `run_once()` reads `agent_container_states()` (tri-state, #2196), runs
+`check_base_image_state` for each running, non-ephemeral agent other than `trinity-system`, and keeps
+**one** platform alert — `fleet_base_image_stale:fleet`, on the system agent's queue — naming the agents
+whose state is `drift`. `platform_alerts.observe` updates the pending row as the set changes and
+`platform_alerts.clear` ends it when a pass proves every agent current. The same alert is raised when
+`trinity-agent-base:latest`'s `trinity.base-image-version` label is older than the backend's release
+version (`compare_versions`): on an update path that never rebuilt the image no agent drifts, so drift
+alone would stay silent. `unknown` — Docker unreadable, a failed comparison, a label that is absent or
+not `X.Y.Z[-rcN]` — files nothing and ends nothing. `FleetImageCheckService` runs it 25s after boot and
+every 10 minutes under the `fleetimage:leader` lease (fail-open); started in
+`main.py::_schedule_watch_loops`. Adoption is still the cold start only.
+
+Related: `409 env_unreadable` (credential sink, Nevermined delegation) names the older agent image and
+the restart when the agent's read answer carries no `missing` list (`agent_env_read.image_predates_missing`).
+
 **System-aware `check_full_capabilities_match` (#1816):** the predicate compares the
 `trinity.full-capabilities` label against the admin-settable **fleet** default, but `trinity-system` runs
 `FULL_CAPABILITIES` by contract (package installation). On an `agent_full_capabilities=false` install,

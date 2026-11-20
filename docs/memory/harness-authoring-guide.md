@@ -5,6 +5,14 @@
 > fourth runtime, using the OpenAI **Codex** runtime (#1187) as the worked
 > example. Claude Code is the reference implementation; Gemini and Codex are the
 > two ports.
+>
+> **OpenCode** (#2981, [feature flow](feature-flows/opencode-runtime.md)) is the
+> fourth runtime and the first whose CLI has no system-prompt flag AND a config
+> stack the workspace can override. Two lessons from it apply to any new port:
+> (1) a control that lives only in a config file the agent can shadow is
+> advisory — deliver safety switches (share, read-only denies) through the
+> child's env or argv, which the CLI applies last; (2) never put the prompt in
+> argv — write it to stdin, or a >128 KiB message fails `Popen` with `E2BIG`.
 
 The work spans **four surfaces** (Invariant #13 — keep them in sync): the agent
 server (the runtime + parity), the backend (credentials + Session-tab gate), the

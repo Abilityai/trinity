@@ -85,7 +85,6 @@ def wake(monkeypatch):
             replay=calls.get("replay", False), enabled=True, in_flight=False
         ),
     )
-    monkeypatch.setattr(mod, "_complete_idempotency", lambda *a, **k: None)
     monkeypatch.setattr(mod, "_fail_idempotency", lambda *a, **k: None)
     monkeypatch.setattr(mod, "_pending_ask_ids", lambda execution_id: calls.get("ask_ids", []))
     monkeypatch.setattr(mod, "_caller_subscribes_to", lambda caller, callee, status: False)
@@ -297,6 +296,34 @@ class TestTheFrame:
         message = wake._calls["dispatch"][0]["message"]
         assert secret not in message
         assert len(message) < 12_000
+
+    def test_a_cut_summary_says_so_with_both_lengths(self, wake):
+        """ent#1216: the notice cut the callee's words mid-sentence and did not
+        say so, which read as the run's own answer stopping there."""
+        words = "word " * 1000                       # 5,000 characters
+        wake._calls["row"] = _row(response=words)
+        _run(wake.maybe_wake_caller("exec-callee"))
+        message = wake._calls["dispatch"][0]["message"]
+        assert f"[cut here: the first {wake.SUMMARY_MAX:,} of 5,000 characters]" in message
+        shown = message.split("Its own words on how it ended:\n\n", 1)[1]
+        assert shown.startswith(words[: wake.SUMMARY_MAX])
+
+    def test_a_summary_that_fits_carries_no_cut_marker(self, wake):
+        wake._calls["row"] = _row(response="x" * wake.SUMMARY_MAX)
+        _run(wake.maybe_wake_caller("exec-callee"))
+        assert "[cut here" not in wake._calls["dispatch"][0]["message"]
+
+    def test_the_cut_is_measured_after_redaction(self, wake):
+        """A raw text over the cap whose redacted form fits was not cut."""
+        secret = "sk-ant-" + "A" * 40
+        raw = (secret + " ") * 60                    # 2,880 raw characters
+        from utils.credential_sanitizer import sanitize_text
+        assert len(raw) > wake.SUMMARY_MAX >= len(sanitize_text(raw))
+        wake._calls["row"] = _row(response=raw)
+        _run(wake.maybe_wake_caller("exec-callee"))
+        message = wake._calls["dispatch"][0]["message"]
+        assert secret not in message
+        assert "[cut here" not in message
 
 
 class TestWiring:

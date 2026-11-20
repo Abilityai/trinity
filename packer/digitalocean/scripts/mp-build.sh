@@ -1,9 +1,11 @@
 #!/bin/bash
 # Build the DigitalOcean Marketplace snapshot for a release tag. Never submits.
 #
-#   DIGITALOCEAN_TOKEN=dop_v1_... TRINITY_SSH_KEY_ID=<id> TRINITY_SSH_KEY_FILE=<path> \
+#   DIGITALOCEAN_TOKEN=dop_v1_... TRINITY_SSH_KEY_ID=<id> TRINITY_SSH_KEY_OP=<op://...> \
 #     bash mp-build.sh <tag>
 #
+# The private key comes from 1Password for the length of the run (TRINITY_SSH_KEY_OP),
+# or from a file that stays (TRINITY_SSH_KEY_FILE).
 # Stdout carries only the snapshot ID; everything else goes to stderr. A failed build deletes the droplet
 # on this run's tag only. A build killed outright leaves one tagged trinity-build-*.
 set -uo pipefail
@@ -17,8 +19,6 @@ if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
 fi
 : "${DIGITALOCEAN_TOKEN:?DIGITALOCEAN_TOKEN must be set}"
 : "${TRINITY_SSH_KEY_ID:?TRINITY_SSH_KEY_ID must be set: an SSH key ID on the DigitalOcean team}"
-: "${TRINITY_SSH_KEY_FILE:?TRINITY_SSH_KEY_FILE must be set: the matching private key}"
-[ -r "$TRINITY_SSH_KEY_FILE" ] || { echo "[mp-build] cannot read ${TRINITY_SSH_KEY_FILE}" >&2; exit 1; }
 
 export DIGITALOCEAN_ACCESS_TOKEN="$DIGITALOCEAN_TOKEN"
 export PKR_VAR_do_token="$DIGITALOCEAN_TOKEN"
@@ -55,12 +55,15 @@ cleanup() {
     trap '' INT TERM HUP
     [ -z "$BUILD_PID" ] || kill "$BUILD_PID" 2>/dev/null
     reap_tag "$RUN_TAG" || rc=1
+    drop_ssh_key
     exit "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+
+use_ssh_key || exit 1
 
 packer init trinity.pkr.hcl >&2 || exit 1
 packer build \

@@ -1,0 +1,83 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-12",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/4501-approver-reach",
+  "merge_base": "3e0a512f99db4bee13fe5d18ef7e3c3e3f2bcda0",
+  "issue": "abilityai/trinity#4501",
+  "counts_as_full_run": false,
+  "docker_available": true,
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_skipped_no_overlap": [
+    3,
+    4,
+    5,
+    6
+  ],
+  "stack_cve_quicklist": [],
+  "attack_surface": {
+    "endpoints_added": 0,
+    "mcp_tools_added": 0,
+    "websocket_channels_added": 0,
+    "agent_context_ingress_added": 0,
+    "behaviour_change": "an agent's ask to: approver records only the seated approvers who can open the agent; 422 role_cannot_open_agent when none can; the recorded audience can only shrink"
+  },
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "Route-census runtime guards could not run on the audit machine (the full app does not import in its virtualenv); the diff adds no route and CI runs them.",
+    "No live run on a stack: unit tests over a real database, the real sink and the real route.",
+    "Private enterprise tree not mounted in the worktree; its pinned copy was searched for callers of the changed functions (none)."
+  ],
+  "supply_chain_summary": {
+    "scanner": "not applicable: no dependency, lockfile or pin change in the diff"
+  },
+  "guard_tests": {
+    "run": [
+      "test_293_admin_gate_rejects_agent_keys",
+      "test_1310_auth_wiring",
+      "test_186_enumeration_uniformity",
+      "test_ent614_source_agent_attribution",
+      "test_292_cmdline_credential_leak",
+      "test_ent1053_approver_answer_fence",
+      "test_ent1042_role_answer_fence",
+      "test_ent1007_ask_to_canon_role",
+      "test_ent816_shared_asks",
+      "test_ent1095_readdress_role",
+      "test_4501_approver_reach"
+    ],
+    "result": "358 passed"
+  },
+  "filter_stats": {
+    "candidates": 3,
+    "below_gate": 1,
+    "excluded": 2,
+    "verified": 0,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior_reports_on_surface": 1,
+    "resolved": 0,
+    "persistent": 0,
+    "new": 0
+  }
+}

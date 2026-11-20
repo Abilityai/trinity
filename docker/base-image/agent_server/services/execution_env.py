@@ -106,7 +106,7 @@ PROTECTED_KEYS = frozenset({
     "GEMINI_CLI_HOME", "GEMINI_CLI_SYSTEM_SETTINGS_PATH", "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
     # trinity-enterprise#1093: these could detach the `/etc/claude-code` file
     # tier's `env` (the vendor-traffic opt-out and the #1001 routing pins) from
-    # the CLI: one relocates the managed-settings path (a stub on 2.1.281, but
+    # the CLI: one relocates the managed-settings path (a stub on 2.1.322, but
     # that is its only purpose); the other keeps only the highest admin tier's
     # `env` (an org's remote managed settings, when present) instead of merging
     # every tier's. Refused on every runtime: no other runtime reads them, and a
@@ -136,7 +136,7 @@ ROUTING_KEYS = frozenset({
 })
 
 # Each runtime's own endpoint names, protected on that runtime only, read from
-# the CLI version the image pins (Claude Code 2.1.281, Codex 0.147.0, Gemini
+# the CLI version the image pins (Claude Code 2.1.322, Codex 0.147.0, Gemini
 # 0.62.0). A Claude agent's `.env` may still carry `OPENAI_BASE_URL` for its own
 # MCP servers and scripts (`${OPENAI_BASE_URL}/v1` is a documented `.mcp.json`
 # shape): Claude Code never reads it, and neither does that Codex.
@@ -628,7 +628,7 @@ def auth_override_env_layers(override) -> tuple:
 # prompt tells the model to save there when "the user explicitly asks you to
 # remember something". On a turn that serves someone other than the owner that
 # competes with `write_user_memory` and can land a person's note where every
-# other user's turn reads it. Claude Code (pinned 2.1.281 and later) reads this
+# other user's turn reads it. Claude Code (2.1.281 through the pinned 2.1.322) reads this
 # variable: truthy (1/true/yes/on) takes the memory system out of the spawn.
 AUTO_MEMORY_OFF_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
 

@@ -114,6 +114,11 @@ ACCEPTED_UNTIL_RELEASE: dict[tuple[str, str], str] = {
     # `workflow_dispatch` — and the trinity-enterprise#794 system-chains
     # `workflow_dispatch` row are all declared on `main` now, and the guard
     # below went red on dev's first push after the sync, as designed.
+    ("sync-docs-to-vertex.yml", "schedule"): (
+        "trinity-enterprise#1285: daily re-sync of the docs-site catalogue "
+        "(llms.txt). Until the release cut the catalogue refreshes only on a "
+        "docs push to main or a manual dispatch; no harm meanwhile."
+    ),
 }
 
 

@@ -34,6 +34,7 @@ from services.slack_service import slack_service
 from db_models import SlackConnectionStatus
 from services.settings_service import get_slack_signing_secret, get_proactive_rate_limit
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from utils.log_masking import masked_traceback
 
 logger = logging.getLogger(__name__)
 
@@ -330,8 +331,16 @@ async def connect_slack(
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Failed to bind agent to Slack channel: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            # #4284: answer the class only. The traceback goes to the log with
+            # the held bot token masked, since the handler holds it decrypted.
+            logger.error(
+                "Failed to bind agent to Slack channel: %s",
+                masked_traceback(e, workspace.get("bot_token")),
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to connect Slack ({e.__class__.__name__} — details in backend logs)",
+            )
 
     else:
         # No workspace connected — need OAuth first

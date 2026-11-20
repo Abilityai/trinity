@@ -46,6 +46,7 @@ import { createA2ACallTools } from "./tools/a2a_call.js";
 import { createAAuthTools } from "./tools/aauth.js";
 import { createCredentialVaultTools } from "./tools/credential_vault.js";
 import { createProjectTools } from "./tools/projects.js";
+import { createPlatformFileTools } from "./tools/platform_files.js";
 import { createAssignmentTools } from "./tools/assignments.js";
 import { createPermissionTools } from "./tools/permissions.js";
 import { createMemberProgressTools } from "./tools/member_progress.js"; // ent#1175
@@ -106,6 +107,7 @@ export interface McpApiKeyValidationResult {
   // narrower set here (it named only user/agent/system) makes the cast below
   // launder two live values, which is how `portal_delegate` went unnoticed.
   scope?: McpAuthContext["scope"];
+  user_role?: string;   // Role of the key owner — used for admin bypass in chat ACL (#4654)
 }
 
 // ---------------------------------------------------------------------------
@@ -560,6 +562,7 @@ export async function createServer(config: ServerConfig = {}) {
               // `mcp_api_keys.scope` is free-text with no CHECK constraint, so a
               // value the union does not name arrives here as a plain string.
               scope: scope as McpAuthContext["scope"],
+              userRole: result.user_role,  // #4654: role-based admin bypass in chat ACL
               mcpApiKey: apiKey,  // Store the actual API key for user-scoped requests
               // #2392: per-request — fastmcp re-authenticates every POST.
               executionId: parseExecutionIdHeader(readHeader(request.headers[EXECUTION_ID_HEADER])),
@@ -691,6 +694,7 @@ export async function createServer(config: ServerConfig = {}) {
     createAAuthTools(client, requireApiKey),         // AAuth — request_person_token (ent#878), call_aauth_resource (ent#879); self-acting
     createCredentialVaultTools(client, requireApiKey), // Credential vault runtime — list/fetch (license-blind proxy, ent#279)
     createProjectTools(client, requireApiKey),       // Workspace Projects — list/get read tools (license-blind proxy, ent#661)
+    createPlatformFileTools(client, requireApiKey),  // File spaces — list/read/write/remove (license-blind proxy, ent#1237)
     createAssignmentTools(client, requireApiKey),     // Role assignments — read who an agent serves (license-blind proxy, ent#500)
     createPermissionTools(client, requireApiKey),     // Permission edges + self-change grants, read-only (ent#991)
     createMemberProgressTools(client, requireApiKey), // Member onboarding progress card — the member's assistant agent self-reports (ent#1175)

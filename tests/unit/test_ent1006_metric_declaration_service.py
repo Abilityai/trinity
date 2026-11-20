@@ -373,6 +373,56 @@ def test_no_dashboard_file_means_no_widget_uses_the_metric(agent, monkeypatch):
     assert body["unchecked"] == []
 
 
+_REAL_OBJECTIVES = svc._objectives  # the `agent` fixture stubs it; these tests run the real one
+
+_FINDING_CODES = ("objective_invalid", "objective_unreadable", "objectives_read_timeout")
+
+
+def _objective_join_answers(monkeypatch, joined):
+    """Fake `read_objective_join`, so `_objectives` itself runs."""
+    from services import objective_join_service
+
+    async def fake_join(agent_name):
+        return joined
+
+    monkeypatch.setattr(objective_join_service, "read_objective_join", fake_join)
+    monkeypatch.setattr(svc, "_objectives", _REAL_OBJECTIVES)
+
+
+@pytest.mark.parametrize("code", _FINDING_CODES)
+def test_an_objective_file_that_cannot_be_read_is_unchecked_not_unused(agent, monkeypatch, code):
+    # The join answers `unavailable: None` with the failure in `findings` when an
+    # objective file does not parse or cannot be read; the metric it cites is in
+    # a source that could not be checked (#2196, #4586), not "no objective uses it".
+    _objective_join_answers(monkeypatch, {
+        "objectives": [], "unavailable": None,
+        "findings": [{"code": code, "message": "x", "path": "objectives/o.yaml"}]})
+    body = asyncio.run(svc.references(AGENT, "close_rate"))
+    assert body["references"] == []
+    assert body["unchecked"] == ["objectives"]
+
+
+@pytest.mark.parametrize("code", _FINDING_CODES)
+def test_an_unreadable_objective_and_a_broken_dashboard_are_both_unchecked(agent, monkeypatch, code):
+    _dashboard_answers(monkeypatch, {"has_dashboard": False, "config": None,
+                                     "error": "YAML parse error at line 3, column 1: oops"})
+    _objective_join_answers(monkeypatch, {
+        "objectives": [], "unavailable": None,
+        "findings": [{"code": code, "message": "x", "path": "objectives/o.yaml"}]})
+    body = asyncio.run(svc.references(AGENT, "close_rate"))
+    assert body["unchecked"] == ["objectives", "dashboard"]
+
+
+def test_a_clean_objective_read_with_no_match_is_not_unchecked(agent, monkeypatch):
+    _objective_join_answers(monkeypatch, {
+        "objectives": [{"id": "o1", "metrics": [{"name": "other"}]}],
+        "unavailable": None,
+        "findings": [{"code": "objective_file_skipped", "message": "x", "path": "objectives"}]})
+    body = asyncio.run(svc.references(AGENT, "close_rate"))
+    assert body["references"] == []
+    assert body["unchecked"] == []
+
+
 # ---------------------------------------------------------------------------
 # routes: the HTTP shape and the gate
 # ---------------------------------------------------------------------------

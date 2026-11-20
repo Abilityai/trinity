@@ -662,11 +662,17 @@ export const useClientPortalStore = defineStore('clientPortal', {
 
     // Accept `version` — the one the person read. Rejects with the server's
     // error (409 `version_stale`, 403 a closed invitation); on success the
-    // roster refusal is over and the shell re-bootstraps.
+    // screen emits `accepted` and the shell re-bootstraps.
+    //
+    // #4515: `termsRefusal` is deliberately NOT cleared here. It is what keeps
+    // `PortalTerms` mounted (`Portal.vue`'s `v-else-if`), and clearing it lets
+    // the scheduler flush unmount the screen before its `emit('accepted')`
+    // runs — Vue drops an emit from an unmounted instance, so the shell never
+    // re-bootstrapped and the refusal's message stayed on the stage. The
+    // re-bootstrap's own roster read clears it (`fetchRoster`, on success).
     async acceptTerms(version) {
       const { data } = await portalHttp.post('/api/terms/accept', { version }, { headers: this.authHeader })
       if (this.terms) this.terms = { ...this.terms, version: data.version, accepted: true }
-      this.termsRefusal = null
       return data
     },
 
@@ -2862,6 +2868,11 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // principle 21: loading behaviour lives in the store). Not awaited:
         // the roster must not wait for it, which is the entire point.
         if (briefingHydrationPlan(this.agents).batch) void this.hydrateBriefings()
+        // #4502: the read succeeded. Every failure path below resolves without
+        // this, so a caller about to make a claim from the roster (the ask
+        // card's "<agent> is picking this up.") can tell a roster it just read
+        // from the one a failed quiet refresh left in place.
+        return true
       } catch (err) {
         // ent#1201: a quiet refresh that fails changes nothing on screen — the
         // next tick reads again. A session that ended is still handled below.
@@ -2913,6 +2924,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // ent#1201: re-read the roster without re-entering the loading phase (no
     // skeleton, no reset `error`/`unavailable`, and a failed read is silent) —
     // the set-up landing's poll, and the re-read when a member's progress flips.
+    // Resolves `true` only when the roster was actually read (#4502).
     refreshRoster() {
       return this.fetchRoster({ quiet: true })
     },

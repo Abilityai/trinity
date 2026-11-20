@@ -37,8 +37,8 @@ before (#2380). Only the builder, the cleanup and the submit script are AWS-only
   aws ec2 disable-image-block-public-access --region us-east-1
   ```
 
-  To build a private AMI for testing instead, remove the `ami_groups` line. The
-  Marketplace lane does not need a public AMI; the Launch Stack lane does.
+  To build a private AMI instead, pass `-var ami_public=false`. The Marketplace
+  lane does not need a public AMI; the Launch Stack lane does.
 
 ## Build
 
@@ -53,17 +53,31 @@ rejects `--cloud aws`, and the build stops right after the clone if it finds no
 AWS support. The build instance's temporary
 security group admits SSH from this machine's address only.
 
+## Boot check
+
+```bash
+AMI="$(jq -r '.builds[-1].artifact_id | split(":")[1]' manifest.json)"
+bash scripts/boot-check.sh "$AMI" <release tag>
+```
+
+It creates a stack from `trinity.cfn.yaml`, claims `/setup` with the instance ID,
+signs in, creates an agent, checks the images, the security group and the
+container block on the metadata service, then deletes the stack and its key
+pair. About 10 minutes. A pass writes `~/.trinity-marketplace/<ami-id>.pass`.
+
 ## Submitting a version
 
-`scripts/mp-submit.sh` runs after every build and does nothing unless
-`TRINITY_AWS_PRODUCT_ID` is set. With it set it sends an `AddDeliveryOptions`
-change set for `AmiProduct@1.0` through the Catalog API as a **dry run**
-(`Intent=VALIDATE`); add `TRINITY_AWS_SUBMIT=apply` to submit.
+`scripts/mp-submit.sh <ami-id>` refuses an AMI without that pass record. It sends
+an `AddDeliveryOptions` change set for `AmiProduct@1.0` through the Catalog API as
+a **dry run** (`Intent=VALIDATE`); add `TRINITY_AWS_SUBMIT=apply` to submit. The
+version title is the tag the boot check recorded. It waits for AWS's answer, which
+takes about 30 minutes because AWS scans the AMI first, on a dry run too. Exit 0
+accepted, 1 rejected with the reasons printed, 3 no answer within the hour.
 
 ```bash
 TRINITY_AWS_PRODUCT_ID=<product id> \
 TRINITY_AWS_INGESTION_ROLE_ARN=<ingestion role ARN> \
-  packer build -var "image_tag=<release tag>" trinity.pkr.hcl
+  bash scripts/mp-submit.sh "$AMI"
 ```
 
 The ingestion role trusts AWS Marketplace ("Marketplace – AMI Assets
@@ -90,7 +104,8 @@ values exist. The AMI is in us-east-1 only, so the link is for that region.
 
 | Release | AMI (us-east-1) |
 |---|---|
-| — | not yet published |
+| v1.0.0 | `ami-091813d78fb2c627c` (private) |
+| v1.0.5 | `ami-0909ebfa6f4176260` (private) |
 
 ## Security notes
 
@@ -103,9 +118,8 @@ values exist. The AMI is in us-east-1 only, so the link is for that region.
   `scripts/deploy/start.sh` as root every five minutes, so the checkout must be
   owned by root and writable by nobody else. The AMI's `/opt/trinity` is.
 
-## Not verified without AWS
+## Not verified
 
-The template passes `packer validate` and the scripts pass `bash -n`, but none of
-this has run on EC2 yet: the build, the Marketplace scan, first boot, the refresh
-after a stop/start, the Elastic IP timing, and the container block on the
-metadata service. Check each on a release-candidate image before submitting.
+The build, `scripts/boot-check.sh` and `scripts/mp-submit.sh` (dry run and
+submit) have run against the live listing. Still unverified: a public AMI build
+for the Launch Stack lane, and the refresh after a stop/start.

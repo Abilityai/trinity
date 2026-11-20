@@ -331,6 +331,8 @@ schedule_executions = Table(
     ),
     # #3380 — the /chat thread this turn answers; NULL = not a /chat turn.
     Column("chat_session_id", Text),
+    # ent#1225 — the platform-recorded turn this row continues; NULL = none.
+    Column("continues_execution_id", Text),
 )
 
 agent_loops = Table(

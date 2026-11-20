@@ -20,6 +20,8 @@ Connect agents to Slack workspaces. Supports DMs, @mentions in channels, multi-a
 4. Under **Transport Connection**, paste the app-level token (`xapp-...`) and click **Connect** to start the Socket Mode transport. The badge shows **Socket Mode**, **Webhook** or **Disconnected**.
 5. Click **Install to Workspace** (**Reinstall to Workspace** once a workspace is connected) to complete the platform-level OAuth and obtain the bot token. Then bind agents to channels from each agent's Channels tab.
 
+After Slack's consent screen, Trinity sends you back to `FRONTEND_URL` when it is set, otherwise to the **Public URL** under **Settings → General** — the same address the OAuth redirect URL is built from. Only when neither is set does it fall back to `http://localhost`, which is a dead page on a server install even though the install itself succeeded. The same applies to the per-agent install.
+
 ### Per-Agent Channel Binding (Agent Channels Tab)
 
 1. Open the agent detail page and select the **Channels** tab.
@@ -146,6 +148,7 @@ Full request/response schemas are in the [Swagger docs](http://localhost:8000/do
 - Webhook Mode requires a publicly accessible URL.
 - Thread tracking applies only to threads started by a bot message or @mention.
 - Rate limits are per Slack user, not per agent.
+- When an agent asks a Slack user to reply with their email for verification, code requests are capped at 5 per user, 3 per address and 20 per workspace in 10 minutes; over a cap the bot replies *Too many sign-in code requests. Try again in 10 minutes.* and the user can retry after the window.
 
 ## See Also
 

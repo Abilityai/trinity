@@ -131,6 +131,10 @@ export interface McpAuthContext extends Record<string, unknown> {
   // exhaustive against `mcp_api_keys.scope`; anything not listed must be
   // treated as least-privileged, never as `user`.
   scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous" | "ops" | "ops_write";
+  // Populated for EVERY key scope, and it is the key OWNER's role: an
+  // agent-scoped key owned by an admin has `userRole === "admin"`. Never read
+  // it without first checking the scope allowlist.
+  userRole?: string;     // Role of the key owner ("admin", "creator", "user") — set from /api/mcp/validate
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
   // #2392: X-Trinity-Execution-Id of THIS request (turn id or "manual"); wins over an agent-supplied execution_id.
   executionId?: string;
@@ -385,6 +389,9 @@ export interface ScheduleExecution {
   attempt_number?: number;
   retry_of_execution_id?: string;
   retry_scheduled_at?: string;
+  // ent#1105: the project an edition attributed this run to — present only
+  // when the reader may see that project; absent otherwise.
+  project_id?: string | null;
 }
 
 /** The aggregated result a completed `POST /fan-out` returns. */

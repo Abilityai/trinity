@@ -51,6 +51,7 @@ from services.capacity_manager import (
 from services.dispatch_breaker import DispatchBreaker
 from services.execution_integrity import derive_turn_integrity
 from services import event_dispatch_service
+from services import execution_attribution  # ent#1105
 from services import channel_completion_report
 from services import peer_skill_policy, skill_gate_service
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
@@ -196,6 +197,11 @@ def _default_model_for(agent_name: str) -> Optional[str]:
 
     ent#1202: a Claude Code agent's own ``default_model`` comes first when this
     instance can run it — one resolver, ``agent_model_service``, for every rung.
+
+    OpenCode (#2981) has its OWN platform default
+    (``platform_default_model_opencode``, a ``provider/model`` id) because the
+    fleet default is a bare Claude id it refuses with "missing a provider
+    prefix"; that rung lives in the same resolver.
     """
     from services.agent_model_service import resolve_default_model
 
@@ -334,9 +340,13 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # trinity-enterprise#1102: `caller_wake` is the `operator_ending` shape for
     # a delegation — the platform wakes the agent that delegated a run when
     # that run ends, from the terminal fan-out, with nobody reading its reply.
+    #
+    # trinity-enterprise#1236: `project_steward` is the platform waking a
+    # project's steward agent, the turn a schedule used to start, with nobody
+    # reading its reply.
     {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
      "a2a", "operator_response", "operator_ending", "retry", "self_task",
-     "skill_gate", "caller_wake"}
+     "skill_gate", "caller_wake", "project_steward"}
 )
 
 
@@ -1647,7 +1657,8 @@ def _log_retry_budget(
 # wrote on the row it pre-created. `/api/internal/execute-task` sends neither the
 # schedule id nor the person who pressed Run now — both live on the row.
 _ROW_ATTRIBUTION = ("source_user_id", "source_user_email", "source_agent_name",
-                    "source_mcp_key_id", "source_mcp_key_name", "schedule_id")
+                    "source_mcp_key_id", "source_mcp_key_name", "schedule_id",
+                    "continues_execution_id")
 
 
 def _with_row_attribution(fields: dict, execution_id: Optional[str]) -> dict:
@@ -1752,6 +1763,11 @@ class TaskExecutionService:
         # whether or not the agent is a pull pilot. Off, the #2391 pilot gate
         # alone decides. See `build_pull_queue_payload`.
         queue_on_capacity: bool = False,
+        # trinity-enterprise#1225: the turn this run continues, recorded by a
+        # platform producer through `turn_tier_service.continuation_origin`.
+        # A continuation trigger is rated as that turn. Ignored when
+        # `execution_id` is given (the producer wrote the row).
+        continues_execution_id: Optional[str] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1852,9 +1868,13 @@ class TaskExecutionService:
                     source_channel_client=source_channel_client,
                     source_channel_agent=source_channel_agent,
                     chain_depth=chain_depth,
+                    continues_execution_id=continues_execution_id,
                 ),
             )
             execution_id = execution.id if execution else None
+            # ent#1105: an edition may attribute this execution to a project
+            # from the row alone (e.g. a room turn). Inert in OSS; never raises.
+            execution_attribution.record_row(execution)
 
         # #678/#792 call-attempt bookkeeping, shared with the exception
         # handlers below (they read what the retries wrote). Created BEFORE the
@@ -1931,6 +1951,7 @@ class TaskExecutionService:
                         source_channel_thread=source_channel_thread,
                         source_channel_client=source_channel_client,
                         max_turns=max_turns,
+                        continues_execution_id=continues_execution_id,
                     ),
                 )
 
@@ -2240,6 +2261,8 @@ class TaskExecutionService:
                 schedule_name=(schedule_context or {}).get("name"),
                 loop_id=loop_id,
             )
+            replay = dict(gate_replay or {})
+            request_parts = replay.pop(skill_gate_service.REQUEST_PARTS, None)
             frozen = skill_gate_service.frozen_dispatch(
                 triggered_by=triggered_by,
                 **{k: v for k, v in fields.items() if k != "schedule_id"})
@@ -2256,8 +2279,9 @@ class TaskExecutionService:
                 triggered_by=triggered_by,
                 occurrence_key=execution_id,
                 origin_execution_id=execution_id,
-                dispatch={**frozen, **(gate_replay or {})},
+                dispatch={**frozen, **replay},
                 gates=gates,
+                request_parts=request_parts,
             )
             # Only reachable with a producer-supplied, proven `gate_requester`.
             # trinity-enterprise#752: the row this call created or was given is

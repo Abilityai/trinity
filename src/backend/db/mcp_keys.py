@@ -517,6 +517,7 @@ class McpKeyOperations:
                 mcp_api_keys.c.scope,
                 users.c.username,
                 users.c.email,
+                users.c.role,
             )
             .select_from(mcp_api_keys.join(users, mcp_api_keys.c.user_id == users.c.id))
             .where(mcp_api_keys.c.key_hash == key_hash)
@@ -552,7 +553,8 @@ class McpKeyOperations:
                 "user_id": row["username"],  # Return username for backward compat
                 "user_email": row["email"],
                 "agent_name": row["agent_name"],  # Agent name if scope is 'agent'
-                "scope": row["scope"] or "user"  # 'user' or 'agent'
+                "scope": row["scope"] or "user",  # 'user' or 'agent'
+                "user_role": row["role"] or "user",
             }
 
     def get_mcp_api_key(self, key_id: str, username: str) -> Optional[McpApiKey]:

@@ -65,6 +65,9 @@ _TRIGGER_BUCKETS = {
     # trinity-enterprise#1102: the wake of the agent that delegated a run, when
     # it ends. Spend driven by agent-to-agent delegation, not by an operator.
     "caller_wake": "Agent-to-agent",
+    # trinity-enterprise#1236: the platform waking a project's steward agent —
+    # the turn its schedule used to start, so it is counted with schedules.
+    "project_steward": "Scheduled",
     "voip": "Voice", "voice": "Voice",
 }
 
@@ -508,6 +511,16 @@ class ScheduleAnalyticsMixin:
             case((schedule_executions.c.status == "success", schedule_executions.c.duration_ms))
         ).label("dur_avg")
         ctx_avg_expr = func.avg(schedule_executions.c.context_used).label("ctx_avg")
+        # trinity-enterprise#1317: the share of each run's OWN window, averaged.
+        # Tokens alone cannot give a percentage — the window is per run (model,
+        # 1M-context opt-in) — so the ratio is taken per row and a run with no
+        # known window (NULL or 0) is skipped by the CASE, never read as 0%.
+        ctx_pct_expr = func.avg(
+            case((
+                schedule_executions.c.context_max > 0,
+                schedule_executions.c.context_used * 100.0 / schedule_executions.c.context_max,
+            ))
+        ).label("ctx_pct")
 
         # Q1: counts + per-day type stacks (full set).
         q1 = (
@@ -524,10 +537,14 @@ class ScheduleAnalyticsMixin:
         # Q2: per-day duration AVG (success only) + context AVG
         # (NULL-skipped, all statuses). CASE→NULL means AVG skips
         # non-success durations; AVG(context_used) skips unmeasured rows.
-        q2 = select(day_col, dur_avg_expr, ctx_avg_expr).where(base_where).group_by(day_col)
+        q2 = (
+            select(day_col, dur_avg_expr, ctx_avg_expr, ctx_pct_expr)
+            .where(base_where)
+            .group_by(day_col)
+        )
 
         # Q3: overall duration AVG + context AVG (full set, single row).
-        q3 = select(dur_avg_expr, ctx_avg_expr).where(base_where)
+        q3 = select(dur_avg_expr, ctx_avg_expr, ctx_pct_expr).where(base_where)
 
         # Q4: capped success-duration pool for the headline p95 only.
         # `cap + 1` so we can detect sampling without a second COUNT.
@@ -607,6 +624,10 @@ class ScheduleAnalyticsMixin:
             int(overall["ctx_avg"])
             if overall and overall["ctx_avg"] is not None else None
         )
+        ctx_pct = (
+            round(float(overall["ctx_pct"]))
+            if overall and overall["ctx_pct"] is not None else None
+        )
 
         # --- per-day duration / context AVG lookup ---
         daily_metrics: Dict[str, Dict] = {}
@@ -617,6 +638,9 @@ class ScheduleAnalyticsMixin:
                 ),
                 "context_avg": (
                     int(row["ctx_avg"]) if row["ctx_avg"] is not None else None
+                ),
+                "context_pct_avg": (
+                    round(float(row["ctx_pct"])) if row["ctx_pct"] is not None else None
                 ),
             }
 
@@ -647,13 +671,14 @@ class ScheduleAnalyticsMixin:
                     "success_rate": day_sr,
                     "duration_avg_ms": m.get("duration_avg_ms"),
                     "context_avg": m.get("context_avg"),
+                    "context_pct_avg": m.get("context_pct_avg"),
                     "by_type": by_type,
                 })
             else:
                 timeline.append({
                     "date": iso, "total": 0, "success": 0, "failed": 0,
                     "success_rate": None, "duration_avg_ms": None,
-                    "context_avg": None, "by_type": {},
+                    "context_avg": None, "context_pct_avg": None, "by_type": {},
                 })
             day = day + timedelta(days=1)
 
@@ -671,6 +696,7 @@ class ScheduleAnalyticsMixin:
             "success_rate": success_rate,
             "duration_ms": {"avg": dur_avg, "p95": p95},
             "context_avg": ctx_avg,
+            "context_pct_avg": ctx_pct,
             "by_type": by_type_totals,
             "buckets": buckets_present,
             "timeline": timeline,

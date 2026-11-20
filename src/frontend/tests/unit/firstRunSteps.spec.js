@@ -311,6 +311,15 @@ describe('per-browser state', () => {
     expect(readFirstRunClosed()).toBe(true)
   })
 
+  it('remembers a close against the install it was made on, so a fresh install offers setup again', () => {
+    expect(persistFirstRunClosed('0f3c9a12')).toBe(true)
+    expect(readFirstRunClosed('0f3c9a12')).toBe(true)
+    expect(readFirstRunClosed('77aa0b01')).toBe(false)          // reinstalled at the same address
+    expect(readFirstRunClosed(null)).toBe(false)                // ...even one that cannot name itself yet
+    localStorage.setItem(FIRST_RUN_CLOSED_KEY, '1')             // written before installs were told apart
+    expect(readFirstRunClosed('77aa0b01')).toBe(true)           // an upgrade does not reopen setup
+  })
+
   it('persists skips as a JSON array and reads them back, de-duplicated', () => {
     expect(readFirstRunSkipped()).toEqual([])
     expect(persistFirstRunSkipped(['email', 'sharing', 'email'])).toBe(true)
@@ -357,7 +366,6 @@ describe('per-browser state', () => {
 describe('the chassis replaced the card ladder (structure)', () => {
   const DASHBOARD = read('../../src/views/Dashboard.vue')
   const OVERLAY = read('../../src/components/onboarding/FirstRunOverlay.vue')
-  const SIDEBAR = read('../../src/components/SystemViewsSidebar.vue')
   const CHECKLIST = read('../../src/components/onboarding/ActivationChecklist.vue')
 
   it('deletes the absorbed surfaces and the one-card-at-a-time rule', () => {
@@ -377,29 +385,20 @@ describe('the chassis replaced the card ladder (structure)', () => {
 
   it('keeps the checklist out of the page flow, and mounts the overlay once', () => {
     // ent#238's checklist STAYS (ruling on ent#581) — but not in the dashboard
-    // flow. It fetches in its own `onMounted` and renders on the result, so
+    // flow (it is in the file only as the floating card below). It fetches in its own `onMounted` and renders on the result, so
     // inline it could only ever appear one round-trip after paint, pushing the
     // fleet grid down by ~150px. Nothing could reserve that space, because the
     // entitlement answer is what decides whether a card exists at all, and
     // reserving unconditionally would leave a permanent gap on every OSS build
     // where the endpoint 404s.
-    expect(DASHBOARD).not.toContain('<ActivationChecklist')
-    // It lives in the systems rail — a fixed-width column outside the
-    // dashboard's flow — so a late entitlement answer extends a scrolling list
-    // instead of moving the fleet grid. It sits after the view rows (under the
-    // labels, however many) and goes away with them when the rail collapses.
-    expect(SIDEBAR).toContain('<ActivationChecklist v-if="!isCollapsed" />')
-    expect(SIDEBAR.indexOf('<ActivationChecklist')).toBeGreaterThan(
-      SIDEBAR.indexOf('v-for="view in sortedViews"'),
-    )
-    expect(SIDEBAR.indexOf('<ActivationChecklist')).toBeLessThan(
-      SIDEBAR.indexOf('Create New View Button'),
-    )
+    // Where there is no assistant it floats in the dashboard's corner, an
+    // absolutely positioned card outside the flow, so a late entitlement
+    // answer moves nothing. Where the assistant is offered, the same steps
+    // live in its panel instead (AssistantWidget reads the same store).
+    expect(DASHBOARD).toContain('<ActivationChecklist />')
+    expect(DASHBOARD).toMatch(/v-if="assistantStore\.corner === 'help' && onboardingStore\.visible"\s+class="absolute /)
     // The checklist itself opens expanded on first start; a saved collapse wins.
     expect(CHECKLIST).toMatch(/getItem\(EXPANDED_KEY\) !== 'false'/)
-    // Expanded by default: an unlabelled rail hides both the systems it lists
-    // and the checklist. A saved preference still wins.
-    expect(SIDEBAR).toMatch(/savedCollapsed === 'true' : false/)
     expect(DASHBOARD.match(/<FirstRunOverlay\b/g)).toHaveLength(1)
     // The Dashboard's hotkeys stand down while setup is open.
     expect(DASHBOARD).toMatch(/firstRunOpen\.value \|\| isEditorOpen\.value/)

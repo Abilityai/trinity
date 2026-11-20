@@ -106,13 +106,15 @@ class ResourcesMixin:
 
         Args:
             agent_name: Name of the agent
-            max_tasks: Maximum parallel tasks (must be 1-10)
+            max_tasks: Maximum parallel tasks (must be >= 1; the upper bound is
+                the admin-set fleet ceiling, enforced by the router)
 
         Returns:
             True if update succeeded
         """
-        # Validate range
-        if max_tasks < 1 or max_tasks > 10:
+        # Lower bound only: the upper bound is the fleet ceiling (#506),
+        # validated by the router, not a hardcoded 10 (#4564).
+        if max_tasks < 1:
             return False
 
         stmt = (

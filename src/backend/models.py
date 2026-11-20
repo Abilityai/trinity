@@ -568,6 +568,9 @@ class ChatMessageRequest(BaseModel):
     """Request model for chat messages."""
     message: str
     model: Optional[str] = None  # Model alias: sonnet, opus, haiku, or full model name
+    # ent#1105: an edition may attribute this execution to a project. Checked
+    # before the row exists; refused 422 project_attribution_unavailable in OSS.
+    project_id: Optional[str] = Field(None, min_length=1, max_length=64)
 
 
 class ReportBackRequest(BaseModel):
@@ -611,6 +614,9 @@ class ParallelTaskRequest(BaseModel):
     # can be reported back to the Slack thread the work actually came from.
     # Optional and fail-open — absent means "no channel context to inherit".
     parent_execution_id: Optional[str] = None
+    # ent#1105: an edition may attribute this execution to a project. Checked
+    # before the row exists; refused 422 project_attribution_unavailable in OSS.
+    project_id: Optional[str] = Field(None, min_length=1, max_length=64)
 
 
 # ============================================================================
@@ -3038,6 +3044,9 @@ class AgentAnalyticsTimelinePoint(BaseModel):
     success_rate: Optional[float] = None
     duration_avg_ms: Optional[int] = None
     context_avg: Optional[int] = None
+    # Share of each run's own context window, averaged (0-100); null when no
+    # run that day recorded a window (trinity-enterprise#1317).
+    context_pct_avg: Optional[int] = None
     by_type: Dict[str, int] = {}
 
 
@@ -3059,6 +3068,7 @@ class AgentAnalyticsResponse(BaseModel):
     success_rate: float
     duration_ms: DurationStats
     context_avg: Optional[int] = None
+    context_pct_avg: Optional[int] = None
     by_type: List[AgentTypeTotal] = []
     buckets: List[str] = []
     timeline: List[AgentAnalyticsTimelinePoint] = []
@@ -3726,6 +3736,9 @@ class FanOutRequest(BaseModel):
     # `GET /api/agents/{name}/fan-out/{fan_out_id}`. Default False keeps the
     # blocking contract every existing caller depends on.
     async_mode: Optional[bool] = False
+    # ent#1105: an edition may attribute this execution to a project. Checked
+    # before the row exists; refused 422 project_attribution_unavailable in OSS.
+    project_id: Optional[str] = Field(None, min_length=1, max_length=64)
 
     @field_validator("tasks")
     @classmethod
@@ -3790,6 +3803,9 @@ class FanOutResponse(BaseModel):
     results: List[FanOutTaskResponse]
     # trinity-enterprise#751: subtasks held by the skill gate (neither run nor failed).
     pending_approval: int = 0
+    # ent#1105: "failed" when a named project_id passed the check but the batch
+    # (or, on a sync batch, one of its subtasks) was not attributed to it.
+    project_attribution: Optional[str] = None
 
 
 # --- #2670: the batch's read surface ----------------------------------------
@@ -4461,6 +4477,27 @@ class OperatorCancel(BaseModel):
     _blank_is_none = field_validator("reason")(_blank_reason_is_none)
 
 
+class OperatorReaddress(BaseModel):
+    """Body for an admin re-addressing one pending card
+    (abilityai/trinity-enterprise#1096).
+
+    `to`: `rule` re-runs the rule that raised the card (a registered platform
+    family's resolver, or the role a role-addressed row went to); `admin`
+    moves a registered family's card to the admin seat. There is no person
+    picker. `reason` is required (1-500 chars after trimming); only whether one
+    was given reaches the audit row."""
+    to: Literal["rule", "admin"]
+    reason: str = Field(..., max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_present(cls, value: str) -> str:
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("reason must be 1 to 500 characters after trimming")
+        return value
+
+
 class OperatorAskCreate(BaseModel):
     """Body for an agent raising an ask through the platform
     (trinity-enterprise#611): `POST /api/agents/{name}/operator-queue`.
@@ -4904,6 +4941,9 @@ class ExecutionResponse(BaseModel):
     # trinity-enterprise#754 — as on ExecutionSummary.
     gate_self_approved: bool = False
     gate_self_approved_by_viewer: bool = False
+    # ent#1105: the project an edition attributed this execution to, present
+    # only when the reader may see that project (the attribution seam's annotate).
+    project_id: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -5124,7 +5164,8 @@ class SetAdminPasswordRequest(BaseModel):
     # #3004: under ADMIN_PASSWORD_SOURCE=instance-id the handler accepts a blank
     # value (AWS review: no PII required); the field itself stays required.
     email: str = Field(..., max_length=254)
-    # #3004 (PROV-018): the EC2 instance ID, checked only when
+    # #3004 (PROV-018): the EC2 instance ID, or the code from an emailed setup
+    # link (trinity-enterprise#1312), checked only when
     # ADMIN_PASSWORD_SOURCE=instance-id and ignored otherwise.
     claim_code: Optional[str] = Field(None, max_length=64)
     # Optional operator profile — all skippable; setup completes without them.
@@ -5218,6 +5259,8 @@ class TelegramBindingResponse(BaseModel):
     warning: Optional[str] = None
     # ent#264: in-progress indicator toggle (default ON); None when unconfigured.
     progress_indicator_enabled: Optional[bool] = None
+    # ent#1189: whether a Public URL is set, so the panel names the right fix.
+    public_url_set: Optional[bool] = None
 
 
 class TelegramConfigureRequest(BaseModel):
@@ -5926,6 +5969,9 @@ class FirstRunState(BaseModel):
     seeded_agents: List[str] = []
     own_agent_count: int = 0
     demo_agent: Optional[str] = None
+    # A short opaque mark of this install: the browser remembers "setup closed"
+    # against it, so a fresh install at the same address offers setup again.
+    install: Optional[str] = None
 
 
 # =============================================================================
