@@ -82,6 +82,11 @@ First-time setup wizard for admin password and API key configuration. On an inst
 >    restores use `os.link`, which never overwrites a newer claim. The bound
 >    email becomes the admin's sign-in identity and the page signs straight in.
 >
+> Provisioner note: a process killed between the take and the restore leaves
+> the secret in a `setup-claim.<random>` file beside the claim, and every setup
+> is refused until the provisioner writes a new claim. A recycle should remove
+> stray `setup-claim.*` files.
+>
 > Tests: `tests/unit/test_ent1312_setup_link_claim.py` (incl. the published
 > test vector), `tests/unit/test_ent1312_setup_nginx.py`,
 > `src/frontend/tests/unit/setupPasswordLink.spec.js`,

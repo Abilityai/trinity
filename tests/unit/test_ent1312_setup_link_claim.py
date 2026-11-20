@@ -168,16 +168,18 @@ def test_other_case_or_padded_email_passes_when_it_normalises_to_the_same_addres
 # PROV-020). The sender and the provisioner build against this exact triple, so
 # it is asserted as literals, both against the reference computation and through
 # the endpoint.
-VECTOR_SECRET = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
-VECTOR_EMAIL = "owner@example.com"
-VECTOR_CODE = "31577483a2bf6d44cc8f31d6069d17e6a02b96bbe84c0e6c245ae7dfef66b2fe"
+VECTOR_SECRET = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+VECTOR_EMAIL_POSTED = " Ada@Example.com "
+VECTOR_EMAIL = "ada@example.com"
+VECTOR_CODE = "5c820b4a5aac8f31eb6741825bfecb8e97f00488d5edaed1ae2908c29d0b7e38"
 
 
 def test_the_published_test_vector_is_what_the_server_accepts(env):
+    assert link_code(VECTOR_SECRET, VECTOR_EMAIL_POSTED) == VECTOR_CODE
     assert link_code(VECTOR_SECRET, VECTOR_EMAIL) == VECTOR_CODE
     e = env(claim=f"email-bound:{VECTOR_SECRET}\n")
-    # Typed with other case and padding, it normalises to the vector's email.
-    assert _post(claim_code=VECTOR_CODE, email=" Owner@Example.com ")["success"] is True
+    # Posted padded and mixed case, it is stored trimmed and lowercased.
+    assert _post(claim_code=VECTOR_CODE, email=VECTOR_EMAIL_POSTED)["success"] is True
     assert e.db.users["admin"]["email"] == VECTOR_EMAIL
 
 
