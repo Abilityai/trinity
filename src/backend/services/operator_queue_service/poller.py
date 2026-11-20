@@ -19,7 +19,6 @@ import os
 import uuid
 from typing import Optional
 
-from services import loop_health
 from services import operator_queue_service as _oq
 from utils.helpers import utc_now_iso
 
@@ -149,6 +148,11 @@ class PollerCoreMixin:
 
     async def _poll_loop(self):
         """Main polling loop."""
+        # Imported here, not at module level: a submodule of this package may
+        # import nothing its `__init__` has not imported first (#3785), and
+        # `__init__` is at its line cap.
+        from services import loop_health
+
         while self._running:
             try:
                 with loop_health.tick("operator_queue_sync"):
