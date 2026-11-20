@@ -58,10 +58,10 @@ def _env_ms(name: str, default_ms: float) -> float:
     return max(1.0, value) / 1000.0
 
 
-# How late the probe may wake before it counts as a stall. 150 ms is the bar
-# #4671 measures `/health` against; the default sits above it so an ordinary
-# GC pause or a busy tick is not reported as an incident.
-STALL_THRESHOLD_S = _env_ms("EVENT_LOOP_STALL_THRESHOLD_MS", 250)
+# How late the probe may wake before it counts as a stall: the 150 ms bar
+# #4671 and #4674 measure `/health` against, so every sample that would fail
+# that acceptance check is also a line in the log saying why.
+STALL_THRESHOLD_S = _env_ms("EVENT_LOOP_STALL_THRESHOLD_MS", 150)
 # A background cycle slower than this is named in the log.
 TICK_WARN_S = _env_ms("LOOP_TICK_WARN_MS", 250)
 PROBE_INTERVAL_S = 0.05
