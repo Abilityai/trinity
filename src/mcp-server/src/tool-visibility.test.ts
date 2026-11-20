@@ -808,7 +808,8 @@ describe("ent#719 human-only tools are listed exactly to the keys their backend 
     // Every tool above but the key read and the three whose rows keep their own
     // kind (close_room `none`, respond_to_operator_queue `in-tool`,
     // revoke_agent_delegation `enforce`); the first test above pins those three.
-    assert.equal(rows, 10, "the rows naming a human-only rule are not the ten this guard expects");
+    // Plus the five person-only project tools (trinity-enterprise#1322).
+    assert.equal(rows, 15, "the rows naming a human-only rule are not the fifteen this guard expects");
   });
 
   it("each description says who may call it and fits the 2,048-character cap, hidden tools included", async () => {
@@ -897,6 +898,12 @@ describe("trinity-enterprise#1322 project tools are listed to exactly the keys t
     ...Object.fromEntries(SHARED.map((t) => [t, ["agent", "user"]])),
     start_project_task: ["agent"],
     propose_project_changes: ["agent"],
+    // A person's acts: a person's own user key only (CP-P4).
+    set_project_lifecycle: ["user"],
+    update_project_settings: ["user"],
+    set_steward_waking: ["user"],
+    manage_project_members: ["user"],
+    decide_project_runs: ["user"],
   };
   const KEYS: Record<string, KeyRow> = {
     user: { scope: "user" },
@@ -939,6 +946,12 @@ describe("trinity-enterprise#1322 project tools are listed to exactly the keys t
   });
 
   it("a person-only project tool is listed to user keys exactly", () => {
+    const personRows = Object.keys(EXPECTED).filter((t) => {
+      const policy = TOOL_ACCESS_POLICY[t];
+      return policy?.kind === "baselined" && policy.owner === HUMAN_ONLY_POLICY_OWNER.person;
+    });
+    assert.deepEqual(personRows.sort(), Object.keys(EXPECTED).filter((t) => EXPECTED[t].join() === "user").sort(),
+      "a user-only project tool must carry the person policy row, and vice versa");
     for (const [tool, policy] of Object.entries(TOOL_ACCESS_POLICY)) {
       if (!(tool in EXPECTED)) continue;
       if (policy.kind === "baselined" && policy.owner === HUMAN_ONLY_POLICY_OWNER.person) {
@@ -964,7 +977,7 @@ describe("trinity-enterprise#1322 project tools are listed to exactly the keys t
       });
       assert.deepEqual(srv.requests, [], `a ${key} key's refused calls reached the backend: ${srv.requests.join(", ")}`);
     }
-    // 2 agent-only tools for the user key; all 17 for the system and ops keys.
-    assert.equal(refused, 2 + 17 + 17);
+    // 2 agent-only tools for the user key; all 22 for the system and ops keys.
+    assert.equal(refused, 2 + 22 + 22);
   });
 });

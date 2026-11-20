@@ -178,3 +178,193 @@ describe("trinity-enterprise#1322 the write tools route by the key's scope", () 
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// CP-P4: the five person-only tools (orchestrator rulings 2).
+// ---------------------------------------------------------------------------
+
+type Reply = { status: number; body?: unknown };
+/** Answer each request from `replies` by "METHOD path", else 200 {}. */
+function answer(replies: Record<string, Reply>) {
+  globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+    const u = new URL(String(url));
+    const key = `${String(init?.method ?? "GET")} ${u.pathname + u.search}`;
+    sent.push({ method: String(init?.method ?? "GET"), path: u.pathname + u.search, headers: Object.fromEntries(new Headers(init?.headers).entries()), body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    const r = replies[key] ?? { status: 200, body: { id: "prj_1" } };
+    if (r.status === 204) return new Response(null, { status: 204 });
+    return new Response(JSON.stringify(r.body ?? {}), { status: r.status, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+}
+const run = async (tool: string, args: Record<string, unknown>, scope = "user") =>
+  JSON.parse(await tools()[tool].execute(args, as(scope)));
+const reqs = () => sent.map((s) => `${s.method} ${s.path}`);
+
+describe("trinity-enterprise#1322 set_project_lifecycle", () => {
+  const CASES: Array<[string, string, unknown]> = [
+    ["start", `POST ${P}/prj_1/start`, { note: "go" }],
+    ["stop", `POST ${P}/prj_1/stop`, { note: "go" }],
+    ["finish", `PATCH ${P}/prj_1`, { status: "done" }],
+    ["archive", `POST ${P}/prj_1/archive`, undefined],
+    ["restore", `POST ${P}/prj_1/restore`, undefined],
+  ];
+  for (const [action, req, body] of CASES) {
+    it(`${action} goes to the person route`, async () => {
+      answer({});
+      const out = await run("set_project_lifecycle", { project_id: "prj_1", action, note: "go" });
+      assert.equal(out.success, true, JSON.stringify(out));
+      assert.deepEqual(reqs(), [req]);
+      assert.deepEqual(sent[0].body, body);
+      assert.equal(out.note_recorded, action === "start" || action === "stop");
+    });
+  }
+  it("the backend's refusal is passed through verbatim", async () => {
+    answer({ [`POST ${P}/prj_1/start`]: { status: 403, body: { detail: { code: "not_permitted", message: "Only an editor can start it." } } } });
+    const out = await run("set_project_lifecycle", { project_id: "prj_1", action: "start" });
+    assert.equal(out.success, false);
+    assert.equal(out.code, "not_permitted");
+    assert.equal(out.error, "Only an editor can start it.");
+  });
+});
+
+describe("trinity-enterprise#1322 update_project_settings: one request per concern, each outcome reported", () => {
+  it("sends goal (never description), and steward, visibility and mode each in their own request", async () => {
+    answer({});
+    const out = await run("update_project_settings", {
+      project_id: "prj_1", name: "N", goal: "G", tracker_url: "https://t.example/x",
+      steward: { kind: "agent", ref: "alpha" }, visibility: "company", mode: "auto",
+    });
+    assert.equal(out.success, true, JSON.stringify(out));
+    assert.deepEqual(reqs(), Array(4).fill(`PATCH ${P}/prj_1`));
+    assert.deepEqual(sent.map((s) => s.body), [
+      { name: "N", goal: "G", tracker_url: "https://t.example/x" },
+      { steward: { kind: "agent", ref: "alpha" } },
+      { visibility: "company" },
+      { mode: "auto" },
+    ]);
+    assert.deepEqual(out.results.map((r: any) => [r.concern, r.ok]), [["fields", true], ["steward", true], ["visibility", true], ["mode", true]]);
+  });
+
+  it("a refused concern is reported by name and the others still say what happened", async () => {
+    let n = 0;
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      sent.push({ method: String(init?.method), path: new URL(String(url)).pathname, headers: {}, body: JSON.parse(String(init?.body)) });
+      n += 1;
+      if (n === 2) return new Response(JSON.stringify({ detail: { code: "mode_is_a_persons", message: "Only a person with edit rights sets the mode." } }), { status: 403 });
+      return new Response(JSON.stringify({ id: "prj_1" }), { status: 200 });
+    }) as typeof fetch;
+    const out = await run("update_project_settings", { project_id: "prj_1", visibility: "members", mode: "track" });
+    assert.equal(out.success, false);
+    assert.deepEqual(out.results.map((r: any) => [r.concern, r.ok, r.code]), [["visibility", true, undefined], ["mode", false, "mode_is_a_persons"]]);
+    assert.match(out.error, /mode/);
+  });
+
+  it("nothing to change is refused by name, with no request", async () => {
+    answer({});
+    const out = await run("update_project_settings", { project_id: "prj_1" });
+    assert.equal(out.code, "nothing_to_change");
+    assert.deepEqual(sent, []);
+  });
+});
+
+describe("trinity-enterprise#1322 set_steward_waking", () => {
+  it("on resumes, off pauses", async () => {
+    answer({ [`POST ${P}/prj_1/steward/resume`]: { status: 200, body: { wake: { on: true } } } });
+    const on = await run("set_steward_waking", { project_id: "prj_1", on: true });
+    const off = await run("set_steward_waking", { project_id: "prj_1", on: false });
+    assert.equal(on.success, true);
+    assert.deepEqual(on.wake, { on: true });
+    assert.equal(off.success, true);
+    assert.deepEqual(reqs(), [`POST ${P}/prj_1/steward/resume`, `POST ${P}/prj_1/steward/pause`]);
+  });
+});
+
+describe("trinity-enterprise#1322 manage_project_members: a result per item", () => {
+  it("adds and removes each item on its own route, in order, encoded", async () => {
+    answer({ [`DELETE ${P}/prj_1/members/a%2Bb%40example.com`]: { status: 204 }, [`DELETE ${P}/prj_1/agents/beta`]: { status: 204 } });
+    const out = await run("manage_project_members", {
+      project_id: "prj_1", add_members: ["x@example.com"], remove_members: ["a+b@example.com"], add_agents: ["alpha"], remove_agents: ["beta"],
+    });
+    assert.equal(out.success, true, JSON.stringify(out));
+    assert.deepEqual(reqs(), [
+      `POST ${P}/prj_1/members`, `DELETE ${P}/prj_1/members/a%2Bb%40example.com`, `POST ${P}/prj_1/agents`, `DELETE ${P}/prj_1/agents/beta`,
+    ]);
+    assert.deepEqual(sent[0].body, { email: "x@example.com" });
+    assert.deepEqual(sent[2].body, { agent_name: "alpha" });
+    assert.deepEqual(out.results.map((r: any) => [r.action, r.item, r.ok]), [
+      ["add_member", "x@example.com", true], ["remove_member", "a+b@example.com", true], ["add_agent", "alpha", true], ["remove_agent", "beta", true],
+    ]);
+  });
+
+  it("one refused item is reported and the rest still run", async () => {
+    answer({ [`POST ${P}/prj_1/members`]: { status: 409, body: { detail: { code: "already_member", message: "Already a member." } } } });
+    const out = await run("manage_project_members", { project_id: "prj_1", add_members: ["x@example.com"], add_agents: ["alpha"] });
+    assert.equal(out.success, false);
+    assert.deepEqual(out.results.map((r: any) => [r.item, r.ok, r.code]), [["x@example.com", false, "already_member"], ["alpha", true, undefined]]);
+  });
+
+  it("a project the person can't see stops the batch: the rest are reported not attempted", async () => {
+    answer({ [`POST ${P}/prj_1/members`]: { status: 404, body: { detail: { code: "project_not_found", message: "Project not found." } } } });
+    const out = await run("manage_project_members", { project_id: "prj_1", add_members: ["x@example.com"], add_agents: ["alpha"] });
+    assert.equal(sent.length, 1);
+    assert.deepEqual(out.results.map((r: any) => [r.item, r.ok, r.code]), [["x@example.com", false, "project_not_found"], ["alpha", false, "not_attempted"]]);
+  });
+
+  it("an item both added and removed, or more than 20 items, is refused with no request", async () => {
+    answer({});
+    const both = await run("manage_project_members", { project_id: "prj_1", add_agents: ["alpha"], remove_agents: ["alpha"] });
+    const many = await run("manage_project_members", { project_id: "prj_1", add_members: Array.from({ length: 21 }, (_, i) => `p${i}@example.com`) });
+    assert.equal(both.code, "item_in_both");
+    assert.equal(many.code, "too_many_items");
+    assert.deepEqual(sent, []);
+  });
+});
+
+describe("trinity-enterprise#1322 decide_project_runs", () => {
+  it("with no ids it lists the waiting runs with their ids", async () => {
+    answer({ [`GET ${P}/prj_1/runs/waiting`]: { status: 200, body: { runs: [{ id: "run_1", task_id: "T-001" }] } } });
+    const out = await run("decide_project_runs", { project_id: "prj_1" });
+    assert.equal(out.success, true);
+    assert.deepEqual(out.runs, [{ id: "run_1", task_id: "T-001" }]);
+    assert.deepEqual(reqs(), [`GET ${P}/prj_1/runs/waiting`]);
+  });
+
+  it("approves and declines, passing the backend's per-id results through", async () => {
+    answer({
+      [`POST ${P}/prj_1/runs/approve`]: { status: 200, body: { results: [{ id: "run_1", ok: true }] } },
+      [`POST ${P}/prj_1/runs/decline`]: { status: 200, body: { results: [{ id: "run_2", ok: true }] } },
+    });
+    const out = await run("decide_project_runs", { project_id: "prj_1", approve: ["run_1"], decline: ["run_2"], note: "not now" });
+    assert.equal(out.success, true, JSON.stringify(out));
+    assert.deepEqual(sent.map((s) => s.body), [{ ids: ["run_1"] }, { ids: ["run_2"], note: "not now" }]);
+    assert.deepEqual(out.approved, [{ id: "run_1", ok: true }]);
+    assert.deepEqual(out.declined, [{ id: "run_2", ok: true }]);
+  });
+
+  it("an id in both lists is refused with no request", async () => {
+    answer({});
+    const out = await run("decide_project_runs", { project_id: "prj_1", approve: ["run_1"], decline: ["run_1"] });
+    assert.equal(out.code, "id_in_both");
+    assert.deepEqual(sent, []);
+  });
+});
+
+describe("trinity-enterprise#1322 the person tools refuse every other key in the tool", () => {
+  const PERSON_TOOLS: Array<[string, Record<string, unknown>]> = [
+    ["set_project_lifecycle", { project_id: "prj_1", action: "start" }],
+    ["update_project_settings", { project_id: "prj_1", mode: "auto" }],
+    ["set_steward_waking", { project_id: "prj_1", on: true }],
+    ["manage_project_members", { project_id: "prj_1", add_agents: ["alpha"] }],
+    ["decide_project_runs", { project_id: "prj_1" }],
+  ];
+  for (const [tool, args] of PERSON_TOOLS) {
+    it(`${tool}: an agent key is told it is a person's act; other scopes key_not_supported; no request`, async () => {
+      answer({});
+      const agent = await run(tool, args, "agent");
+      assert.equal(agent.code, "persons_act", JSON.stringify(agent));
+      for (const scope of ["system", "ops", "portal_delegate", "connector", "some_future_tier"]) {
+        assert.equal((await run(tool, args, scope)).code, "key_not_supported", scope);
+      }
+      assert.deepEqual(sent, []);
+    });
+  }
+});

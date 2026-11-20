@@ -102,4 +102,48 @@ export class PersonProjectClient {
   async importProject(agentName: string, path: string): Promise<Row> {
     return this.send("POST", `${BASE}/import`, { agent_name: agentName, path });
   }
+
+  // --- person-only acts (CP-P4) ----------------------------------------------
+
+  async lifecycle(projectId: string, action: "start" | "stop" | "finish" | "archive" | "restore", note?: string): Promise<Row> {
+    if (action === "finish") return this.send("PATCH", this.path(projectId), { status: "done" });
+    if (action === "start" || action === "stop") return this.send("POST", this.path(projectId, `/${action}`), note ? { note } : undefined);
+    return this.send("POST", this.path(projectId, `/${action}`), undefined);
+  }
+
+  async updateProject(projectId: string, body: Record<string, unknown>): Promise<Row> {
+    return this.send("PATCH", this.path(projectId), body);
+  }
+
+  async setStewardWaking(projectId: string, on: boolean): Promise<Row> {
+    return this.send("POST", this.path(projectId, on ? "/steward/resume" : "/steward/pause"), undefined);
+  }
+
+  async addMember(projectId: string, email: string): Promise<Row> {
+    return this.send("POST", this.path(projectId, "/members"), { email });
+  }
+
+  async removeMember(projectId: string, email: string): Promise<unknown> {
+    return this.send("DELETE", this.path(projectId, `/members/${encodeURIComponent(email)}`), undefined);
+  }
+
+  async addAgent(projectId: string, agentName: string): Promise<Row> {
+    return this.send("POST", this.path(projectId, "/agents"), { agent_name: agentName });
+  }
+
+  async removeAgent(projectId: string, agentName: string): Promise<unknown> {
+    return this.send("DELETE", this.path(projectId, `/agents/${encodeURIComponent(agentName)}`), undefined);
+  }
+
+  async waitingRuns(projectId: string): Promise<Row[]> {
+    const res = await this.get<{ runs: Row[] }>(this.path(projectId, "/runs/waiting"));
+    return res.runs;
+  }
+
+  async decideRuns(projectId: string, decision: "approve" | "decline", ids: string[], note?: string): Promise<Row[]> {
+    const body: Record<string, unknown> = { ids };
+    if (decision === "decline" && note) body.note = note;
+    const res = await this.send<{ results: Row[] }>("POST", this.path(projectId, `/runs/${decision}`), body);
+    return res.results;
+  }
 }

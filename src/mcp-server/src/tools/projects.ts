@@ -24,7 +24,7 @@
 import { z } from "zod";
 import { TrinityClient, ApiError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
-import { agentKeyToolAccess, projectToolAccess, resolveActingAgent } from "../access.js";
+import { agentKeyToolAccess, HUMAN_ONLY_KEYS_NOT_SHOWN, humanOnlyToolAccess, projectToolAccess, resolveActingAgent } from "../access.js";
 import { deriveMcpIdempotencyKey } from "./chat.js";
 import { PersonProjectClient } from "./projects_person_client.js";
 
@@ -53,6 +53,20 @@ class ScopeRefusal extends Error {
 const ACT_AS_NOT_OFFERED =
   "The project tools don't act for an agent. Omit agent_name and the call acts as you, with your own Workspace permissions.";
 const KEY_NOT_SUPPORTED = "Project tools take a person's own user key or an agent's own key.";
+/**
+ * trinity-enterprise#1322: the caller line of a person-only project tool. The
+ * backend route takes a person (a signed-in session or their own user key) and
+ * applies their Workspace permissions on the project.
+ */
+const PROJECT_PERSON_WHO_MAY_CALL =
+  " WHO MAY CALL: a person, as themself — their own user-scoped key, with their Workspace permissions on the project. " +
+  HUMAN_ONLY_KEYS_NOT_SHOWN.person;
+/** What an agent's key is told when it calls a person's act anyway (keyless only: it is not listed to agent keys). */
+const personsAct = (act: string, agentPath: string) =>
+  `${act} is a person's act; an agent's key can't do it. ${agentPath}`;
+const ASK_A_PERSON = "Ask a person on the project with ask_operator.";
+const PROPOSE_IT = "Propose it with propose_project_changes; your primary contact decides.";
+const MEMBER_BATCH_CAP = 20;
 const IMPORT_NEEDS_AGENT = "Name the agent whose folder project this is in `agent`; the import reads that agent's files.";
 
 /** The write methods both doors answer, by the same name and body. */
@@ -168,6 +182,19 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     doorFor(context, requested).client;
   const writerFor = (context: { session?: McpAuthContext } | undefined, requested?: string): ProjectWriter =>
     doorFor(context, requested).client;
+
+  /**
+   * trinity-enterprise#1322: the person door for a person-only act. Only a
+   * person's own user key (or keyless dev mode) gets it; an agent's key is told
+   * the act is a person's, naming the path it does have; any other scope is
+   * refused. None of these tools is listed to a key that is refused here.
+   */
+  const personFor = (context: { session?: McpAuthContext } | undefined, act: string, agentPath: string): PersonProjectClient => {
+    const scope = context?.session?.scope;
+    if (scope === "agent") throw new ScopeRefusal("persons_act", personsAct(act, agentPath));
+    if (scope !== undefined && scope !== "user") throw new ScopeRefusal("key_not_supported", KEY_NOT_SUPPORTED);
+    return new PersonProjectClient(getClient(context?.session));
+  };
 
   /** A write or read refusal as a structured result — never a throw. */
   const fail = (e: unknown): string => {
@@ -746,6 +773,202 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         try {
           return ok(await writerFor(context, p.agent_name).setProjectHealth(
             p.project_id, { state: p.state, note: p.note ?? "" }, turnOf(context)));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ============================================ trinity-enterprise#1322 (person)
+    set_project_lifecycle: {
+      name: "set_project_lifecycle",
+      canAccess: humanOnlyToolAccess("person"),
+      description:
+        "Start, stop, finish, archive or restore a project, as the person you are. start also restarts " +
+        "a stopped or finished project; stop lets runs under way finish; finish marks it done; archive " +
+        "hides it from lists (list_projects with include_archived finds it) and restore brings it back. " +
+        "A `note` is written to the project log on start and stop only (`note_recorded` says whether " +
+        "it was). Needs edit rights on the project; the backend's refusal is passed through by name." +
+        PROJECT_PERSON_WHO_MAY_CALL,
+      parameters: z.object({
+        project_id: projectId,
+        action: z.enum(["start", "stop", "finish", "archive", "restore"]),
+        note: z.string().max(500).optional().describe("One line for the project log (start and stop)."),
+      }),
+      execute: async (p: { project_id: string; action: "start" | "stop" | "finish" | "archive" | "restore"; note?: string }, context?: { session?: McpAuthContext }) => {
+        try {
+          const person = personFor(context, "Starting, stopping or archiving a project", ASK_A_PERSON);
+          const project = await person.lifecycle(p.project_id, p.action, p.note);
+          return ok({ action: p.action, note_recorded: Boolean(p.note) && (p.action === "start" || p.action === "stop"), project });
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    update_project_settings: {
+      name: "update_project_settings",
+      canAccess: humanOnlyToolAccess("person"),
+      description:
+        "Change a project's settings as the person you are: its name, goal and tracker link; its " +
+        "steward (kind 'agent' with an agent name from list_agents, or kind 'person' with a work " +
+        "email); who can open it (visibility: members or company); and its mode (track: a person " +
+        "starts every run; propose: runs wait for a person's go; auto: the steward starts them). Each " +
+        "concern is its own request — the fields, then steward, visibility, mode — and `results` " +
+        "reports each one, so a refusal of one never hides whether the others applied. A new agent " +
+        "steward is given the project-management skills when it can be (`steward_skills`)." +
+        PROJECT_PERSON_WHO_MAY_CALL,
+      parameters: z.object({
+        project_id: projectId,
+        name: z.string().min(1).max(200).optional(),
+        goal: z.string().min(1).max(2000).optional().describe("What done looks like, in a sentence or two."),
+        tracker_url: z.string().max(2000).optional(),
+        steward: z.object({ kind: z.enum(["person", "agent"]), ref: z.string().min(1).max(320) }).optional()
+          .describe("A person's work email, or an agent name."),
+        visibility: z.enum(["members", "company"]).optional(),
+        mode: z.enum(["track", "propose", "auto"]).optional(),
+      }),
+      execute: async (p: { project_id: string; name?: string; goal?: string; tracker_url?: string; steward?: { kind: string; ref: string }; visibility?: string; mode?: string }, context?: { session?: McpAuthContext }) => {
+        try {
+          const person = personFor(context, "Changing a project's settings", "Propose a steward or visibility change with propose_project_changes; your primary contact decides. The mode is set by a person: ask one with ask_operator.");
+          const fields = Object.fromEntries(
+            (["name", "goal", "tracker_url"] as const).filter((k) => p[k] !== undefined).map((k) => [k, p[k]]));
+          const concerns: Array<[string, Record<string, unknown>]> = [];
+          if (Object.keys(fields).length) concerns.push(["fields", fields]);
+          for (const k of ["steward", "visibility", "mode"] as const) if (p[k] !== undefined) concerns.push([k, { [k]: p[k] }]);
+          if (!concerns.length) throw new ScopeRefusal("nothing_to_change", "Name at least one setting to change.");
+          const results: Array<Record<string, unknown>> = [];
+          let project: unknown;
+          for (const [concern, body] of concerns) {
+            try {
+              project = await person.updateProject(p.project_id, body);
+              const skills = (project as { steward_skills?: unknown } | undefined)?.steward_skills;
+              results.push({ concern, ok: true, ...(concern === "steward" && skills !== undefined ? { steward_skills: skills } : {}) });
+            } catch (e) {
+              const r = JSON.parse(fail(e)) as { error: string; code?: string };
+              results.push({ concern, ok: false, ...(r.code ? { code: r.code } : {}), error: r.error });
+            }
+          }
+          const refused = results.filter((r) => !r.ok).map((r) => r.concern);
+          return JSON.stringify({
+            success: refused.length === 0,
+            ...(refused.length ? { error: `Not applied: ${refused.join(", ")}. The rest applied; see results.` } : {}),
+            results,
+            ...(project ? { project } : {}),
+          }, null, 2);
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    set_steward_waking: {
+      name: "set_steward_waking",
+      canAccess: humanOnlyToolAccess("person"),
+      description:
+        "Start (on: true) or pause (on: false) the platform waking a project's agent steward. It is " +
+        "off until a person starts it; pausing stops new wakes, and a run under way finishes." +
+        PROJECT_PERSON_WHO_MAY_CALL,
+      parameters: z.object({ project_id: projectId, on: z.boolean() }),
+      execute: async (p: { project_id: string; on: boolean }, context?: { session?: McpAuthContext }) => {
+        try {
+          const person = personFor(context, "Starting or pausing the steward's wakes", ASK_A_PERSON);
+          return ok(await person.setStewardWaking(p.project_id, p.on));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    manage_project_members: {
+      name: "manage_project_members",
+      canAccess: humanOnlyToolAccess("person"),
+      description:
+        "Add or remove a project's people (work emails) and agents (agent names), as the person you " +
+        "are, with your Workspace permissions. Each item is its own request, in the order members to " +
+        "add, members to remove, agents to add, agents to remove, and `results` has one entry per item " +
+        "(ok, or the backend's code and reason). At most 20 items per call. A project you can't see " +
+        "stops the batch and the rest read not_attempted. Adding an agent someone else owns still " +
+        "needs its owner's yes." + PROJECT_PERSON_WHO_MAY_CALL,
+      parameters: z.object({
+        project_id: projectId,
+        add_members: z.array(z.string().min(3).max(320)).max(MEMBER_BATCH_CAP).optional(),
+        remove_members: z.array(z.string().min(3).max(320)).max(MEMBER_BATCH_CAP).optional(),
+        add_agents: z.array(z.string().min(1).max(128)).max(MEMBER_BATCH_CAP).optional(),
+        remove_agents: z.array(z.string().min(1).max(128)).max(MEMBER_BATCH_CAP).optional(),
+      }),
+      execute: async (p: { project_id: string; add_members?: string[]; remove_members?: string[]; add_agents?: string[]; remove_agents?: string[] }, context?: { session?: McpAuthContext }) => {
+        try {
+          const person = personFor(context, "Adding or removing a project's people and agents", PROPOSE_IT);
+          const plan: Array<[string, string, () => Promise<unknown>]> = [
+            ...(p.add_members ?? []).map((m) => ["add_member", m, () => person.addMember(p.project_id, m)] as [string, string, () => Promise<unknown>]),
+            ...(p.remove_members ?? []).map((m) => ["remove_member", m, () => person.removeMember(p.project_id, m)] as [string, string, () => Promise<unknown>]),
+            ...(p.add_agents ?? []).map((a) => ["add_agent", a, () => person.addAgent(p.project_id, a)] as [string, string, () => Promise<unknown>]),
+            ...(p.remove_agents ?? []).map((a) => ["remove_agent", a, () => person.removeAgent(p.project_id, a)] as [string, string, () => Promise<unknown>]),
+          ];
+          if (!plan.length) throw new ScopeRefusal("nothing_to_change", "Name at least one member or agent to add or remove.");
+          if (plan.length > MEMBER_BATCH_CAP) throw new ScopeRefusal("too_many_items", `At most ${MEMBER_BATCH_CAP} items per call; send the rest in another call.`);
+          const lower = (xs?: string[]) => new Set((xs ?? []).map((x) => x.toLowerCase()));
+          const clash = [...lower(p.add_members)].filter((m) => lower(p.remove_members).has(m))
+            .concat([...lower(p.add_agents)].filter((a) => lower(p.remove_agents).has(a)));
+          if (clash.length) throw new ScopeRefusal("item_in_both", `Both added and removed: ${clash.join(", ")}. Pick one.`);
+          const results: Array<Record<string, unknown>> = [];
+          let stopped = false;
+          for (const [action, item, call] of plan) {
+            if (stopped) {
+              results.push({ action, item, ok: false, code: "not_attempted" });
+              continue;
+            }
+            try {
+              await call();
+              results.push({ action, item, ok: true });
+            } catch (e) {
+              const r = JSON.parse(fail(e)) as { error: string; code?: string };
+              results.push({ action, item, ok: false, ...(r.code ? { code: r.code } : {}), error: r.error });
+              if (r.code === "project_not_found") stopped = true;
+            }
+          }
+          const failed = results.filter((r) => !r.ok).length;
+          return JSON.stringify({ success: failed === 0, ...(failed ? { error: `${failed} of ${results.length} not applied; see results.` } : {}), results }, null, 2);
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    decide_project_runs: {
+      name: "decide_project_runs",
+      canAccess: humanOnlyToolAccess("person"),
+      description:
+        "The runs a project's steward proposed that wait for a person's go (Propose mode, or a task " +
+        "held for a person). With no ids, lists them (`runs`, each with its id). With `approve` and/or " +
+        "`decline` ids, decides each on its own and passes the per-id results through (`approved`, " +
+        "`declined`); a `note` goes with a decline. An id in both lists is refused." +
+        PROJECT_PERSON_WHO_MAY_CALL,
+      parameters: z.object({
+        project_id: projectId,
+        approve: z.array(z.string().min(1).max(64)).max(100).optional(),
+        decline: z.array(z.string().min(1).max(64)).max(100).optional(),
+        note: z.string().max(500).optional().describe("Why, for a decline."),
+      }),
+      execute: async (p: { project_id: string; approve?: string[]; decline?: string[]; note?: string }, context?: { session?: McpAuthContext }) => {
+        try {
+          const person = personFor(context, "Approving or declining a proposed run", ASK_A_PERSON);
+          const approve = p.approve ?? [];
+          const decline = p.decline ?? [];
+          if (!approve.length && !decline.length) {
+            const runs = await person.waitingRuns(p.project_id);
+            return ok({ count: runs.length, runs });
+          }
+          const both = approve.filter((id) => decline.includes(id));
+          if (both.length) throw new ScopeRefusal("id_in_both", `In both approve and decline: ${both.join(", ")}. Pick one.`);
+          const approved = approve.length ? await person.decideRuns(p.project_id, "approve", approve) : [];
+          const declined = decline.length ? await person.decideRuns(p.project_id, "decline", decline, p.note) : [];
+          return ok({ approved, declined });
         } catch (e) {
           return fail(e);
         }

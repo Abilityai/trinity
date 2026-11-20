@@ -593,6 +593,12 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // `agents` are never acted on by the caller: the backend checks each against the rosters of
   // the agent's primary contacts, nothing happens until one of them approves, and adding one
   // someone else owns still raises that owner's consent ask (R39). The gate is projects.manage.
+  // trinity-enterprise#1322: a person's acts on a project, on the Workspace routes with their own user key.
+  set_project_lifecycle: { kind: "baselined", owner: PERSON_ONLY },
+  update_project_settings: { kind: "baselined", owner: PERSON_ONLY },
+  set_steward_waking: { kind: "baselined", owner: PERSON_ONLY },
+  manage_project_members: { kind: "baselined", owner: PERSON_ONLY },
+  decide_project_runs: { kind: "baselined", owner: PERSON_ONLY },
   propose_project_changes: { kind: "baselined", owner: "trinity-enterprise#1089: projects/proposals.py — the agent's primary approves (ent#816 first answer wins) + the agent owner's consent ask" },
   // --- platform_files.ts ---
   list_platform_files: { kind: "in-tool", how: ACT_AS + " — a space id; the backend resolves the space's access for the calling agent on every call (uniform 404 otherwise) (ent#1237)" },
