@@ -1023,8 +1023,14 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
           const d = await decide("decline", decline);
           const rows = [...a.rows, ...d.rows];
           const notApplied = rows.filter((r) => !r.applied).length;
+          // "The approvals were applied" only when every approve id was, not
+          // merely when the approve request succeeded.
+          const approvedCount = a.rows.filter((r) => r.applied).length;
           const error = !notApplied ? undefined
-            : d.failed && approve.length && !a.failed ? `The approvals were applied; the declines were not (${d.rows[0]?.why}).`
+            : d.failed && approve.length && !a.failed
+              ? approvedCount === approve.length
+                ? `The approvals were applied; the declines were not (${d.rows[0]?.why}).`
+                : `${approvedCount} of ${approve.length} approvals applied; the declines were not (${d.rows[0]?.why}).`
             : `${notApplied} of ${rows.length} not applied; see approved and declined.`;
           return JSON.stringify({ success: notApplied === 0, ...(error ? { error } : {}), approved: a.rows, declined: d.rows }, null, 2);
         } catch (e) {

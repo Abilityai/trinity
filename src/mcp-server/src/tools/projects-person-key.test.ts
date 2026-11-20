@@ -385,6 +385,31 @@ describe("trinity-enterprise#1322 decide_project_runs", () => {
     assert.match(out.error, /approvals were applied/i);
   });
 
+  // A request that succeeded is not every id applied: the claim "the approvals
+  // were applied" holds only when each approve id was.
+  it("a decline failure after a partly applied approve names both counts", async () => {
+    answer({
+      [`POST ${P}/prj_1/runs/approve`]: { status: 200, body: { results: [{ id: "r1", outcome: "started" }, { id: "r2", outcome: "already_decided" }] } },
+      [`POST ${P}/prj_1/runs/decline`]: { status: 503, body: { detail: "upstream unavailable" } },
+    });
+    const out = await run("decide_project_runs", { project_id: "prj_1", approve: ["r1", "r2"], decline: ["r3"] });
+    assert.equal(out.success, false, JSON.stringify(out));
+    assert.deepEqual(out.approved.map((r: any) => [r.id, r.applied]), [["r1", true], ["r2", false]]);
+    assert.doesNotMatch(out.error, /^The approvals were applied/i);
+    assert.match(out.error, /1 of 2 approvals/i);
+    assert.match(out.error, /declines were not/i);
+  });
+
+  it("every approval applied and the decline request fails: the approvals were applied", async () => {
+    answer({
+      [`POST ${P}/prj_1/runs/approve`]: { status: 200, body: { results: [{ id: "r1", outcome: "started" }, { id: "r2", outcome: "started" }] } },
+      [`POST ${P}/prj_1/runs/decline`]: { status: 503, body: { detail: "upstream unavailable" } },
+    });
+    const out = await run("decide_project_runs", { project_id: "prj_1", approve: ["r1", "r2"], decline: ["r3"] });
+    assert.equal(out.success, false, JSON.stringify(out));
+    assert.match(out.error, /^The approvals were applied; the declines were not/);
+  });
+
   it("an id in both lists is refused with no request", async () => {
     answer({});
     const out = await run("decide_project_runs", { project_id: "prj_1", approve: ["run_1"], decline: ["run_1"] });
