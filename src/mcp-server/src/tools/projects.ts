@@ -24,7 +24,7 @@
 import { z } from "zod";
 import { TrinityClient, ApiError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
-import { resolveActingAgent } from "../access.js";
+import { agentKeyToolAccess, projectToolAccess, resolveActingAgent } from "../access.js";
 import { deriveMcpIdempotencyKey } from "./chat.js";
 
 /**
@@ -199,6 +199,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     list_projects: {
       name: "list_projects",
+      canAccess: projectToolAccess,
       description:
         "List the Workspace projects you are working on: each project's id, name, goal, status, " +
         "steward and tracker link. Only projects your owner approved you for are listed. When a " +
@@ -224,6 +225,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     get_project: {
       name: "get_project",
+      canAccess: projectToolAccess,
       description:
         "Read one Workspace project you are working on, by id: its goal, status, steward, tracker " +
         "link, members, the other agents on it, and how many chats and rooms are linked. `context` " +
@@ -262,6 +264,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     list_project_tasks: {
       name: "list_project_tasks",
+      canAccess: projectToolAccess,
       description:
         "List a project's tasks. By default only open ones (not done, not awaiting verification); " +
         "pass status 'all', 'done' or a single status to see others. Each task has an id like T-003, " +
@@ -296,6 +299,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     create_project_task: {
       name: "create_project_task",
+      canAccess: projectToolAccess,
       description:
         "Add a task to a project you are working on. Give it a short title, and where you can an " +
         "objective and a definition of done (a checklist). It gets the next id (T-NNN) and starts as " +
@@ -325,6 +329,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     update_project_task: {
       name: "update_project_task",
+      canAccess: projectToolAccess,
       description:
         "Update a project task. To claim a task is finished, set status 'pending-verification' and put " +
         "your evidence in 'note' (it is logged as your done claim); a person or the project's steward " +
@@ -353,6 +358,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     add_project_task_note: {
       name: "add_project_task_note",
+      canAccess: projectToolAccess,
       description: "Append a note to a task's log (progress, a waiting-on, a hand-off). The log is append-only.",
       parameters: z.object({ agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION), project_id: projectId, task_id: taskId, body: z.string().min(1).max(4000) }),
       execute: async (p: { project_id: string; task_id: string; body: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
@@ -367,6 +373,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     read_project_context: {
       name: "read_project_context",
+      canAccess: projectToolAccess,
       description:
         "Read a brief people prepared for this project's agents (a transcript, background, their " +
         "view) — an item from the `context` list of get_project. Returns its text, at most 200 KB " +
@@ -391,6 +398,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     get_project_log: {
       name: "get_project_log",
+      canAccess: projectToolAccess,
       description:
         "Read a project's log: the decisions, deliverables, task changes, blockers and hand-offs that " +
         "people and agents recorded, oldest first within the page. get_project already includes the " +
@@ -409,6 +417,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     add_project_log_entry: {
       name: "add_project_log_entry",
+      canAccess: projectToolAccess,
       description:
         "Record one meaningful outcome in the project log, which every person and agent on the project " +
         "reads first. Write ONE entry per outcome — a decision made, a deliverable finished, a blocker, a " +
@@ -433,6 +442,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     link_to_project: {
       name: "link_to_project",
+      canAccess: projectToolAccess,
       description:
         "Put something you produced on a project so its members can find it: a file you shared, a " +
         "report you wrote, a decision you recorded, or an open ask you raised (an ask raised in a " +
@@ -456,6 +466,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ======================================================================== v3
     get_steward_digest: {
       name: "get_steward_digest",
+      canAccess: projectToolAccess,
       description:
         "What needs you on the projects you steward: for each, its health and whether an update is " +
         "due, tasks awaiting verification (verify or reopen them), tasks blocked or waiting on a " +
@@ -478,6 +489,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ================================================================ ent#588
     create_project: {
       name: "create_project",
+      canAccess: projectToolAccess,
       description:
         "Start a Workspace project for your owner (/project-init on Trinity): a name and the goal in " +
         "a sentence or two. Your owner becomes its creator and first member, you become its steward " +
@@ -507,6 +519,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     import_project: {
       name: "import_project",
+      canAccess: projectToolAccess,
       description:
         "Bring one of your own folder projects onto the platform, once (/project-init adopt on " +
         "Trinity): `project_files/<slug>` or `<canon>/projects/<slug>` with its project.md, task " +
@@ -531,6 +544,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ================================================================ ent#980
     propose_project_changes: {
       name: "propose_project_changes",
+      canAccess: agentKeyToolAccess,
       description:
         "Request the people part of a project you are on but can't change yourself: members to add " +
         "or remove, agents to add or remove (yourself included), a new steward, who can open it, and an " +
@@ -581,6 +595,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     list_project_executions: {
       name: "list_project_executions",
+      canAccess: projectToolAccess,
       description:
         "List a project's runs (executions), newest first: the chats, tasks, delegations and steward " +
         "work attributed to the project. Each row has the agent, status, model, cost, queued/started/" +
@@ -621,6 +636,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     start_project_task: {
       name: "start_project_task",
+      canAccess: agentKeyToolAccess,
       description:
         "As a project's steward, start one task's run on an agent you name (trinity-enterprise#1235). " +
         "The platform never picks the task or the agent. What happens depends on the project's mode, " +
@@ -660,6 +676,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     set_project_health: {
       name: "set_project_health",
+      canAccess: projectToolAccess,
       description:
         "As a project's steward, record how it is going: on-track, at-risk or off-track, with one " +
         "line saying why. It shows on the project and in the list, and is added to the project log. " +

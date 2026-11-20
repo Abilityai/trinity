@@ -876,3 +876,95 @@ describe("ent#719 human-only tools are listed exactly to the keys their backend 
     assert.equal(srv.requests.length, 1 + shown.length, srv.requests.join(", "));
   });
 });
+
+describe("trinity-enterprise#1322 project tools are listed to exactly the keys that can call them", () => {
+  /**
+   * Written out here, not derived from the code under test. The shared tools
+   * act as the calling agent (its own key) or as the person (their own
+   * user-scoped key, on the Workspace routes). Starting a task's run and
+   * proposing changes stay an agent's: the person's start is not built, and a
+   * person makes a change directly instead of proposing it. No other scope is
+   * shown a project tool: the system key, connector, delegate, ops and any
+   * future scope.
+   */
+  const SHARED = [
+    "list_projects", "get_project", "list_project_tasks", "create_project_task", "update_project_task",
+    "add_project_task_note", "read_project_context", "get_project_log", "add_project_log_entry",
+    "link_to_project", "get_steward_digest", "create_project", "import_project", "list_project_executions",
+    "set_project_health",
+  ];
+  const EXPECTED: Record<string, string[]> = {
+    ...Object.fromEntries(SHARED.map((t) => [t, ["agent", "user"]])),
+    start_project_task: ["agent"],
+    propose_project_changes: ["agent"],
+  };
+  const KEYS: Record<string, KeyRow> = {
+    user: { scope: "user" },
+    agent: { scope: "agent", agent_name: "alpha" },
+    system: { scope: "system", agent_name: "trinity-system" },
+    connector: { scope: "connector", agent_name: "alpha" },
+    portal_delegate: { scope: "portal_delegate" },
+    ops: { scope: "ops" },
+    some_future_tier: { scope: "some_future_tier" },
+  };
+
+  let srv: KeyedServer;
+  const listing: Record<string, string[]> = {};
+  before(async () => {
+    srv = await bootKeyedServer(KEYS);
+    for (const key of Object.keys(KEYS)) listing[key] = await listedTo(srv.url, key);
+  });
+  after(async () => {
+    await srv?.stop();
+  });
+
+  it("covers every registered project tool, and each carries its own access check", async () => {
+    const { createProjectTools } = await import("./tools/projects.js");
+    const tools = Object.values(createProjectTools({ getBaseUrl: () => "http://x" } as any, true)) as Array<{
+      name: string; canAccess?: unknown;
+    }>;
+    assert.deepEqual(tools.map((t) => t.name).sort(), Object.keys(EXPECTED).sort(),
+      "a project tool was added or removed: give it a row here and its own canAccess");
+    // Without its own canAccess a tool inherits the operator gate and is shown
+    // to the system key; the listing test below would catch it too.
+    for (const t of tools) assert.equal(typeof t.canAccess, "function", `${t.name} has no canAccess of its own`);
+  });
+
+  it("each project tool is listed to exactly its scopes, for every key scope", () => {
+    assert.ok(listing.user.length > 100, `only ${listing.user.length} tools for a user key — the census is not seeing the server`);
+    for (const [tool, scopes] of Object.entries(EXPECTED)) {
+      const shown = Object.keys(KEYS).filter((key) => listing[key].includes(tool)).sort();
+      assert.deepEqual(shown, [...scopes].sort(), `${tool} is listed to [${shown}], expected [${scopes}]`);
+    }
+  });
+
+  it("a person-only project tool is listed to user keys exactly", () => {
+    for (const [tool, policy] of Object.entries(TOOL_ACCESS_POLICY)) {
+      if (!(tool in EXPECTED)) continue;
+      if (policy.kind === "baselined" && policy.owner === HUMAN_ONLY_POLICY_OWNER.person) {
+        assert.deepEqual(EXPECTED[tool], ["user"], `${tool}: its row says person, but this census expects [${EXPECTED[tool]}]`);
+      }
+    }
+  });
+
+  it("a key calling a project tool it is not shown gets 'not found', and the backend is never asked", async () => {
+    let refused = 0;
+    for (const key of ["user", "system", "ops"]) {
+      const hidden = Object.keys(EXPECTED).filter((tool) => !EXPECTED[tool].includes(KEYS[key].scope));
+      srv.requests.length = 0;
+      await asKey(srv.url, key, async (c) => {
+        for (const tool of hidden) {
+          await assert.rejects(
+            () => c.callTool({ name: tool, arguments: { project_id: "prj_ghost", task_id: "T-001", agent: "alpha" } }),
+            (err: unknown) => NOT_FOUND.test(String((err as Error)?.message ?? err)),
+            `${tool}: a ${key} key calling it by name must be rejected as not found`,
+          );
+          refused += 1;
+        }
+      });
+      assert.deepEqual(srv.requests, [], `a ${key} key's refused calls reached the backend: ${srv.requests.join(", ")}`);
+    }
+    // 2 agent-only tools for the user key; all 17 for the system and ops keys.
+    assert.equal(refused, 2 + 17 + 17);
+  });
+});

@@ -226,6 +226,25 @@ export function humanOnlyToolAccess(rule: HumanOnlyRule): (auth: unknown) => boo
 }
 
 /**
+ * trinity-enterprise#1322: the project tools' listing. A project tool acts as
+ * the calling agent (its own key) or as the person (their own user-scoped key,
+ * on the Workspace routes); no other scope can act on a project, so no other
+ * scope is shown one. An allow-list over the free-text scope (#848, #2323).
+ */
+const PROJECT_TOOL_SCOPES: ReadonlySet<string> = new Set(["agent", "user"]);
+
+/** `canAccess` for a project tool both an agent key and a person's user key call. */
+export function projectToolAccess(auth: unknown): boolean {
+  const scope = (auth as { scope?: unknown } | null | undefined)?.scope;
+  return typeof scope === "string" && PROJECT_TOOL_SCOPES.has(scope);
+}
+
+/** `canAccess` for a tool only an agent's own key calls (a proposal, a task's run). */
+export function agentKeyToolAccess(auth: unknown): boolean {
+  return (auth as { scope?: unknown } | null | undefined)?.scope === "agent";
+}
+
+/**
  * The sentence every `person` or `interactive` tool's description carries: which
  * keys can never call it, and so are not shown it. It is what the predicate
  * lists, stated once.
@@ -325,6 +344,8 @@ const A2A_CALL_SELF = "a2a_call.ts checkSelf — self-only by design (an agent s
 const AGENTS_INLINE = "agents.ts inline getPermittedAgents filter ({self} ∪ permitted)";
 const ACT_AS =
   "self-acting (resolveActingAgent): an agent or system key acts as itself and an agent_name naming another agent is refused; a user key's agent_name rides X-Trinity-Act-As-Agent, which the backend admits only for an admin's user key and holds to that one agent (dependencies.admit_act_as / get_self_acting_agent / assert_own_agent, trinity-enterprise#1024)";
+const PROJECT_KEY =
+  "routed by the key's scope (trinity-enterprise#1322): an agent key acts as itself on /api/enterprise/projects/agent/* and an agent_name naming another agent is refused; a person's user key acts as that person on the Workspace routes, with their Workspace permissions; listed to no other scope (projectToolAccess)";
 const LOOP_RESOLVE =
   "resolves the loop's agent (GET /api/loops/{id}) then checkAgentEdge; compound uniform denial (ent#628)";
 
@@ -553,22 +574,22 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   list_available_credentials: { kind: "none", why: "the calling agent's own grants (ent#279)" },
   fetch_credential: { kind: "none", why: "`name` is a credential; the backend scopes it to the calling agent (ent#279)" },
   // --- projects.ts ---
-  list_projects: { kind: "in-tool", how: ACT_AS + " — the calling agent's own active projects (ent#661)" },
-  get_project: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  list_project_tasks: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  create_project_task: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  update_project_task: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  add_project_task_note: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  get_project_log: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  read_project_context: { kind: "in-tool", how: ACT_AS + " — a project id and a context item marked for agents; the backend answers only for a project the calling agent is active on, in an internal turn (ent#1193)" },
-  add_project_log_entry: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  link_to_project: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  get_steward_digest: { kind: "in-tool", how: ACT_AS + " — the calling agent's own stewarded projects (ent#661 v3)" },
-  list_project_executions: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on, in its own live turn, and fences rows it may not open (ent#1105)" },
-  start_project_task: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only when the calling agent is the project's steward, in the mode a person set (ent#1235)" },
-  set_project_health: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only when the calling agent is its active steward (ent#661 v3)" },
-  create_project: { kind: "in-tool", how: ACT_AS + " — creates on the calling agent's OWN owner's behalf; the backend gates it on projects.manage (ent#588)" },
-  import_project: { kind: "in-tool", how: ACT_AS + " — a path in the calling agent's OWN files; the backend gates it on projects.manage (ent#588)" },
+  list_projects: { kind: "in-tool", how: PROJECT_KEY + " — the calling agent's own active projects (ent#661)" },
+  get_project: { kind: "in-tool", how: PROJECT_KEY + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  list_project_tasks: { kind: "in-tool", how: PROJECT_KEY + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  create_project_task: { kind: "in-tool", how: PROJECT_KEY + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  update_project_task: { kind: "in-tool", how: PROJECT_KEY + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  add_project_task_note: { kind: "in-tool", how: PROJECT_KEY + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  get_project_log: { kind: "in-tool", how: PROJECT_KEY + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  read_project_context: { kind: "in-tool", how: PROJECT_KEY + " — a project id and a context item marked for agents; the backend answers only for a project the calling agent is active on, in an internal turn (ent#1193)" },
+  add_project_log_entry: { kind: "in-tool", how: PROJECT_KEY + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  link_to_project: { kind: "in-tool", how: PROJECT_KEY + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  get_steward_digest: { kind: "in-tool", how: PROJECT_KEY + " — the calling agent's own stewarded projects (ent#661 v3)" },
+  list_project_executions: { kind: "in-tool", how: PROJECT_KEY + " — a project id; the backend answers only for a project the calling agent is active on, in its own live turn, and fences rows it may not open (ent#1105)" },
+  start_project_task: { kind: "in-tool", how: "self-acting (resolveActingAgent): an agent key only, listed to agent keys only (agentKeyToolAccess, trinity-enterprise#1322) — a project id; the backend answers only when the calling agent is the project's steward, in the mode a person set (ent#1235)" },
+  set_project_health: { kind: "in-tool", how: PROJECT_KEY + " — a project id; the backend answers only when the calling agent is its active steward (ent#661 v3)" },
+  create_project: { kind: "in-tool", how: PROJECT_KEY + " — creates on the calling agent's OWN owner's behalf; the backend gates it on projects.manage (ent#588)" },
+  import_project: { kind: "in-tool", how: PROJECT_KEY + " — a path in the calling agent's OWN files; the backend gates it on projects.manage (ent#588)" },
   // `agents` are never acted on by the caller: the backend checks each against the rosters of
   // the agent's primary contacts, nothing happens until one of them approves, and adding one
   // someone else owns still raises that owner's consent ask (R39). The gate is projects.manage.
