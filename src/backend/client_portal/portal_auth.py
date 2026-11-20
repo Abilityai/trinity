@@ -246,9 +246,12 @@ async def get_portal_principal(
     # edge to, i.e. a REST path around the MCP layer's agent-to-agent
     # permission matrix, and (new in #2198) a one-call read of the owner's
     # entire cross-agent thread index via GET /sessions. Rejected here, at the
-    # dependency, so all current and future portal routes inherit it: no MCP
-    # tool targets this surface and neither agent images nor the base image
-    # call it (verified), so there is no legitimate agent caller to break.
+    # dependency, so all current and future portal routes inherit it. The one
+    # MCP caller is a person, not an agent: the MCP server's project tools
+    # (tools/projects.ts) call the Workspace project routes behind this door
+    # with the person's own user-scoped key, which resolves here to that
+    # person. An agent key is refused, and neither agent images nor the base
+    # image call this surface, so there is no legitimate agent caller to break.
     # `reject_agent_principal`, not the stricter allowlist
     # `reject_non_interactive_principal`, deliberately: this is a *use*
     # surface, so a user's own user-scoped key scripting their own Workspace
