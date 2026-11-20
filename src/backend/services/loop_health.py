@@ -71,7 +71,9 @@ STUCK_REPORT_S = 5.0
 # `snapshot()` windows.
 LAG_WINDOW_S = 60.0
 STALL_WINDOW_S = 600.0
-STACK_FRAMES = 12
+# Deep enough to reach Trinity's own caller under a library: a sync HTTP call
+# seen on a live instance was 12 frames of urllib3 and http.client before it.
+STACK_FRAMES = 40
 
 _BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
