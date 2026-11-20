@@ -117,7 +117,7 @@
 
 ### 1.6a Agent Overview tab (#1107; rebuilt trinity-enterprise#1317)
 - **Status**: 🚧 In Dev
-- **Description**: The default tab on the agent page is a page about the agent, top to bottom: **Now** (state, next scheduled run, items needing attention, New task), **Activity** (runs per day by what started them, failures on their own rail, 7d/14d/30d) beside **Recent work**, three measures over the same window (**Finished** with its denominator, **Time per run**, **Context used** as a share of the window), **Reported by this agent** (declared metrics), **Schedules** and **Health**.
+- **Description**: The default tab on the agent page is a page about the agent, top to bottom: **Now** (state, next scheduled run, items needing attention, New task), **Activity** (runs per day with failures on the same scale, and what started the window's runs as one split bar, 7d/14d/30d) beside **Recent work**, three measures over the same window (**Finished** with its denominator, **Time per run**, **Context used** as a share of the window), **Reported by this agent** (declared metrics), **Schedules** and **Health**.
 - **Rules**: every section keeps one footprint across loading, empty, failed and ready; an agent with no runs, schedules, metrics or health checks still gets the whole page (ghost charts, `—` for anything never measured, an empty state naming what will appear and one next action); a failed read is a failed section and never another agent's figures; no cost tile (the header owns cost); the compatibility report is not on this tab (Settings › General).
 - **Flow**: `feature-flows/agent-overview-dashboard.md`
 

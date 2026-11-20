@@ -54,7 +54,7 @@ const EMPTY_ANALYTICS = {
 const BUSY_ANALYTICS = {
   window_hours: 168, total_executions: 21, success_count: 18, failed_count: 2, success_rate: 0.9,
   duration_ms: { avg: 134000, p95: 400000 }, context_avg: 76000, context_pct_avg: 38,
-  by_type: [], buckets: ['Chat/Tasks', 'Scheduled'],
+  by_type: [{ bucket: 'Chat/Tasks', total: 5 }, { bucket: 'Scheduled', total: 16 }], buckets: ['Chat/Tasks', 'Scheduled'],
   timeline: [
     day('2026-11-14', { total: 6, success: 6, success_rate: 1, duration_avg_ms: 100000, context_pct_avg: 30, by_type: { Scheduled: 4, 'Chat/Tasks': 2 } }),
     day('2026-11-15'),
@@ -237,33 +237,42 @@ describe('an active agent', () => {
     expect(rows[1].find('[data-testid="overview-recent-detail"]').text()).toBe('/digest')
   })
 
-  it('stacks runs per day, stubs the empty day and rails the failures', async () => {
+  it('charts runs per day, marks the failing day, and leaves the empty day without a dot', async () => {
     const wrapper = await mountPanel()
     expect(wrapper.findAll('[data-testid="overview-activity-col"]')).toHaveLength(4)
-    expect(wrapper.findAll('[data-testid="overview-activity-stub"]')).toHaveLength(1)
+    expect(wrapper.findAll('[data-testid="overview-activity-dot"]')).toHaveLength(3)
     expect(wrapper.findAll('[data-testid="overview-activity-fail"]')).toHaveLength(1)
+    const plot = t(wrapper, 'overview-activity-plot')
+    expect(plot.findAll('path').every((p) => p.attributes('d'))).toBe(true)
+    // what started them: one bar for the window, largest first, with counts
+    expect(t(wrapper, 'overview-activity-split').findAll('i')).toHaveLength(2)
+    expect(t(wrapper, 'overview-activity-sources').text()).toMatch(/Scheduled\s*16 · 76%\s*Chat\/Tasks\s*5 · 24%/)
     expect(t(wrapper, 'overview-activity-readout').text()).toMatch(/^21\s*runs · 2 failed · busiest Mon, Nov 16 \(8\)$/)
   })
 
-  it('reads one day into the reserved line on hover, and puts the summary back', async () => {
+  it('reads one day beside the guide on hover, and the summary line does not change', async () => {
     const wrapper = await mountPanel()
+    const summary = t(wrapper, 'overview-activity-readout').text()
     await wrapper.findAll('[data-testid="overview-activity-col"]')[2].trigger('mouseenter')
-    expect(t(wrapper, 'overview-activity-readout').text()).toMatch(/^8\s*Mon, Nov 16 · 3 Chat\/Tasks · 5 Scheduled · 2 failed$/)
+    expect(t(wrapper, 'overview-activity-day').text()).toMatch(/^Mon, Nov 16\s*8 runs · 2 failed\s*3 Chat\/Tasks · 5 Scheduled$/)
+    expect(t(wrapper, 'overview-activity-readout').text()).toBe(summary)
     await t(wrapper, 'overview-activity-plot').trigger('mouseleave')
-    expect(t(wrapper, 'overview-activity-readout').text()).toMatch(/^21\s*runs/)
+    expect(t(wrapper, 'overview-activity-day').exists()).toBe(false)
   })
 
   it('the same reading is reachable from the keyboard', async () => {
     const wrapper = await mountPanel()
     const plot = t(wrapper, 'overview-activity-plot')
+    const note = () => t(wrapper, 'overview-activity-day')
     expect(plot.attributes('tabindex')).toBe('0')
     await plot.trigger('keydown', { key: 'ArrowRight' })
-    expect(t(wrapper, 'overview-activity-readout').text()).toMatch(/Sat, Nov 14/)
+    expect(note().text()).toMatch(/Sat, Nov 14\s*6 runs · none failed/)
     await plot.trigger('keydown', { key: 'ArrowRight' })
-    expect(t(wrapper, 'overview-activity-readout').text()).toMatch(/Sun, Nov 15 · no runs/)
+    expect(note().text()).toMatch(/^Sun, Nov 15\s*no runs$/)
     await plot.trigger('keydown', { key: 'End' })
-    expect(t(wrapper, 'overview-activity-readout').text()).toMatch(/Tue, Nov 17/)
+    expect(note().text()).toMatch(/Tue, Nov 17/)
     await plot.trigger('keydown', { key: 'Escape' })
+    expect(note().exists()).toBe(false)
     expect(t(wrapper, 'overview-activity-readout').text()).toMatch(/^21\s*runs/)
   })
 

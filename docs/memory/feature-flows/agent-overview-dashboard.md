@@ -23,7 +23,7 @@ stored report refreshes on deploy or when that pane is opened.
 | # | Section | Component | Source(s) |
 |---|---------|-----------|-----------|
 | 1 | **Now** — state, next scheduled run, "N items need attention", the one primary action | `overview/OverviewNow.vue` | `recent`, `live`, `schedules`, `notifications` + `asks` + `sync` |
-| 2 | **Activity** — runs per day stacked by trigger bucket, failure rail, 7d/14d/30d | `overview/OverviewActivity.vue` | `analytics` |
+| 2 | **Activity** — runs per day as a curve with failures as a second curve on the same scale, one "what started them" split bar for the window, 7d/14d/30d | `overview/OverviewActivity.vue` | `analytics` |
 | 2 | **Recent work** — last five runs | `overview/OverviewRecent.vue` | `recent` |
 | 3 | **Finished · Time per run · Context used** | `overview/OverviewMeasureTile.vue` ×3 | `analytics` |
 | 4 | **Reported by this agent** — declared metrics as plain tiles | `overview/OverviewReported.vue` | `metrics` |
@@ -94,7 +94,7 @@ history.
 
 | Surface | No data yet | Succeeded, nothing there |
 |---------|-------------|--------------------------|
-| Activity chart | `ScanlineReveal` track | dashed ghost bars + "Nothing has run yet…"; a zero-run day inside an active window is a baseline stub |
+| Activity chart | `ScanlineReveal` track | dashed ghost curve + "Nothing has run yet…" and a dashed source bar with `—` per source; a zero-run day inside an active window is a point on the baseline |
 | Measure tile chart | `ScanlineReveal` track, value `—` | dashed ghost curve, value `—`, "after the first run" |
 | Health strip | `ScanlineReveal` track | 24 dashed placeholder blocks |
 | Recent · Schedules · Reported | `SkeletonLoader` | what will appear + one next action |
@@ -140,7 +140,7 @@ raw non-gray palette classes.
 `AgentAnalyticsResponse` (+ `DurationStats`, `AgentTypeTotal`,
 `AgentAnalyticsTimelinePoint`). Key fields: `total_executions`, terminal
 `success_rate`, `duration_ms{avg,p95}`, `context_avg`, `context_pct_avg`, `by_type[]` (per-bucket
-window totals), `buckets[]` (legend/stack order), `timeline[]` (gap-filled UTC
+window totals), `buckets[]` (source order in the hover readout), `timeline[]` (gap-filled UTC
 days, each with `by_type`, `success_rate`, `duration_avg_ms`, `context_avg`, `context_pct_avg`),
 `sampled`/`sample_size`.
 

@@ -7,36 +7,22 @@
  * return, so the rules that matter are unit-testable without a DOM:
  *
  *   - a value that has never been measured is `—`, never `0` or `0%`;
- *   - a day with no runs is a stub in the bar chart and a GAP in a line, never
- *     a point at zero;
+ *   - a day with no runs is zero on the runs chart (a count) and a GAP in a
+ *     measured line (a rate or an average), never a point at zero there;
  *   - a rate is always shown with its denominator (trinity-enterprise#227).
  */
 import { parseUTC, formatCompactAge } from './timestamps'
 
 export const DASH = '—'
 
-/** Tallest a stacked column may be, in px. The chart zone reserves this. */
-export const CHART_HEIGHT = 126
-/** The failure rail under the baseline: 3px for one failure, up to this for the window's worst day. */
-export const RAIL_MAX = 8
-const RAIL_MIN = 3
-/** Gap between stacked segments, in px (the surface shows through). */
-export const SEGMENT_GAP = 2
+/** The activity plot's height in px. Its SVG is PLOT_WIDTH wide and stretched. */
+export const CHART_HEIGHT = 146
+const PLOT_WIDTH = 1000
+/** Headroom above the busiest day, where the "N a day" label sits. */
+const PLOT_TOP = 22
 
-// The outline of a chart to come: a gentle rise, plainly not data. Same idea as
-// the dashboard tile's GHOST_BARS, at this chart's height.
-const GHOST_HEIGHTS = [18, 26, 22, 34, 28, 42, 34, 50, 40, 60, 48, 70, 58, 80]
-
-/** `n` ghost-bar heights, resampled so 7, 14 and 30 days share one silhouette. */
-export function ghostColumns(n) {
-  const count = Math.max(1, n | 0)
-  const out = []
-  for (let i = 0; i < count; i++) {
-    const at = count === 1 ? GHOST_HEIGHTS.length - 1 : Math.round((i * (GHOST_HEIGHTS.length - 1)) / (count - 1))
-    out.push(GHOST_HEIGHTS[at])
-  }
-  return out
-}
+/** The outline of the activity chart to come, in the plot's own box: plainly not data. */
+export const GHOST_ACTIVITY = 'M0 124 C 140 116, 210 76, 340 84 S 580 118, 700 64 S 910 36, 1000 46'
 
 /** The ghost curve for an empty line tile, in a 200×48 box. */
 export const GHOST_LINE = 'M0 40 C 28 38, 44 26, 68 28 S 116 38, 140 20 S 182 10, 200 13'
@@ -76,51 +62,109 @@ export function hasRuns(stats) {
   return (stats?.total_executions || 0) > 0
 }
 
-const MIN_SEGMENT = 3
+const f1 = (v) => Number(v.toFixed(1))
 
 /**
- * Columns for the stacked activity chart.
- *
- * A column's height is proportional to the busiest day. Inside it every
- * segment first gets a 3px minimum (so one run is visible beside a busy
- * bucket) and the gaps are set aside; only what is left is shared by count.
- * So segments + gaps never exceed the column, and the column never exceeds
- * CHART_HEIGHT, however lopsided the day.
+ * A smooth path through `points` that never overshoots them (monotone cubic,
+ * Fritsch–Carlson): between two days the curve stays between their values, so
+ * it cannot dip under zero or rise above the busiest day.
  */
-export function activityColumns(stats, { height = CHART_HEIGHT } = {}) {
+export function monotonePath(points) {
+  const n = points.length
+  if (n < 2) return ''
+  const dx = []
+  const slope = []
+  for (let i = 0; i < n - 1; i++) {
+    dx.push(points[i + 1][0] - points[i][0])
+    slope.push((points[i + 1][1] - points[i][1]) / dx[i])
+  }
+  const tan = [slope[0]]
+  for (let i = 1; i < n - 1; i++) {
+    tan.push(slope[i - 1] * slope[i] <= 0 ? 0 : (2 * slope[i - 1] * slope[i]) / (slope[i - 1] + slope[i]))
+  }
+  tan.push(slope[n - 2])
+  let d = `M${f1(points[0][0])} ${f1(points[0][1])}`
+  for (let i = 0; i < n - 1; i++) {
+    const h = dx[i] / 3
+    d += ` C${f1(points[i][0] + h)} ${f1(points[i][1] + tan[i] * h)} ${f1(points[i + 1][0] - h)} ${f1(points[i + 1][1] - tan[i + 1] * h)} ${f1(points[i + 1][0])} ${f1(points[i + 1][1])}`
+  }
+  return d
+}
+
+/**
+ * The activity chart: runs per day as one curve, failures as a second curve
+ * on the SAME scale beneath it.
+ *
+ * Each day is a column `{ xPct, y, failY }` (where its points sit, for the
+ * dots and the hover guide) and keeps its per-source counts for the readout.
+ * A day with no runs is a point at zero: a count, unlike a rate, is measured
+ * as zero. The failure curve is drawn only around days that had a failure, so
+ * a clean stretch does not paint the baseline red.
+ */
+export function activityColumns(stats, { height = CHART_HEIGHT, width = PLOT_WIDTH, top = PLOT_TOP } = {}) {
   const timeline = stats?.timeline || []
   const order = Array.isArray(stats?.buckets) ? stats.buckets : []
+  const n = timeline.length
   const max = timeline.reduce((m, d) => Math.max(m, d?.total || 0), 0)
-  const unit = max > 0 ? height / max : 0
-  // The rail's height says HOW MANY failed that day, relative to the window's
-  // worst day; with a single failure anywhere it is the minimum mark.
-  const maxFailed = timeline.reduce((m, d) => Math.max(m, d?.failed || 0), 0)
-  const railPx = (failed) => {
-    if (!failed) return 0
-    if (maxFailed <= 1) return RAIL_MIN
-    return Math.round(RAIL_MIN + ((RAIL_MAX - RAIL_MIN) * (failed - 1)) / (maxFailed - 1))
-  }
-  const columns = timeline.map((d) => {
+  const x = (i) => ((i + 0.5) / n) * width
+  const y = (v) => (max > 0 ? height - (Math.min(v, max) / max) * (height - top) : height)
+  const columns = timeline.map((d, i) => {
     const byType = d?.by_type || {}
-    // Backend order first; anything it did not list still gets drawn.
+    // Backend order first; anything it did not list is still named.
     const names = [...order.filter((b) => byType[b]), ...Object.keys(byType).filter((b) => !order.includes(b) && byType[b])]
-    const counted = names.reduce((sum, b) => sum + byType[b], 0) || 1
-    const column = Math.min(height, (d?.total || 0) * unit)
-    const shared = Math.max(0, column - SEGMENT_GAP * (names.length - 1) - MIN_SEGMENT * names.length)
+    const total = d?.total || 0
+    const failed = d?.failed || 0
     return {
       date: d.date,
       label: dayLabel(d.date),
-      total: d?.total || 0,
-      failed: d?.failed || 0,
-      failPx: railPx(d?.failed || 0),
-      segments: names.map((bucket) => ({
-        bucket,
-        count: byType[bucket],
-        px: MIN_SEGMENT + Math.floor((shared * byType[bucket]) / counted),
-      })),
+      total,
+      failed,
+      xPct: f1((x(i) / width) * 100),
+      y: f1(y(total)),
+      failY: f1(y(failed)),
+      segments: names.map((bucket) => ({ bucket, count: byType[bucket] })),
     }
   })
-  return { max, columns }
+  const closed = (path, from, to) => (path ? `${path} L${f1(x(to))} ${height} L${f1(x(from))} ${height} Z` : '')
+  const line = monotonePath(columns.map((c, i) => [x(i), c.y]))
+  // Runs of failing days, each widened by one day so the curve returns to zero.
+  const failLines = []
+  const failAreas = []
+  for (let i = 0; i < n; i++) {
+    if (!columns[i].failed) continue
+    let end = i
+    while (end + 1 < n && columns[end + 1].failed) end++
+    const from = Math.max(0, i - 1)
+    const to = Math.min(n - 1, end + 1)
+    const path = monotonePath(columns.slice(from, to + 1).map((c, k) => [x(from + k), c.failY]))
+    if (path) {
+      failLines.push(path)
+      failAreas.push(closed(path, from, to))
+    }
+    i = end
+  }
+  return {
+    max,
+    columns,
+    line,
+    area: closed(line, 0, n - 1),
+    failLine: failLines.join(' '),
+    failArea: failAreas.join(' '),
+  }
+}
+
+/**
+ * What started the window's runs, largest first, each with its share. Shares
+ * are of the runs the backend attributed, so they add up to the bar.
+ */
+export function sourceSplit(stats) {
+  const rows = (Array.isArray(stats?.by_type) ? stats.by_type : [])
+    .map((r) => ({ bucket: r?.bucket, count: r?.total || 0 }))
+    .filter((r) => r.bucket && r.count > 0)
+  const sum = rows.reduce((s, r) => s + r.count, 0)
+  return rows
+    .sort((a, b) => b.count - a.count)
+    .map((r) => ({ ...r, pct: Math.round((r.count / sum) * 100) }))
 }
 
 /**
@@ -138,7 +182,7 @@ export function activityReadout(stats, column, { never = false } = {}) {
   if (!hasRuns(stats)) {
     return {
       head: '0',
-      text: never ? 'Nothing has run yet. Runs will stack here by what started them.' : 'No runs in this window.',
+      text: never ? 'Nothing has run yet. Runs will chart here by day.' : 'No runs in this window.',
     }
   }
   const timeline = stats.timeline || []

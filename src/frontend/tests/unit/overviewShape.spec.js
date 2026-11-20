@@ -7,8 +7,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   CHART_HEIGHT, DASH,
-  activityColumns, activityReadout, attentionCount, ghostColumns, healthBlocks,
-  firstLine, hoverText, linePaths, measureTiles, nextRun, nowState, recentRows, runTitle, scheduleRows,
+  activityColumns, activityReadout, attentionCount, healthBlocks,
+  firstLine, hoverText, linePaths, measureTiles, monotonePath, sourceSplit, nextRun, nowState, recentRows, runTitle, scheduleRows,
 } from '../../src/utils/overviewShape'
 
 const NOW = Date.parse('2026-11-20T12:00:00Z')
@@ -105,37 +105,65 @@ describe('line paths', () => {
 })
 
 describe('activity chart', () => {
-  it('scales to the busiest day and never exceeds the chart height', () => {
-    const { max, columns } = activityColumns(BUSY)
+  // Every y the path visits, control points included.
+  const ys = (d) => [...d.matchAll(/(-?[\d.]+) (-?[\d.]+)/g)].map((m) => Number(m[2]))
+
+  it('scales to the busiest day and stays inside the plot', () => {
+    const { max, columns, line, area } = activityColumns(BUSY)
     expect(max).toBe(10)
-    const rendered = (col) => col.segments.reduce((sum, s) => sum + s.px, 0) + 2 * (col.segments.length - 1)
-    expect(rendered(columns[0])).toBeLessThanOrEqual(CHART_HEIGHT)
-    expect(rendered(columns[0])).toBeGreaterThan(CHART_HEIGHT - 3)
-    expect(columns[0].segments.map((s) => s.bucket)).toEqual(['Chat/Tasks', 'Scheduled'])
+    expect(columns.map((c) => c.y)).toEqual([22, CHART_HEIGHT, expect.any(Number)])
+    expect(columns[2].y).toBeGreaterThan(22)
+    expect(columns[2].y).toBeLessThan(CHART_HEIGHT)
+    expect(Math.min(...ys(line))).toBeGreaterThanOrEqual(22)
+    expect(Math.max(...ys(line))).toBeLessThanOrEqual(CHART_HEIGHT)
+    expect(area.endsWith('Z')).toBe(true)
+    expect(columns[0].segments).toEqual([{ bucket: 'Chat/Tasks', count: 4 }, { bucket: 'Scheduled', count: 6 }])
   })
 
-  it('a lopsided day with many small buckets still fits the chart', () => {
-    const by = { A: 100 }
-    for (const k of 'BCDEFGHI') by[k] = 1
-    const { columns } = activityColumns({ buckets: [], timeline: [{ date: '2026-11-20', total: 108, by_type: by }] })
-    const col = columns[0]
-    const rendered = col.segments.reduce((sum, s) => sum + s.px, 0) + 2 * (col.segments.length - 1)
-    expect(rendered).toBeLessThanOrEqual(CHART_HEIGHT)
-    expect(Math.min(...col.segments.map((s) => s.px))).toBeGreaterThanOrEqual(3)
+  it('the curve never overshoots a spike: no dip under zero, no rise above the peak', () => {
+    const d = monotonePath([[0, 100], [10, 100], [20, 0], [30, 100], [40, 90], [50, 100]])
+    expect(Math.min(...ys(d))).toBe(0)
+    expect(Math.max(...ys(d))).toBe(100)
+    expect(monotonePath([[0, 1]])).toBe('')
   })
 
-  it('the failure mark grows with the number of failures that day', () => {
+  it('failures sit on the same scale as runs, each day centred in its slot', () => {
+    const tl = (total, failed) => ({ date: '2026-11-20', total, failed, by_type: { A: total } })
+    const { columns } = activityColumns({ buckets: [], timeline: [tl(10, 0), tl(10, 5), tl(10, 10), tl(4, 1)] })
+    expect(columns.map((c) => c.xPct)).toEqual([12.5, 37.5, 62.5, 87.5])
+    expect(columns[2].failY).toBe(columns[2].y)
+    expect(columns[1].failY).toBe((22 + CHART_HEIGHT) / 2)
+    expect(columns[0].failY).toBe(CHART_HEIGHT)
+  })
+
+  it('the failure curve is drawn only around failing days, not along a clean baseline', () => {
     const tl = (failed) => ({ date: '2026-11-20', total: 9, failed, by_type: { A: 9 } })
-    const { columns } = activityColumns({ buckets: [], timeline: [tl(0), tl(1), tl(2), tl(5)] })
-    expect(columns.map((c) => c.failPx)).toEqual([0, 3, 4, 8])
-    // one failure in the whole window is the minimum mark, not the tallest
-    expect(activityColumns({ buckets: [], timeline: [tl(1), tl(0)] }).columns[0].failPx).toBe(3)
+    const starts = (d) => (d.match(/M/g) || []).length
+    expect(activityColumns({ buckets: [], timeline: [tl(0), tl(0), tl(0)] }).failLine).toBe('')
+    // two separate failing stretches are two strokes; neighbours join into one
+    expect(starts(activityColumns({ buckets: [], timeline: [tl(1), tl(0), tl(0), tl(2), tl(1), tl(0)] }).failLine)).toBe(2)
+    const one = activityColumns({ buckets: [], timeline: [tl(0), tl(0), tl(2), tl(0), tl(0)] })
+    // it starts one day before and ends one day after the failure, at zero
+    expect(one.failLine.startsWith(`M300 ${CHART_HEIGHT}`)).toBe(true)
+    expect(one.failLine.endsWith(`700 ${CHART_HEIGHT}`)).toBe(true)
   })
 
-  it('a zero-run day has no segments, and a single run is still visible', () => {
-    const { columns } = activityColumns(BUSY)
-    expect(columns[1].segments).toEqual([])
-    expect(columns[2].segments[0].px).toBeGreaterThanOrEqual(3)
+  it('a window with no runs has a flat line on the baseline', () => {
+    const { max, columns, failLine } = activityColumns(EMPTY)
+    expect(max).toBe(0)
+    expect(columns.every((c) => c.y === CHART_HEIGHT)).toBe(true)
+    expect(failLine).toBe('')
+  })
+
+  it('what started the runs is listed largest first with shares of the window', () => {
+    const stats = { by_type: [{ bucket: 'Chat/Tasks', total: 6 }, { bucket: 'Scheduled', total: 28 }, { bucket: 'MCP', total: 0 }, { bucket: 'Channels', total: 6 }] }
+    expect(sourceSplit(stats)).toEqual([
+      { bucket: 'Scheduled', count: 28, pct: 70 },
+      { bucket: 'Chat/Tasks', count: 6, pct: 15 },
+      { bucket: 'Channels', count: 6, pct: 15 },
+    ])
+    expect(sourceSplit(EMPTY)).toEqual([])
+    expect(sourceSplit(null)).toEqual([])
   })
 
   it('draws a bucket the backend order did not list', () => {
@@ -152,15 +180,6 @@ describe('activity chart', () => {
 
   it('an empty window says what will appear', () => {
     expect(activityReadout(EMPTY, null, { never: true }).text).toMatch(/Nothing has run yet/)
-  })
-
-  it('ghost columns keep one silhouette at every window length', () => {
-    for (const n of [7, 14, 30]) {
-      const g = ghostColumns(n)
-      expect(g).toHaveLength(n)
-      expect(g[0]).toBe(18)
-      expect(g[n - 1]).toBe(80)
-    }
   })
 })
 

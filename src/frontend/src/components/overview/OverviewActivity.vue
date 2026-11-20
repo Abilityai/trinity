@@ -2,27 +2,29 @@
 /**
  * Overview › Activity (trinity-enterprise#1317).
  *
- * Runs per day, stacked by what started them, with failures on their own rail
- * under the baseline (never a segment inside the stack — that would redefine
- * every other segment as "succeeded"; the ExecutionsTile rule).
+ * Runs per day as one curve, with the day's failures as a second curve on the
+ * same scale beneath it, so "how busy" and "how much of it failed" are read off
+ * one picture. What started the runs is a part of the WINDOW, not of a day, so
+ * it is one split bar under the chart with a count and share per source (a
+ * day's own split is in the readout on hover).
  *
  * The chart keeps one footprint in every state: a scanline track while there
- * is no data yet, dashed ghost bars when the read succeeded and nothing has
- * run, the failed state when it did not, and the bars. A day with no runs
- * inside an active window is a baseline stub.
+ * is no data yet, a dashed ghost curve when the read succeeded and nothing has
+ * run, the failed state when it did not, and the curves.
  *
- * There is no floating tooltip. The line under the title is reserved and shows
- * the window's summary at rest and one day's breakdown while that day is
- * hovered or reached with the arrow keys — nothing is appended outside the
- * panel, so nothing can stay on screen after the page is left (#3591).
+ * The line under the title is the window's summary and stays put. One day's
+ * breakdown, hovered or reached with the arrow keys, is a label beside the
+ * guide INSIDE the plot — nothing is appended outside the panel, so nothing can
+ * stay on screen after the page is left (#3591), and reading a day moves
+ * nothing else on the page.
  */
-import { computed, ref, watch } from 'vue'
+import { computed, ref, useId, watch } from 'vue'
 import BaseCard from '../base/BaseCard.vue'
 import BaseSegmented from '../base/BaseSegmented.vue'
 import LoadFailed from '../LoadFailed.vue'
 import ScanlineReveal from '../ScanlineReveal.vue'
 import { BUCKET_COLORS } from '@/utils/executionBuckets'
-import { activityColumns, activityReadout, dayLabel, ghostColumns, hasRuns } from '@/utils/overviewShape'
+import { CHART_HEIGHT, DASH, GHOST_ACTIVITY, activityColumns, activityReadout, dayLabel, hasRuns, sourceSplit } from '@/utils/overviewShape'
 
 const props = defineProps({
   /** 'loading' | 'failed' | 'empty' | 'ready' — from `viewState`. */
@@ -47,26 +49,52 @@ const DEFAULT_KEYS = ['Chat/Tasks', 'Scheduled', 'Channels', 'Agent-to-agent']
 const quiet = computed(() => props.state === 'empty' || (props.state === 'ready' && !hasRuns(props.stats)))
 const shaped = computed(() => activityColumns(props.stats))
 const columns = computed(() => shaped.value.columns)
-const ghosts = computed(() => ghostColumns(columns.value.length || Number.parseInt(props.window, 10) || 7))
+const viewBox = `0 0 1000 ${CHART_HEIGHT}`
+const gradientId = useId()
+// A dot per day is legible up to two weeks; beyond that only the hovered day gets one.
+const showDots = computed(() => columns.value.length <= 14)
+const activeColumn = computed(() => (active.value == null ? null : columns.value[active.value] || null))
 
 const active = ref(null)
 watch(() => [props.window, props.stats], () => { active.value = null })
 
+// The line under the title is the WINDOW's summary and does not change while a
+// day is read: the day's own figures sit in a label beside the guide, so
+// moving across the chart moves nothing else on the page.
 const readout = computed(() => {
-  if (props.state === 'loading') return { head: '—', text: '' }
-  if (props.state === 'failed') return { head: '—', text: '' }
-  const column = active.value == null ? null : columns.value[active.value] || null
-  return activityReadout(props.stats, column, { never: props.never })
+  if (props.state === 'loading' || props.state === 'failed') return { head: '—', text: '' }
+  return activityReadout(props.stats, null, { never: props.never })
 })
 
+const dayNote = computed(() => {
+  const col = activeColumn.value
+  if (!col) return null
+  return {
+    label: col.label,
+    runs: col.total ? `${col.total} ${col.total === 1 ? 'run' : 'runs'} · ${col.failed ? `${col.failed} failed` : 'none failed'}` : 'no runs',
+    sources: col.segments.map((s) => `${s.count} ${s.bucket}`).join(' · '),
+    // Opens away from the nearer edge so it never leaves the plot.
+    side: col.xPct > 50 ? 'left' : 'right',
+    xPct: col.xPct,
+  }
+})
+
+const split = computed(() => (quiet.value || props.state !== 'ready' ? [] : sourceSplit(props.stats)))
 const legend = computed(() => {
-  const names = !quiet.value && props.stats?.buckets?.length ? props.stats.buckets : DEFAULT_KEYS
-  return names.map((name) => ({ name, color: colorFor(name) }))
+  if (split.value.length) {
+    return split.value.map((s) => ({ name: s.bucket, color: colorFor(s.bucket), figure: `${s.count} · ${s.pct}%` }))
+  }
+  return DEFAULT_KEYS.map((name) => ({ name, color: colorFor(name), figure: DASH }))
 })
+const splitLabel = computed(() => split.value.map((s) => `${s.bucket} ${s.count}`).join(', '))
 
+// The 7d window (eight UTC days) fits a name each; longer windows get first, middle and Today.
 const axis = computed(() => {
   const days = columns.value
   if (!days.length) return null
+  if (days.length <= 8) {
+    return { each: days.map((d, i) => (i === days.length - 1 ? 'Today' : d.label.split(',')[0])) }
+  }
   return { first: dayLabel(days[0].date), mid: dayLabel(days[Math.floor(days.length / 2)].date) }
 })
 
@@ -108,7 +136,6 @@ function onKeydown(event) {
     <!-- The reserved readout: one line, whatever the state. -->
     <p
       class="mt-3 flex min-h-[32px] flex-wrap items-baseline gap-x-2 text-[12.5px] text-gray-500 dark:text-gray-400"
-      aria-live="polite"
       data-testid="overview-activity-readout"
     >
       <span class="text-2xl font-bold leading-none tabular-nums text-gray-900 dark:text-gray-100">{{ readout.head }}</span>
@@ -133,21 +160,18 @@ function onKeydown(event) {
           <!-- Nothing has run: the outline of the chart to come, plainly not data. -->
           <div
             v-if="quiet"
-            class="flex h-[146px] items-end gap-[3px] border-b border-gray-200 dark:border-gray-700"
+            class="relative h-[146px] border-b border-gray-200 dark:border-gray-700"
             role="img"
             :aria-label="chartLabel"
             data-testid="overview-activity-ghost"
           >
-            <span v-for="(h, i) in ghosts" :key="i" class="flex h-full min-w-0 flex-1 flex-col justify-end">
-              <i
-                class="mx-auto block w-full max-w-[36px] rounded-t border border-b-0 border-dashed border-gray-300 dark:border-gray-600"
-                :style="{ height: h + 'px' }"
-              ></i>
-            </span>
+            <svg class="absolute inset-0 h-full w-full text-gray-300 dark:text-gray-600" :viewBox="viewBox" preserveAspectRatio="none" aria-hidden="true">
+              <path :d="GHOST_ACTIVITY" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="5 5" vector-effect="non-scaling-stroke" />
+            </svg>
           </div>
           <div
             v-else
-            class="rounded outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40"
+            class="relative h-[146px] rounded border-b border-gray-200 outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:border-gray-700"
             tabindex="0"
             role="img"
             :aria-label="chartLabel"
@@ -156,39 +180,70 @@ function onKeydown(event) {
             @blur="active = null"
             @mouseleave="active = null"
           >
-            <div class="relative flex h-[146px] items-end gap-[3px] border-b border-gray-200 dark:border-gray-700">
-              <span class="absolute left-0 top-0 text-[11px] tabular-nums text-gray-500 dark:text-gray-400">{{ shaped.max }} a day</span>
+            <span class="absolute left-0 top-0 text-[11px] tabular-nums text-gray-500 dark:text-gray-400">{{ shaped.max }} a day</span>
+            <svg
+              class="absolute inset-0 h-full w-full text-action-primary-500 dark:text-action-primary-400"
+              :viewBox="viewBox"
+              preserveAspectRatio="none"
+              aria-hidden="true"
+            >
+              <defs>
+                <linearGradient :id="gradientId" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stop-color="currentColor" stop-opacity="0.26" />
+                  <stop offset="1" stop-color="currentColor" stop-opacity="0" />
+                </linearGradient>
+              </defs>
+              <path :d="shaped.area" :fill="`url(#${gradientId})`" />
+              <path :d="shaped.line" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+              <g class="text-status-danger-500">
+                <path :d="shaped.failArea" fill="currentColor" fill-opacity="0.14" />
+                <path :d="shaped.failLine" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" vector-effect="non-scaling-stroke" />
+              </g>
+            </svg>
+            <i
+              v-if="activeColumn"
+              class="pointer-events-none absolute inset-y-0 w-px bg-gray-300 dark:bg-gray-600"
+              :style="{ left: activeColumn.xPct + '%' }"
+            ></i>
+            <template v-for="(col, i) in columns" :key="col.date">
+              <i
+                v-if="showDots ? col.total : active === i"
+                class="pointer-events-none absolute h-[7px] w-[7px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-action-primary-500 ring-2 ring-white dark:bg-action-primary-400 dark:ring-gray-800"
+                :style="{ left: col.xPct + '%', top: col.y + 'px' }"
+                data-testid="overview-activity-dot"
+              ></i>
+              <i
+                v-if="col.failed"
+                class="pointer-events-none absolute h-[7px] w-[7px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-status-danger-500 ring-2 ring-white dark:ring-gray-800"
+                :style="{ left: col.xPct + '%', top: col.failY + 'px' }"
+                data-testid="overview-activity-fail"
+              ></i>
+            </template>
+            <div
+              class="pointer-events-none absolute top-0 z-10"
+              :style="dayNote ? { left: dayNote.xPct + '%' } : { left: 0 }"
+              aria-live="polite"
+            >
+              <div
+                v-if="dayNote"
+                class="absolute top-0 whitespace-nowrap rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-[12.5px] shadow-sm dark:border-gray-700 dark:bg-gray-800"
+                :class="dayNote.side === 'left' ? 'right-2' : 'left-2'"
+                data-testid="overview-activity-day"
+              >
+                <p class="font-medium text-gray-900 dark:text-gray-100">{{ dayNote.label }}</p>
+                <p class="tabular-nums text-gray-600 dark:text-gray-300">{{ dayNote.runs }}</p>
+                <p v-if="dayNote.sources" class="tabular-nums text-gray-500 dark:text-gray-400">{{ dayNote.sources }}</p>
+              </div>
+            </div>
+            <!-- One hit slot per day, the full height of the plot. -->
+            <div class="absolute inset-0 flex">
               <span
                 v-for="(col, i) in columns"
                 :key="col.date"
-                class="flex h-full min-w-0 flex-1 flex-col justify-end transition-opacity motion-reduce:transition-none"
-                :class="active != null && active !== i ? 'opacity-40' : 'opacity-100'"
+                class="h-full min-w-0 flex-1"
                 data-testid="overview-activity-col"
                 @mouseenter="active = i"
-              >
-                <i v-if="!col.total" class="mx-auto block h-[2px] w-full max-w-[36px] rounded-sm bg-gray-200 dark:bg-gray-700" data-testid="overview-activity-stub"></i>
-                <span v-else class="mx-auto flex w-full max-w-[36px] flex-col-reverse gap-[2px]">
-                  <i
-                    v-for="seg in col.segments"
-                    :key="seg.bucket"
-                    class="block rounded-sm"
-                    :style="{ height: seg.px + 'px', backgroundColor: colorFor(seg.bucket) }"
-                  ></i>
-                </span>
-              </span>
-            </div>
-            <!-- Failure rail: its own row under the baseline, one slot per day,
-                 hanging down from it. The mark is taller the more runs failed
-                 that day, so "5 failed" over three marks is readable at a glance. -->
-            <div class="flex h-[11px] items-start gap-[3px] pt-[3px]" aria-hidden="true">
-              <span v-for="col in columns" :key="col.date" class="flex min-w-0 flex-1 justify-center">
-                <i
-                  v-if="col.failed"
-                  class="block w-full max-w-[36px] rounded-sm bg-status-danger-500"
-                  :style="{ height: col.failPx + 'px' }"
-                  data-testid="overview-activity-fail"
-                ></i>
-              </span>
+              ></span>
             </div>
           </div>
         </div>
@@ -197,21 +252,43 @@ function onKeydown(event) {
 
     <div class="mt-1 flex h-4 justify-between text-[11px] tabular-nums text-gray-500 dark:text-gray-400">
       <template v-if="axis && !quiet && state === 'ready'">
-        <span>{{ axis.first }}</span><span>{{ axis.mid }}</span><span>Today</span>
+        <template v-if="axis.each">
+          <span v-for="(name, i) in axis.each" :key="i" class="min-w-0 flex-1 text-center">{{ name }}</span>
+        </template>
+        <template v-else>
+          <span>{{ axis.first }}</span><span>{{ axis.mid }}</span><span>Today</span>
+        </template>
       </template>
       <template v-else-if="state !== 'failed'">
         <span>{{ window }} ago</span><span>Today</span>
       </template>
     </div>
 
-    <ul class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[12.5px] text-gray-600 dark:text-gray-300">
-      <li v-for="k in legend" :key="k.name" class="inline-flex items-center gap-1.5 whitespace-nowrap">
-        <i class="inline-block h-2 w-2 rounded-sm" :style="{ backgroundColor: k.color }"></i>{{ k.name }}
-      </li>
-      <li class="inline-flex items-center gap-1.5 whitespace-nowrap">
-        <i class="inline-block h-1 w-2 rounded-sm bg-status-danger-500"></i>Failed that day, taller for more
-      </li>
-    </ul>
+    <!-- What started the window's runs: one bar, the same footprint with or without data. -->
+    <div class="mt-4" data-testid="overview-activity-sources">
+      <div class="flex items-center justify-between gap-3 text-[11px] text-gray-500 dark:text-gray-400">
+        <span>What started them</span>
+        <span class="flex items-center gap-3">
+          <span class="inline-flex items-center gap-1.5"><i class="inline-block h-0.5 w-3 rounded bg-action-primary-500 dark:bg-action-primary-400"></i>Runs</span>
+          <span class="inline-flex items-center gap-1.5"><i class="inline-block h-0.5 w-3 rounded bg-status-danger-500"></i>Failed</span>
+        </span>
+      </div>
+      <div v-if="split.length" class="mt-1.5 flex h-2 gap-[2px]" role="img" :aria-label="splitLabel" data-testid="overview-activity-split">
+        <i
+          v-for="s in split"
+          :key="s.bucket"
+          class="block h-2 min-w-[3px] basis-0 rounded-sm"
+          :style="{ flexGrow: s.count, backgroundColor: colorFor(s.bucket) }"
+        ></i>
+      </div>
+      <div v-else class="mt-1.5 h-2 rounded-sm border border-dashed border-gray-300 dark:border-gray-600" aria-hidden="true"></div>
+      <ul class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[12.5px] text-gray-600 dark:text-gray-300">
+        <li v-for="k in legend" :key="k.name" class="inline-flex items-center gap-1.5 whitespace-nowrap">
+          <i class="inline-block h-2 w-2 rounded-sm" :style="{ backgroundColor: k.color }"></i>{{ k.name }}
+          <span class="tabular-nums text-gray-500 dark:text-gray-400">{{ k.figure }}</span>
+        </li>
+      </ul>
+    </div>
 
     <p v-if="stale" class="mt-2 text-[12.5px] text-status-warning-700 dark:text-status-warning-400" data-testid="overview-activity-stale">
       Couldn't refresh. Showing the last activity that loaded.
