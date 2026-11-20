@@ -1635,6 +1635,10 @@ class DatabaseManager:
     def get_execution_timeout(self, agent_name: str) -> int:
         return self._agent_ops.get_execution_timeout(agent_name)
 
+    def get_execution_timeouts(self, agent_names) -> dict:
+        # #4672: the batch form of `get_execution_timeout`.
+        return self._agent_ops.get_execution_timeouts(agent_names)
+
     def get_all_execution_timeouts(self) -> dict:
         return self._agent_ops.get_all_execution_timeouts()
 
@@ -2111,6 +2115,10 @@ class DatabaseManager:
 
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
+
+    def get_executions_by_ids(self, execution_ids):
+        # #4672: the batch form of `get_execution`.
+        return self._schedule_ops.get_executions_by_ids(execution_ids)
 
     def get_turn_attribution(self, execution_id: str):
         """One execution's rating columns and status (trinity-enterprise#1225)."""
@@ -4886,6 +4894,10 @@ class DatabaseManager:
 
     def list_loop_runs(self, loop_id: str):
         return self._loop_ops.list_runs(loop_id)
+
+    def list_loop_runs_for_loops(self, loop_ids):
+        # #4672: the batch form of `list_loop_runs`.
+        return self._loop_ops.list_runs_for_loops(loop_ids)
 
     # ---- Terminal-driven advance (#2523) -----------------------------------
 
