@@ -112,11 +112,13 @@ class EventLoopProbe:
     def __init__(self, *, interval_s: float = PROBE_INTERVAL_S,
                  threshold_s: float = STALL_THRESHOLD_S,
                  stuck_report_s: float = STUCK_REPORT_S,
-                 clock=time.monotonic) -> None:
+                 clock=time.monotonic, read_stack=None) -> None:
         self.interval_s = interval_s
         self.threshold_s = threshold_s
         self.stuck_report_s = stuck_report_s
         self._clock = clock
+        # How the loop thread's stack is read; a test hands in its own.
+        self._read_stack = read_stack or self._loop_stack
         self._lock = threading.Lock()
         self._task: Optional[asyncio.Task] = None
         self._thread: Optional[threading.Thread] = None
@@ -195,6 +197,9 @@ class EventLoopProbe:
 
     # --------------------------------------------------------- the watchdog
 
+    def _loop_stack(self) -> List[str]:
+        return format_stack(sys._current_frames().get(self._loop_thread_id))
+
     def _watch(self) -> None:
         while not self._stop.wait(self.interval_s):
             try:
@@ -216,7 +221,7 @@ class EventLoopProbe:
             beat_seen = self._last_beat
         if not (capture or report_stuck):
             return
-        stack = format_stack(sys._current_frames().get(self._loop_thread_id))
+        stack = self._read_stack()
         with self._lock:
             # Only while the SAME silence is still going: if the loop woke
             # between the look and the snapshot, these frames are whatever ran

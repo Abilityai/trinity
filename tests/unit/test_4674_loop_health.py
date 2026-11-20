@@ -123,12 +123,10 @@ class TestCapture:
         probe.check()
         assert probe._captured is None
 
-    def test_a_silent_loop_is_captured_once(self, monkeypatch):
+    def test_a_silent_loop_is_captured_once(self):
         clock = _Clock()
-        probe = _probe(clock)
         calls = []
-        monkeypatch.setattr(loop_health, "format_stack",
-                            lambda frame, limit=12: calls.append(1) or ["services/x.py:1 in culprit"])
+        probe = _probe(clock, read_stack=lambda: calls.append(1) or ["services/x.py:1 in culprit"])
         clock.advance(0.05 + 0.3)
         probe.check()
         clock.advance(0.3)
@@ -136,10 +134,9 @@ class TestCapture:
         assert probe._captured == ["services/x.py:1 in culprit"]
         assert len(calls) == 1, "the stack is the one at the threshold, not re-taken per look"
 
-    def test_the_report_carries_the_captured_stack_and_clears_it(self, caplog, monkeypatch):
+    def test_the_report_carries_the_captured_stack_and_clears_it(self, caplog):
         clock = _Clock()
-        probe = _probe(clock)
-        monkeypatch.setattr(loop_health, "format_stack", lambda frame, limit=12: [
+        probe = _probe(clock, read_stack=lambda: [
             "site-packages/sqlalchemy/engine/base.py:1969 in _exec_single_context",
             "db/users.py:132 in get_user_by_email",
             "dependencies.py:410 in get_current_user",
@@ -155,18 +152,16 @@ class TestCapture:
         assert "dependencies.py:410 in get_current_user" in record.getMessage()
         assert probe._captured is None
 
-    def test_a_capture_taken_after_the_loop_woke_is_dropped(self, monkeypatch):
+    def test_a_capture_taken_after_the_loop_woke_is_dropped(self):
         """The watchdog looks, the loop wakes, THEN the frames are read: they
         are whatever ran next. Keeping them would blame them for the NEXT stall."""
         clock = _Clock()
-        probe = _probe(clock)
-
-        def frames_read_late(frame, limit=12):
+        def frames_read_late():
             clock.advance(0.01)
             probe.record_beat(0.36)          # the loop woke while we were reading
             return ["routers/innocent.py:1 in bystander"]
 
-        monkeypatch.setattr(loop_health, "format_stack", frames_read_late)
+        probe = _probe(clock, read_stack=frames_read_late)
         clock.advance(0.05 + 0.3)
         probe.check()
         assert probe._captured is None
@@ -180,11 +175,9 @@ class TestCapture:
         (record,) = _messages(caplog, "event_loop_blocked")
         assert "unknown" in record.blocked_at
 
-    def test_a_stall_that_does_not_end_is_reported_while_it_lasts(self, caplog, monkeypatch):
+    def test_a_stall_that_does_not_end_is_reported_while_it_lasts(self, caplog):
         clock = _Clock()
-        probe = _probe(clock)
-        monkeypatch.setattr(loop_health, "format_stack",
-                            lambda frame, limit=12: ["services/x.py:9 in forever"])
+        probe = _probe(clock, read_stack=lambda: ["services/x.py:9 in forever"])
         with caplog.at_level(logging.WARNING, logger="services.loop_health"):
             clock.advance(0.05 + 1.0)
             probe.check()
