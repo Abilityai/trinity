@@ -70,9 +70,16 @@ class FakeDB:
     def set_setting(self, key, value):
         self.settings[key] = value
 
-    def update_user_password(self, username, hashed):
+    fail_store = False
+
+    def update_user_password(self, username, hashed, email=None):
+        if self.fail_store:
+            raise RuntimeError("database is locked")
         self.password_writes.append((username, hashed))
-        self.users.setdefault(username, {"username": username})["password"] = hashed
+        row = self.users.setdefault(username, {"username": username})
+        row["password"] = hashed
+        if email is not None:
+            row["email"] = email
         return True
 
     def update_user(self, username, updates):
@@ -372,6 +379,119 @@ def test_a_form_1_crash_restore_never_overwrites_a_newer_claim_either(env, monke
     with pytest.raises(RuntimeError):
         _post(claim_code="i-0abc1234def567890", email="")
     assert e.claim_file.read_text() == f"email-bound:{OTHER_SECRET}\n"
+
+
+def _taken_copies(e):
+    return [n for n in e.claim_files() if n != "setup-claim"]
+
+
+def _crash_after_take(monkeypatch, setup):
+    def _boom(p):
+        raise RuntimeError("bcrypt backend missing")
+    monkeypatch.setattr(setup, "hash_password", _boom)
+
+
+def test_a_restore_whose_write_fails_leaves_no_file_and_keeps_the_taken_copy(env, monkeypatch):
+    e = env()
+    setup = _setup()
+    _crash_after_take(monkeypatch, setup)
+
+    def _write_fails(fd, data):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(setup.os, "write", _write_fails)
+    with pytest.raises(RuntimeError):
+        _post()
+    assert not e.claim_file.exists(), "a half-written claim must not be left at the path"
+    copies = _taken_copies(e)
+    assert len(copies) == 1, "the taken copy stays on disk rather than vanish"
+    assert (e.claim_file.parent / copies[0]).read_text() == f"email-bound:{SECRET}\n"
+
+
+def test_a_restore_write_failure_never_removes_a_claim_renamed_on_meanwhile(env, monkeypatch):
+    e = env()
+    setup = _setup()
+    _crash_after_take(monkeypatch, setup)
+
+    def _recycle_then_fail(fd, data):
+        _recycle(e.claim_file, OTHER_SECRET)
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(setup.os, "write", _recycle_then_fail)
+    with pytest.raises(RuntimeError):
+        _post()
+    assert e.claim_file.read_text() == f"email-bound:{OTHER_SECRET}\n", "the newer claim is not ours to remove"
+
+
+def test_a_restore_completes_a_short_write(env, monkeypatch):
+    e = env()
+    setup = _setup()
+    _crash_after_take(monkeypatch, setup)
+    real_write = setup.os.write
+    monkeypatch.setattr(setup.os, "write", lambda fd, data: real_write(fd, bytes(data[:5])))
+    with pytest.raises(RuntimeError):
+        _post()
+    assert e.claim_file.read_text() == f"email-bound:{SECRET}\n", "every byte is restored"
+    assert e.claim_files() == ["setup-claim"]
+
+
+def test_a_restore_write_that_makes_no_progress_is_a_failure(env, monkeypatch):
+    e = env()
+    setup = _setup()
+    _crash_after_take(monkeypatch, setup)
+    monkeypatch.setattr(setup.os, "write", lambda fd, data: 0)
+    with pytest.raises(RuntimeError):
+        _post()
+    assert not e.claim_file.exists(), "an empty claim must not be kept"
+    assert len(_taken_copies(e)) == 1
+
+
+# --------------------------------------------------------------------------
+# the bound email is stored with the password, or setup fails cleanly (W5)
+# --------------------------------------------------------------------------
+
+def test_email_bound_store_failure_fails_setup_cleanly_and_can_be_retried(env):
+    e = env()
+    e.db.fail_store = True
+    with pytest.raises(HTTPException) as ei:
+        _post()
+    assert ei.value.status_code == 503
+    assert ei.value.detail != MISMATCH and "try" in ei.value.detail.lower()
+    assert e.db.password_writes == [] and "admin" not in e.db.users, "no admin, no password"
+    assert e.db.settings["setup_completed"] == "false"
+    assert e.failures == [], "a store failure is not a failed claim attempt"
+    assert e.claim_file.read_text() == f"email-bound:{SECRET}\n" and e.claim_files() == ["setup-claim"]
+
+    e.db.fail_store = False
+    out = _post()
+    assert out["success"] is True and out["email_registered"] is True
+    assert e.db.users["admin"]["email"] == EMAIL
+
+
+def test_email_bound_password_and_email_are_one_write(env, monkeypatch):
+    e = env()
+    setup = _setup()
+
+    def _profile_write_fails(username, updates):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(e.db, "update_user", _profile_write_fails)
+    out = _post()
+    assert out["email_registered"] is True
+    assert e.db.users["admin"] == {"username": "admin", "password": "hashed:" + PW, "email": EMAIL}
+
+
+def test_instance_id_form_still_never_blocks_setup_on_the_email_write(env, monkeypatch):
+    e = env(claim="i-0abc1234def567890")
+
+    def _profile_write_fails(username, updates):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(e.db, "update_user", _profile_write_fails)
+    out = _post(claim_code="i-0abc1234def567890", email=EMAIL)
+    assert out["success"] is True and out["email_registered"] is False
+    assert e.db.settings["setup_completed"] == "true"
+    assert "email" not in e.db.users["admin"]
 
 
 # --------------------------------------------------------------------------

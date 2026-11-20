@@ -194,13 +194,26 @@ def _restore_claim(taken: Path) -> None:
             except OSError:
                 pass  # not permitted to change owner: the content still matters most
             os.fchmod(fd, stat.S_IMODE(st.st_mode))
-            os.write(fd, data)
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("short write")
+                view = view[written:]
             os.fsync(fd)
         except OSError as e:
             # Drop the partial file; the taken copy stays on disk rather than vanish.
+            # Only while the path is still the file this call created: a claim
+            # renamed onto it meanwhile is newer and not ours to remove.
             logger.warning("Could not restore the setup claim file: %s", type(e).__name__)
-            os.close(fd)
-            _SETUP_CLAIM_PATH.unlink(missing_ok=True)
+            try:
+                mine, now = os.fstat(fd), os.stat(_SETUP_CLAIM_PATH)
+                if (mine.st_ino, mine.st_dev) == (now.st_ino, now.st_dev):
+                    _SETUP_CLAIM_PATH.unlink(missing_ok=True)
+            except OSError:
+                pass
+            finally:
+                os.close(fd)
             return
         os.close(fd)
     try:
@@ -389,6 +402,12 @@ async def set_admin_password(
     # password or email leaves it in place for the owner's retry. If the writes
     # below raise, it is put back for the same reason.
     taken_claim = _take_claim(data.claim_code, data.email) if claim_mode else None
+    # trinity-enterprise#1312: on the email-bound form the email is the admin's
+    # only sign-in identity, so it is stored in the same write as the password
+    # and a failure there fails setup with nothing written.
+    email_bound = taken_claim is not None and _read_claim_file(taken_claim).strip().startswith(
+        _EMAIL_BOUND_PREFIX
+    )
     try:
         # Hash the password and update admin user.
         hashed_password = hash_password(data.password)
@@ -398,7 +417,19 @@ async def set_admin_password(
         # honours ADMIN_USERNAME, so on an `ADMIN_USERNAME=root` install the literal
         # made this call miss the real admin and INSERT a *second* role='admin'
         # account (update_user_password upserts) instead of updating the first.
-        db.update_user_password(admin_username(), hashed_password)
+        if not email_bound:
+            db.update_user_password(admin_username(), hashed_password)
+        else:
+            try:
+                db.update_user_password(admin_username(), hashed_password, email=normalized_email)
+            except Exception as e:
+                # One transaction, so nothing was written: a plain retryable
+                # error, not the claim refusal, and no failed attempt recorded.
+                logger.warning("Setup could not store the admin account: %s", type(e).__name__)
+                raise HTTPException(
+                    status_code=503,
+                    detail="Setup could not be saved, and nothing was changed. Please try again.",
+                ) from None
     except BaseException:
         if taken_claim is not None:
             _restore_claim(taken_claim)
@@ -409,8 +440,8 @@ async def set_admin_password(
     # configured (no Resend key), so we cannot deliver a code here. We simply
     # bind the email to the admin account — the operator can then sign in with
     # email + password instead of the fixed 'admin' username.
-    email_registered = False
-    if normalized_email:
+    email_registered = email_bound
+    if normalized_email and not email_bound:
         try:
             db.update_user(admin_username(), {"email": normalized_email})
             email_registered = True
