@@ -5887,6 +5887,9 @@ class FirstRunState(BaseModel):
     seeded_agents: List[str] = []
     own_agent_count: int = 0
     demo_agent: Optional[str] = None
+    # A short opaque mark of this install: the browser remembers "setup closed"
+    # against it, so a fresh install at the same address offers setup again.
+    install: Optional[str] = None
 
 
 # =============================================================================

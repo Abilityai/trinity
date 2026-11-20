@@ -200,17 +200,26 @@ export function litNodes(states = {}) {
 
 // --- per-browser state, every read/write guarded (private mode, blocked storage)
 
-export function readFirstRunClosed() {
+// "Closed" is remembered against the install it was closed on (the server's
+// short `install` mark), so a fresh install at the same address offers setup
+// again. A bare '1' was written before installs were told apart (and is what
+// is written while an install has no mark yet); it still counts as closed, so
+// an upgrade does not reopen setup on everyone. A mark kept for some OTHER
+// install never counts, including when this one cannot name itself.
+export function readFirstRunClosed(install) {
   try {
-    return localStorage.getItem(FIRST_RUN_CLOSED_KEY) === '1'
+    const kept = localStorage.getItem(FIRST_RUN_CLOSED_KEY)
+    if (!kept) return false
+    if (kept === '1') return true
+    return Boolean(install) && kept === install
   } catch {
     return false
   }
 }
 
-export function persistFirstRunClosed() {
+export function persistFirstRunClosed(install) {
   try {
-    localStorage.setItem(FIRST_RUN_CLOSED_KEY, '1')
+    localStorage.setItem(FIRST_RUN_CLOSED_KEY, install || '1')
     return true
   } catch (e) {
     console.warn('[firstRun] could not persist close:', e?.message || e)
