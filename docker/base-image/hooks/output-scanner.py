@@ -28,7 +28,8 @@ For `Bash`:
   The Bash schema wants an object there: a string rewrite is rejected and the
   whole result becomes a `tool_use_error`, while a Bash-shaped object is
   accepted. So a string Bash response is rewritten as `{stdout, stderr,
-  interrupted}` (`_as_bash`); observed live on 2.1.281, see CLI_FACTS_TO_REAUDIT.
+  interrupted}` (`_as_bash`); observed live on 2.1.281, and the same code path
+  was read in 2.1.322 (not re-run live); see CLI_FACTS_TO_REAUDIT.
   An MCP error result does the same with a string; MCP output has no schema
   check, so that string is rewritten as a string.
 
@@ -61,12 +62,13 @@ from lib import load_config, log_event, run_hook  # noqa: E402
 
 # The CLI build these facts were read from. A test fails when the image pins
 # another one, until each fact below is re-checked against it.
-OUTPUT_SCANNER_CLI_VERIFIED = "2.1.281"
+OUTPUT_SCANNER_CLI_VERIFIED = "2.1.322"
 CLI_FACTS_TO_REAUDIT = (
     "PostToolUse hookSpecificOutput.updatedToolOutput replaces what the model sees for a built-in tool",
     "a rewrite that fails the tool's output schema is dropped and the original used (outputSchema.safeParse)",
     "the Bash output schema: stdout, stderr, interrupted required; isImage, structuredContent, "
-    "persistedOutputPath, persistedOutputSize and the hint strings optional",
+    "persistedOutputPath, persistedOutputSize, the hint strings and the background, tail and note fields "
+    "(backgroundOutputPath, stdoutHoldsOutputEnd, tailInputPath, memoryLimitNote, ...) optional",
     "a non-empty structuredContent is shown to the model instead of stdout",
     "output over the inline limit is written to persistedOutputPath (a tool-results dir) before the hooks run, "
     "and the model sees a preview of stdout plus that path",
@@ -80,16 +82,22 @@ CLI_FACTS_TO_REAUDIT = (
     "a matcher of only letters, digits, _ and | is an exact list of tool names; any other matcher is an "
     "UNANCHORED JavaScript regex, so `Read` as a regex would also match NotebookRead and ReadMcpResourceTool",
     "the Read output schema: a union on `type` (text: file.content; image and pdf: file.base64; notebook: "
-    "file.cells with outputs[].image.image_data; parts; file_unchanged); the model sees file.content with "
+    "file.cells with outputs[].image.image_data; parts); the model sees file.content with "
     "line numbers the CLI adds after the hooks",
     "the WebFetch output schema: bytes, code, codeText, result, durationMs, url required; the model sees result",
-    "the Grep output schema: mode, numFiles, filenames required, content optional; the model sees content in "
+    "the Grep output schema: numFiles, filenames required, mode and content optional; the model sees content in "
     "content mode and filenames otherwise",
     "an MCP tool's tool_response is a list of Anthropic content blocks (an image is {type: image, source: "
     "{type: base64, data}}) or a string, and a rewrite of it is not checked against any schema",
     "an MCP result with isError fires PostToolUseFailure AND PostToolUse, whose tool_response is the error "
     "string prefixed `Error: `; a string rewrite is accepted",
     "background Bash output is written to a tasks/*.output file the model is told to Read",
+    "output piped into `tail` is also saved whole to a tailInputPath file the model is told about; reading it "
+    "goes through a scanned Read or Bash",
+    "a hook whose stdout has not closed 500 ms after it exits (10 s at most) has every rewrite refused, so the "
+    "original output goes through: the scanner must flush and start no child that keeps stdout open",
+    "PostToolUse also runs for a tool call that finishes after an interrupt, with 10 s to answer; a hook that "
+    "times out passes the original through",
 )
 
 PLACEHOLDER = "[REDACTED:{name}]"
