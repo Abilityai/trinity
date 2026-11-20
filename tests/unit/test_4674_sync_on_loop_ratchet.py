@@ -137,21 +137,29 @@ class TestCompare:
         assert guard.compare({}, {"a.py": 3})[0].startswith("STALE a.py")
 
 
+@pytest.fixture(scope="module")
+def live_scan():
+    """One parse of the backend for the whole module."""
+    return guard.scan_tree()
+
+
 class TestTheLiveTree:
-    def test_the_known_offenders_are_found(self):
-        """trinity-dev#82's proof points, read from this checkout."""
-        scan = guard.scan_tree()
-        heartbeat = scan["src/backend/services/heartbeat_service.py"]
-        assert ("run_heartbeat_watch_loop", "via:docker") in {(fn, kind) for _, fn, kind in heartbeat}
-        assert scan["src/backend/dependencies.py"], "the auth dependency path"
+    def test_the_scan_finds_the_class_it_exists_for(self, live_scan):
+        """Not a pin on any one function — those are what #4674 fixes, and a
+        test naming them would fail the day they are fixed. Only that the scan
+        of this checkout sees both families, and reaches some of them through
+        a module's own sync function."""
+        kinds = {kind for found in live_scan.values() for _, _, kind in found}
+        assert {"db", "docker"} <= kinds
+        assert any(kind.startswith("via:") for kind in kinds)
 
-    def test_the_private_submodule_and_migrations_are_out_of_scope(self):
-        assert not any("/enterprise/" in p or "/migrations/" in p for p in guard.scan_tree())
+    def test_the_private_submodule_and_migrations_are_out_of_scope(self, live_scan):
+        assert not any("/enterprise/" in p or "/migrations/" in p for p in live_scan)
 
-    def test_the_ratchet(self):
+    def test_the_ratchet(self, live_scan):
         """THE guard. A failure here means a diff added a blocking call to an
         `async def` (hop to a thread, or make the handler a plain `def`), or
         removed some without regenerating the baseline:
             python scripts/ci/check_sync_on_loop.py --write"""
-        problems = guard.compare(guard.counts(guard.scan_tree()), guard.load_baseline())
+        problems = guard.compare(guard.counts(live_scan), guard.load_baseline())
         assert problems == [], "\n" + "\n".join(problems)
