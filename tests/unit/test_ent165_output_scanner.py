@@ -135,6 +135,17 @@ def test_a_key_on_stderr_is_redacted(tmp_path):
     assert rewritten["stderr"] == "warning: token [REDACTED:github] expires soon"
 
 
+def test_a_github_app_installation_token_is_redacted_whole(tmp_path):
+    """`ghs_<app id>_<JWT>` (trinity-enterprise#1277) carries `_`, `.` and `-`,
+    which the older `ghs_` shape does not match, so the whole token must go,
+    not only a prefix with the signature left in clear."""
+    token = "ghs_12345678_eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiIxMjMiLCJleHAiOjF9." + "c2ln-bmF0_dXJl" * 8
+    payload = _bash(stdout=f"remote: https://x-access-token:{token}@github.com/acme/repo.git\n")
+    rewritten = _rewrite(_scan(tmp_path, payload))
+    assert rewritten["stdout"] == "remote: https://x-access-token:[REDACTED:github]@github.com/acme/repo.git\n"
+    assert [e["patterns"] for e in _events(tmp_path, "credential_redacted")] == [["github"]]
+
+
 def test_every_string_leaf_is_scanned_including_lists(tmp_path):
     """The pinned Bash schema carries `structuredContent`, a list of blocks the
     model is shown INSTEAD of stdout when it is non-empty."""

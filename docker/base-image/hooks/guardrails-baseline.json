@@ -84,6 +84,7 @@
     {"name": "github", "source": "ghp_[a-zA-Z0-9]{36,}", "pattern": "ghp_[a-zA-Z0-9]{36,}"},
     {"name": "github", "source": "github_pat_[a-zA-Z0-9_]{22,}", "pattern": "github_pat_[a-zA-Z0-9_]{22,}"},
     {"name": "github", "source": "gho_[a-zA-Z0-9]{36,}", "pattern": "gho_[a-zA-Z0-9]{36,}"},
+    {"name": "github", "source": "ghs_\\d{1,20}_[A-Za-z0-9_-]{1,512}\\.[A-Za-z0-9_-]{1,2048}\\.[A-Za-z0-9_-]{1,512}", "pattern": "ghs_\\d{1,20}_[A-Za-z0-9_-]{1,512}\\.[A-Za-z0-9_-]{1,2048}\\.[A-Za-z0-9_-]{1,512}"},
     {"name": "github", "source": "ghs_[a-zA-Z0-9]{36,}", "pattern": "ghs_[a-zA-Z0-9]{36,}"},
     {"name": "github", "source": "ghr_[a-zA-Z0-9]{36,}", "pattern": "ghr_[a-zA-Z0-9]{36,}"},
     {"name": "slack", "source": "xoxb-[a-zA-Z0-9\\-]+", "pattern": "xoxb-[a-zA-Z0-9\\-]{20,}", "tightening": "length floor 20"},
