@@ -4,9 +4,9 @@
  * (`get_portal_principal`) and applies their Workspace permissions, so the
  * person acts as themself: no agent, no act-as header, no turn.
  *
- * The read half mirrors the agent door's methods (`TrinityClient` project
- * methods) by name and return shape, so a read tool calls the same method on
- * whichever door the key's scope picks.
+ * The methods mirror the agent door's (`TrinityClient` project methods) by
+ * name and return shape, so a tool calls the same method on whichever door the
+ * key's scope picks. Write bodies are the same as the agent door's.
  */
 import type { TrinityClient } from "../client.js";
 
@@ -18,6 +18,10 @@ export class PersonProjectClient {
 
   private get<T>(path: string): Promise<T> {
     return this.client.request<T>("GET", path);
+  }
+
+  private send<T>(method: string, path: string, body: unknown): Promise<T> {
+    return this.client.request<T>(method, path, body);
   }
 
   private path(projectId: string, tail = ""): string {
@@ -61,5 +65,41 @@ export class PersonProjectClient {
       if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
     }
     return this.get(this.path(projectId, qs.toString() ? `/executions?${qs.toString()}` : "/executions"));
+  }
+
+  // --- writes (CP-P3) ---------------------------------------------------------
+
+  async createProjectTask(projectId: string, body: Record<string, unknown>): Promise<Row> {
+    return this.send("POST", this.path(projectId, "/tasks"), body);
+  }
+
+  async updateProjectTask(projectId: string, taskId: string, body: Record<string, unknown>): Promise<Row> {
+    return this.send("PATCH", this.path(projectId, `/tasks/${encodeURIComponent(taskId)}`), body);
+  }
+
+  async addProjectTaskNote(projectId: string, taskId: string, body: string): Promise<Row> {
+    return this.send("POST", this.path(projectId, `/tasks/${encodeURIComponent(taskId)}/log`), { body });
+  }
+
+  async addProjectLogEntry(projectId: string, body: Record<string, unknown>): Promise<Row> {
+    return this.send("POST", this.path(projectId, "/log"), body);
+  }
+
+  async linkToProject(projectId: string, body: Record<string, unknown>): Promise<Row> {
+    return this.send("POST", this.path(projectId, "/items"), body);
+  }
+
+  async setProjectHealth(projectId: string, body: Record<string, unknown>): Promise<Row> {
+    return this.send("POST", this.path(projectId, "/health"), body);
+  }
+
+  /** The person becomes the project's creator and first member. */
+  async createProject(body: Record<string, unknown>): Promise<Row> {
+    return this.send("POST", BASE, body);
+  }
+
+  /** One of an agent's folder projects, imported by a person who can use that agent. */
+  async importProject(agentName: string, path: string): Promise<Row> {
+    return this.send("POST", `${BASE}/import`, { agent_name: agentName, path });
   }
 }

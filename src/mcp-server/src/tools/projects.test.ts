@@ -85,21 +85,19 @@ describe("ent#661 projects — honest refusals, never a throw", () => {
     assert.doesNotMatch(JSON.parse(await notAgent.list_projects.execute({}, {})).message, /pass agent_name/);
   });
 
-  it("create_project: a 403 agent_key_required with agent_name gets the agent-key guidance", async () => {
-    const failing = async () => {
-      throw apiError(403, { code: "agent_key_required", message: "raw backend text" });
-    };
+  it("create_project: a user key naming an agent is refused act_as_not_offered and nothing is sent (trinity-enterprise#1322)", async () => {
+    let called = 0;
     const tools = makeTools({
-      createProjectAsAgent: failing,
-      asAgent: () => ({ createProjectAsAgent: failing }),
+      createProjectAsAgent: async () => { called += 1; return {}; },
+      asAgent: () => { called += 1; return {}; },
     } as unknown as Partial<TrinityClient>);
     const out = JSON.parse(
       await tools.create_project.execute({ name: "P", goal: "G", agent_name: "a1" }, { session: { scope: "user" } as never }),
     );
     assert.equal(out.success, false);
-    assert.equal(out.code, "agent_key_required");
-    assert.match(out.error, /agent context/);
-    assert.doesNotMatch(out.error, /raw backend text/);
+    assert.equal(out.code, "act_as_not_offered");
+    assert.doesNotMatch(out.error, /agent context|agent-scoped key/);
+    assert.equal(called, 0);
   });
 
   it("get: a 404 is 'not a project you are on', with no further distinction", async () => {
@@ -317,7 +315,8 @@ describe("ent#588 — an agent starts or imports a project (projects.manage)", (
     assert.deepEqual(calls[0], ["create", { name: "x", goal: "y" }]);
     assert.deepEqual(calls[1].slice(0, 2), ["import", "project_files/q4"]);
     assert.equal(calls[1].includes("pm"), false);
-    assert.match(tools.create_project.description, /propose_project_changes/);
+    assert.match(tools.create_project.description, /owner's approval/);
+    assert.doesNotMatch(tools.create_project.description, /propose_project_changes/);
   });
 
   it("import_project forwards only the path; a second import's 409 is surfaced", async () => {

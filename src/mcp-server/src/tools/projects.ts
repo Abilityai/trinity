@@ -53,6 +53,10 @@ class ScopeRefusal extends Error {
 const ACT_AS_NOT_OFFERED =
   "The project tools don't act for an agent. Omit agent_name and the call acts as you, with your own Workspace permissions.";
 const KEY_NOT_SUPPORTED = "Project tools take a person's own user key or an agent's own key.";
+const IMPORT_NEEDS_AGENT = "Name the agent whose folder project this is in `agent`; the import reads that agent's files.";
+
+/** The write methods both doors answer, by the same name and body. */
+type ProjectWriter = Pick<TrinityClient, "createProjectTask" | "updateProjectTask" | "addProjectTaskNote" | "addProjectLogEntry" | "linkToProject" | "setProjectHealth">;
 
 /** The read methods both doors answer, by the same name and shape. */
 type ProjectReader = Pick<TrinityClient, "getMyProject" | "listProjectTasks" | "getProjectLog" | "readProjectContext" | "getStewardDigest" | "listProjectExecutions"> & {
@@ -143,22 +147,27 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
   };
 
   /**
-   * trinity-enterprise#1322: the door a read tool calls, picked by the key's
+   * trinity-enterprise#1322: the door a project tool calls, picked by the key's
    * scope from an allow-list. `agent` keeps today's request (and its refusal of
-   * a named other agent); `user` reads as the person on the Workspace routes;
+   * a named other agent); `user` acts as the person on the Workspace routes;
    * no key (keyless dev mode: no session, or one without a scope, which a keyed
    * session never is — authenticate maps a scope-less key to `user`) is today's
    * path; any other scope is refused.
    */
-  const readerFor = (context: { session?: McpAuthContext } | undefined, requested?: string): ProjectReader => {
+  type Door = { kind: "agent"; client: TrinityClient } | { kind: "person"; client: PersonProjectClient };
+  const doorFor = (context: { session?: McpAuthContext } | undefined, requested?: string): Door => {
     const session = context?.session;
-    if (session?.scope === undefined || session.scope === "agent") return clientFor(context, requested);
+    if (session?.scope === undefined || session.scope === "agent") return { kind: "agent", client: clientFor(context, requested) };
     if (session.scope === "user") {
       if (typeof requested === "string" && requested.trim() !== "") throw new ScopeRefusal("act_as_not_offered", ACT_AS_NOT_OFFERED);
-      return new PersonProjectClient(getClient(session));
+      return { kind: "person", client: new PersonProjectClient(getClient(session)) };
     }
     throw new ScopeRefusal("key_not_supported", KEY_NOT_SUPPORTED);
   };
+  const readerFor = (context: { session?: McpAuthContext } | undefined, requested?: string): ProjectReader =>
+    doorFor(context, requested).client;
+  const writerFor = (context: { session?: McpAuthContext } | undefined, requested?: string): ProjectWriter =>
+    doorFor(context, requested).client;
 
   /** A write or read refusal as a structured result — never a throw. */
   const fail = (e: unknown): string => {
@@ -352,14 +361,14 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "makes it a person's task: it needs an owner who is on the project and no agent " +
         "(person_task_has_agent, person_task_needs_owner), it is never started as an agent run, and " +
         "only a person marks it done. Only the project's steward may give a task to a person " +
-        "(only_the_steward_assigns_people); otherwise ask with propose_project_changes. When every " +
+        "(only_the_steward_assigns_people); anyone else asks the steward. When every " +
         "task it waits on is done, its owner is told once." + REFS_RULE,
       parameters: createTaskParams,
       execute: async (p: Record<string, unknown> & { project_id: string } & { agent_name?: string; assignee?: string }, context?: { session?: McpAuthContext }) => {
         const { project_id, assignee, agent_name: _actAs, ...rest } = declared(createTaskParams, p) as typeof p;
         const body = assignee ? { ...rest, agent: assignee } : rest;
         try {
-          return ok(await clientFor(context, p.agent_name).createProjectTask(project_id, body, turnOf(context)));
+          return ok(await writerFor(context, p.agent_name).createProjectTask(project_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -388,7 +397,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         const { project_id, task_id, assignee, agent_name: _actAs, ...rest } = declared(updateTaskParams, p) as typeof p;
         const body = assignee ? { ...rest, agent: assignee } : rest;
         try {
-          return ok(await clientFor(context, p.agent_name).updateProjectTask(project_id, task_id, body, turnOf(context)));
+          return ok(await writerFor(context, p.agent_name).updateProjectTask(project_id, task_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -403,7 +412,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       parameters: z.object({ agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION), project_id: projectId, task_id: taskId, body: z.string().min(1).max(4000) }),
       execute: async (p: { project_id: string; task_id: string; body: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          return ok(await clientFor(context, p.agent_name).addProjectTaskNote(p.project_id, p.task_id, p.body, turnOf(context)));
+          return ok(await writerFor(context, p.agent_name).addProjectTaskNote(p.project_id, p.task_id, p.body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -472,7 +481,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       execute: async (p: { project_id: string; kind: string; body: string; task_id?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         const { project_id, agent_name: _actAs, ...body } = p;
         try {
-          return ok(await clientFor(context, p.agent_name).addProjectLogEntry(project_id, body, turnOf(context)));
+          return ok(await writerFor(context, p.agent_name).addProjectLogEntry(project_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -496,7 +505,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       }),
       execute: async (p: { project_id: string; kind: string; target_id: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          return ok(await clientFor(context, p.agent_name).linkToProject(p.project_id, { kind: p.kind, target_id: p.target_id }, turnOf(context)));
+          return ok(await writerFor(context, p.agent_name).linkToProject(p.project_id, { kind: p.kind, target_id: p.target_id }, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -531,13 +540,13 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       name: "create_project",
       canAccess: projectToolAccess,
       description:
-        "Start a Workspace project for your owner (/project-init on Trinity): a name and the goal in " +
-        "a sentence or two. Your owner becomes its creator and first member, you become its steward " +
-        "and the agent on it, and only its members can see it — adding people or changing who can " +
-        "see it stays your owner's. Needs the project-management permission an instance admin grants; " +
-        "without it the call is refused with `project_management_not_permitted` and nothing is created. " +
-        "You are its steward; to hand that to another agent, ask with propose_project_changes " +
-        "(its `steward` field) — your primary contact approves it. Returns the project; work on it " +
+        "Start a Workspace project (/project-init on Trinity): a name and the goal in a sentence or " +
+        "two. With a person's own user key, you become its creator and first member, with your " +
+        "Workspace permissions. With an agent's key, the agent's owner becomes its creator and first " +
+        "member, the agent becomes its steward and the agent on it, and handing the steward role to " +
+        "another agent needs the owner's approval. Only its members can see it. Needs the " +
+        "project-management permission an instance admin grants; without it the call is refused with " +
+        "`project_management_not_permitted` and nothing is created. Returns the project; work on it " +
         "with the task and log tools.",
       parameters: z.object({
         agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
@@ -549,7 +558,9 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         try {
           const body: Record<string, unknown> = { name: p.name, goal: p.goal };
           if (p.tracker_url) body.tracker_url = p.tracker_url;
-          return ok({ project: await clientFor(context, p.agent_name).createProjectAsAgent(body, turnOf(context)) });
+          const door = doorFor(context, p.agent_name);
+          const project = door.kind === "person" ? await door.client.createProject(body) : await door.client.createProjectAsAgent(body, turnOf(context));
+          return ok({ project });
         } catch (e) {
           return fail(e);
         }
@@ -561,20 +572,24 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       name: "import_project",
       canAccess: projectToolAccess,
       description:
-        "Bring one of your own folder projects onto the platform, once (/project-init adopt on " +
-        "Trinity): `project_files/<slug>` or `<canon>/projects/<slug>` with its project.md, task " +
-        "files, log and decisions. Afterwards the platform is its home and nothing syncs back; a " +
-        "second import of the same folder is refused. Needs the project-management permission; " +
-        "your owner becomes the project's creator. The steward is the agent its project.md names as " +
-        "`owner` when your owner can use it, else your owner; to hand it to another agent afterwards, " +
-        "ask with propose_project_changes — your primary contact approves it.",
+        "Bring an agent's folder project onto the platform, once (/project-init adopt on Trinity): " +
+        "`project_files/<slug>` or `<canon>/projects/<slug>` with its project.md, task files, log and " +
+        "decisions. Afterwards the platform is its home and nothing syncs back; a second import of the " +
+        "same folder is refused. Needs the project-management permission. An agent's key imports its " +
+        "own folder and its owner becomes the creator; a person's own user key names the agent in " +
+        "`agent` and becomes the creator. The steward is the agent its project.md names as `owner` " +
+        "when the creator can use it, else the creator.",
       parameters: z.object({
         agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
-        path: z.string().min(1).max(300).describe("The project folder in your files, e.g. 'project_files/q4-launch'."),
+        path: z.string().min(1).max(300).describe("The project folder in the agent's files, e.g. 'project_files/q4-launch'."),
+        agent: z.string().min(1).max(128).optional().describe("A person's own user key: the agent whose folder it is (one you can use). An agent key imports its own folder; leave it out."),
       }),
-      execute: async (p: { path: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (p: { path: string; agent?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          return ok({ project: await clientFor(context, p.agent_name).importProjectAsAgent(p.path, turnOf(context)) });
+          const door = doorFor(context, p.agent_name);
+          if (door.kind === "agent") return ok({ project: await door.client.importProjectAsAgent(p.path, turnOf(context)) });
+          if (!p.agent || p.agent.trim() === "") throw new ScopeRefusal("agent_required", IMPORT_NEEDS_AGENT);
+          return ok({ project: await door.client.importProject(p.agent, p.path) });
         } catch (e) {
           return fail(e);
         }
@@ -729,7 +744,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       }),
       execute: async (p: { project_id: string; state: string; note?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          return ok(await clientFor(context, p.agent_name).setProjectHealth(
+          return ok(await writerFor(context, p.agent_name).setProjectHealth(
             p.project_id, { state: p.state, note: p.note ?? "" }, turnOf(context)));
         } catch (e) {
           return fail(e);
