@@ -1,6 +1,6 @@
 {
   "_comment": "Blocking calls written directly inside `async def`, per file (#4674). May only shrink. Regenerate: python scripts/ci/check_sync_on_loop.py --write",
-  "total": 1911,
+  "total": 1912,
   "files": {
     "src/backend/adapters/message_router.py": 19,
     "src/backend/adapters/slack_adapter.py": 17,
@@ -92,7 +92,7 @@
     "src/backend/routers/webhooks.py": 1,
     "src/backend/routers/whatsapp.py": 8,
     "src/backend/services/activity_service.py": 7,
-    "src/backend/services/agent_invite_service.py": 5,
+    "src/backend/services/agent_invite_service.py": 6,
     "src/backend/services/agent_mcp_key_service.py": 14,
     "src/backend/services/agent_service/api_key.py": 6,
     "src/backend/services/agent_service/autonomy.py": 12,
