@@ -79,7 +79,10 @@ First-time setup wizard for admin password and API key configuration. On an inst
 >    `hmac.compare_digest` — same rate limit, same one 403, same ordering before
 >    password work as the instance-ID form. `_take_claim` re-reads the taken
 >    file and re-verifies it (a recycle between check and take is refused);
->    restores use `os.link`, which never overwrites a newer claim. The bound
+>    restores create the claim path exclusively (`O_EXCL`) and copy the taken
+>    file in, so they never overwrite a newer claim. The bound email is stored in
+>    the same write as the password; if that write fails, setup answers a
+>    retryable 503 and nothing is written. The bound
 >    email becomes the admin's sign-in identity and the page signs straight in.
 >
 > Provisioner note: a process killed between the take and the restore leaves
