@@ -108,6 +108,25 @@ class TestUniqueAndOneWriter:
         assert created["email"] is None
         assert users_db.get_user_by_email(taken)["username"] == holder["username"]
 
+    def test_the_password_upsert_binds_an_email_in_the_same_write(self, users_db):
+        """trinity-enterprise#1312: the email-bound setup link stores the
+        password and the sign-in email together, on both upsert branches."""
+        a, b = _addr("new"), _addr("existing")
+        assert users_db.update_user_password(f"admin-{uuid.uuid4().hex[:6]}", "h1", email=a)
+        assert users_db.get_user_by_email(a)["password"] == "h1"
+        me = _make_user(users_db)
+        assert users_db.update_user_password(me["username"], "h2", email=b.upper())
+        assert users_db.get_user_by_email(b)["username"] == me["username"]
+
+    def test_a_refused_email_leaves_the_password_unwritten(self, users_db):
+        EmailInUseError = _users_mod(users_db).EmailInUseError
+        a = _addr()
+        _make_user(users_db, email=a)
+        me = _make_user(users_db)
+        with pytest.raises(EmailInUseError):
+            users_db.update_user_password(me["username"], "h3", email=a)
+        assert users_db.get_user_by_username(me["username"])["password"] != "h3"
+
     def test_a_lost_race_on_the_index_is_the_same_refusal(self, users_db, monkeypatch):
         """Check-then-write can lose a race; the unique index is what holds, and
         its IntegrityError surfaces as EmailInUseError, never a 500."""

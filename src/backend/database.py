@@ -1131,8 +1131,8 @@ class DatabaseManager:
     def update_last_login(self, username: str):
         return self._user_ops.update_last_login(username)
 
-    def update_user_password(self, username: str, hashed_password: str):
-        return self._user_ops.update_user_password(username, hashed_password)
+    def update_user_password(self, username: str, hashed_password: str, email: str = None):
+        return self._user_ops.update_user_password(username, hashed_password, email=email)
 
     def get_or_create_auth0_user(self, auth0_sub: str, email: str, name: str = None, picture: str = None):
         return self._user_ops.get_or_create_auth0_user(auth0_sub, email, name, picture)
