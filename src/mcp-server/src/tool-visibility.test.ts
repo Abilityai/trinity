@@ -980,4 +980,52 @@ describe("trinity-enterprise#1322 project tools are listed to exactly the keys t
     // 2 agent-only tools for the user key; all 22 for the system and ops keys.
     assert.equal(refused, 2 + 22 + 22);
   });
+
+  /**
+   * No text a key reads names a tool that key cannot call: the description of
+   * every project tool it is listed, and the refusals those tools give it. A
+   * tool name is any name some key is listed; the reader's own listing is the
+   * set it may be pointed at.
+   */
+  it("no description or refusal points a key at a tool it is not listed", async () => {
+    const universe = new Set(Object.values(listing).flat());
+    const named = (text: string) => (text.match(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g) ?? []).filter((w) => universe.has(w));
+    const ARGS = [
+      { project_id: "prj_1", task_id: "T-001", item_id: "brief", title: "x", body: "x", kind: "note", target_id: "r1",
+        state: "on-track", name: "x", goal: "x", path: "p", agent: "alpha", action: "start", on: true, add_agents: ["beta"] },
+      { project_id: "prj_1", agent_name: "beta" },
+      { project_id: "prj_1", item_id: "brief", offset: 10, path: "p" },
+      {},
+    ];
+    for (const key of ["user", "agent"]) {
+      const listed = new Set(listing[key]);
+      const project = Object.keys(EXPECTED).filter((t) => listed.has(t));
+      const bad: string[] = [];
+      await asKey(srv.url, key, async (c) => {
+        for (const t of (await c.listTools()).tools) {
+          if (!project.includes(t.name)) continue;
+          for (const n of named(t.description ?? "")) if (!listed.has(n)) bad.push(`${t.name} description → ${n}`);
+        }
+        for (const tool of project) {
+          for (const args of ARGS) {
+            const res = await c.callTool({ name: tool, arguments: args }).catch((e: unknown) => ({ content: [{ type: "text", text: String(e) }] }));
+            const text = ((res as { content?: Array<{ text?: string }> }).content ?? []).map((x) => x.text ?? "").join(" ");
+            for (const n of named(text)) if (!listed.has(n)) bad.push(`${tool} refusal → ${n}`);
+          }
+        }
+      });
+      assert.deepEqual([...new Set(bad)], [], `a ${key} key is pointed at tools it is not listed`);
+    }
+  });
+
+  it("a keyed session always has a scope: a key row with none acts as the person", async () => {
+    const noScope = await bootKeyedServer({ bare: {} as KeyRow });
+    try {
+      assert.ok((await listedTo(noScope.url, "bare")).includes("set_project_lifecycle"), "a scope-less key row is not listed as a user key");
+      await asKey(noScope.url, "bare", (c) => c.callTool({ name: "get_project", arguments: { project_id: "prj_1" } }));
+      assert.deepEqual(noScope.requests.filter((r) => r.startsWith("GET /api/enterprise/")), ["GET /api/enterprise/projects/prj_1"]);
+    } finally {
+      await noScope.stop();
+    }
+  });
 });

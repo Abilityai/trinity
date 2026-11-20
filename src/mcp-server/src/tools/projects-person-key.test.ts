@@ -368,3 +368,75 @@ describe("trinity-enterprise#1322 the person tools refuse every other key in the
     });
   }
 });
+
+// ---------------------------------------------------------------------------
+// CP-P5: refusals read true for the key that reads them.
+// ---------------------------------------------------------------------------
+
+describe("trinity-enterprise#1322 explain(): only the entitlement gate reads as 'not licensed'", () => {
+  const LICENSE = { status: 403, body: { detail: "Enterprise feature 'projects' is not licensed for this instance." } };
+  const OTHER = { status: 403, body: { detail: "Your account has no email; projects need one." } };
+  // Each source that turns a plain-string 403 into words: list_projects, get_project, and fail().
+  const SOURCES: Array<[string, Record<string, unknown>, string, (o: any) => string]> = [
+    ["list_projects", {}, `GET ${P}`, (o) => o.message],
+    ["get_project", { project_id: "prj_1" }, `GET ${P}/prj_1`, (o) => o.error],
+    ["add_project_log_entry", { project_id: "prj_1", kind: "note", body: "x" }, `POST ${P}/prj_1/log`, (o) => o.error],
+  ];
+  for (const [tool, args, route, text] of SOURCES) {
+    it(`${tool}: the license gate's 403 says not licensed`, async () => {
+      answer({ [route]: LICENSE });
+      assert.equal(text(await run(tool, args)), "Projects are not licensed for this instance.");
+    });
+    it(`${tool}: any other string 403 is passed through unchanged`, async () => {
+      answer({ [route]: OTHER });
+      assert.equal(text(await run(tool, args)), "Your account has no email; projects need one.");
+    });
+  }
+});
+
+describe("trinity-enterprise#1322 read_project_context: a person's key takes no offset", () => {
+  it("an offset from a person's key is refused by name, with no request", async () => {
+    answer({});
+    const out = await run("read_project_context", { project_id: "prj_1", item_id: "brief", offset: 100 });
+    assert.equal(out.code, "offset_not_offered", JSON.stringify(out));
+    assert.deepEqual(sent, []);
+  });
+  it("an agent key still pages by offset", async () => {
+    answer({});
+    await run("read_project_context", { project_id: "prj_1", item_id: "brief", offset: 100 }, "agent");
+    assert.deepEqual(reqs(), [`GET ${P}/agent/projects/prj_1/context/brief?offset=100`]);
+  });
+  it("the description promises paging to an agent's key only", () => {
+    const d: string = tools().read_project_context.description;
+    assert.match(d, /agent's own key[^.]*200 KB/);
+    assert.match(d, /person's own key reads the brief from its start/);
+  });
+});
+
+describe("trinity-enterprise#1322 a session with no scope takes the agent path only when no key is required", () => {
+  it("keyed: a scope-less session is refused in the tool, shared and person tools alike, with no request", async () => {
+    answer({});
+    const keyless = { session: { mcpApiKey: "trinity_mcp_x", executionId: "exec-1" } };
+    for (const [tool, args] of [["get_project", { project_id: "prj_1" }], ["set_steward_waking", { project_id: "prj_1", on: true }]] as const) {
+      const out = JSON.parse(await tools()[tool].execute(args, keyless));
+      assert.equal(out.code, "key_not_supported", `${tool}: ${JSON.stringify(out)}`);
+    }
+    assert.deepEqual(sent, []);
+  });
+});
+
+describe("trinity-enterprise#1322 the steward-proposal pointer", () => {
+  const PAGE = { status: 200, body: { id: "prj_1", proposal: { ask_id: "oq-1", summary: "add bob" } } };
+  it("a person's key reads how to decide a waiting proposal: its ask_id to respond_to_operator_queue, by the primary contacts", async () => {
+    answer({ [`GET ${P}/prj_1`]: PAGE });
+    const out = await run("get_project", { project_id: "prj_1" });
+    assert.equal(out.proposal.ask_id, "oq-1");
+    assert.match(out.proposal.how_to_decide, /proposal\.ask_id as item_id to respond_to_operator_queue/);
+    assert.match(out.proposal.how_to_decide, /proposing agent's primary contacts/);
+  });
+  it("an agent key's page is unchanged", async () => {
+    answer({ [`GET ${P}/agent/projects/prj_1`]: PAGE });
+    const out = await run("get_project", { project_id: "prj_1" }, "agent");
+    assert.deepEqual(out.proposal, { ask_id: "oq-1", summary: "add bob" });
+  });
+});

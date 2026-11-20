@@ -74,7 +74,7 @@ describe("ent#661 projects — honest refusals, never a throw", () => {
   });
 
   it("list: a string 403 is unlicensed, a code 403 is the agent-key gate", async () => {
-    const unlicensed = makeTools({ listMyProjects: async () => { throw apiError(403, "Feature not entitled"); } });
+    const unlicensed = makeTools({ listMyProjects: async () => { throw apiError(403, "Enterprise feature 'projects' is not licensed for this instance."); } });
     assert.match(JSON.parse(await unlicensed.list_projects.execute({}, {})).message, /not licensed/);
     const notAgent = makeTools({
       listMyProjects: async () => {
