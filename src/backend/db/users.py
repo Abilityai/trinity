@@ -238,7 +238,9 @@ class UserOperations:
 
         return self.get_user_by_username(username)
 
-    def update_user_password(self, username: str, hashed_password: str) -> bool:
+    def update_user_password(
+        self, username: str, hashed_password: str, email: Optional[str] = None
+    ) -> bool:
         """Update user's password hash, creating the user if it doesn't exist.
 
         For the admin user during first-time setup, this will create the user
@@ -247,6 +249,8 @@ class UserOperations:
         Args:
             username: The username to update
             hashed_password: The bcrypt-hashed password
+            email: When given, bound as the sign-in email in the same
+                transaction, so the two are written together or not at all
 
         Returns:
             True if the user was updated or created successfully
@@ -254,11 +258,16 @@ class UserOperations:
         now = utc_now_iso()
         with get_engine().begin() as conn:
             # Try to update existing user
-            result = conn.execute(
-                update(users)
-                .where(users.c.username == username)
-                .values(password_hash=hashed_password, updated_at=now)
-            )
+            if email is not None:
+                result = self._update_user_row(conn, username, dict(
+                    password_hash=hashed_password, updated_at=now, email=email,
+                ))
+            else:
+                result = conn.execute(
+                    update(users)
+                    .where(users.c.username == username)
+                    .values(password_hash=hashed_password, updated_at=now)
+                )
             if result.rowcount > 0:
                 return True
 
@@ -273,6 +282,7 @@ class UserOperations:
                 # SQLite seed already leaves it NULL.
                 created_at=now,
                 updated_at=now,
+                **({"email": email} if email is not None else {}),
             ))
             return result.rowcount > 0
 

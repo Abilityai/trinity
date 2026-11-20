@@ -56,11 +56,22 @@ queries IMDS. The check runs after the existing-admin refusal and before any
 password work, is rate-limited per client IP, fails closed on a missing or empty
 claim file, and answers every failure with one generic 403. The file is deleted
 once setup succeeds. Email is optional on this path only (no PII required).
+
+trinity-enterprise#1312 adds a second form of that claim file for an emailed
+setup link: one line `email-bound:<secret>` (64 lowercase hex). The claim then
+binds the admin email itself: a request must carry an email, and its claim code
+must be `hex(HMAC-SHA256(secret, email.strip().lower()))`. A provisioner can
+build the claim before anyone signs up, and never holds the person's email.
+A malformed secret refuses every setup. The instance-ID form is unchanged. The
+take re-reads the taken file and re-verifies it, so a claim replaced between the
+check and the take is refused, and a restore never overwrites a newer claim.
 """
+import hashlib
 import hmac
 import logging
 import os
 import re
+import stat
 import uuid
 from pathlib import Path
 
@@ -90,6 +101,9 @@ _SETUP_CLAIM_PATH = Path("/data/setup-claim")
 # The one answer for every claim failure (wrong, missing, or no claim on file),
 # so a response never says which it was.
 _CLAIM_MISMATCH = "That instance ID does not match this server."
+# trinity-enterprise#1312: an email-bound claim (see module docstring).
+_EMAIL_BOUND_PREFIX = "email-bound:"
+_EMAIL_BOUND_SECRET_RE = re.compile(r"[0-9a-f]{64}")
 
 router = APIRouter(prefix="/api/setup", tags=["setup"])
 
@@ -104,38 +118,125 @@ def _normalise_claim(value: str) -> bytes:
     return value.strip().lower().encode()
 
 
-def _check_claim(claim_code, request: Request) -> None:
-    """Refuse (403) unless `claim_code` matches the stored instance ID.
+def _read_claim_file(path: Path) -> str:
+    try:
+        return path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _expected_claim(stored: str, email) -> bytes:
+    """The normalised claim code a request must give, or b"" to refuse.
+
+    Instance-ID form: the stored line itself. Email-bound form
+    (trinity-enterprise#1312): the HMAC of the request's email under the stored
+    secret, so the code is valid for that one address only.
+    """
+    line = stored.strip()
+    if not line.startswith(_EMAIL_BOUND_PREFIX):
+        return _normalise_claim(stored)
+    secret = line[len(_EMAIL_BOUND_PREFIX):]
+    if not _EMAIL_BOUND_SECRET_RE.fullmatch(secret):
+        logger.warning("Setup claim file malformed — refusing first-run setup")
+        return b""
+    bound_email = (email or "").strip().lower()
+    if not bound_email:
+        return b""
+    return hmac.new(
+        bytes.fromhex(secret), bound_email.encode("utf-8"), hashlib.sha256
+    ).hexdigest().encode()
+
+
+def _claim_matches(stored: str, claim_code, email) -> bool:
+    expected = _expected_claim(stored, email)
+    given = _normalise_claim(claim_code or "")
+    return bool(expected) and hmac.compare_digest(given, expected)
+
+
+def _check_claim(claim_code, email, request: Request) -> None:
+    """Refuse (403) unless `claim_code` matches the stored claim.
 
     Per-IP only, on the login bucket: an account-style bucket would be one
     global key, letting anyone lock the owner out of their own claim.
     """
     client_ip = _get_client_ip(request)
     check_login_rate_limit(client_ip)
-    try:
-        expected = _normalise_claim(_SETUP_CLAIM_PATH.read_text())
-    except (OSError, UnicodeDecodeError):
-        expected = b""
-    if not expected:
+    stored = _read_claim_file(_SETUP_CLAIM_PATH)
+    if not stored.strip():
         # Warning, not error: an unauthenticated caller can trigger it at will.
         logger.warning("Setup claim file missing, empty or unreadable — refusing first-run setup")
-    given = _normalise_claim(claim_code or "")
-    if not expected or not hmac.compare_digest(given, expected):
+    if not _claim_matches(stored, claim_code, email):
         record_login_attempt(client_ip, success=False)
         raise HTTPException(status_code=403, detail=_CLAIM_MISMATCH)
     record_login_attempt(client_ip, success=True)
 
 
-def _take_claim() -> Path:
+def _restore_claim(taken: Path) -> None:
+    """Put a taken claim back, never over a claim written meanwhile.
+
+    The claim path is created exclusively (`O_EXCL`), so a provisioner's newer
+    claim wins and only the stale taken copy is dropped. No link is made: the
+    guard in `test_ent819_no_platform_links_in_home.py` pins every one.
+    """
+    try:
+        data = taken.read_bytes()
+        st = taken.stat()
+        fd = os.open(_SETUP_CLAIM_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    except OSError as e:
+        logger.warning("Could not restore the setup claim file: %s", type(e).__name__)
+        return
+    else:
+        try:
+            try:
+                os.fchown(fd, st.st_uid, st.st_gid)
+            except OSError:
+                pass  # not permitted to change owner: the content still matters most
+            os.fchmod(fd, stat.S_IMODE(st.st_mode))
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("short write")
+                view = view[written:]
+            os.fsync(fd)
+        except OSError as e:
+            # Drop the partial file; the taken copy stays on disk rather than vanish.
+            # Only while the path is still the file this call created: a claim
+            # renamed onto it meanwhile is newer and not ours to remove.
+            logger.warning("Could not restore the setup claim file: %s", type(e).__name__)
+            try:
+                mine, now = os.fstat(fd), os.stat(_SETUP_CLAIM_PATH)
+                if (mine.st_ino, mine.st_dev) == (now.st_ino, now.st_dev):
+                    _SETUP_CLAIM_PATH.unlink(missing_ok=True)
+            except OSError:
+                pass
+            finally:
+                os.close(fd)
+            return
+        os.close(fd)
+    try:
+        taken.unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("Could not tidy the taken setup claim file: %s", type(e).__name__)
+
+
+def _take_claim(claim_code, email) -> Path:
     """Atomically take the claim file so one request, and only one, proceeds.
 
-    Two requests with the right ID both pass `_check_claim`; `rename` succeeds
-    for exactly one of them. The loser gets the same generic 403.
+    Two requests with the right claim both pass `_check_claim`; `rename`
+    succeeds for exactly one of them. The loser gets the same generic 403. The
+    taken file is re-read and re-verified: a provisioner may have replaced the
+    claim after the check, and then this request's code is no longer valid.
     """
     taken = _SETUP_CLAIM_PATH.with_name(f"{_SETUP_CLAIM_PATH.name}.{uuid.uuid4().hex}")
     try:
         _SETUP_CLAIM_PATH.rename(taken)
     except OSError:
+        raise HTTPException(status_code=403, detail=_CLAIM_MISMATCH)
+    if not _claim_matches(_read_claim_file(taken), claim_code, email):
+        _restore_claim(taken)
         raise HTTPException(status_code=403, detail=_CLAIM_MISMATCH)
     return taken
 
@@ -262,7 +363,7 @@ async def set_admin_password(
     # deliberately expensive and this route is unauthenticated).
     claim_mode = _claim_required()
     if claim_mode:
-        _check_claim(data.claim_code, request)
+        _check_claim(data.claim_code, data.email, request)
 
     # Check setup not already completed.
     if db.get_setting_value('setup_completed', 'false') == 'true':
@@ -300,7 +401,13 @@ async def set_admin_password(
     # #3004: take the claim only now, after every 400 above, so a rejected
     # password or email leaves it in place for the owner's retry. If the writes
     # below raise, it is put back for the same reason.
-    taken_claim = _take_claim() if claim_mode else None
+    taken_claim = _take_claim(data.claim_code, data.email) if claim_mode else None
+    # trinity-enterprise#1312: on the email-bound form the email is the admin's
+    # only sign-in identity, so it is stored in the same write as the password
+    # and a failure there fails setup with nothing written.
+    email_bound = taken_claim is not None and _read_claim_file(taken_claim).strip().startswith(
+        _EMAIL_BOUND_PREFIX
+    )
     try:
         # Hash the password and update admin user.
         hashed_password = hash_password(data.password)
@@ -310,13 +417,22 @@ async def set_admin_password(
         # honours ADMIN_USERNAME, so on an `ADMIN_USERNAME=root` install the literal
         # made this call miss the real admin and INSERT a *second* role='admin'
         # account (update_user_password upserts) instead of updating the first.
-        db.update_user_password(admin_username(), hashed_password)
+        if not email_bound:
+            db.update_user_password(admin_username(), hashed_password)
+        else:
+            try:
+                db.update_user_password(admin_username(), hashed_password, email=normalized_email)
+            except Exception as e:
+                # One transaction, so nothing was written: a plain retryable
+                # error, not the claim refusal, and no failed attempt recorded.
+                logger.warning("Setup could not store the admin account: %s", type(e).__name__)
+                raise HTTPException(
+                    status_code=503,
+                    detail="Setup could not be saved, and nothing was changed. Please try again.",
+                ) from None
     except BaseException:
         if taken_claim is not None:
-            try:
-                taken_claim.rename(_SETUP_CLAIM_PATH)
-            except OSError as e:
-                logger.warning("Could not restore the setup claim file: %s", type(e).__name__)
+            _restore_claim(taken_claim)
         raise
 
     # Register the operator email as the admin's sign-in identity (#82 Phase 1).
@@ -324,8 +440,8 @@ async def set_admin_password(
     # configured (no Resend key), so we cannot deliver a code here. We simply
     # bind the email to the admin account — the operator can then sign in with
     # email + password instead of the fixed 'admin' username.
-    email_registered = False
-    if normalized_email:
+    email_registered = email_bound
+    if normalized_email and not email_bound:
         try:
             db.update_user(admin_username(), {"email": normalized_email})
             email_registered = True

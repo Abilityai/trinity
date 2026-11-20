@@ -5083,7 +5083,8 @@ class SetAdminPasswordRequest(BaseModel):
     # #3004: under ADMIN_PASSWORD_SOURCE=instance-id the handler accepts a blank
     # value (AWS review: no PII required); the field itself stays required.
     email: str = Field(..., max_length=254)
-    # #3004 (PROV-018): the EC2 instance ID, checked only when
+    # #3004 (PROV-018): the EC2 instance ID, or the code from an emailed setup
+    # link (trinity-enterprise#1312), checked only when
     # ADMIN_PASSWORD_SOURCE=instance-id and ignored otherwise.
     claim_code: Optional[str] = Field(None, max_length=64)
     # Optional operator profile — all skippable; setup completes without them.
