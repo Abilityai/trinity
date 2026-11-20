@@ -50,6 +50,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 let nextId = 1
 const newId = () => `m${nextId++}`
+let statusFlight = null
 
 const detail = (error) => error?.response?.data?.detail
 const words = (error, fallback) => {
@@ -159,7 +160,14 @@ export const useAssistantStore = defineStore('assistant', {
   },
 
   actions: {
-    async loadStatus() {
+    // One read at a time: App.vue's watch and the terms page's re-read after
+    // acceptance (trinity-enterprise#1327) both ask, and must join one request.
+    loadStatus() {
+      if (!statusFlight) statusFlight = this._readStatus().finally(() => { statusFlight = null })
+      return statusFlight
+    },
+
+    async _readStatus() {
       try {
         const { data } = await api.get(`${BASE}/status`)
         this.status = data

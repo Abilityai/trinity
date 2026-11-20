@@ -13,6 +13,12 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import api from '../api'
+import { useAuthStore } from './auth'
+import { useEnterpriseStore } from './enterprise'
+import { useSessionsStore } from './sessions'
+import { FEATURE_ID as ASSISTANT_FEATURE, useAssistantStore } from './assistant'
+import { useOnboardingStore } from './onboarding'
+import { useBuildInfo } from '../composables/useBuildInfo'
 
 const BASE = '/api/terms'
 
@@ -46,7 +52,39 @@ export const useTermsStore = defineStore('terms', () => {
   async function accept(version) {
     const { data } = await api.post(`${BASE}/accept`, { version })
     if (current.value) current.value = { ...current.value, version: data.version, accepted: true }
+    await rereadStartup()
     return data
+  }
+
+  /**
+   * trinity-enterprise#1327 — the app's start-up reads were answered 403
+   * `terms_required`, and each one keeps that answer for the page load: the
+   * profile (`profileVerified` stays false), the entitlements and session
+   * flags (cached as "none"), the build info, the assistant's status and the
+   * getting-started checklist (both cached as "absent"). Accepting ends the
+   * refusal, so ask them all again — before the page moves on, so the page the
+   * person lands on is drawn from the real answers, not the refused ones.
+   * Never rejects: a read that still fails leaves its own safe fallback.
+   */
+  async function rereadStartup() {
+    const auth = useAuthStore()
+    const enterprise = useEnterpriseStore()
+    const assistant = useAssistantStore()
+    const onboarding = useOnboardingStore()
+    assistant.absent = false
+    assistant.statusError = ''
+    onboarding.absent = false
+    await Promise.allSettled([
+      auth.fetchUserProfile(),
+      enterprise.loadFeatureFlags(true),
+      useSessionsStore().loadFeatureFlags(true),
+      useBuildInfo().load(true),
+      onboarding.fetchChecklist(true),
+    ])
+    // The same gate App.vue mounts the assistant on; joins its read if it started one.
+    if (auth.profileVerified && auth.user?.role === 'admin' && enterprise.isEntitled(ASSISTANT_FEATURE)) {
+      await assistant.loadStatus()
+    }
   }
 
   /**
