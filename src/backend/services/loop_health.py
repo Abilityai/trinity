@@ -14,8 +14,9 @@ Two instruments, one registry:
 **The loop probe.** A coroutine sleeps `PROBE_INTERVAL_S` and measures how
 late it woke: that lateness is the lag every other coroutine also paid. A
 daemon thread watches the coroutine's last wake-up; when the loop has been
-silent past `STALL_THRESHOLD_S` it snapshots the loop thread's stack — the
-frames that are blocking right now. When the loop comes back, ONE warning is
+silent for half of `STALL_THRESHOLD_S` it snapshots the loop thread's stack —
+the frames that are blocking right now — so the frame is in hand before a
+block that only just passes the threshold has ended. When the loop comes back, ONE warning is
 logged with the blocked time, the worker pid and that stack. A stall that
 outlives `STUCK_REPORT_S` is also reported while it is still going, in case
 the process never comes back.
@@ -115,6 +116,12 @@ class EventLoopProbe:
                  clock=time.monotonic, read_stack=None) -> None:
         self.interval_s = interval_s
         self.threshold_s = threshold_s
+        # The stack is taken at HALF the threshold. Taken at the threshold
+        # itself, a block that ends just past it is over before the watch
+        # thread's next look, and is reported with no frame at all — which is
+        # what the first run on a live instance did with a 159 ms block.
+        self.capture_after_s = threshold_s / 2
+        self.watch_interval_s = min(interval_s, threshold_s / 6)
         self.stuck_report_s = stuck_report_s
         self._clock = clock
         # How the loop thread's stack is read; a test hands in its own.
@@ -201,7 +208,7 @@ class EventLoopProbe:
         return format_stack(sys._current_frames().get(self._loop_thread_id))
 
     def _watch(self) -> None:
-        while not self._stop.wait(self.interval_s):
+        while not self._stop.wait(self.watch_interval_s):
             try:
                 self.check()
             except Exception:  # noqa: BLE001 — a diagnostic must never take the worker down
@@ -212,7 +219,7 @@ class EventLoopProbe:
         now = self._clock()
         with self._lock:
             silent_for = now - self._last_beat - self.interval_s
-            if silent_for < self.threshold_s:
+            if silent_for < self.capture_after_s:
                 return
             capture = self._captured is None
             report_stuck = silent_for >= self.stuck_report_s and not self._stuck_reported

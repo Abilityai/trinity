@@ -116,12 +116,44 @@ class TestStallThreshold:
 # ===========================================================================
 
 class TestCapture:
-    def test_nothing_is_captured_below_the_threshold(self):
+    def test_nothing_is_captured_before_half_the_threshold(self):
         clock = _Clock()
-        probe = _probe(clock)
-        clock.advance(0.05 + 0.2)
+        probe = _probe(clock, read_stack=lambda: ["services/x.py:1 in culprit"])
+        clock.advance(0.05 + 0.12)
         probe.check()
         assert probe._captured is None
+
+    def test_the_frame_is_in_hand_before_the_threshold(self, caplog):
+        """Found on a live instance: a 159 ms block against a 150 ms threshold
+        was over before the watch thread next looked, and was reported with no
+        frame. The stack is taken at half the threshold; whether it is REPORTED
+        still depends on how long the block turned out to be."""
+        clock = _Clock()
+        probe = _probe(clock, read_stack=lambda: ["db/users.py:132 in get_user_by_email"])
+        clock.advance(0.05 + 0.13)
+        probe.check()
+        assert probe._captured == ["db/users.py:132 in get_user_by_email"]
+        with caplog.at_level(logging.WARNING, logger="services.loop_health"):
+            clock.advance(0.13)
+            probe.record_beat(0.26)
+        (record,) = _messages(caplog, "event_loop_blocked")
+        assert record.blocked_at == "db/users.py:132 in get_user_by_email"
+
+    def test_an_early_capture_of_a_short_block_is_discarded_unreported(self, caplog):
+        clock = _Clock()
+        probe = _probe(clock, read_stack=lambda: ["services/x.py:1 in brief"])
+        clock.advance(0.05 + 0.13)
+        probe.check()
+        with caplog.at_level(logging.WARNING, logger="services.loop_health"):
+            clock.advance(0.01)
+            probe.record_beat(0.14)          # under the threshold after all
+        assert _messages(caplog) == []
+        assert probe._captured is None
+
+    def test_the_watch_thread_looks_often_enough(self):
+        probe = EventLoopProbe(interval_s=0.05, threshold_s=0.15)
+        assert probe.watch_interval_s <= probe.threshold_s / 6
+        assert probe.capture_after_s == probe.threshold_s / 2
 
     def test_a_silent_loop_is_captured_once(self):
         clock = _Clock()
