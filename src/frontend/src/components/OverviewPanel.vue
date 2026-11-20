@@ -1,29 +1,34 @@
 <script setup>
 /**
- * Agent Detail "Overview" tab (#1107) — the default landing tab.
+ * Agent Detail "Overview" tab — the default landing tab (#1107, rebuilt in
+ * trinity-enterprise#1317).
  *
- * Deterministic, DB-sourced glance at the agent over the last few days.
- * Owns "trend over the window"; the persistent AgentHeader owns "now + cost".
- * This panel deliberately does NOT re-render the header's live CPU/MEM
- * gauges, cost cards, git controls, autonomy/read-only/auth chips, or the
- * circuit badge — where it needs one (e.g. circuit open) it links up to the
- * header control.
+ * A page about the agent: what it is doing now, what it has done, how well,
+ * what it reports about its own job, and whether it is healthy. The persistent
+ * AgentHeader still owns identity, live CPU/MEM, cost, git controls and the
+ * autonomy/auth chips; nothing here re-renders them.
  *
- * Charts are window-keyed and fetched once per (agent, window) via the
- * executions store cache; nothing here polls.
+ * This file is layout and wiring only. The reads live in
+ * `stores/agentOverview.js` (one source per section, each with its own
+ * loaded/failed state), the decisions in `utils/overviewShape.js`, and each
+ * section in `components/overview/`. Every section keeps one footprint across
+ * loading, empty, failed and ready, so a new agent with nothing to show still
+ * gets the whole page.
  */
-import { ref, computed, watch, onMounted } from 'vue'
-import axios from 'axios'
-import { parseUTC } from '@/utils/timestamps'
-import { BUCKET_COLORS } from '@/utils/executionBuckets'
-import { formatSyncSummary, syncChip, syncPillClass, syncTextClass } from '@/utils/syncSummary'
-import { pendingCountOf, readPendingQueue } from '@/utils/operatorQueueRead'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useAuthStore } from '../stores/auth'
-import { useExecutionsStore } from '../stores/executions'
-import { useAgentsStore } from '../stores/agents'
-import StackedBarChart from './StackedBarChart.vue'
-import TrendLineChart from './TrendLineChart.vue'
-import CompatibilityPanel from './CompatibilityPanel.vue'
+import { useAgentOverviewStore } from '../stores/agentOverview'
+import { viewState } from '@/utils/loadingState'
+import {
+  attentionCount, hasRuns, measureTiles, nextRun, nowState, recentRows, scheduleRows,
+} from '@/utils/overviewShape'
+import OverviewNow from './overview/OverviewNow.vue'
+import OverviewActivity from './overview/OverviewActivity.vue'
+import OverviewRecent from './overview/OverviewRecent.vue'
+import OverviewMeasureTile from './overview/OverviewMeasureTile.vue'
+import OverviewReported from './overview/OverviewReported.vue'
+import OverviewSchedules from './overview/OverviewSchedules.vue'
+import OverviewHealth from './overview/OverviewHealth.vue'
 
 const props = defineProps({
   agent: { type: Object, required: true },
@@ -31,539 +36,192 @@ const props = defineProps({
 const emit = defineEmits(['navigate-tab', 'open-task'])
 
 const authStore = useAuthStore()
-const executionsStore = useExecutionsStore()
-const agentsStore = useAgentsStore()
+const store = useAgentOverviewStore()
+const src = store.sources
 
 const agentName = computed(() => props.agent?.name)
-const isRunning = computed(() => props.agent?.status === 'running')
-// #1409: admins get an actionable CTA in the empty health state; others get
-// plain guidance (only admins can enable the monitoring loop).
+// Only admins can turn the monitoring loop on (#1409).
 const isAdmin = computed(() => authStore.role === 'admin')
+const canManage = computed(() => !!props.agent?.can_share && !props.agent?.is_system)
 
-// Shared palette — bucket order must match db `_BUCKET_ORDER` (#1107). Moved to
-// `utils/executionBuckets.js` when the Workspace agent page became a second
-// consumer (#2161); the ramp's rationale lives there with it.
+// Blank the store for a different agent BEFORE the first render: it outlives
+// this component, and one frame of the previous agent's figures is the defect
+// #3815 names. The same agent's data stays, so returning to the tab is instant.
+if (agentName.value && store.agent !== agentName.value) store.reset(agentName.value)
 
-// Line-chart colors, also from the design-system semantic hues.
-const SUCCESS_COLOR = '#22c55e'  // green-500  (status-success)
-const DURATION_COLOR = '#6366f1' // indigo-500 (action-primary)
-const CONTEXT_COLOR = '#38bdf8'  // sky-400
-const UPTIME_COLOR = '#22c55e'   // green-500  (status-success)
-const LATENCY_COLOR = '#fbbf24'  // amber-400  (status-warning family)
+const now = ref(Date.now())
 
-// --- window selector ---
-const window = ref('7d')
-const WINDOWS = [
-  { id: '7d', label: '7d' },
-  { id: '14d', label: '14d' },
-  { id: '30d', label: '30d' },
-]
+const view = (key, count = 1) => viewState({ hasLoaded: src[key].hasLoaded, error: src[key].error, count })
 
-// --- state ---
-const analytics = ref(null)
-const analyticsLoading = ref(false)
-const info = ref(null)
-const live = ref(null) // { running_count, queued_count }
-const notifCount = ref(0)
-const opQueuePending = ref(0)
-// trinity-enterprise#707: the whole `/git/sync-state` payload (the backend's
-// numbers + verdict), not just the failure count.
-const syncState = ref(null)
-// D13: the attention count keeps counting failed syncs, not red divergence.
-const syncFailures = computed(() => syncState.value?.consecutive_failures || 0)
-const health = ref(null) // AgentHealthDetail
-const healthTrend = ref(null) // { dates, uptime, latency }
-const schedulesCount = ref(null)
-const schedulesPerf = ref(null) // #1115 per-schedule rollups (window-keyed)
-const skillsCount = ref(null)
-const recent = ref([])
+// --- activity + measures (one read, one window) ---
+const stats = computed(() => src.analytics.data)
+const activity = computed(() => view('analytics', hasRuns(stats.value) ? 1 : 0))
+// No runs at all, as far as the recent list knows — not merely none in this window.
+const never = computed(() => src.recent.hasLoaded && (src.recent.data || []).length === 0)
+const tiles = computed(() => measureTiles(stats.value, { never: never.value }))
+// Labels name the window the numbers are FROM, which lags the control while a switch is out.
+const shownWindow = computed(() => src.analytics.window || store.window)
 
-// --- attention badge ---
-const attentionCount = computed(
-  () => (notifCount.value || 0) + (opQueuePending.value || 0) + (syncFailures.value || 0)
-)
-
-// --- sync line (trinity-enterprise#707) ---
-// `—` until the backend has an observation (and after a failed read, which
-// keeps whatever was on screen): never `ok` for an agent nobody has measured.
-const syncText = computed(() => formatSyncSummary(syncState.value, Date.now()) ?? '—')
-const syncTitle = computed(
-  () => syncChip(syncState.value, Date.now())?.title ?? 'Sync status unknown'
-)
-const syncClass = computed(() => syncTextClass(syncState.value))
-const syncPill = computed(() => syncPillClass(syncState.value))
-
-// --- formatters ---
-function fmtDuration(ms) {
-  if (ms == null) return '—'
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
-  const m = Math.floor(ms / 60000)
-  const s = Math.round((ms % 60000) / 1000)
-  return `${m}m ${s}s`
-}
-function fmtTokens(n) {
-  if (n == null) return '—'
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
-  return `${n}`
-}
-function fmtPct(v) {
-  return v == null ? '—' : `${Math.round(v)}%`
-}
-function fmtDateTime(iso) {
-  if (!iso) return '—'
-  try { return parseUTC(iso).toLocaleString() } catch { return iso }
-}
-
-// --- chart data ---
-const dates = computed(() => (analytics.value?.timeline || []).map((p) => p.date))
-
-const successSeries = computed(() => [{
-  label: 'Completion',  // ent#206: exit-based, not answer quality
-  color: SUCCESS_COLOR,
-  fill: true,
-  data: (analytics.value?.timeline || []).map((p) =>
-    p.success_rate == null ? null : Math.round(p.success_rate * 100)
-  ),
-}])
-
-const durationSeries = computed(() => [{
-  label: 'Avg duration',
-  color: DURATION_COLOR,
-  fill: true,
-  data: (analytics.value?.timeline || []).map((p) => p.duration_avg_ms ?? null),
-}])
-
-const contextSeries = computed(() => [{
-  label: 'Avg context',
-  color: CONTEXT_COLOR,
-  fill: true,
-  data: (analytics.value?.timeline || []).map((p) => p.context_avg ?? null),
-}])
-
-const hasExecutions = computed(() => (analytics.value?.total_executions || 0) > 0)
-const hasContext = computed(() =>
-  (analytics.value?.timeline || []).some((p) => p.context_avg != null)
-)
-
-// health trend (clamped to ≤7d by retention — labeled in the UI)
-const hasHealthTrend = computed(
-  () => healthTrend.value && healthTrend.value.dates.length > 0
-)
-const uptimeSeries = computed(() => [{
-  label: 'Uptime', color: UPTIME_COLOR, fill: true,
-  data: healthTrend.value?.uptime || [],
-}])
-const latencySeries = computed(() => [{
-  label: 'Latency', color: LATENCY_COLOR, fill: true,
-  data: healthTrend.value?.latency || [],
-}])
-
-const statusColor = {
-  success: 'bg-status-success-500', completed: 'bg-status-success-500',
-  failed: 'bg-status-danger-500', error: 'bg-status-danger-500',
-  running: 'bg-action-primary-500', queued: 'bg-status-warning-500',
-  cancelled: 'bg-gray-400', skipped: 'bg-gray-400',
-}
-function dotColor(s) { return statusColor[s] || 'bg-gray-400' }
-
-const healthBadge = computed(() => {
-  const s = (health.value?.aggregate_status || '').toLowerCase()
-  if (s === 'healthy') return { label: 'Healthy', cls: 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300' }
-  if (s === 'degraded') return { label: 'Degraded', cls: 'bg-status-warning-100 dark:bg-status-warning-900/50 text-status-warning-700 dark:text-status-warning-300' }
-  if (s === 'unhealthy') return { label: 'Unhealthy', cls: 'bg-status-danger-100 dark:bg-status-danger-900/50 text-status-danger-700 dark:text-status-danger-300' }
-  return { label: 'Unknown', cls: 'bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400' }
+// --- now ---
+const nowFace = computed(() => {
+  const known = props.agent?.status !== 'running' || src.recent.hasLoaded || src.live.hasLoaded
+  if (!known) return null
+  return nowState({
+    agentStatus: props.agent?.status,
+    recent: src.recent.data || [],
+    live: src.live.data,
+    stats: src.analytics.hasLoaded ? stats.value : null,
+    now: now.value,
+  })
 })
+const next = computed(() => nextRun(src.schedules.data || [], now.value))
+const nextState = computed(() => view('schedules', (src.schedules.data || []).length).state)
+const attention = computed(() => attentionCount({
+  notifications: src.notifications.data,
+  asks: src.asks.data,
+  // D13: failed syncs count; red divergence alone does not.
+  syncFailures: src.sync.data?.consecutive_failures,
+}))
 
-// --- fetching ---
-async function loadAnalytics() {
-  if (!agentName.value) return
-  analyticsLoading.value = true
-  try {
-    const [a, s] = await Promise.allSettled([
-      executionsStore.fetchAgentAnalytics(agentName.value, window.value),
-      executionsStore.fetchSchedulesSummary(agentName.value, window.value),
-    ])
-    analytics.value = a.status === 'fulfilled' ? a.value : null
-    schedulesPerf.value = s.status === 'fulfilled' ? s.value : null
-  } finally {
-    analyticsLoading.value = false
-  }
+// --- lists ---
+const recent = computed(() => recentRows(src.recent.data || [], now.value))
+const recentView = computed(() => view('recent', recent.value.length))
+const schedules = computed(() => scheduleRows(src.summary.data, src.schedules.data || [], { now: now.value, windowLabel: src.summary.window || store.window }))
+const schedulesView = computed(() => view('summary', schedules.value.length))
+
+// --- reported ---
+const metrics = computed(() => src.metrics.data || [])
+const reportedView = computed(() => view('metrics', metrics.value.filter((m) => m?.status !== 'retired').length))
+
+// --- health ---
+const healthView = computed(() => view('health'))
+
+// --- loading and liveness ---
+function load() {
+  if (agentName.value) store.load(agentName.value)
 }
 
-// #1115 per-schedule scorecard formatters (shared style with the Schedules tab).
-function fmtSuccessRate(rate) {
-  return rate == null ? '—' : `${Math.round(rate * 100)}%`
+// AgentDetail is KeepAlive'd, so timers are paired with activation, not only
+// with mount: a cached page must not keep ticking or polling.
+let tick = null
+let poll = null
+function startTimers() {
+  stopTimers()
+  tick = setInterval(() => { now.value = Date.now() }, 1000)
+  poll = setInterval(() => {
+    if (typeof document !== 'undefined' && document.hidden) return
+    store.refreshLive()
+  }, 30000)
 }
-function successRateClass(rate) {
-  if (rate == null) return 'text-gray-500 dark:text-gray-400'
-  if (rate >= 0.9) return 'text-status-success-700 dark:text-status-success-400'
-  if (rate >= 0.5) return 'text-status-warning-700 dark:text-status-warning-400'
-  return 'text-status-danger-600 dark:text-status-danger-400'
+function stopTimers() {
+  if (tick) clearInterval(tick)
+  if (poll) clearInterval(poll)
+  tick = null
+  poll = null
 }
-// Reuses the existing `fmtDuration` defined for the Duration chart below.
-
-async function loadSidecars() {
-  const name = agentName.value
-  if (!name) return
-  const h = authStore.authHeader
-  const get = (url, params) => axios.get(url, { params, headers: h })
-
-  const results = await Promise.allSettled([
-    get('/api/executions/stats', { agent: name }),
-    get(`/api/agents/${name}/notifications/count`),
-    // #3302: the agent's pending count is the list route's `total` — the old
-    // per-agent read answered `count`, the length of a 100-row page.
-    get('/api/operator-queue', { agent_name: name, status: 'pending', limit: 1 }),
-    get(`/api/agents/${name}/git/sync-state`),
-    get(`/api/monitoring/agents/${name}`),
-    get(`/api/monitoring/agents/${name}/history`, { check_type: 'network', hours: 168, limit: 1000 }),
-    get(`/api/agents/${name}/schedules`),
-    get(`/api/agents/${name}/skills`),
-    get('/api/executions', { agent: name, limit: 5 }),
-    // #2198: through the store, not a raw axios.get. Overview is the default
-    // landing tab, so this fired concurrently with AgentDetail's own
-    // `checkBrainOrbCapability()` — three `/info` requests for one mount. The
-    // store's in-flight join collapses them; `loadAnalytics()` two functions up
-    // already uses the cached store methods, so the precedent is adjacent.
-    agentsStore.getAgentInfo(name),
-  ])
-
-  const [stats, notif, opq, sync, hDetail, hHist, scheds, skills, recents, agentInfo] = results
-
-  // NOTE the missing `.data`: the store returns `response.data` already
-  // unwrapped, unlike the nine raw-axios siblings below. Keeping `.data` here
-  // would set `info` to `undefined` with no throw and no console error — a
-  // permanently blank "About" lead on the default tab. Do not "restore" it, and
-  // do not mass-edit the siblings, which are still raw Axios responses.
-  if (agentInfo.status === 'fulfilled') info.value = agentInfo.value
-  if (stats.status === 'fulfilled') live.value = stats.value.data
-  if (notif.status === 'fulfilled') notifCount.value = notif.value.data?.pending_count || 0
-  // An unverified total (null) means the route withheld a row that was not
-  // this viewer's to see: with no more rows the page's own rows are the count,
-  // with more they are a floor until the agent's pending asks are read once
-  // below. Never the number on screen — the panel is reused across agents.
-  const opqBody = opq.status === 'fulfilled' ? opq.value.data : null
-  const opqCounted = pendingCountOf(opqBody)
-  if (opq.status === 'fulfilled') opQueuePending.value = opqCounted ?? (Number(opqBody?.count) || 0)
-  if (sync.status === 'fulfilled') syncState.value = sync.value.data || null
-  if (hDetail.status === 'fulfilled') health.value = hDetail.value.data
-  if (hHist.status === 'fulfilled') healthTrend.value = bucketHealth(hHist.value.data?.checks || [])
-  if (scheds.status === 'fulfilled') schedulesCount.value = (scheds.value.data || []).length
-  if (skills.status === 'fulfilled') {
-    const d = skills.value.data
-    skillsCount.value = Array.isArray(d) ? d.length : (d?.skills?.length ?? null)
-  }
-  if (recents.status === 'fulfilled') recent.value = recents.value.data || []
-
-  // Last, so every write above stays in step with the reads that fed it.
-  if (opq.status === 'fulfilled' && opqCounted == null && opqBody?.has_more) {
-    try {
-      const read = await readPendingQueue((params) => get('/api/operator-queue', params), { params: { agent_name: name } })
-      if (agentName.value === name) opQueuePending.value = read.total ?? read.items.length
-    } catch {
-      // the fallback failed: the line stays as a failed read leaves it
-    }
-  }
-}
-
-// Bucket network health checks into per-UTC-day uptime% + avg latency.
-function bucketHealth(checks) {
-  if (!checks.length) return { dates: [], uptime: [], latency: [] }
-  const byDay = {}
-  for (const c of checks) {
-    const day = (c.checked_at || '').slice(0, 10)
-    if (!day) continue
-    if (!byDay[day]) byDay[day] = { reach: 0, n: 0, lat: 0, latN: 0 }
-    byDay[day].n += 1
-    if (c.reachable) byDay[day].reach += 1
-    if (c.latency_ms != null) { byDay[day].lat += c.latency_ms; byDay[day].latN += 1 }
-  }
-  const days = Object.keys(byDay).sort()
-  return {
-    dates: days,
-    uptime: days.map((d) => Math.round((byDay[d].reach / byDay[d].n) * 100)),
-    latency: days.map((d) => (byDay[d].latN ? Math.round(byDay[d].lat / byDay[d].latN) : null)),
-  }
-}
-
-watch(window, loadAnalytics)
-watch(() => agentName.value, () => { loadAnalytics(); loadSidecars() })
 
 onMounted(() => {
-  loadAnalytics()
-  loadSidecars()
+  load()
+  startTimers()
 })
+// Coming back to a cached page. A fresh mount already has its timers (whether
+// or not Vue also fires this hook for it), so there is nothing to restart then.
+onActivated(() => {
+  if (tick) return
+  now.value = Date.now()
+  store.refreshLive()
+  startTimers()
+})
+onDeactivated(stopTimers)
+onBeforeUnmount(stopTimers)
+
+watch(agentName, (name, previous) => {
+  if (name && name !== previous) load()
+})
+
+function retry(...keys) {
+  for (const key of keys) store.retry(key)
+}
 </script>
 
 <template>
-  <div class="space-y-5">
-    <!-- 1. About (lead) -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700">
-      <div class="flex items-start justify-between gap-4">
-        <div class="min-w-0">
-          <h2 class="text-lg font-semibold text-gray-900 dark:text-white truncate">
-            {{ info?.display_name || info?.name || agent.name }}
-          </h2>
-          <p v-if="info?.tagline" class="mt-0.5 text-sm text-action-primary-600 dark:text-action-primary-400 font-medium">
-            {{ info.tagline }}
-          </p>
-          <p v-if="info?.description" class="mt-2 text-sm text-gray-600 dark:text-gray-300 line-clamp-3 whitespace-pre-line">
-            {{ info.description }}
-          </p>
-        </div>
-        <!-- trinity-enterprise#887: the Info tab is Settings › General now,
-             which is owner-only — so is this link. -->
-        <button
-          v-if="agent.can_share"
-          class="shrink-0 text-xs font-medium text-action-primary-600 dark:text-action-primary-400 hover:underline"
-          @click="emit('navigate-tab', 'info')"
-        >Full details →</button>
-      </div>
-      <div class="mt-4">
-        <button
-          class="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md bg-action-primary-600 hover:bg-action-primary-700 text-white"
-          @click="emit('navigate-tab', 'tasks')"
-        >
-          <svg class="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
-          New task
-        </button>
-      </div>
+  <div class="space-y-4" data-testid="overview-panel">
+    <OverviewNow
+      :now="nowFace"
+      :next="next"
+      :next-state="nextState"
+      :attention="attention"
+      @new-task="emit('navigate-tab', 'tasks')"
+      @navigate="emit('navigate-tab', $event)"
+      @open-task="emit('open-task', $event)"
+    />
+
+    <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
+      <OverviewActivity
+        class="min-w-0 lg:col-span-2"
+        :state="activity.state"
+        :stale="activity.stale"
+        :stats="stats"
+        :window="store.window"
+        :never="never"
+        @update:window="store.setWindow($event)"
+        @retry="retry('analytics', 'summary')"
+      />
+      <OverviewRecent
+        class="min-w-0"
+        :state="recentView.state"
+        :rows="recent"
+        @open-task="emit('open-task', $event)"
+        @navigate="emit('navigate-tab', $event)"
+        @retry="retry('recent')"
+      />
     </div>
 
-    <!-- 2. Needs attention (count + link only; hidden when zero) -->
-    <router-link
-      v-if="attentionCount > 0"
-      :to="{ path: '/operations' }"
-      class="flex items-center justify-between px-4 py-3 rounded-lg bg-status-warning-50 dark:bg-status-warning-900/30 border border-status-warning-200 dark:border-status-warning-800 hover:bg-status-warning-100 dark:hover:bg-status-warning-900/50 transition-colors"
-    >
-      <span class="flex items-center text-sm font-medium text-status-warning-800 dark:text-status-warning-300">
-        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19h13.86a2 2 0 001.74-3L13.74 4a2 2 0 00-3.48 0L3.34 16a2 2 0 001.73 3z" /></svg>
-        {{ attentionCount }} {{ attentionCount === 1 ? 'item needs' : 'items need' }} attention
-      </span>
-      <span class="text-xs text-status-warning-700 dark:text-status-warning-400">View in Operations →</span>
-    </router-link>
-
-    <!-- 2b. Deployment compatibility (#668) — count + expandable checklist, auto-fix -->
-    <CompatibilityPanel :agent="agent" />
-
-    <!-- 3. Trend charts -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
-      <!-- #2197 class: title + live counts + window toggle are ~360px of
-           rigid min-content, so this row widened the page at 375px (found by
-           e2e/agent-header.spec.js, ent#950). It wraps instead. -->
-      <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-2 px-5 pt-4">
-        <h3 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider">Activity trends</h3>
-        <div class="flex flex-wrap items-center gap-2">
-          <span v-if="live" class="text-xs text-gray-500 dark:text-gray-400">
-            <span class="font-mono text-action-primary-600 dark:text-action-primary-400">{{ live.running_count }}</span> running ·
-            <span class="font-mono text-status-warning-700 dark:text-status-warning-400">{{ live.queued_count }}</span> queued
-          </span>
-          <div class="inline-flex rounded-md border border-gray-200 dark:border-gray-700 overflow-hidden">
-            <button
-              v-for="w in WINDOWS" :key="w.id"
-              @click="window = w.id"
-              :class="['px-2.5 py-1 text-xs font-medium', window === w.id ? 'bg-action-primary-600 text-white' : 'bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700']"
-            >{{ w.label }}</button>
-          </div>
-        </div>
-      </div>
-
-      <div v-if="analyticsLoading && !analytics" class="py-12 text-center">
-        <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500 mx-auto"></div>
-      </div>
-
-      <div v-else-if="!hasExecutions" class="py-12 px-6 text-center">
-        <svg class="w-10 h-10 mx-auto text-gray-300 dark:text-gray-600 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 3v18h18M7 15l4-4 3 3 5-6" />
-        </svg>
-        <p class="text-sm font-medium text-gray-700 dark:text-gray-300">No runs in the last {{ window }}</p>
-        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-sm mx-auto">
-          Executions show up here after this agent runs a chat, schedule, or task.
-        </p>
-      </div>
-
-      <div v-else class="p-5 grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <!-- executions by type -->
-        <div class="lg:col-span-2">
-          <div class="flex items-baseline justify-between mb-2">
-            <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300">Executions by type</h4>
-            <span class="text-xs text-gray-400">{{ analytics.total_executions }} total</span>
-          </div>
-          <StackedBarChart :data="analytics.timeline" :buckets="analytics.buckets" :colors="BUCKET_COLORS" :height="150" />
-        </div>
-
-        <!-- success rate -->
-        <div>
-          <div class="flex items-baseline justify-between mb-2">
-            <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300" title="Runs that finished without erroring — completion, not answer quality (ent#206)">Execution completion rate</h4>
-            <span class="text-sm font-semibold text-status-success-700 dark:text-status-success-400">{{ Math.round(analytics.success_rate * 100) }}%</span>
-          </div>
-          <TrendLineChart :dates="dates" :series="successSeries" :y-min="0" :y-max="100" :value-format="(v) => (v == null ? '—' : v + '%')" :axis-format="(v) => v + '%'" />
-        </div>
-
-        <!-- duration -->
-        <div>
-          <div class="flex items-baseline justify-between mb-2">
-            <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300">Duration</h4>
-            <span class="text-xs text-gray-500 dark:text-gray-400">avg <span class="font-mono text-gray-700 dark:text-gray-200">{{ fmtDuration(analytics.duration_ms.avg) }}</span> · p95 <span class="font-mono text-gray-700 dark:text-gray-200">{{ fmtDuration(analytics.duration_ms.p95) }}</span></span>
-          </div>
-          <TrendLineChart :dates="dates" :series="durationSeries" :y-min="0" :value-format="(v) => fmtDuration(v)" :axis-format="(v) => fmtDuration(v)" />
-        </div>
-
-        <!-- context -->
-        <div v-if="hasContext" class="lg:col-span-2">
-          <div class="flex items-baseline justify-between mb-2">
-            <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300">Context consumption</h4>
-            <span class="text-xs text-gray-500 dark:text-gray-400">avg <span class="font-mono text-gray-700 dark:text-gray-200">{{ fmtTokens(analytics.context_avg) }}</span> tokens</span>
-          </div>
-          <TrendLineChart :dates="dates" :series="contextSeries" :y-min="0" :value-format="(v) => fmtTokens(v)" :axis-format="(v) => fmtTokens(v)" />
-        </div>
-      </div>
-
-      <p v-if="analytics?.sampled" class="px-5 pb-3 -mt-2 text-[11px] text-gray-400">
-        p95 sampled over the newest {{ analytics.sample_size }} runs.
-      </p>
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <OverviewMeasureTile
+        v-for="tile in tiles"
+        :key="tile.key"
+        class="min-w-0"
+        :state="activity.state"
+        :label="tile.label"
+        :window-label="shownWindow"
+        :value="tile.value"
+        :sub="tile.sub"
+        :series="tile.series"
+        :hi="tile.hi"
+        :guide="tile.guide"
+        :aria="tile.aria"
+      />
     </div>
 
-    <!-- 3.5 Schedules performance (#1115) — per-schedule rollups for the
-         window. Hidden when the agent has no schedules. Each row deep-links
-         to the Schedules tab (the #868 per-schedule deep view). -->
-    <div
-      v-if="schedulesPerf && schedulesPerf.schedules.length"
-      class="bg-white dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700"
-    >
-      <div class="flex items-baseline justify-between mb-3">
-        <h3 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider">Schedules performance</h3>
-        <span class="text-xs text-gray-400">last {{ window }}</span>
-      </div>
-      <div class="divide-y divide-gray-100 dark:divide-gray-700/60">
-        <button
-          v-for="s in schedulesPerf.schedules"
-          :key="s.schedule_id"
-          @click="emit('navigate-tab', 'schedules')"
-          class="w-full flex items-center gap-3 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded px-1 -mx-1"
-          :title="`Open ${s.name} in the Schedules tab`"
-        >
-          <div class="min-w-0 flex-1">
-            <p class="text-sm font-medium text-gray-900 dark:text-white truncate">{{ s.command || s.name }}</p>
-            <p class="text-xs text-gray-400 truncate font-mono">{{ s.name }} · {{ s.cron_expression }}</p>
-          </div>
-          <div class="shrink-0 flex items-center gap-4 text-right">
-            <div class="w-14">
-              <p :class="['text-sm font-semibold', successRateClass(s.success_rate)]">{{ fmtSuccessRate(s.success_rate) }}</p>
-              <p class="text-[10px] text-gray-400 uppercase tracking-wide">success</p>
-            </div>
-            <div class="w-16 hidden sm:block">
-              <p class="text-sm font-mono text-gray-700 dark:text-gray-200">{{ fmtDuration(s.avg_duration_ms) }}</p>
-              <p class="text-[10px] text-gray-400 uppercase tracking-wide">avg</p>
-            </div>
-            <div class="w-10">
-              <p class="text-sm font-mono text-gray-700 dark:text-gray-200">{{ s.total_executions }}</p>
-              <p class="text-[10px] text-gray-400 uppercase tracking-wide">runs</p>
-            </div>
-            <div class="w-10 hidden sm:block">
-              <p class="text-sm font-mono text-gray-700 dark:text-gray-200">{{ s.tool_call_total }}</p>
-              <p class="text-[10px] text-gray-400 uppercase tracking-wide">tools</p>
-            </div>
-            <svg class="w-4 h-4 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-            </svg>
-          </div>
-        </button>
-      </div>
-      <p v-if="schedulesPerf.tool_calls_sampled" class="mt-2 text-[11px] text-gray-400">
-        Tool counts sampled over the newest runs.
-      </p>
-    </div>
+    <OverviewReported
+      :state="reportedView.state"
+      :metrics="metrics"
+      :can-open-dashboard="canManage"
+      @navigate="emit('navigate-tab', $event)"
+      @retry="retry('metrics')"
+    />
 
-    <!-- 4. Health & reliability -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700">
-      <h3 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider mb-3">Health &amp; reliability</h3>
-      <div class="flex flex-wrap items-center gap-2 mb-4">
-        <span :class="['px-2.5 py-1 text-xs font-semibold rounded-full', healthBadge.cls]">{{ healthBadge.label }}</span>
-        <span v-if="health?.network" class="px-2.5 py-1 text-xs rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">
-          {{ health.network.reachable ? 'Reachable' : 'Offline' }}
-        </span>
-        <span v-if="health?.docker" class="px-2.5 py-1 text-xs rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">
-          {{ health.docker.restart_count || 0 }} restarts
-        </span>
-        <span v-if="health?.docker?.oom_killed" class="px-2.5 py-1 text-xs rounded-full bg-status-danger-100 dark:bg-status-danger-900/50 text-status-danger-700 dark:text-status-danger-300">OOM killed</span>
-        <span v-if="health?.uptime_percent_24h != null" class="px-2.5 py-1 text-xs rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">
-          {{ fmtPct(health.uptime_percent_24h) }} uptime (24h)
-        </span>
-        <span v-if="health?.circuit_breaker?.open" class="px-2.5 py-1 text-xs rounded-full bg-status-danger-100 dark:bg-status-danger-900/50 text-status-danger-700 dark:text-status-danger-300">
-          Circuit open — see header
-        </span>
-      </div>
-
-      <div v-if="hasHealthTrend" class="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div>
-          <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">Uptime <span class="font-normal text-gray-400">(last 7 days)</span></h4>
-          <TrendLineChart :dates="healthTrend.dates" :series="uptimeSeries" :y-min="0" :y-max="100" :height="120" :value-format="(v) => (v == null ? '—' : v + '%')" :axis-format="(v) => v + '%'" />
-        </div>
-        <div>
-          <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">Latency <span class="font-normal text-gray-400">(last 7 days)</span></h4>
-          <TrendLineChart :dates="healthTrend.dates" :series="latencySeries" :y-min="0" :height="120" :value-format="(v) => (v == null ? '—' : v + 'ms')" :axis-format="(v) => v + 'ms'" />
-        </div>
-      </div>
-      <div v-else class="py-8 px-6 text-center">
-        <svg class="w-10 h-10 mx-auto text-gray-300 dark:text-gray-600 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 12h4l3 8 4-16 3 8h4" />
-        </svg>
-        <p class="text-sm font-medium text-gray-700 dark:text-gray-300">No health data yet</p>
-        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-sm mx-auto">
-          Fleet-health monitoring is off, so uptime and latency aren't being recorded for this agent.
-        </p>
-        <router-link
-          v-if="isAdmin"
-          :to="{ path: '/operations', query: { tab: 'health' } }"
-          class="mt-3 inline-flex items-center text-xs font-medium text-action-primary-600 dark:text-action-primary-400 hover:underline"
-        >
-          Enable it in Operations → Health →
-        </router-link>
-        <p v-else class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-          An admin can enable it in Operations → Health.
-        </p>
-      </div>
-    </div>
-
-    <!-- 5. Recent activity -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider">Recent activity</h3>
-        <button class="text-xs font-medium text-action-primary-600 dark:text-action-primary-400 hover:underline" @click="emit('navigate-tab', 'tasks')">View all →</button>
-      </div>
-      <div v-if="recent.length === 0" class="text-sm text-gray-400 py-2">No recent executions.</div>
-      <ul v-else class="divide-y divide-gray-100 dark:divide-gray-700">
-        <li v-for="r in recent" :key="r.id">
-          <button class="w-full flex items-center gap-3 py-2 text-left hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded px-1 -mx-1" @click="emit('open-task', r.id)">
-            <span :class="['w-2 h-2 rounded-full shrink-0', dotColor(r.status)]"></span>
-            <span class="flex-1 min-w-0 truncate text-sm text-gray-700 dark:text-gray-200">{{ r.message || '(no message)' }}</span>
-            <span class="shrink-0 px-1.5 py-0.5 text-[10px] rounded bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400">{{ r.triggered_by }}</span>
-            <span class="shrink-0 text-[11px] text-gray-400">{{ fmtDateTime(r.started_at) }}</span>
-          </button>
-        </li>
-      </ul>
-    </div>
-
-    <!-- 6. Footprint (compact, static) -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700">
-      <h3 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider mb-3">Footprint</h3>
-      <div class="flex flex-wrap gap-2 text-xs">
-        <button class="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600" @click="emit('navigate-tab', 'schedules')">
-          {{ schedulesCount ?? '—' }} schedules
-        </button>
-        <button class="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600" @click="emit('navigate-tab', 'skills')">
-          {{ skillsCount ?? '—' }} skills
-        </button>
-        <button v-if="agent.can_share" class="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600" @click="emit('navigate-tab', 'channels')">
-          {{ (agent.shares && agent.shares.length) || 0 }} shares
-        </button>
-        <span data-testid="overview-sync" :title="syncTitle" class="px-2.5 py-1 rounded-md text-gray-600 dark:text-gray-300 tabular-nums" :class="syncPill || 'bg-gray-100 dark:bg-gray-700'">
-          Sync: <span data-testid="overview-sync-value" :class="syncClass">{{ syncText }}</span>
-        </span>
-      </div>
+    <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
+      <OverviewSchedules
+        class="min-w-0 lg:col-span-2"
+        :state="schedulesView.state"
+        :rows="schedules"
+        @navigate="emit('navigate-tab', $event)"
+        @retry="retry('summary', 'schedules')"
+      />
+      <OverviewHealth
+        class="min-w-0"
+        :state="healthView.state"
+        :health="src.health.data"
+        :history-loaded="src.history.hasLoaded"
+        :history-failed="!!src.history.error && !src.history.hasLoaded"
+        :checks="src.history.data || []"
+        :sync="src.sync.data"
+        :is-admin="isAdmin"
+        :now="now"
+        @retry="retry('health', 'history')"
+      />
     </div>
   </div>
 </template>
