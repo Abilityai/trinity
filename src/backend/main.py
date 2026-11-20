@@ -462,6 +462,11 @@ async def _init_logging_and_first_run_notice() -> None:
             "admin account. On an internet-reachable instance, keep it behind a "
             "tunnel/VPN until setup completes (docs/DEPLOYMENT.md → Security)."
         )
+    else:
+        # #4693: installs set up before the admin's email was allow-listed at
+        # setup. Idempotent, never raises, logs no address.
+        from services.admin_email_allowlist import allow_list_admin_email
+        allow_list_admin_email()
 
 
 async def _start_event_bus() -> None:

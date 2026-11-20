@@ -26,6 +26,8 @@ from models import (
 from database import db
 from db.users import EmailInUseError
 from services.platform_audit_service import AuditEventType, platform_audit_service
+from services.admin_email_allowlist import allow_list_admin_email
+from utils.admin_identity import admin_username
 from dependencies import (
     require_admin,
     get_current_user,
@@ -176,6 +178,9 @@ async def update_my_email(
         _refuse(409, "email_in_use", "That email is already associated with another account")
     if not updated:
         raise HTTPException(status_code=404, detail="User not found")
+    # #4693: the setup admin's new address joins the allow-list, as at setup.
+    if current_user.username == admin_username():
+        allow_list_admin_email(email)
 
     await platform_audit_service.log(
         event_type=AuditEventType.AUTHENTICATION,
