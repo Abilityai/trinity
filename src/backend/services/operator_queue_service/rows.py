@@ -20,7 +20,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from services import operator_queue_service as _oq
-from utils import request_memo
 from utils.helpers import parse_iso_timestamp, to_utc_iso
 
 from . import deps, reserved
@@ -174,12 +173,8 @@ OPERATOR_QUEUE_AGING_HOURS_KEY = "operator_queue_aging_hours"
 OPERATOR_QUEUE_AGING_HOURS_DEFAULT = 24
 
 
-@request_memo.memoized
 def aging_hours() -> int:
-    """The operator's bound, `0` = disabled; unreadable ⇒ the default + WARN.
-
-    Memoized inside a `request_memo.scope()` (#4671): `is_aged` is asked per
-    row, and each call read the setting again."""
+    """The operator's bound, `0` = disabled; unreadable ⇒ the default + WARN."""
     try:
         raw = deps.db.get_setting_value(
             OPERATOR_QUEUE_AGING_HOURS_KEY, str(OPERATOR_QUEUE_AGING_HOURS_DEFAULT)
