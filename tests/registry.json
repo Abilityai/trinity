@@ -9432,6 +9432,50 @@
         "docker"
       ],
       "description": "OpenCode telemetry under `part` (Abilityai/lilu#659) and the per-provider images capability (Abilityai/lilu#660). #659: the pinned 1.18.32 binary nests step/tool payloads under `part`; a REAL step_finish line captured on the DGX must read input 56913 / output 63 / cost 0.0, a 4-step tool turn must report the LAST step's input (57229, not the sum) and the real tool id `bash` (never \"Tool\"), and the legacy flat shape must still parse. Cost decision: a native `cost: 0` stays 0.0; None only when no cost field arrived. #660: 1.18.32 swaps an image part for an \"ERROR: Cannot read …\" text part unless the model's `modalities.input` lists \"image\"; `OPENCODE_PROVIDER_<ID>_IMAGES` defaults off for ollama / URL-declared OpenAI-compatible providers and on for openrouter/anthropic/openai, is surfaced as `capabilities().image_input`, writes `modalities` (with \"text\" kept) into the provider block when true, and an undeliverable image is never a silent text-only turn: no `-f`, the model is told, a `metadata.warnings` entry, a sentence prepended to the response, and a log line."
+    },
+    {
+      "file": "unit/test_ent1312_setup_link_claim.py",
+      "feature": "trinity-enterprise#1312",
+      "added": "2026-11-20",
+      "categories": [
+        "backend",
+        "setup",
+        "security"
+      ],
+      "description": "PROV-020: the email-bound setup claim (email-bound:<64 hex>) passes only for the email its code was derived for (case/whitespace-insensitive); blank/other email, another secret's code and a malformed secret line are the one generic 403 with one failed-attempt record and no password work; the instance-ID form is untouched; /status is identical for both forms; a recycle between check and take is refused and restores never clobber a newer claim; nothing logs the code, secret or email; the published test vector is asserted through the endpoint."
+    },
+    {
+      "file": "unit/test_ent1312_setup_nginx.py",
+      "feature": "trinity-enterprise#1312",
+      "added": "2026-11-20",
+      "categories": [
+        "frontend",
+        "nginx",
+        "security"
+      ],
+      "description": "PROV-020: /setup and /setup/ get their own nginx location with access_log off, no-store, try_files /index.html =404 (served in place) and exactly one Referrer-Policy: no-referrer from the header copy render-nginx.sh writes."
+    },
+    {
+      "file": "../src/frontend/tests/unit/setupPasswordLink.spec.js",
+      "feature": "trinity-enterprise#1312",
+      "added": "2026-11-20",
+      "categories": [
+        "frontend",
+        "unit",
+        "setup"
+      ],
+      "description": "PROV-020 (mounted): on an instance-id install /setup reads claim/email from the fragment or query, clears the address bar, hides the instance-ID field, shows the email read-only, posts claim_code and signs in; refused/incomplete/reloaded links show one card without the words 'instance ID'; only a non-secret flag is stored; other installs ignore the values but clear them; Login shows the setup-complete notice only when asked."
+    },
+    {
+      "file": "../src/frontend/tests/unit/setupLinkGuard.spec.js",
+      "feature": "trinity-enterprise#1312",
+      "added": "2026-11-20",
+      "categories": [
+        "frontend",
+        "unit",
+        "setup"
+      ],
+      "description": "PROV-020 (real router): on a completed install a /setup visit carrying link values goes to /login?notice=setup-complete with nothing of the link forwarded, a plain /setup to a bare /login; scrub() redacts claim= in queries and fragments."
     }
   ]
 }

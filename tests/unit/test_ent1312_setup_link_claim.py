@@ -164,6 +164,23 @@ def test_other_case_or_padded_email_passes_when_it_normalises_to_the_same_addres
     assert e.db.users["admin"]["email"] == EMAIL
 
 
+# The published test vector (docs/memory/requirements/infrastructure.md,
+# PROV-020). The sender and the provisioner build against this exact triple, so
+# it is asserted as literals, both against the reference computation and through
+# the endpoint.
+VECTOR_SECRET = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+VECTOR_EMAIL = "owner@example.com"
+VECTOR_CODE = "31577483a2bf6d44cc8f31d6069d17e6a02b96bbe84c0e6c245ae7dfef66b2fe"
+
+
+def test_the_published_test_vector_is_what_the_server_accepts(env):
+    assert link_code(VECTOR_SECRET, VECTOR_EMAIL) == VECTOR_CODE
+    e = env(claim=f"email-bound:{VECTOR_SECRET}\n")
+    # Typed with other case and padding, it normalises to the vector's email.
+    assert _post(claim_code=VECTOR_CODE, email=" Owner@Example.com ")["success"] is True
+    assert e.db.users["admin"]["email"] == VECTOR_EMAIL
+
+
 def test_the_code_is_normalised_like_an_instance_id(env):
     e = env()
     assert _post(claim_code=CODE.upper())["success"] is True
