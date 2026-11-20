@@ -71,6 +71,7 @@ import hmac
 import logging
 import os
 import re
+import stat
 import uuid
 from pathlib import Path
 
@@ -173,22 +174,35 @@ def _check_claim(claim_code, email, request: Request) -> None:
 def _restore_claim(taken: Path) -> None:
     """Put a taken claim back, never over a claim written meanwhile.
 
-    `os.link` fails if the path exists, so a provisioner's newer claim wins and
-    the stale taken copy is dropped. Where hard links are unsupported, fall back
-    to a rename guarded by an existence check.
+    The claim path is created exclusively (`O_EXCL`), so a provisioner's newer
+    claim wins and only the stale taken copy is dropped. No link is made: the
+    guard in `test_ent819_no_platform_links_in_home.py` pins every one.
     """
     try:
-        os.link(taken, _SETUP_CLAIM_PATH)
+        data = taken.read_bytes()
+        st = taken.stat()
+        fd = os.open(_SETUP_CLAIM_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         pass
-    except OSError:
+    except OSError as e:
+        logger.warning("Could not restore the setup claim file: %s", type(e).__name__)
+        return
+    else:
         try:
-            if not _SETUP_CLAIM_PATH.exists():
-                taken.rename(_SETUP_CLAIM_PATH)
-                return
+            try:
+                os.fchown(fd, st.st_uid, st.st_gid)
+            except OSError:
+                pass  # not permitted to change owner: the content still matters most
+            os.fchmod(fd, stat.S_IMODE(st.st_mode))
+            os.write(fd, data)
+            os.fsync(fd)
         except OSError as e:
+            # Drop the partial file; the taken copy stays on disk rather than vanish.
             logger.warning("Could not restore the setup claim file: %s", type(e).__name__)
+            os.close(fd)
+            _SETUP_CLAIM_PATH.unlink(missing_ok=True)
             return
+        os.close(fd)
     try:
         taken.unlink(missing_ok=True)
     except OSError as e:

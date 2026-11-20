@@ -328,6 +328,23 @@ def test_a_crash_after_the_take_restores_the_claim(env, monkeypatch):
     assert e.claim_files() == ["setup-claim"]
 
 
+def test_a_crash_restore_keeps_the_claim_mode_and_makes_no_link(env, monkeypatch):
+    e = env()
+    e.claim_file.chmod(0o640)
+    setup = _setup()
+
+    def _boom(p):
+        raise RuntimeError("bcrypt backend missing")
+
+    monkeypatch.setattr(setup, "hash_password", _boom)
+    with pytest.raises(RuntimeError):
+        _post()
+    st = e.claim_file.stat()
+    assert st.st_mode & 0o777 == 0o640, "the restored claim keeps the mode it had"
+    assert st.st_nlink == 1, "the restore makes no link"
+    assert e.claim_files() == ["setup-claim"]
+
+
 def test_a_crash_restore_never_overwrites_a_claim_recycled_meanwhile(env, monkeypatch):
     e = env()
     setup = _setup()
