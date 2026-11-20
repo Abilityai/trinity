@@ -71,6 +71,7 @@ const nowFace = computed(() => {
     recent: src.recent.data || [],
     live: src.live.data,
     stats: src.analytics.hasLoaded ? stats.value : null,
+    schedules: src.schedules.data || [],
     now: now.value,
   })
 })
@@ -84,7 +85,7 @@ const attention = computed(() => attentionCount({
 }))
 
 // --- lists ---
-const recent = computed(() => recentRows(src.recent.data || [], now.value))
+const recent = computed(() => recentRows(src.recent.data || [], now.value, src.schedules.data || []))
 const recentView = computed(() => view('recent', recent.value.length))
 const schedules = computed(() => scheduleRows(src.summary.data, src.schedules.data || [], { now: now.value, windowLabel: src.summary.window || store.window }))
 const schedulesView = computed(() => view('summary', schedules.value.length))

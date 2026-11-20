@@ -103,6 +103,14 @@ history.
 `tests/unit/portalLoadingTreatment.spec.js`; the branch lives inside the slot
 and nothing renders in it while loading.
 
+### Run titles and the failure mark
+
+A run's title (Recent work, and "Working on …" in Now) is `runTitle()`: the
+prompt's first non-empty line on up to two lines, the whole prompt (flattened,
+capped at 400 characters) on hover. A scheduled run is titled by its schedule's
+name with the command beneath. The failure mark under the baseline is 3–8px
+tall, scaled by how many runs failed that day relative to the window's worst day.
+
 ### Activity readout
 
 There is no floating tooltip. One reserved line under the title shows the

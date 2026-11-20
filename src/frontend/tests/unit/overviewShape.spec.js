@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest'
 import {
   CHART_HEIGHT, DASH,
   activityColumns, activityReadout, attentionCount, ghostColumns, healthBlocks,
-  linePaths, measureTiles, nextRun, nowState, recentRows, scheduleRows,
+  firstLine, hoverText, linePaths, measureTiles, nextRun, nowState, recentRows, runTitle, scheduleRows,
 } from '../../src/utils/overviewShape'
 
 const NOW = Date.parse('2026-11-20T12:00:00Z')
@@ -124,6 +124,14 @@ describe('activity chart', () => {
     expect(Math.min(...col.segments.map((s) => s.px))).toBeGreaterThanOrEqual(3)
   })
 
+  it('the failure mark grows with the number of failures that day', () => {
+    const tl = (failed) => ({ date: '2026-11-20', total: 9, failed, by_type: { A: 9 } })
+    const { columns } = activityColumns({ buckets: [], timeline: [tl(0), tl(1), tl(2), tl(5)] })
+    expect(columns.map((c) => c.failPx)).toEqual([0, 3, 4, 8])
+    // one failure in the whole window is the minimum mark, not the tallest
+    expect(activityColumns({ buckets: [], timeline: [tl(1), tl(0)] }).columns[0].failPx).toBe(3)
+  })
+
   it('a zero-run day has no segments, and a single run is still visible', () => {
     const { columns } = activityColumns(BUSY)
     expect(columns[1].segments).toEqual([])
@@ -205,6 +213,39 @@ describe('next run', () => {
   it('is null with no schedule to wait for', () => {
     expect(nextRun([], NOW)).toBeNull()
     expect(nextRun([{ name: 'off', enabled: false, next_run_at: iso(-5) }], NOW)).toBeNull()
+  })
+})
+
+describe('what a run is called', () => {
+  const PROMPT = '\n\n  Review the Q4 pipeline  \nYou are a careful analyst.\n\n- step one\n- step two'
+
+  it('is the first non-empty line of a long multi-line prompt', () => {
+    expect(firstLine(PROMPT)).toBe('Review the Q4 pipeline')
+    expect(runTitle({ message: PROMPT })).toMatchObject({ title: 'Review the Q4 pipeline', detail: '' })
+  })
+
+  it('keeps the whole prompt for hover, on one line and capped', () => {
+    expect(hoverText(PROMPT)).toBe('Review the Q4 pipeline You are a careful analyst. - step one - step two')
+    const long = hoverText('x'.repeat(900))
+    expect(long).toHaveLength(400)
+    expect(long.endsWith('…')).toBe(true)
+  })
+
+  it('a scheduled run is known by its schedule, with the command beneath', () => {
+    const schedules = [{ id: 's1', name: 'morning-digest' }]
+    expect(runTitle({ message: '/digest --full', schedule_id: 's1' }, schedules)).toMatchObject({ title: 'morning-digest', detail: '/digest --full' })
+    // an id that matches no schedule (a manual run's placeholder) falls back to the prompt
+    expect(runTitle({ message: 'Hello', schedule_id: '__manual__' }, schedules).title).toBe('Hello')
+  })
+
+  it('a run with no message says so', () => {
+    expect(runTitle({ message: '' }).title).toBe('(no message)')
+  })
+
+  it('the Now row uses the same title, with the whole prompt kept for hover', () => {
+    const state = nowState({ agentStatus: 'running', recent: [{ id: 'e', status: 'running', message: PROMPT, started_at: iso(1) }] })
+    expect(state.title).toBe('Working on “Review the Q4 pipeline”')
+    expect(state.full).toMatch(/careful analyst/)
   })
 })
 

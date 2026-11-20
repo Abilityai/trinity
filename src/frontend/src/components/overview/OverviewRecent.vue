@@ -5,6 +5,10 @@
  * The last five runs: outcome (shape and colour, never colour alone), what was
  * asked, when, how long, and what started it. Empty names what will appear and
  * the one next action.
+ *
+ * Prompts are long and multi-line in practice, so a row's title is the
+ * prompt's first line, on up to two lines, with the whole prompt on hover. A
+ * scheduled run is titled by its schedule's name, with the command beneath.
  */
 import BaseCard from '../base/BaseCard.vue'
 import BaseBadge from '../base/BaseBadge.vue'
@@ -73,14 +77,16 @@ const glyph = (status) => GLYPH[status] || 'rounded-full bg-gray-400 dark:bg-gra
       <li v-for="row in rows" :key="row.id">
         <button
           type="button"
-          class="-mx-1 flex w-[calc(100%+0.5rem)] items-center gap-3 rounded px-1 py-2.5 text-left hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:hover:bg-gray-750"
+          class="-mx-1 flex w-[calc(100%+0.5rem)] items-start gap-3 rounded px-1 py-2.5 text-left hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:hover:bg-gray-750"
+          :title="row.full || undefined"
           data-testid="overview-recent-row"
           @click="emit('open-task', row.id)"
         >
-          <span class="inline-block h-2.5 w-2.5 flex-none" :class="glyph(row.status)" role="img" :aria-label="row.status"></span>
+          <span class="mt-[5px] inline-block h-2.5 w-2.5 flex-none" :class="glyph(row.status)" role="img" :aria-label="row.status"></span>
           <span class="min-w-0 flex-1">
-            <span class="block truncate text-sm text-gray-900 dark:text-gray-100">{{ row.title }}</span>
-            <span class="block text-[12.5px] tabular-nums text-gray-500 dark:text-gray-400" :title="row.absolute">{{ row.when }} · {{ row.took }}</span>
+            <span class="line-clamp-2 break-words text-sm text-gray-900 dark:text-gray-100" data-testid="overview-recent-title">{{ row.title }}</span>
+            <span v-if="row.detail" class="block truncate font-mono text-[12.5px] text-gray-500 dark:text-gray-400" data-testid="overview-recent-detail">{{ row.detail }}</span>
+            <span class="block text-[12.5px] tabular-nums text-gray-500 dark:text-gray-400">{{ row.when }} · {{ row.took }}</span>
           </span>
           <BaseBadge v-if="row.via" variant="neutral" size="sm" class="flex-none">{{ row.via }}</BaseBadge>
         </button>

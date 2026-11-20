@@ -117,7 +117,7 @@ function onKeydown(event) {
 
     <LoadFailed
       v-if="state === 'failed'"
-      class="h-[166px]"
+      class="h-[169px]"
       dense
       title="Couldn't load activity"
       message="The run history did not load. This is not the same as an agent with no runs."
@@ -127,9 +127,9 @@ function onKeydown(event) {
          nothing renders in it while loading (the primitive does not hide its
          slot under the track). The zone and the inner box are both sized: the
          primitive's content wrapper has no height of its own. -->
-    <ScanlineReveal v-else class="mt-3 block h-[154px]" :loading="state === 'loading'" :reveal="state === 'ready' && !quiet">
+    <ScanlineReveal v-else class="mt-3 block h-[157px]" :loading="state === 'loading'" :reveal="state === 'ready' && !quiet">
       <template v-if="state !== 'loading'">
-        <div class="h-[154px]">
+        <div class="h-[157px]">
           <!-- Nothing has run: the outline of the chart to come, plainly not data. -->
           <div
             v-if="quiet"
@@ -177,10 +177,17 @@ function onKeydown(event) {
                 </span>
               </span>
             </div>
-            <!-- Failure rail: its own row under the baseline, one slot per day. -->
-            <div class="flex h-[8px] gap-[3px] pt-[3px]" aria-hidden="true">
+            <!-- Failure rail: its own row under the baseline, one slot per day,
+                 hanging down from it. The mark is taller the more runs failed
+                 that day, so "5 failed" over three marks is readable at a glance. -->
+            <div class="flex h-[11px] items-start gap-[3px] pt-[3px]" aria-hidden="true">
               <span v-for="col in columns" :key="col.date" class="flex min-w-0 flex-1 justify-center">
-                <i v-if="col.failed" class="block h-[4px] w-full max-w-[36px] rounded-sm bg-status-danger-500" data-testid="overview-activity-fail"></i>
+                <i
+                  v-if="col.failed"
+                  class="block w-full max-w-[36px] rounded-sm bg-status-danger-500"
+                  :style="{ height: col.failPx + 'px' }"
+                  data-testid="overview-activity-fail"
+                ></i>
               </span>
             </div>
           </div>
@@ -202,7 +209,7 @@ function onKeydown(event) {
         <i class="inline-block h-2 w-2 rounded-sm" :style="{ backgroundColor: k.color }"></i>{{ k.name }}
       </li>
       <li class="inline-flex items-center gap-1.5 whitespace-nowrap">
-        <i class="inline-block h-1 w-2 rounded-sm bg-status-danger-500"></i>Failed that day
+        <i class="inline-block h-1 w-2 rounded-sm bg-status-danger-500"></i>Failed that day, taller for more
       </li>
     </ul>
 

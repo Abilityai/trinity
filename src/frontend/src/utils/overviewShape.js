@@ -17,6 +17,9 @@ export const DASH = '—'
 
 /** Tallest a stacked column may be, in px. The chart zone reserves this. */
 export const CHART_HEIGHT = 126
+/** The failure rail under the baseline: 3px for one failure, up to this for the window's worst day. */
+export const RAIL_MAX = 8
+const RAIL_MIN = 3
 /** Gap between stacked segments, in px (the surface shows through). */
 export const SEGMENT_GAP = 2
 
@@ -89,6 +92,14 @@ export function activityColumns(stats, { height = CHART_HEIGHT } = {}) {
   const order = Array.isArray(stats?.buckets) ? stats.buckets : []
   const max = timeline.reduce((m, d) => Math.max(m, d?.total || 0), 0)
   const unit = max > 0 ? height / max : 0
+  // The rail's height says HOW MANY failed that day, relative to the window's
+  // worst day; with a single failure anywhere it is the minimum mark.
+  const maxFailed = timeline.reduce((m, d) => Math.max(m, d?.failed || 0), 0)
+  const railPx = (failed) => {
+    if (!failed) return 0
+    if (maxFailed <= 1) return RAIL_MIN
+    return Math.round(RAIL_MIN + ((RAIL_MAX - RAIL_MIN) * (failed - 1)) / (maxFailed - 1))
+  }
   const columns = timeline.map((d) => {
     const byType = d?.by_type || {}
     // Backend order first; anything it did not list still gets drawn.
@@ -101,6 +112,7 @@ export function activityColumns(stats, { height = CHART_HEIGHT } = {}) {
       label: dayLabel(d.date),
       total: d?.total || 0,
       failed: d?.failed || 0,
+      failPx: railPx(d?.failed || 0),
       segments: names.map((bucket) => ({
         bucket,
         count: byType[bucket],
@@ -236,6 +248,33 @@ export function measureTiles(stats, { never = false } = {}) {
   ]
 }
 
+/** A prompt's first non-empty line — the nearest thing a run has to a title. */
+export function firstLine(message) {
+  for (const line of String(message || '').split(/\r?\n/)) {
+    const text = line.trim()
+    if (text) return text
+  }
+  return ''
+}
+
+/** The whole prompt on one line, capped, for hover text. */
+export function hoverText(message, cap = 400) {
+  const flat = String(message || '').replace(/\s+/g, ' ').trim()
+  return flat.length > cap ? `${flat.slice(0, cap - 1)}…` : flat
+}
+
+/**
+ * What to call a run. A scheduled run is known by its schedule's name (its
+ * message is only the command, kept as `detail`); anything else by the first
+ * line of what was asked.
+ */
+export function runTitle(run, schedules = []) {
+  const line = firstLine(run?.message)
+  const schedule = run?.schedule_id ? (schedules || []).find((s) => s.id === run.schedule_id) : null
+  if (schedule) return { title: schedule.name, detail: line && line !== schedule.name ? line : '', full: hoverText(run.message) }
+  return { title: line || '(no message)', detail: '', full: hoverText(run?.message) }
+}
+
 /** `in 48m`, `in 2h 10m`, `in 3d`; `due now` once the time has passed. */
 export function formatUntil(ms) {
   if (ms == null || Number.isNaN(ms)) return DASH
@@ -278,7 +317,7 @@ const ms = (iso) => {
  * `live` and `recent` may each be missing (their read failed or has not
  * landed); the state then rests on what is known and claims nothing more.
  */
-export function nowState({ agentStatus, recent = [], live = null, stats = null, now = Date.now() } = {}) {
+export function nowState({ agentStatus, recent = [], live = null, stats = null, schedules = [], now = Date.now() } = {}) {
   if (agentStatus !== 'running') {
     return { kind: 'stopped', title: 'Stopped', detail: 'Start it from the header to give it work.' }
   }
@@ -288,9 +327,11 @@ export function nowState({ agentStatus, recent = [], live = null, stats = null, 
     const first = running[0]
     const started = ms(first?.started_at)
     const more = runningCount - 1
+    const named = first ? runTitle(first, schedules) : null
     return {
       kind: 'working',
-      title: first?.message ? `Working on “${first.message}”` : 'Working',
+      title: first?.message ? `Working on “${named.title}”` : 'Working',
+      full: named?.full || '',
       detail: [started != null ? formatElapsed(now - started) : '', more > 0 ? `+${more} more` : ''].filter(Boolean).join(' · '),
       executionId: first?.id || null,
     }
@@ -320,7 +361,7 @@ export function nextRun(schedules = [], now = Date.now()) {
 }
 
 /** The last few runs, shaped for the list. */
-export function recentRows(executions = [], now = Date.now()) {
+export function recentRows(executions = [], now = Date.now(), schedules = []) {
   return (executions || []).slice(0, 5).map((r) => {
     const started = ms(r.started_at)
     const status = r.status === 'success' || r.status === 'completed' ? 'finished'
@@ -331,7 +372,7 @@ export function recentRows(executions = [], now = Date.now()) {
     return {
       id: r.id,
       status,
-      title: r.message || '(no message)',
+      ...runTitle(r, schedules),
       when: started != null ? agoLabel(now - started) : DASH,
       absolute: started != null ? new Date(started).toLocaleString() : '',
       took: status === 'running' ? 'in progress' : formatDuration(r.duration_ms),

@@ -45,6 +45,7 @@ const GLYPH = {
             v-if="now.executionId"
             type="button"
             class="max-w-full truncate rounded align-bottom hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40"
+            :title="now.full || undefined"
             @click="emit('open-task', now.executionId)"
           >{{ now.title }}</button>
           <template v-else>{{ now.title }}</template>

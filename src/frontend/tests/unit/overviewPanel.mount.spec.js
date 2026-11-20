@@ -222,6 +222,21 @@ describe('an active agent', () => {
     expect(wrapper.emitted('open-task')).toEqual([['e1'], ['e2']])
   })
 
+  it('a long multi-line prompt shows its first line, clamped, with the rest on hover', async () => {
+    routes['/api/executions'] = [
+      { id: 'p1', status: 'success', message: 'Review the Q4 pipeline\nYou are a careful analyst.\n- one\n- two', started_at: new Date(Date.now() - 60000).toISOString(), duration_ms: 9000, triggered_by: 'manual', schedule_id: '__manual__' },
+      { id: 'p2', status: 'success', message: '/digest', started_at: new Date(Date.now() - 120000).toISOString(), duration_ms: 9000, triggered_by: 'schedule', schedule_id: 's1' },
+    ]
+    const wrapper = await mountPanel()
+    const rows = wrapper.findAll('[data-testid="overview-recent-row"]')
+    const title = rows[0].find('[data-testid="overview-recent-title"]')
+    expect(title.text()).toBe('Review the Q4 pipeline')
+    expect(title.classes()).toContain('line-clamp-2')
+    expect(rows[0].attributes('title')).toBe('Review the Q4 pipeline You are a careful analyst. - one - two')
+    expect(rows[1].find('[data-testid="overview-recent-title"]').text()).toBe('morning-digest')
+    expect(rows[1].find('[data-testid="overview-recent-detail"]').text()).toBe('/digest')
+  })
+
   it('stacks runs per day, stubs the empty day and rails the failures', async () => {
     const wrapper = await mountPanel()
     expect(wrapper.findAll('[data-testid="overview-activity-col"]')).toHaveLength(4)
