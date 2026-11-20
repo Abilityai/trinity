@@ -9476,6 +9476,18 @@
         "setup"
       ],
       "description": "PROV-020 (real router): on a completed install a /setup visit carrying link values goes to /login?notice=setup-complete with nothing of the link forwarded, a plain /setup to a bare /login; scrub() redacts claim= in queries and fragments."
+    },
+    {
+      "file": "unit/test_4693_admin_email_code_login.py",
+      "feature": "#4693",
+      "added": "2026-11-20",
+      "categories": [
+        "backend",
+        "unit",
+        "auth",
+        "setup"
+      ],
+      "description": "Setup with an email (password form and emailed-link form) allow-lists the admin's address, so an email-code request mints a code and dispatches a send; another address still creates nothing; boot backfill and the admin's email change are wired."
     }
   ]
 }

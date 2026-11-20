@@ -173,7 +173,7 @@
                   <BaseButton size="sm" variant="secondary" class="mt-2" @click="useAdminLogin">Admin Login</BaseButton>
                 </div>
                 <p v-else class="text-sm text-gray-600 dark:text-gray-400">
-                  📧 We sent a 6-digit code to <strong class="text-gray-900 dark:text-white">{{ emailInput }}</strong>
+                  📧 If <strong class="text-gray-900 dark:text-white">{{ emailInput }}</strong> is registered, a 6-digit code is on its way.
                 </p>
                 <p v-if="countdown > 0" class="text-xs text-gray-500 dark:text-gray-400 mt-1">
                   Code expires in {{ formatTime(countdown) }}
