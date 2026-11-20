@@ -18,9 +18,13 @@ import { useEnterpriseStore } from './enterprise'
 import { useSessionsStore } from './sessions'
 import { FEATURE_ID as ASSISTANT_FEATURE, useAssistantStore } from './assistant'
 import { useOnboardingStore } from './onboarding'
+import { useFirstRunStore } from './firstRun'
 import { useBuildInfo } from '../composables/useBuildInfo'
 
 const BASE = '/api/terms'
+
+/** The longest acceptance waits on the re-reads; a later answer lands when it lands. */
+export const REREAD_LIMIT_MS = 4000
 
 export const useTermsStore = defineStore('terms', () => {
   /** `{ required, version, title, text, is_default, accepted }` from `GET /current`. */
@@ -60,13 +64,26 @@ export const useTermsStore = defineStore('terms', () => {
    * trinity-enterprise#1327 — the app's start-up reads were answered 403
    * `terms_required`, and each one keeps that answer for the page load: the
    * profile (`profileVerified` stays false), the entitlements and session
-   * flags (cached as "none"), the build info, the assistant's status and the
-   * getting-started checklist (both cached as "absent"). Accepting ends the
-   * refusal, so ask them all again — before the page moves on, so the page the
-   * person lands on is drawn from the real answers, not the refused ones.
-   * Never rejects: a read that still fails leaves its own safe fallback.
+   * flags (cached as "none"), the build info, the first-run state (cached as
+   * "not a first run"), the assistant's status and the getting-started
+   * checklist (both cached as "absent"). Accepting ends the refusal, so ask
+   * them all again — before the page moves on, so the page the person lands on
+   * is drawn from the real answers, not the refused ones. The wait is bounded
+   * by `REREAD_LIMIT_MS`: a read that never answers cannot keep the person on
+   * the terms page. Never rejects: a read that still fails leaves its own
+   * safe fallback.
    */
   async function rereadStartup() {
+    let timer
+    const limit = new Promise((resolve) => { timer = setTimeout(resolve, REREAD_LIMIT_MS) })
+    try {
+      await Promise.race([rereadAll(), limit])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  async function rereadAll() {
     const auth = useAuthStore()
     const enterprise = useEnterpriseStore()
     const assistant = useAssistantStore()
@@ -80,6 +97,7 @@ export const useTermsStore = defineStore('terms', () => {
       useSessionsStore().loadFeatureFlags(true),
       useBuildInfo().load(true),
       onboarding.fetchChecklist(true),
+      useFirstRunStore().fetchState(true),
     ])
     // The same gate App.vue mounts the assistant on; joins its read if it started one.
     if (auth.profileVerified && auth.user?.role === 'admin' && enterprise.isEntitled(ASSISTANT_FEATURE)) {
