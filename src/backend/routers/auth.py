@@ -400,7 +400,10 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
             detail="setup_required"
         )
 
-    user = authenticate_user(form_data.username, form_data.password)
+    # #4674: bcrypt is ~200 ms of CPU by design. Verified on the event loop it
+    # stalled the whole worker for every login — and for every failed attempt,
+    # which anyone can send (measured: 176–200 ms per login on a live instance).
+    user = await asyncio.to_thread(authenticate_user, form_data.username, form_data.password)
     if not user:
         # Record failed attempt
         record_login_attempt(client_ip, success=False, account=account)
