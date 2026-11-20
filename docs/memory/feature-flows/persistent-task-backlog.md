@@ -474,6 +474,11 @@ page if demand emerges.
   and filed as the `dispatch_queue_stalled` platform alert (threshold
   `queue_stall_alert_minutes`, 5–1440, default 30) — see
   [`architecture/execution.md`](../architecture/execution.md) Capacity & Backlog.
+  #4636: a busy wait (`capacity`, `agent_busy`, `conversation_busy`) files at
+  medium and says the wait is expected; `worker_claim` and `backlog_drain`
+  file at high, and a reading that outranks the pending row rewrites it.
+  #4635: one worker runs the monitor (a fail-open Redis lease) with a
+  bounded number of reads per tick.
   `GET /executions/{id}` / MCP `get_execution_result` do not carry the three
   keys yet (trinity#4274).
 

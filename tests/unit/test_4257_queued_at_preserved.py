@@ -229,10 +229,303 @@ def test_oldest_queued_head_per_agent_skips_running_and_nulls(ops):
     assert ops.oldest_queued_head_per_agent() == []
 
 
-def test_agents_with_running_conversation_reads_the_2843_guard(ops):
+# ---------------------------------------------------------------------------
+# #4635: the head read hands back one row per agent, not every queued row.
+# `requires_postgres` so the schema-parity PostgreSQL tier runs them too: the
+# read is a grouped statement joined back to its table, the shape whose
+# GROUP BY strictness and TEXT ordering PostgreSQL enforces and SQLite does not.
+# ---------------------------------------------------------------------------
+
+
+class _Rows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __iter__(self):
+        return iter(self._rows)
+
+    def all(self):
+        return list(self._rows)
+
+    def first(self):
+        return self._rows[0] if self._rows else None
+
+
+class _CountingConnection:
+    def __init__(self, owner, conn):
+        self._owner, self._conn = owner, conn
+
+    def __enter__(self):
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._conn.__exit__(*exc)
+
+    def execute(self, *args, **kwargs):
+        rows = list(self._conn.execute(*args, **kwargs).mappings())
+        self._owner.statements += 1
+        self._owner.rows += len(rows)
+        return _MappedResult(rows)
+
+
+class _MappedResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def mappings(self):
+        return _Rows(self._rows)
+
+
+class _CountingEngine:
+    """Counts what each statement hands back to Python — the per-tick cost
+    the issue is about, measured rather than read off the SQL text."""
+
+    def __init__(self, engine):
+        self._engine = engine
+        self.statements = 0
+        self.rows = 0
+
+    def connect(self):
+        return _CountingConnection(self, self._engine.connect())
+
+    @property
+    def dialect(self):
+        return self._engine.dialect
+
+
+@pytest.mark.requires_postgres
+def test_the_head_read_hands_back_one_row_per_agent_not_every_queued_row(ops, monkeypatch):
+    for i in range(300):
+        _q("alpha", i, f"a-{i:03d}")
+    _q("beta", 7, "b-1")
+    _q("beta", 9, "b-2")
+    queue_mod = sys.modules["db.schedules.queue"]
+    counting = _CountingEngine(queue_mod.get_engine())
+    monkeypatch.setattr(queue_mod, "get_engine", lambda: counting)
+
+    heads = {h["agent_name"]: h for h in ops.oldest_queued_head_per_agent()}
+
+    assert heads["alpha"]["execution_id"] == "a-000"
+    assert heads["alpha"]["queued_count"] == 300
+    assert heads["beta"]["execution_id"] == "b-1"
+    assert heads["beta"]["queued_count"] == 2
+    assert counting.statements == 1
+    assert counting.rows == 2, "every queued row was shipped to Python to find two heads"
+
+
+@pytest.mark.requires_postgres
+def test_a_tie_at_the_head_instant_breaks_on_id_and_counts_both(ops):
+    qa = _iso(_T0)
+    for eid in ("b2", "a1"):
+        _hrun(
+            "INSERT INTO schedule_executions "
+            "(id, schedule_id, agent_name, status, started_at, queued_at, message, "
+            " triggered_by) "
+            "VALUES (:id, '__manual__', 'alpha', 'queued', :qa, :qa, 'm', 'mcp')",
+            id=eid, qa=qa,
+        )
+
+    (head,) = ops.oldest_queued_head_per_agent()
+
+    assert head["execution_id"] == "a1"
+    assert head["queued_count"] == 2
+
+
+@pytest.mark.requires_postgres
+def test_another_agents_head_instant_never_picks_this_agents_later_row(ops):
+    """Fan-out admits several agents in one instant. Alpha's LATER row shares
+    beta's head instant and has the smaller id: matched on the instant alone,
+    it would be read as alpha's head, carrying beta's count."""
+    _q("alpha", 0, "z-head")
+    _q("alpha", 10, "a-later")
+    _q("beta", 10, "b-head")
+
+    heads = {h["agent_name"]: h for h in ops.oldest_queued_head_per_agent()}
+
+    assert heads["alpha"]["execution_id"] == "z-head"
+    assert heads["alpha"]["queued_count"] == 2
+    assert heads["beta"]["execution_id"] == "b-head"
+    assert heads["beta"]["queued_count"] == 1
+
+
+@pytest.mark.requires_postgres
+def test_a_claimed_row_sharing_the_head_instant_is_neither_head_nor_counted(ops):
+    """A claim keeps `queued_at` (#4257), so a running row can carry the very
+    instant of the queued head — and a smaller id."""
+    qa = _iso(_T0)
+    _hrun(
+        "INSERT INTO schedule_executions "
+        "(id, schedule_id, agent_name, status, started_at, queued_at, message, "
+        " triggered_by) "
+        "VALUES ('q1-running', '__manual__', 'alpha', 'running', :qa, :qa, 'm', 'mcp')",
+        qa=qa,
+    )
+    _hrun(
+        "INSERT INTO schedule_executions "
+        "(id, schedule_id, agent_name, status, started_at, queued_at, message, "
+        " triggered_by) "
+        "VALUES ('q2-queued', '__manual__', 'alpha', 'queued', :qa, :qa, 'm', 'mcp')",
+        qa=qa,
+    )
+
+    (head,) = ops.oldest_queued_head_per_agent()
+
+    assert head["execution_id"] == "q2-queued"
+    assert head["queued_count"] == 1
+
+
+@pytest.mark.requires_postgres
+def test_rows_never_admitted_do_not_count_toward_the_depth(ops):
+    _q("alpha", 0, "a1")
+    _q("alpha", 1, "a2")
+    _hrun(
+        "INSERT INTO schedule_executions "
+        "(id, schedule_id, agent_name, status, started_at, message, triggered_by) "
+        "VALUES ('noadmit', '__manual__', 'alpha', 'queued', :sa, 'm', 'mcp')",
+        sa=_iso(_T0),
+    )
+
+    (head,) = ops.oldest_queued_head_per_agent()
+
+    assert head["execution_id"] == "a1"
+    assert head["queued_count"] == 2
+
+
+@pytest.mark.requires_postgres
+def test_the_head_read_keeps_its_shape_and_its_agent_order(ops):
+    _q("beta", 0, "b1", trigger="schedule", key="conv-b")
+    _q("alpha", 3, "a1")
+
+    heads = ops.oldest_queued_head_per_agent()
+
+    assert [h["agent_name"] for h in heads] == ["alpha", "beta"]
+    assert set(heads[1]) == {
+        "agent_name", "execution_id", "queued_at", "conversation_key",
+        "triggered_by", "redelivery_count", "queued_count",
+    }
+    assert heads[1]["conversation_key"] == "conv-b"
+    assert heads[1]["triggered_by"] == "schedule"
+    assert heads[1]["redelivery_count"] == 0
+    assert isinstance(heads[1]["redelivery_count"], int)
+
+
+# ---------------------------------------------------------------------------
+# #4635 review (D1): the oldest row a worker could CLAIM. The pull claim skips
+# a row whose conversation already has a running turn (#2843), so a held FIFO
+# head says nothing about the rows behind it.
+# ---------------------------------------------------------------------------
+
+
+def _running(agent: str, eid: str, key):
+    _hrun(
+        "INSERT INTO schedule_executions "
+        "(id, schedule_id, agent_name, status, started_at, queued_at, message, "
+        " triggered_by, conversation_key) "
+        "VALUES (:id, '__manual__', :a, 'running', :sa, :sa, 'm', 'mcp', :k)",
+        id=eid, a=agent, sa=_iso(_T0 - timedelta(minutes=30)), k=key,
+    )
+
+
+@pytest.mark.requires_postgres
+def test_the_claimable_head_skips_rows_whose_conversation_is_running(ops):
+    _running("alpha", "r-1", "conv-1")
+    _q("alpha", 0, "held", key="conv-1")
+    _q("alpha", 5, "free", key="conv-2")
+    _q("alpha", 9, "keyless")
+
+    (head,) = ops.oldest_queued_head_per_agent(agent_names=["alpha"], claimable=True)
+
+    assert head["execution_id"] == "free"
+    assert head["queued_count"] == 2, "the held row is not claimable"
+
+
+@pytest.mark.requires_postgres
+def test_a_row_without_a_conversation_is_always_claimable(ops):
+    _running("alpha", "r-1", "conv-1")
+    _q("alpha", 0, "held", key="conv-1")
+    _q("alpha", 4, "keyless")
+
+    (head,) = ops.oldest_queued_head_per_agent(agent_names=["alpha"], claimable=True)
+
+    assert head["execution_id"] == "keyless"
+
+
+@pytest.mark.requires_postgres
+def test_the_claimable_head_is_scoped_to_the_named_agents(ops):
+    _running("alpha", "r-1", "conv-1")
+    _q("alpha", 0, "held", key="conv-1")
+    _q("beta", 1, "beta-free")
+
+    assert ops.oldest_queued_head_per_agent(agent_names=["alpha"], claimable=True) == []
+    assert ops.oldest_queued_head_per_agent(agent_names=[], claimable=True) == []
+
+
+@pytest.mark.requires_postgres
+def test_another_agents_running_turn_never_holds_this_agents_conversation(ops):
+    """The #2843 guard is per agent: the same key running on beta does not
+    hold alpha's row."""
+    _running("beta", "r-b", "conv-1")
+    _q("alpha", 0, "alpha-row", key="conv-1")
+
+    (head,) = ops.oldest_queued_head_per_agent(agent_names=["alpha"], claimable=True)
+
+    assert head["execution_id"] == "alpha-row"
+
+
+def test_running_conversation_keys_read_the_2843_guard(ops):
     _q("alpha", 0, "running-one", key="conv-1")
     ops.claim_next_queued("alpha", worker_id="alpha#w0", lease_seconds=900)
     _q("alpha", 1, "waiting", key="conv-1")
 
-    assert ops.agents_with_running_conversation("alpha") == ["conv-1"]
-    assert ops.agents_with_running_conversation("beta") == []
+    assert ops.running_conversation_keys_by_agent(["alpha", "beta"]) == {"alpha": ["conv-1"]}
+
+
+# ---------------------------------------------------------------------------
+# #4635 G3: the monitor's per-agent reads, batched per tick
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.requires_postgres
+def test_running_conversation_keys_are_read_for_many_agents_at_once(ops):
+    _running("alpha", "r-a1", "conv-1")
+    _running("alpha", "r-a2", "conv-2")
+    _running("beta", "r-b1", "conv-9")
+    _running("gamma", "r-g1", None)          # a keyless turn holds no conversation
+    _q("alpha", 0, "queued-a", key="conv-3")  # a queued row holds nothing either
+
+    keys = ops.running_conversation_keys_by_agent(["alpha", "beta", "gamma", "delta"])
+
+    assert {a: sorted(k) for a, k in keys.items()} == {
+        "alpha": ["conv-1", "conv-2"],
+        "beta": ["conv-9"],
+    }
+    assert ops.running_conversation_keys_by_agent([]) == {}
+
+
+def _leased(agent: str, eid: str, lease_delta_minutes: int):
+    _hrun(
+        "INSERT INTO schedule_executions "
+        "(id, schedule_id, agent_name, status, started_at, message, triggered_by, "
+        " lease_expires_at, claim_token, claimed_by_worker) "
+        "VALUES (:id, '__manual__', :a, 'running', :sa, 'm', 'mcp', :le, 'tok', 'w')",
+        id=eid, a=agent, sa=_iso(_T0),
+        le=_iso(datetime.now(timezone.utc) + timedelta(minutes=lease_delta_minutes)),
+    )
+
+
+@pytest.mark.requires_postgres
+def test_an_expired_lease_is_not_a_busy_worker_when_the_caller_asks(ops):
+    """Canary B-02's rule: a running row whose lease has expired has no worker
+    behind it until the reaper requeues it, so it must not make a dead pool
+    read as full. The meter's own callers keep counting every lease."""
+    _leased("alpha", "live-1", 10)
+    _leased("alpha", "live-2", 10)
+    _leased("alpha", "dead-1", -10)
+    _leased("beta", "dead-2", -10)
+    now = _iso(datetime.now(timezone.utc))
+
+    assert ops.count_active_leased_by_agent(["alpha", "beta"]) == {"alpha": 3, "beta": 1}
+    assert ops.count_active_leased_by_agent(
+        ["alpha", "beta"], unexpired_at=now
+    ) == {"alpha": 2}

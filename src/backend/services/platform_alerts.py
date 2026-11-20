@@ -646,6 +646,13 @@ OBSERVED_FAILED = "failed"
 _PRIORITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
+def priority_rank(priority: Optional[str]) -> int:
+    """Where a priority sits on the alert ladder: low 0 < medium 1 < high 2 <
+    critical 3; anything else reads as low (#4636 — an emitter deciding
+    whether a reading outranks its pending row)."""
+    return _PRIORITY_RANK.get(priority, 0)
+
+
 def _snoozed_by(kind: Kind, ended: Optional[Mapping], priority: str, context: Mapping) -> bool:
     """A person ended this subject's row inside the snooze window (at any time,
     for a kind whose `person_ending_is_final`), and the new reading is neither

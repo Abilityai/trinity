@@ -1134,8 +1134,8 @@ class DatabaseManager:
     def update_last_login(self, username: str):
         return self._user_ops.update_last_login(username)
 
-    def update_user_password(self, username: str, hashed_password: str):
-        return self._user_ops.update_user_password(username, hashed_password)
+    def update_user_password(self, username: str, hashed_password: str, email: str = None):
+        return self._user_ops.update_user_password(username, hashed_password, email=email)
 
     def get_or_create_auth0_user(self, auth0_sub: str, email: str, name: str = None, picture: str = None):
         return self._user_ops.get_or_create_auth0_user(auth0_sub, email, name, picture)
@@ -1727,8 +1727,11 @@ class DatabaseManager:
 
     # Physical-occupancy meter (#1081 Phase 3): read-only leased-row counters
     # consumed by CapacityManager's two meter methods. Metering only.
-    def count_active_leased_by_agent(self, agent_names):
-        return self._schedule_ops.count_active_leased_by_agent(agent_names)
+    def count_active_leased_by_agent(self, agent_names, unexpired_at=None):
+        # #4635: `unexpired_at` — the stall monitor counts live leases only.
+        return self._schedule_ops.count_active_leased_by_agent(
+            agent_names, unexpired_at=unexpired_at
+        )
 
     def execution_awaits_claim(self, execution_id: str) -> bool:
         return self._schedule_ops.execution_awaits_claim(execution_id)
@@ -1747,11 +1750,14 @@ class DatabaseManager:
     ) -> int:
         return self._schedule_ops.count_queued_ahead(agent_name, queued_at, execution_id)
 
-    def oldest_queued_head_per_agent(self):
-        return self._schedule_ops.oldest_queued_head_per_agent()
+    def oldest_queued_head_per_agent(self, agent_names=None, *, claimable=False):
+        return self._schedule_ops.oldest_queued_head_per_agent(
+            agent_names, claimable=claimable
+        )
 
-    def agents_with_running_conversation(self, agent_name: str):
-        return self._schedule_ops.agents_with_running_conversation(agent_name)
+    def running_conversation_keys_by_agent(self, agent_names):
+        # #4635: the #2843 guard's read, for every agent with a head in one query.
+        return self._schedule_ops.running_conversation_keys_by_agent(agent_names)
 
     def cancel_queued_execution(
         self, execution_id: str, reason: str = "cancelled", status: str = "cancelled"
@@ -4436,6 +4442,10 @@ class DatabaseManager:
     # #3246 — platform alerts: one pending row per (agent, subject)
     def find_pending_operator_queue_by_subject(self, agent_name, subject):
         return self._operator_queue_ops.find_pending_by_subject(agent_name, subject)
+
+    def list_pending_operator_queue_by_subject_prefix(self, subject_prefix):
+        # #4635: one emitter's open alerts across agents (the stall reconcile).
+        return self._operator_queue_ops.list_pending_by_subject_prefix(subject_prefix)
 
     def find_person_ended_operator_queue_by_subject(self, agent_name, subject, since):
         return self._operator_queue_ops.find_person_ended_by_subject(agent_name, subject, since)

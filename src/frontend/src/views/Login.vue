@@ -8,6 +8,15 @@
         <p class="mt-2 text-center text-sm text-gray-600 dark:text-gray-400">
           Sign in to manage your agents
         </p>
+        <!-- trinity-enterprise#1312: a used setup link lands here. -->
+        <p
+          v-if="setupCompleteNotice"
+          class="mt-4 rounded-lg px-3 py-2 text-center text-sm bg-status-info-100 text-status-info-700 dark:bg-status-info-500/15 dark:text-status-info-300"
+          data-testid="login-setup-complete"
+          role="status"
+        >
+          This instance is already set up. Sign in to continue.
+        </p>
       </div>
 
       <!-- Loading State (detecting mode or authenticating) -->
@@ -334,6 +343,7 @@ const loadingMessage = ref('Checking authentication...')
 // Email authentication state
 // #3922: the Workspace's code page hands a platform account over with its
 // address in `?email=`, the only producer of that query.
+const setupCompleteNotice = route.query.notice === 'setup-complete'
 const handoffEmail = typeof route.query.email === 'string' ? route.query.email.trim() : ''
 const workspaceHandoff = !!handoffEmail
 const emailInput = ref(handoffEmail)

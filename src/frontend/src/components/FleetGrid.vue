@@ -48,17 +48,28 @@
         :viewBox="`0 0 ${wireLayer.w} ${wireLayer.h}`"
       >
         <g :transform="`translate(${-wireLayer.x},${-wireLayer.y})`">
-          <g v-for="e in wireLayer.edges" :key="e.id" class="gv-wire" :class="edgeClass(e)">
-            <path
-              class="gv-wire-hit"
-              :d="e.d"
-              @click.stop="removeEdge(e)"
-              @pointerenter="onEdgeEnter(e)"
-              @pointerleave="onEdgeLeave(e)"
-            ></path>
-            <path class="gv-wire-line" :d="e.d"></path>
-            <path class="gv-wire-ah" :d="e.ah"></path>
+          <!-- One translucent group per tier (dim → base → hot): a trunk or bus
+               shared by several lines keeps one tone, and a highlighted line
+               paints over its siblings (#2066). -->
+          <g v-for="t in wireTiers" :key="t.cls" class="gv-wire-tier" :class="t.cls">
+            <g v-for="e in t.edges" :key="e.id" class="gv-wire" :data-edge="e.id">
+              <path class="gv-wire-line" :d="e.d"></path>
+              <path class="gv-wire-ah" :d="e.ah"></path>
+            </g>
           </g>
+          <!-- Hit targets cover only the part of a line no sibling shares
+               (`computeEdges` → `hit`), so a click on a shared trunk or bus
+               can never remove an arbitrary sibling. -->
+          <path
+            v-for="e in wireLayer.edges"
+            :key="'hit:' + e.id"
+            class="gv-wire-hit"
+            :data-edge="e.id"
+            :d="e.hit"
+            @click.stop="removeEdge(e)"
+            @pointerenter="onEdgeEnter(e)"
+            @pointerleave="onEdgeLeave(e)"
+          ></path>
           <template v-if="connectDraft">
             <path class="gv-wire-line adding" :d="connectDraft.d"></path>
             <path class="gv-wire-ah adding" :d="connectDraft.ah"></path>
@@ -115,6 +126,14 @@
           :style="{ width: CELL_W + 'px', height: CELL_H + 'px', transform: `translate(${s.x}px,${s.y}px)` }"
         ></div>
 
+        <!-- Where a new agent is about to land (the drop socket, dashed) -->
+        <div
+          v-for="a in landingSockets"
+          :key="'as' + a.name"
+          class="gv-socket gv-arrive-socket"
+          :style="{ width: CELL_W + 'px', height: CELL_H + 'px', transform: `translate(${a.x}px,${a.y}px)`, '--arrive-d': a.delay + 'ms' }"
+        ></div>
+
         <!-- Tiles -->
         <div
           v-for="agent in placedAgents"
@@ -127,8 +146,10 @@
             locked: lockedName === agent.name,
             linktarget: connectTarget === agent.name,
             blockdrag: zoneDrag && zoneDrag.memberSet.has(agent.name),
+            arriving: arriving[agent.name]?.phase === 'landing',
           }"
           :style="tileStyle(agent.name)"
+          :data-arrival="arriving[agent.name]?.phase"
           :data-agent="agent.name"
           role="listitem"
           tabindex="0"
@@ -146,6 +167,12 @@
             :dept="deptByAgent[agent.name] || null"
           />
           <div v-else class="gv-tile-far">{{ agent.name }}</div>
+          <!-- A new agent: an accent edge and a tag that stay a few seconds
+               after it lands, so the eye can find what was just made. -->
+          <span v-if="arriving[agent.name]" class="gv-arrive-fx" aria-hidden="true">
+            <i class="gv-arrive-sheen"></i>
+            <b class="gv-arrive-tag" :style="{ transform: `scale(${tagScale})` }">New</b>
+          </span>
           <!-- PROTOTYPE org overlay: bottom connector — drag DOWN onto
                another agent to make it report to this one (org-chart
                direction: manager above, report below) -->
@@ -359,6 +386,9 @@ import { useOrgOverlay } from '@/composables/useOrgOverlay'
  */
 const props = defineProps({
   agents: { type: Array, required: true },
+  // Names that joined the fleet just now (networkStore.arrivals). Each lands
+  // on the grid once: see "arrivals" below.
+  arrivals: { type: Array, default: () => [] },
   // ent#261 × ent#305: `agents` is the visibleAgents seam (type-to-filter
   // narrows it live), but the org overlay derives its WORLD from its roster —
   // filtering out the only dept-* agent would flip the fleet into bootstrap
@@ -569,6 +599,7 @@ const {
   deptByAgent,
   zones,
   wireLayer,
+  wireTiers,
   connectDraft,
   zoneSockets,
   hoverAgent,
@@ -581,7 +612,6 @@ const {
   onTileLeave,
   onEdgeEnter,
   onEdgeLeave,
-  edgeClass,
   startConnect,
   removeEdge,
   trackDropZone,
@@ -665,8 +695,77 @@ function tileStyle(name) {
   const p = layout.value[name]
   const [x, y] = cellXY(p.c, p.r)
   style.transform = `translate(${x}px,${y}px)`
+  const landing = arriving.value[name]
+  if (landing) {
+    style['--arrive-d'] = landing.delay + 'ms'
+    // The landing is animated through two registered properties INSIDE the
+    // transform: the standalone `scale` property would also scale the tile's
+    // own translate, and it would fly in from the wrong place.
+    if (landing.phase === 'landing' && !reducedMotion) {
+      style.transform += ' translateY(var(--arrive-y)) scale(var(--arrive-s))'
+    }
+  }
   return style
 }
+
+// --- arrivals: a new agent lands on the grid ---
+// One at a time, a beat apart, so a team is dealt onto the grid rather than
+// popping in at once: a dashed socket marks the cell, the tile drops into it
+// with the grid's own snap spring, a ring and a sheen mark the landing, and an
+// accent edge with a "New" tag stays a few seconds. Reduced motion: the tile
+// is simply there, with the edge and the tag.
+const ARRIVE_STAGGER_MS = 150
+const ARRIVE_LANDING_MS = 1500
+const ARRIVE_FRESH_MS = 6500
+const arriving = ref({})            // name -> { phase: 'landing' | 'fresh', delay }
+const arriveTimers = new Set()
+function later(fn, ms) {
+  const t = setTimeout(() => {
+    arriveTimers.delete(t)
+    fn()
+  }, ms)
+  arriveTimers.add(t)
+}
+// The tag is read from across the room: it keeps its size when the grid is
+// zoomed out to fit a large fleet.
+const tagScale = computed(() => Math.min(2.4, Math.max(1, 0.9 / vz.value)).toFixed(2))
+const landingSockets = computed(() =>
+  reducedMotion ? [] : Object.entries(arriving.value)
+    .filter(([name, a]) => a.phase === 'landing' && layout.value[name])
+    .map(([name, a]) => {
+      const [x, y] = cellXY(layout.value[name].c, layout.value[name].r)
+      return { name, x, y, delay: a.delay }
+    })
+)
+function inView(name) {
+  const p = layout.value[name]
+  const [x, y] = cellXY(p.c, p.r)
+  const x0 = -vtx.value / vz.value
+  const y0 = -vty.value / vz.value
+  return x >= x0 && y >= y0 && x + CELL_W <= x0 + canvasW.value / vz.value && y + CELL_H <= y0 + canvasH.value / vz.value
+}
+function land(names) {
+  const fresh = names.filter((n) => !arriving.value[n] && layout.value[n])
+  if (!fresh.length) return
+  // A landing nobody can see is no landing: bring the whole fleet into view.
+  if (fresh.some((n) => !inView(n))) fitView()
+  const next = { ...arriving.value }
+  fresh.forEach((name, i) => {
+    const delay = reducedMotion ? 0 : i * ARRIVE_STAGGER_MS
+    next[name] = { phase: 'landing', delay }
+    later(() => {
+      if (arriving.value[name]) arriving.value = { ...arriving.value, [name]: { phase: 'fresh', delay } }
+    }, delay + ARRIVE_LANDING_MS)
+    later(() => {
+      const { [name]: _gone, ...rest } = arriving.value
+      arriving.value = rest
+    }, delay + ARRIVE_LANDING_MS + ARRIVE_FRESH_MS)
+  })
+  arriving.value = next
+}
+// After the layout has a cell for them (the roster watch above runs first,
+// and a mount with news already waiting needs the canvas measured).
+watch(() => props.arrivals.join('\n'), () => nextTick(() => land(props.arrivals)))
 
 function frame() {
   rafId = 0
@@ -955,7 +1054,10 @@ onMounted(() => {
   tickTimer = setInterval(() => {
     if (!document.hidden) now.value = Date.now()
   }, 1000)
-  nextTick(fitView)
+  nextTick(() => {
+    fitView()
+    land(props.arrivals)
+  })
 })
 
 function onPageHide() {
@@ -963,6 +1065,7 @@ function onPageHide() {
 }
 
 onBeforeUnmount(() => {
+  arriveTimers.forEach(clearTimeout)
   gridStore.stopPolling()
   window.removeEventListener('pagehide', onPageHide)
   gridStore.flushPending({ keepalive: false }) // mode switch: the page stays
@@ -1465,14 +1568,26 @@ onBeforeUnmount(() => {
   fill: none;
   stroke: var(--gv-wire);
   stroke-width: 1.5;
-  opacity: 0.55;
-  transition: opacity 0.15s ease;
+  stroke-linejoin: round;
+  stroke-linecap: round;
 }
 .gv-wire-ah {
   fill: var(--gv-wire);
   stroke: none;
+}
+/* Opacity lives on the tier group, not on each path, so overlapping segments
+   of one tier composite once (gridOrg.paintTiers). */
+.gv-wire-tier {
   opacity: 0.55;
-  transition: opacity 0.15s ease;
+}
+.gv-wire-tier.hot {
+  opacity: 0.95;
+}
+.gv-wire-tier.hot .gv-wire-line {
+  stroke-width: 2;
+}
+.gv-wire-tier.dim {
+  opacity: 0.12;
 }
 .gv-wire-hit {
   fill: none;
@@ -1480,17 +1595,6 @@ onBeforeUnmount(() => {
   stroke-width: 14;
   pointer-events: stroke;
   cursor: pointer;
-}
-.gv-wire.hot .gv-wire-line,
-.gv-wire.hot .gv-wire-ah {
-  opacity: 0.95;
-}
-.gv-wire.hot .gv-wire-line {
-  stroke-width: 2;
-}
-.gv-wire.dim .gv-wire-line,
-.gv-wire.dim .gv-wire-ah {
-  opacity: 0.12;
 }
 .gv-wire-line.adding {
   stroke: var(--gv-blue);
@@ -1855,12 +1959,112 @@ onBeforeUnmount(() => {
   display: block;
 }
 
+/* --- a new agent lands --- */
+@property --arrive-s {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 1;
+}
+@property --arrive-y {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+.gv-arrive-socket {
+  border-style: dashed;
+  animation: gv-arrive-socket 720ms ease-out var(--arrive-d, 0ms) both;
+}
+@keyframes gv-arrive-socket {
+  0% { opacity: 0; }
+  22% { opacity: 1; }
+  62% { opacity: 1; }
+  100% { opacity: 0; }
+}
+.gv-tile.arriving {
+  transition: none;
+  z-index: 12;
+  animation:
+    gv-arrive-land 620ms cubic-bezier(0.22, 1.35, 0.32, 1) calc(var(--arrive-d, 0ms) + 180ms) both,
+    gv-arrive-ring 950ms ease-out calc(var(--arrive-d, 0ms) + 520ms) both;
+}
+@keyframes gv-arrive-land {
+  0% { opacity: 0; --arrive-s: 0.6; --arrive-y: -26px; filter: blur(8px); }
+  40% { opacity: 1; filter: blur(0); }
+  100% { opacity: 1; --arrive-s: 1; --arrive-y: 0px; filter: blur(0); }
+}
+@keyframes gv-arrive-ring {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--gv-blue) 55%, transparent), var(--gv-tile-shadow); }
+  100% { box-shadow: 0 0 0 26px transparent, var(--gv-tile-shadow); }
+}
+.gv-arrive-fx {
+  position: absolute;
+  inset: -1px;
+  border-radius: 12px;
+  border: 1.5px solid color-mix(in srgb, var(--gv-blue) 75%, transparent);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--gv-blue) 14%, transparent),
+    0 0 30px -4px color-mix(in srgb, var(--gv-blue) 50%, transparent);
+  pointer-events: none;
+  z-index: 3;
+  animation: gv-arrive-glow 7.4s ease-out calc(var(--arrive-d, 0ms) + 480ms) both;
+}
+@keyframes gv-arrive-glow {
+  0% { opacity: 0; }
+  5% { opacity: 1; }
+  78% { opacity: 1; }
+  100% { opacity: 0; }
+}
+.gv-arrive-sheen {
+  position: absolute;
+  inset: 0;
+  border-radius: 11px;
+  overflow: hidden;
+}
+.gv-arrive-sheen::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: 0;
+  width: 55%;
+  height: 200%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--gv-blue) 26%, transparent) 50%,
+    transparent
+  );
+  transform: translateX(-140%) rotate(18deg);
+  animation: gv-arrive-sheen 900ms cubic-bezier(0.4, 0, 0.2, 1) calc(var(--arrive-d, 0ms) + 620ms) both;
+}
+@keyframes gv-arrive-sheen {
+  to { transform: translateX(260%) rotate(18deg); }
+}
+.gv-arrive-tag {
+  position: absolute;
+  top: -10px;
+  right: 12px;
+  padding: 1.5px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--gv-btn-border);
+  /* the button tint is translucent in dark: back it, or the tile edge shows through */
+  background: linear-gradient(var(--gv-btn-bg), var(--gv-btn-bg)), var(--gv-panel);
+  color: var(--gv-btn-text);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: 0.02em;
+  transform-origin: 100% 100%;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .gv-tile,
   .gv-tile.snapping {
     transition: box-shadow 0.2s ease, border-color 0.2s ease;
   }
-  .gv-tile.locked {
+  .gv-tile.locked,
+  .gv-tile.arriving,
+  .gv-arrive-fx,
+  .gv-arrive-sheen::before {
     animation: none;
   }
 }

@@ -3044,6 +3044,9 @@ class AgentAnalyticsTimelinePoint(BaseModel):
     success_rate: Optional[float] = None
     duration_avg_ms: Optional[int] = None
     context_avg: Optional[int] = None
+    # Share of each run's own context window, averaged (0-100); null when no
+    # run that day recorded a window (trinity-enterprise#1317).
+    context_pct_avg: Optional[int] = None
     by_type: Dict[str, int] = {}
 
 
@@ -3065,6 +3068,7 @@ class AgentAnalyticsResponse(BaseModel):
     success_rate: float
     duration_ms: DurationStats
     context_avg: Optional[int] = None
+    context_pct_avg: Optional[int] = None
     by_type: List[AgentTypeTotal] = []
     buckets: List[str] = []
     timeline: List[AgentAnalyticsTimelinePoint] = []
@@ -5132,7 +5136,8 @@ class SetAdminPasswordRequest(BaseModel):
     # #3004: under ADMIN_PASSWORD_SOURCE=instance-id the handler accepts a blank
     # value (AWS review: no PII required); the field itself stays required.
     email: str = Field(..., max_length=254)
-    # #3004 (PROV-018): the EC2 instance ID, checked only when
+    # #3004 (PROV-018): the EC2 instance ID, or the code from an emailed setup
+    # link (trinity-enterprise#1312), checked only when
     # ADMIN_PASSWORD_SOURCE=instance-id and ignored otherwise.
     claim_code: Optional[str] = Field(None, max_length=64)
     # Optional operator profile — all skippable; setup completes without them.
@@ -5936,6 +5941,9 @@ class FirstRunState(BaseModel):
     seeded_agents: List[str] = []
     own_agent_count: int = 0
     demo_agent: Optional[str] = None
+    # A short opaque mark of this install: the browser remembers "setup closed"
+    # against it, so a fresh install at the same address offers setup again.
+    install: Optional[str] = None
 
 
 # =============================================================================

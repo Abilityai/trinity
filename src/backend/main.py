@@ -1191,6 +1191,11 @@ async def _shutdown_loops_and_transports(app: FastAPI) -> None:
     from services import fleet_image_service as _fleet_image_stop
     _fleet_image_stop.fleet_image_check_service.stop()
 
+    # #4635: the queue-stall monitor's leader lease, so a restarted worker need
+    # not wait out its TTL before the monitor runs again. Never raises.
+    from services import queue_stall_service as _queue_stall_stop
+    _queue_stall_stop.release_lease()
+
 
 async def _shutdown_probes_and_clients(app: FastAPI) -> None:
     """Subscription-recovery probe, canary, operator-queue sync, pooled HTTP clients.
@@ -2067,7 +2072,7 @@ def _build_version_payload(
             "agent_server": version,
             "base_image": f"trinity-agent-base:{version}"
         },
-        "runtimes": ["claude-code", "gemini-cli", "codex"],
+        "runtimes": ["claude-code", "gemini-cli", "codex", "opencode"],
         # #1814: the version baked into the running image. Equal to `version`
         # on a normally-built stack; DIFFERENT means the image is stale
         # relative to the code being executed (an in-place upgrade without

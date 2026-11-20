@@ -8,7 +8,8 @@ Precedence, the same on every path::
       > platform default model          (#831)
 
 A non-Claude agent gets ``None`` and runs on its own model (``AGENT_RUNTIME_MODEL``
-or its CLI default): the platform default is a Claude id.
+or its CLI default): the platform default is a Claude id. OpenCode (#2981) is the
+exception: it gets ``platform_default_model_opencode`` when one is set.
 
 The stored value is checked on every read with ``model_catalog.unrunnable_reason``
 — an allowlist — so an id this instance cannot run never reaches the CLI. It is
@@ -75,6 +76,11 @@ def resolve_default_model(agent_name: str, *, runtime: Optional[str] = None,
         from services import settings_service as settings
 
     runtime = runtime or _runtime_of(agent_name)
+    if runtime == "opencode":
+        # #2981: OpenCode has its own platform default (a ``provider/model`` id);
+        # unset → None, and the agent's own configured model decides.
+        return ResolvedModel(settings.get_platform_default_model(runtime=runtime),
+                             SOURCE_PLATFORM_DEFAULT, None, None)
     if runtime != "claude-code":
         return choose(None, runtime, None)
     try:

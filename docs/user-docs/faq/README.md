@@ -100,7 +100,7 @@
 - [Why was my file write refused?](agents.md#why-was-my-file-write-refused)
 - [How do I get a file into my agent's container, and can I send a ZIP?](agents.md#how-do-i-get-a-file-into-my-agents-container-and-can-i-send-a-zip)
 - [Where can I see my agent's logs?](agents.md#where-can-i-see-my-agents-logs)
-- [What is the compatibility report on the Overview tab, and can Trinity fix what it finds?](agents.md#what-is-the-compatibility-report-on-the-overview-tab-and-can-trinity-fix-what-it-finds)
+- [What is the compatibility report, and can Trinity fix what it finds?](agents.md#what-is-the-compatibility-report-and-can-trinity-fix-what-it-finds)
 - [Is there a limit on how many canvases an agent can hold?](agents.md#is-there-a-limit-on-how-many-canvases-an-agent-can-hold)
 - [I already have a GitHub repo — how do I turn it into an agent?](agents.md#i-already-have-a-github-repo--how-do-i-turn-it-into-an-agent)
 - [I already run several Claude Code agents on my own machine. How do I move them onto Trinity?](agents.md#i-already-run-several-claude-code-agents-on-my-own-machine-how-do-i-move-them-onto-trinity)
