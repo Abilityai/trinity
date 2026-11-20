@@ -222,6 +222,15 @@ export const routes = [
   // `requiresEntitlement: '<id>'` so non-entitled features 302 to
   // the catalogue.
   {
+    // abilityai/trinity-enterprise#1307 — a read-only picture of the fleet in
+    // motion. `?window=1` is the same page without the navigation, for the
+    // separate window the page can open itself in.
+    path: '/flight-deck',
+    name: 'FlightDeck',
+    component: () => import('../views/FlightDeck.vue'),
+    meta: { requiresAuth: true, requiresEntitlement: 'flight_deck', title: 'Flight Deck', hideHelpWidget: true }
+  },
+  {
     path: '/enterprise',
     name: 'EnterpriseLanding',
     component: () => import('../views/enterprise/Index.vue'),

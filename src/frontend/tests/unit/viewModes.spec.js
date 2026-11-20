@@ -9,7 +9,9 @@
  * store copy would have run against the buttons. Pure module — no DOM.
  */
 import { describe, it, expect } from 'vitest'
-import { VIEW_MODES, DEFAULT_VIEW_MODE, nextViewMode } from '../../src/utils/viewModes.js'
+import {
+  ALL_VIEW_MODES, DEFAULT_VIEW_MODE, GATED_VIEW_MODES, VIEW_MODES, nextViewMode, viewModeLabel, viewModesFor,
+} from '../../src/utils/viewModes.js'
 
 describe('#2536 viewModes — the one home of the mode list', () => {
   it('lists timeline, grid, list in visual order; timeline is the default; the list is frozen', () => {
@@ -42,5 +44,29 @@ describe('#2536 viewModes — the one home of the mode list', () => {
       // Every mode is visited exactly once per lap — no mode is unreachable.
       expect(seen.size).toBe(VIEW_MODES.length)
     }
+  })
+})
+
+describe('entitled modes (trinity-enterprise#1307)', () => {
+  it('a build without the entitlement has exactly the three base modes', () => {
+    expect(viewModesFor([])).toEqual([...VIEW_MODES])
+    expect(viewModesFor(['audit'])).toEqual([...VIEW_MODES])
+  })
+
+  it('the Flight Deck joins the end of the list when entitled', () => {
+    expect(GATED_VIEW_MODES.deck).toBe('flight_deck')
+    expect(viewModesFor(['flight_deck'])).toEqual(['timeline', 'grid', 'list', 'deck'])
+    expect([...ALL_VIEW_MODES]).toEqual(['timeline', 'grid', 'list', 'deck'])
+    expect(viewModeLabel('deck')).toBe('Flight Deck')
+    expect(viewModeLabel('grid')).toBe('grid')
+  })
+
+  it('the cycle visits the deck only on the list that has it', () => {
+    const entitled = viewModesFor(['flight_deck'])
+    expect(nextViewMode('list', entitled)).toBe('deck')
+    expect(nextViewMode('deck', entitled)).toBe('timeline')
+    expect(nextViewMode('list')).toBe('timeline')
+    // a saved deck on a build without it degrades to the default
+    expect(nextViewMode('deck')).toBe(DEFAULT_VIEW_MODE)
   })
 })

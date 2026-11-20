@@ -9432,6 +9432,26 @@
         "docker"
       ],
       "description": "OpenCode telemetry under `part` (Abilityai/lilu#659) and the per-provider images capability (Abilityai/lilu#660). #659: the pinned 1.18.32 binary nests step/tool payloads under `part`; a REAL step_finish line captured on the DGX must read input 56913 / output 63 / cost 0.0, a 4-step tool turn must report the LAST step's input (57229, not the sum) and the real tool id `bash` (never \"Tool\"), and the legacy flat shape must still parse. Cost decision: a native `cost: 0` stays 0.0; None only when no cost field arrived. #660: 1.18.32 swaps an image part for an \"ERROR: Cannot read …\" text part unless the model's `modalities.input` lists \"image\"; `OPENCODE_PROVIDER_<ID>_IMAGES` defaults off for ollama / URL-declared OpenAI-compatible providers and on for openrouter/anthropic/openai, is surfaced as `capabilities().image_input`, writes `modalities` (with \"text\" kept) into the provider block when true, and an undeliverable image is never a silent text-only turn: no `-f`, the model is told, a `metadata.warnings` entry, a sentence prepended to the response, and a log line."
+    },
+    {
+      "file": "../src/frontend/tests/unit/flightDeck.spec.js",
+      "feature": "trinity-enterprise#1307",
+      "added": "2026-11-19",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "Flight Deck rules (utils/flightDeck.js): who counts as working (socket map ∪ polled state, visible agents only), order (working, idle by recency, stopped), each row's 24h facts (success, runs, cost, context; no runs is no reading), fleet totals, cost label, task text hidden unless turned on and never leaked into a row, upcoming scheduled runs (names withheld unless text is on), the feed (newest first, visible agents, state-keyed), sleep when hidden, stale only after the limit and never before a first load, the popup feature string; and the demo fleet (seeded: runs start, finish and are counted; a stopped agent never starts)."
+    },
+    {
+      "file": "../src/frontend/tests/unit/flightDeck.mount.spec.js",
+      "feature": "trinity-enterprise#1307",
+      "added": "2026-11-19",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "Flight Deck pane mounted in jsdom: the real route table carries requiresAuth + requiresEntitlement 'flight_deck' on the window route; headline numbers and table row order; each row's success, runs, cost and context with no reading for an agent with no runs; host meters with only the over-limit one coloured; upcoming runs without names while text is hidden; the privacy switch changes the rendered task and the stored choice; Open in window calls window.open at /flight-deck with popup features and reports a blocked popup with the address; the window page offers no second open button and runs and releases the fleet store; empty and failed states are distinct; a failed host read leaves the rest rendering; demo mode draws a simulated fleet, says so and makes no request; a hidden page makes no requests and resumes when shown; leaving stops its polls; the ring keeps each agent's dot in name order and rings once for a new event only."
     }
   ]
 }

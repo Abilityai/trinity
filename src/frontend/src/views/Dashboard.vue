@@ -256,12 +256,21 @@
                   v-for="mode in VIEW_MODES"
                   :key="mode"
                   @click="toggleMode(mode)"
-                  :class="[
-                    'px-2 py-1 rounded text-xs font-medium transition-all capitalize',
-                    viewMode === mode ? 'bg-blue-600 text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
-                  ]"
+                  :class="modeButtonClass(viewMode === mode)"
                 >
                   {{ mode }}
+                </button>
+                <!-- Entitled modes (trinity-enterprise#1307) follow the three
+                     every build has, INSIDE the switcher, so it stays the last
+                     child of the cluster. -->
+                <button
+                  v-for="mode in gatedModes"
+                  :key="mode"
+                  :data-testid="`view-mode-${mode}`"
+                  @click="toggleMode(mode)"
+                  :class="modeButtonClass(viewMode === mode)"
+                >
+                  {{ viewModeLabel(mode) }}
                 </button>
               </div>
             </div>
@@ -419,6 +428,13 @@
       />
     </div>
 
+    <!-- Flight Deck (trinity-enterprise#1307) — the same fleet as a picture in
+         motion. v-if so its host poll and its drawing loop stop whenever the
+         mode is not active. It draws `visibleAgents`, like the other panes. -->
+    <div v-if="viewMode === 'deck' && deckEntitled" class="flex-1 min-h-0 overflow-hidden">
+      <FlightDeckPanel :agents="visibleAgents" @retry="refreshAll" />
+    </div>
+
     <!-- Query-empty overlay (ent#261 D8) — ONE chassis-level element covering
          whichever pane is active; the pane stays MOUNTED underneath (a
          transient zero-match while typing must never unmount ReplayTimeline /
@@ -528,10 +544,12 @@ import { useSystemViewsStore } from '@/stores/systemViews'
 import { storeToRefs } from 'pinia'
 import FleetGrid from '@/components/FleetGrid.vue'
 import { isOrgTag } from '@/utils/gridOrg'
-import { VIEW_MODES, nextViewMode } from '@/utils/viewModes'
+import { VIEW_MODES, nextViewMode, viewModeLabel, viewModesFor } from '@/utils/viewModes'
 import AgentListPanel from '@/components/AgentListPanel.vue'
 import CreateAgentModal from '@/components/CreateAgentModal.vue'
 import { useNotification } from '@/composables/useNotification'
+import FlightDeckPanel from '@/components/flight-deck/FlightDeckPanel.vue'
+import { useEnterpriseStore } from '@/stores/enterprise'
 
 const networkStore = useNetworkStore()
 const systemViewsStore = useSystemViewsStore()
@@ -544,6 +562,31 @@ const router = useRouter()
 // onMounted, so it stops with the component; the socket still opens on mount.
 const authStore = useAuthStore()
 watch(() => authStore.token, (token) => networkStore.followToken(token))
+
+// trinity-enterprise#1307: the Flight Deck is a mode only where it is entitled.
+// The flags are cached per page load; nothing on the Dashboard waits for them.
+// A saved or linked `deck` on a build without it falls back to the default
+// once the flags have answered — never before, or an entitled reload would
+// lose its saved mode to the wait.
+const enterpriseStore = useEnterpriseStore()
+const { enterpriseFeatures, featureFlagsLoaded } = storeToRefs(enterpriseStore)
+const availableModes = computed(() => viewModesFor(enterpriseFeatures.value))
+const gatedModes = computed(() => availableModes.value.filter(m => !VIEW_MODES.includes(m)))
+const deckEntitled = computed(() => availableModes.value.includes('deck'))
+enterpriseStore.loadFeatureFlags()
+watch([featureFlagsLoaded, () => networkStore.viewMode], ([loaded, mode]) => {
+  if (loaded && !availableModes.value.includes(mode)) {
+    networkStore.setViewMode(VIEW_MODES[0], { persist: false })
+  }
+}, { immediate: true })
+
+// One class recipe for every switcher button.
+function modeButtonClass(active) {
+  return [
+    'px-2 py-1 rounded text-xs font-medium transition-all capitalize',
+    active ? 'bg-blue-600 text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
+  ]
+}
 
 // ?view= deep-link intent (trinity-enterprise#260 D2) — a route WATCH, not an
 // onMounted read, so navigating to `/?view=list` while the Dashboard is already
@@ -911,7 +954,7 @@ onMounted(async () => {
   networkStore.startAgentRefresh()
 
   // Start activity refresh polling if in timeline mode (fallback for WebSocket gaps)
-  if (networkStore.isTimelineMode) {
+  if (networkStore.isTimelineMode || networkStore.viewMode === 'deck') {
     networkStore.startActivityRefresh()
   }
 })
@@ -988,7 +1031,7 @@ function toggleMode(mode) {
 // same store path a switcher click takes, so localStorage and the active
 // button can never disagree with the pane.
 function cycleViewMode() {
-  networkStore.setViewMode(nextViewMode(viewMode.value))
+  networkStore.setViewMode(nextViewMode(viewMode.value, availableModes.value))
 }
 
 function handlePlay() {

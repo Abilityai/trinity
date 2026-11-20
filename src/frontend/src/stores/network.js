@@ -7,7 +7,7 @@ import { useAgentsStore } from './agents'
 import { parseUTC, getTimestampMs } from '@/utils/timestamps'
 import { isOrgTag } from '@/utils/gridOrg'
 import { agentDisplayName } from '@/utils/agentName'
-import { VIEW_MODES, DEFAULT_VIEW_MODE } from '@/utils/viewModes'
+import { ALL_VIEW_MODES, DEFAULT_VIEW_MODE } from '@/utils/viewModes'
 
 // #3109: how long a burst of `agent_created` events is gathered into one refetch.
 export const AGENT_CREATED_COALESCE_MS = 300
@@ -74,7 +74,7 @@ export const useNetworkStore = defineStore('network', () => {
   // `utils/viewModes.js` (#2536) — ONE home shared with the Dashboard's mode
   // toggle v-for, the `v` cycle order and the e2e specs; do not re-declare it.
   const savedViewMode = localStorage.getItem('trinity-dashboard-view')
-  const viewMode = ref(VIEW_MODES.includes(savedViewMode) ? savedViewMode : DEFAULT_VIEW_MODE)
+  const viewMode = ref(ALL_VIEW_MODES.includes(savedViewMode) ? savedViewMode : DEFAULT_VIEW_MODE)
   const isTimelineMode = computed(() => viewMode.value === 'timeline')
   const isPlaying = ref(false)
   const replaySpeed = ref(10) // 10x default
@@ -1542,7 +1542,7 @@ export const useNetworkStore = defineStore('network', () => {
   // write — used by the `?view=` deep-link/redirect (ent#260), which is a
   // one-shot intent that must not rewrite the user's saved view selection.
   function setViewMode(mode, { persist = true } = {}) {
-    if (!VIEW_MODES.includes(mode)) mode = DEFAULT_VIEW_MODE
+    if (!ALL_VIEW_MODES.includes(mode)) mode = DEFAULT_VIEW_MODE
     viewMode.value = mode
     if (persist) {
       localStorage.setItem('trinity-dashboard-view', mode)
@@ -1551,7 +1551,10 @@ export const useNetworkStore = defineStore('network', () => {
     // Keep WebSocket and shared stats polling active in ALL views for live
     // updates; only the timeline's activity-refresh fallback is mode-scoped.
     stopReplay()
-    if (mode === 'timeline') {
+    // The Flight Deck (ent#1307) reads the same event list the timeline does.
+    if (mode === 'deck') {
+      startActivityRefresh()
+    } else if (mode === 'timeline') {
       startActivityRefresh()
       console.log('[Collaboration] Switched to Timeline view (live mode)')
     } else {
