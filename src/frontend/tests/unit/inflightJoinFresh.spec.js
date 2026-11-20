@@ -10,8 +10,8 @@
  * So the count is the easy half here. The assertions that matter are the ones
  * about WHEN a join is refused.
  */
-import { describe, it, expect, beforeEach } from 'vitest'
-import { joinFresh, markChanged, resetInFlight, inFlightCount } from '@/utils/inflight'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { joinFresh, markChanged, resetInFlight, inFlightCount, MAX_FLIGHT_AGE_MS } from '@/utils/inflight'
 
 function deferred() {
   let resolve, reject
@@ -205,5 +205,60 @@ describe('joinFresh — scopes', () => {
     chatState.calls[0].resolve('old')
     await tick(); await tick()
     expect(chatState.calls).toHaveLength(2)
+  })
+})
+
+describe('joinFresh — a hung request cannot freeze a list', () => {
+  // The Workspace transport sets no timeout: a request the network swallowed
+  // stays "in flight" for minutes. Nothing may join it, or queue behind it,
+  // for longer than MAX_FLIGHT_AGE_MS.
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('a flight past its age is not joined: the next read goes out', async () => {
+    const { fn, calls } = reader()
+    joinFresh('sessions', fn)                 // never settles
+    await vi.advanceTimersByTimeAsync(MAX_FLIGHT_AGE_MS - 1)
+    joinFresh('sessions', fn)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(calls).toHaveLength(1)             // still young: joined
+    await vi.advanceTimersByTimeAsync(1)
+    const fresh = joinFresh('sessions', fn)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(calls).toHaveLength(2)
+    calls[1].resolve('list')
+    expect(await fresh).toBe('list')
+  })
+
+  it('a read waiting behind a hung flight stops waiting when it ages out', async () => {
+    const { fn, calls } = reader()
+    joinFresh('chat-state', fn)               // never settles
+    await vi.advanceTimersByTimeAsync(1000)
+    markChanged()
+    let answer = null
+    joinFresh('chat-state', fn).then((v) => { answer = v })
+    await vi.advanceTimersByTimeAsync(MAX_FLIGHT_AGE_MS - 1001)
+    expect(calls).toHaveLength(1)             // still waiting
+    await vi.advanceTimersByTimeAsync(1)
+    expect(calls).toHaveLength(2)             // gave up waiting, read
+    calls[1].resolve('fresh')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(answer).toBe('fresh')
+  })
+
+  it('the hung flight settling late does not disturb the newer one', async () => {
+    const { fn, calls } = reader()
+    const hung = joinFresh('sessions', fn)
+    await vi.advanceTimersByTimeAsync(MAX_FLIGHT_AGE_MS)
+    const fresh = joinFresh('sessions', fn)
+    await vi.advanceTimersByTimeAsync(0)
+    calls[0].resolve('late')
+    expect(await hung).toBe('late')
+    const joined = joinFresh('sessions', fn)  // the NEWER flight is still the one in the map
+    await vi.advanceTimersByTimeAsync(0)
+    expect(calls).toHaveLength(2)
+    calls[1].resolve('new')
+    expect(await fresh).toBe('new')
+    expect(await joined).toBe('new')
   })
 })
