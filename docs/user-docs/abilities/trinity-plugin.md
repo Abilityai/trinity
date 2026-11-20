@@ -267,7 +267,7 @@ Optional but recommended:
 - `template.yaml` `schedules:` — declared recurring work, materialized at creation
 - `template.yaml` `plugins:` — declared Claude Code plugins, re-installed on every boot. Declare `trinity@abilityai` at minimum so the intent is in the repo; the platform provides that one plugin on every boot even when it is undeclared
 
-The authoritative verdict is the platform's compatibility report (Agent Detail → Overview), which `/trinity:onboard` runs at the end of every path. See [Creating Agents](../agents/creating-agents.md).
+The authoritative verdict is the platform's compatibility report (Agent Detail → Settings › General), which `/trinity:onboard` runs at the end of every path. See [Creating Agents](../agents/creating-agents.md).
 
 ## See Also
 

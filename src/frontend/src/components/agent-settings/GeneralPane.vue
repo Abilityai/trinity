@@ -289,6 +289,10 @@
       </SettingRow>
     </SettingsSection>
 
+    <!-- Deployment compatibility (#668). It lived on the Overview until
+         trinity-enterprise#1317; this pane is its only home now. -->
+    <CompatibilityPanel :agent="agent" />
+
     <!-- Danger zone -->
     <SettingsSection v-if="showDangerZone" title="Danger zone" danger>
       <SettingRow
@@ -346,6 +350,7 @@ import {
 } from '../../utils/executionTimeout'
 import { apiErrorMessage } from '../../utils/apiError'
 import SettingsSection from './SettingsSection.vue'
+import CompatibilityPanel from '../CompatibilityPanel.vue'
 import SettingRow from './SettingRow.vue'
 import BaseButton from '../base/BaseButton.vue'
 import BaseInput from '../base/BaseInput.vue'

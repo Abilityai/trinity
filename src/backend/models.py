@@ -3044,6 +3044,9 @@ class AgentAnalyticsTimelinePoint(BaseModel):
     success_rate: Optional[float] = None
     duration_avg_ms: Optional[int] = None
     context_avg: Optional[int] = None
+    # Share of each run's own context window, averaged (0-100); null when no
+    # run that day recorded a window (trinity-enterprise#1317).
+    context_pct_avg: Optional[int] = None
     by_type: Dict[str, int] = {}
 
 
@@ -3065,6 +3068,7 @@ class AgentAnalyticsResponse(BaseModel):
     success_rate: float
     duration_ms: DurationStats
     context_avg: Optional[int] = None
+    context_pct_avg: Optional[int] = None
     by_type: List[AgentTypeTotal] = []
     buckets: List[str] = []
     timeline: List[AgentAnalyticsTimelinePoint] = []
