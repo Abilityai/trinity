@@ -312,7 +312,7 @@ export function cardNote(card) {
   if (card.action === 'feedback') return 'Goes to the people who make Trinity, with the page you are on and your Trinity version. Nothing else is attached.'
   if (card.action === 'build') return 'Creates these agents on this instance, as you. Nothing is switched on.'
   if (card.action === 'tool') return irreversibleTool(card) ? 'This cannot be undone. It runs as you.' : 'Changes this instance. It runs as you.'
-  if (card.action === 'upgrade') return 'A larger allowance and bigger teams. You sign in with your email first.'
+  if (card.action === 'upgrade') return "A larger allowance and bigger teams. We email a code to this instance's registered address to confirm."
   return 'Runs as you, not as the assistant.'
 }
 

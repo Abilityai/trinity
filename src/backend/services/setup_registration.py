@@ -18,6 +18,21 @@ Protocol (what a provider implements)::
             # setup then refuses with the retryable
             # ``registration_terms_unavailable`` and never completes.
 
+        def applies(self) -> bool:  # OPTIONAL
+            # Whether the terms apply on this instance right now. Asked on
+            # every request, in every worker, so it must be cheap and local
+            # (no network). False reads as "no provider": the route is 404
+            # and setup is unchanged. An exception reads as "couldn't tell":
+            # the route is 404, and setup on the emailed link refuses with
+            # the retryable ``registration_terms_unavailable``, recording
+            # nothing. A provider without this method always applies.
+
+A module may register its provider unconditionally and let ``applies()``
+decide, so eligibility that changes after the process started (another process
+writing a setting) is seen by every worker without re-registering.
+``SUPPORTS_APPLIES`` tells a module this platform asks ``applies()``; an older
+platform does not, and a module must then register only when eligible.
+
 The provider is called with NOTHING from the caller: no claim code, no email,
 no address. A malformed answer is treated as unavailable.
 
@@ -80,6 +95,8 @@ class RegistrationTermsError(Exception):
                 "version": self.version, "retryable": self.retryable}
 
 
+SUPPORTS_APPLIES = True
+
 _provider: Optional[RegistrationTermsProvider] = None
 _cache: Optional[tuple] = None  # (fetched_at, terms)
 _failed_at: Optional[float] = None  # when the provider last could not answer
@@ -124,6 +141,41 @@ def _lock() -> asyncio.Lock:
 
 def provider() -> Optional[RegistrationTermsProvider]:
     return _provider
+
+
+# What ``applies_state()`` answers. UNKNOWN is a raising ``applies()``: the
+# provider could not say. The open route reads it as "no provider" (404, so a
+# fault never opens it) but setup on the emailed link refuses with the
+# retryable unavailable answer, so a fault never lets the admin past the terms.
+APPLIES = "applies"
+DOES_NOT_APPLY = "does_not_apply"
+UNKNOWN = "unknown"
+
+
+def applies_state() -> str:
+    """Whether the registered provider applies right now: ``APPLIES``,
+    ``DOES_NOT_APPLY`` (none registered, or ``applies()`` said no) or
+    ``UNKNOWN`` (``applies()`` raised; logged)."""
+    p = _provider
+    if p is None:
+        return DOES_NOT_APPLY
+    applies = getattr(p, "applies", None)
+    if applies is None:
+        return APPLIES
+    try:
+        return APPLIES if applies() else DOES_NOT_APPLY
+    except Exception as e:  # noqa: BLE001 — a fault is "couldn't tell"
+        logger.warning("[setup] registration terms provider could not say whether it applies: %s",
+                       type(e).__name__)
+        return UNKNOWN
+
+
+def active_provider() -> Optional[RegistrationTermsProvider]:
+    """The registered provider when it applies right now, else None. A
+    provider without ``applies()`` always applies; one whose ``applies()``
+    raises does not here, so a fault never opens the route — setup asks
+    ``check_accepted_if_applies`` instead, which refuses on that fault."""
+    return _provider if applies_state() == APPLIES else None
 
 
 def _unavailable() -> RegistrationTermsError:
@@ -212,6 +264,19 @@ async def check_accepted(given_version: Optional[str]) -> str:
             409, CHANGED, "The registration terms have changed. Read the current version and accept it.",
             version=current)
     return current
+
+
+async def check_accepted_if_applies(given_version: Optional[str]) -> Optional[str]:
+    """The setup gate. None when no provider applies (setup unchanged); the
+    accepted version when one applies (``check_accepted``); and the retryable
+    503 ``registration_terms_unavailable`` when ``applies()`` could not answer
+    — nothing is taken or written on a refusal."""
+    state = applies_state()
+    if state == DOES_NOT_APPLY:
+        return None
+    if state == UNKNOWN:
+        raise _unavailable()
+    return await check_accepted(given_version)
 
 
 def record_acceptance(version: str, ip: Optional[str], *, now: Optional[str] = None) -> dict:

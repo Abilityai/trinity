@@ -496,3 +496,111 @@ def test_failed_admin_write_leaves_no_acceptance_row(env):
     assert ei.value.status_code == 503
     assert "registration_terms_acceptance" not in e.db.settings, "nothing was changed"
     assert e.claim_file.read_text() == f"email-bound:{SECRET}\n"
+
+
+# --------------------------------------------------------------------------
+# a provider that says whether it applies. Eligibility that changes after the
+# process started (another process writing a setting) left workers that had
+# not registered a provider without the terms, so setup completed with none.
+# The seam now asks the provider at request time; a provider without
+# `applies()` behaves exactly as before.
+# --------------------------------------------------------------------------
+
+class GatedProvider(FakeProvider):
+    def __init__(self, applies=False, **kw):
+        super().__init__(**kw)
+        self.applies_now = applies
+        self.asked = 0
+
+    def applies(self):
+        self.asked += 1
+        if isinstance(self.applies_now, Exception):
+            raise self.applies_now
+        return self.applies_now
+
+
+def test_seam_advertises_that_it_asks_applies():
+    assert _seam().SUPPORTS_APPLIES is True
+
+
+def test_a_provider_that_does_not_apply_is_404_and_never_fetched(env):
+    p = GatedProvider(applies=False)
+    env(provider=p)
+    with pytest.raises(HTTPException) as ei:
+        _get_terms()
+    assert ei.value.status_code == 404
+    assert p.calls == [], "no provider fetch when it does not apply"
+    assert p.asked == 1
+
+
+def test_a_provider_that_starts_applying_after_registration_answers_the_terms(env):
+    """Registered at start while it did not apply; a later change (made by
+    another process) makes it apply. No re-registration."""
+    p = GatedProvider(applies=False)
+    env(provider=p)
+    with pytest.raises(HTTPException):
+        _get_terms()
+    p.applies_now = True
+    assert _get_terms()["version"] == V1
+
+
+def test_a_provider_that_does_not_apply_leaves_setup_unchanged(env):
+    p = GatedProvider(applies=False)
+    e = env(provider=p)
+    assert _post()["success"] is True
+    assert "registration_terms_acceptance" not in e.db.settings
+    assert p.calls == []
+
+
+def test_a_provider_that_applies_gates_setup(env):
+    e = env(provider=GatedProvider(applies=True))
+    _refused(e, 400, "registration_terms_required")
+
+
+def test_an_applies_that_raises_reads_as_not_applying(env):
+    p = GatedProvider(applies=RuntimeError("db down"))
+    env(provider=p)
+    with pytest.raises(HTTPException) as ei:
+        _get_terms()
+    assert ei.value.status_code == 404
+    assert p.calls == []
+
+
+def test_active_provider_is_none_without_a_provider(env):
+    env()
+    assert _seam().active_provider() is None
+
+
+def test_a_provider_without_applies_is_always_active(env):
+    p = FakeProvider()
+    env(provider=p)
+    assert _seam().active_provider() is p
+
+
+# A raising `applies()` is "couldn't tell", not "does not apply": the open
+# route stays closed (404), but setup on the emailed link refuses with the
+# retryable unavailable answer and writes nothing, so a transient fault can
+# never let the admin past the terms (must-fix 1, trinity#4713).
+
+def test_an_applies_that_raises_refuses_setup_503_retryable_records_nothing(env):
+    p = GatedProvider(applies=RuntimeError("db down"))
+    e = env(provider=p)
+    d = _refused(e, 503, "registration_terms_unavailable", version=V1)
+    assert d["retryable"] is True
+    assert p.calls == [], "the terms are not fetched when applies() could not answer"
+
+
+def test_an_applies_that_recovers_lets_setup_through(env):
+    p = GatedProvider(applies=RuntimeError("db down"))
+    e = env(provider=p)
+    _refused(e, 503, "registration_terms_unavailable", version=V1)
+    p.applies_now = True
+    assert _post(version=V1)["success"] is True
+    assert e.db.settings["setup_completed"] == "true"
+
+
+def test_an_applies_that_raises_does_not_gate_the_instance_id_form(env):
+    p = GatedProvider(applies=RuntimeError("db down"))
+    e = env(claim="i-0123456789abcdef0\n", provider=p)
+    assert _post(claim_code="i-0123456789abcdef0", email="")["success"] is True
+    assert e.db.settings["setup_completed"] == "true"
