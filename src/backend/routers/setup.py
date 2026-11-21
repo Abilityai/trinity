@@ -438,11 +438,13 @@ async def set_admin_password(
     registration_version = None
     if (
         claim_mode
-        and setup_registration.active_provider() is not None
+        and setup_registration.provider() is not None
         and _read_claim_file(_SETUP_CLAIM_PATH).strip().startswith(_EMAIL_BOUND_PREFIX)
     ):
+        # A provider that could not say whether it applies refuses here
+        # (retryable 503) rather than letting setup past the terms.
         try:
-            registration_version = await setup_registration.check_accepted(
+            registration_version = await setup_registration.check_accepted_if_applies(
                 data.registration_terms_version
             )
         except setup_registration.RegistrationTermsError as e:

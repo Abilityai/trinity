@@ -575,3 +575,32 @@ def test_a_provider_without_applies_is_always_active(env):
     p = FakeProvider()
     env(provider=p)
     assert _seam().active_provider() is p
+
+
+# A raising `applies()` is "couldn't tell", not "does not apply": the open
+# route stays closed (404), but setup on the emailed link refuses with the
+# retryable unavailable answer and writes nothing, so a transient fault can
+# never let the admin past the terms (must-fix 1, trinity#4713).
+
+def test_an_applies_that_raises_refuses_setup_503_retryable_records_nothing(env):
+    p = GatedProvider(applies=RuntimeError("db down"))
+    e = env(provider=p)
+    d = _refused(e, 503, "registration_terms_unavailable", version=V1)
+    assert d["retryable"] is True
+    assert p.calls == [], "the terms are not fetched when applies() could not answer"
+
+
+def test_an_applies_that_recovers_lets_setup_through(env):
+    p = GatedProvider(applies=RuntimeError("db down"))
+    e = env(provider=p)
+    _refused(e, 503, "registration_terms_unavailable", version=V1)
+    p.applies_now = True
+    assert _post(version=V1)["success"] is True
+    assert e.db.settings["setup_completed"] == "true"
+
+
+def test_an_applies_that_raises_does_not_gate_the_instance_id_form(env):
+    p = GatedProvider(applies=RuntimeError("db down"))
+    e = env(claim="i-0123456789abcdef0\n", provider=p)
+    assert _post(claim_code="i-0123456789abcdef0", email="")["success"] is True
+    assert e.db.settings["setup_completed"] == "true"
