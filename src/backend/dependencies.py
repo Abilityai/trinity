@@ -3434,6 +3434,13 @@ STANDING_WORK_REFUSED = (
     "limited), so it cannot set up work that runs later as the agent's owner: schedules, "
     "loops, reminders and events. Ask the agent's owner to set it up."
 )
+# trinity-enterprise#1318: the agent's primary person, held back by the owner.
+STANDING_WORK_PRIMARY_OFF = (
+    "This turn is for the agent's primary person, and the agent's owner has turned off "
+    "full access for them on this agent, so it cannot set up work that runs later: "
+    "schedules, loops, reminders and events. The owner can turn it back on in the "
+    "agent's Guardrails settings."
+)
 OWNER_TIER_TURN_REFUSED = (
     "This turn is for a person the agent is shared with (or a visitor the owner has "
     "limited), and this is something only the agent's owner may do. Ask the agent's "
@@ -3441,7 +3448,7 @@ OWNER_TIER_TURN_REFUSED = (
 )
 
 
-def restricted_agent_turn(principal) -> bool:
+def restricted_agent_turn(principal, *, owner_routes: bool = False) -> bool:
     """Whether `principal` is an agent key acting in a turn the platform rates
     below the owner (the shell's line: a shared person always, a visitor when
     the owner turned `visitor_shell` off, an unknown or foreign turn always).
@@ -3450,24 +3457,35 @@ def restricted_agent_turn(principal) -> bool:
     the agent's key) or names an owner turn is still restricted while any
     running turn on the agent is (`running_turn_restricts`, the ledger — the
     rule the key's reads follow, ent#875). The price is the same as there: while
-    a shared person's turn runs, the owner's concurrent runs are fenced too."""
+    a shared person's turn runs, the owner's concurrent runs are fenced too.
+
+    `owner_routes`: the question for an owner-tier route other than standing
+    work, which a primary's turn may not use either (ent#1318 ruling 3)."""
     agent = getattr(principal, "agent_name", None)
     if getattr(principal, "mcp_scope", None) != "agent" or not (isinstance(agent, str) and agent):
         return False
     from services import turn_tier_service
+    rule = (turn_tier_service.restricts_owner_routes if owner_routes
+            else turn_tier_service.restricts_standing_work)
     acting = turn_tier_service.acting_turn(db, principal)
-    if acting is not None and turn_tier_service.restricts_standing_work(db, agent, acting[0], acting[1]):
+    if acting is not None and rule(db, agent, acting[0], acting[1]):
         return True
-    return turn_tier_service.running_turn_restricts(db, agent)
+    return turn_tier_service.running_turn_restricts(db, agent, owner_routes=owner_routes)
 
 
 def _enforce_standing_work_fence(request, principal: User) -> None:
     from services import route_tier_service
     method = (getattr(request, "method", "") or "").upper()
     refused = route_tier_service.refused_in_restricted_turn(method, request)
-    if refused is None or not restricted_agent_turn(principal):
+    if refused is None or not restricted_agent_turn(principal, owner_routes=refused != "standing_work"):
         return
-    detail = STANDING_WORK_REFUSED if refused == "standing_work" else OWNER_TIER_TURN_REFUSED
+    if refused == "standing_work":
+        from services import turn_tier_service
+        detail = (STANDING_WORK_PRIMARY_OFF
+                  if turn_tier_service.running_primary_off(db, principal.agent_name)
+                  else STANDING_WORK_REFUSED)
+    else:
+        detail = OWNER_TIER_TURN_REFUSED
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 

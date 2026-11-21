@@ -85,6 +85,17 @@ SHELL_VISITOR_OFF = (
     "This conversation comes from a channel or a public link, and the agent's owner "
     "has turned off running commands for those. Answer without the shell."
 )
+# trinity-enterprise#1318: the agent's primary person, held back by the owner.
+SHELL_PRIMARY_OFF = (
+    "This turn is for the agent's primary person, and the agent's owner has turned off "
+    "full access for them on this agent, so running commands is owner-only here. Answer "
+    "without the shell; the owner can turn it back on in the agent's Guardrails settings."
+)
+MCP_PRIMARY_OFF = (
+    "This turn is for the agent's primary person, and the agent's owner has turned off "
+    "full access for them on this agent, which includes the MCP servers the owner added. "
+    "Answer without them; the owner can turn it back on in the agent's Guardrails settings."
+)
 MCP_OWNER_ONLY = (
     "This turn is for a person the agent is shared with, and the MCP servers the agent's "
     "owner added are owner-only (they can reach files and commands the agent's own tools "
@@ -247,6 +258,9 @@ def ask_turn(container_env: dict, agent: str, run: str):
             if tier not in ("owner", "share"):
                 return "unreachable", False, None
             kind = answer.get("kind") if answer.get("kind") in ("person", "visitor") else None
+            # ent#1318: a primary held back by the owner's switch says so.
+            if tier == "share" and answer.get("reason") == "primary_off":
+                kind = "primary_off"
             return tier, answer.get("shell") is True, kind
         except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError):
             if attempt == 2:
@@ -282,9 +296,9 @@ def guard_shell(tool: str, *, verb: str = "exec") -> None:
     if tier == "unreachable":
         deny(COULD_NOT_CHECK, tool=tool, verb=verb, tier=tier)
     if verb == "mcp":
-        reason = MCP_VISITOR_OFF if kind == "visitor" else MCP_OWNER_ONLY
+        reason = {"visitor": MCP_VISITOR_OFF, "primary_off": MCP_PRIMARY_OFF}.get(kind, MCP_OWNER_ONLY)
     else:
-        reason = SHELL_VISITOR_OFF if kind == "visitor" else SHELL_OWNER_ONLY
+        reason = {"visitor": SHELL_VISITOR_OFF, "primary_off": SHELL_PRIMARY_OFF}.get(kind, SHELL_OWNER_ONLY)
     deny(reason, tool=tool, verb=verb, tier=tier, kind=kind)
 
 

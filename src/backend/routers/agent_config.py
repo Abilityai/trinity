@@ -805,6 +805,14 @@ def _validate_guardrails_payload(body: dict) -> dict:
             raise HTTPException(status_code=400, detail="visitor_shell must be true or false")
         cleaned["visitor_shell"] = body["visitor_shell"]
 
+    # trinity-enterprise#1318: does the agent work in full (commands, its own
+    # playbooks and tools, standing work) for the person seated as its primary?
+    # Read live per turn by turn_tier_service; absent = on.
+    if "primary_reach" in body:
+        if not isinstance(body["primary_reach"], bool):
+            raise HTTPException(status_code=400, detail="primary_reach must be true or false")
+        cleaned["primary_reach"] = body["primary_reach"]
+
     return cleaned
 
 

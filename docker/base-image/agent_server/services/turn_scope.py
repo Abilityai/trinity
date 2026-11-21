@@ -44,6 +44,12 @@ REFUSED_VISITOR = (
     "not allowed those to run on {runtime}. The owner can allow it in the agent's "
     "Guardrails settings."
 )
+# trinity-enterprise#1318: the agent's primary person, held back by the owner.
+REFUSED_PRIMARY_OFF = (
+    "This turn is for the agent's primary person, and the agent's owner has turned off "
+    "full access for them on this agent, so it does not run on {runtime}. The owner can "
+    "turn it back on in the agent's Guardrails settings."
+)
 # The class the backend and the pull sink read off the refusal (ent#926).
 ERROR_CODE = "turn_refused"
 COULD_NOT_CHECK = (
@@ -86,6 +92,9 @@ async def fetch_turn(agent: str, run: str):
     if tier not in ("owner", "share"):
         return "unreachable", False, None
     kind = answer.get("kind") if answer.get("kind") in ("person", "visitor") else None
+    # ent#1318: a primary held back by the owner's switch says so.
+    if tier == "share" and answer.get("reason") == "primary_off":
+        kind = "primary_off"
     return tier, answer.get("shell") is True, kind
 
 
@@ -99,7 +108,7 @@ async def require_owner_tier(runtime: str, execution_id: Optional[str]) -> None:
     logger.info(f"event=turn_scope_refused runtime={runtime} execution_id={execution_id} tier={tier} kind={kind}")
     if tier == "unreachable":
         raise HTTPException(status_code=503, detail=COULD_NOT_CHECK.format(runtime=runtime))
-    text = (REFUSED_VISITOR if kind == "visitor" else REFUSED).format(runtime=runtime)
+    text = {"visitor": REFUSED_VISITOR, "primary_off": REFUSED_PRIMARY_OFF}.get(kind, REFUSED).format(runtime=runtime)
     # A typed body: the pull sink reads `error_code` off it (#3012), and the
     # backend answers 403, so no caller retries a refusal that cannot change.
     raise HTTPException(status_code=403, detail={"message": text, "error_code": ERROR_CODE})

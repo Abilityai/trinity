@@ -85,7 +85,28 @@
             On: conversations from channels and public links can use the shell, and a Gemini or
             Codex agent answers them. The shell reaches everything the agent can, so turn this
             off if those visitors should not. Off: they get answers without running commands.
-            People you share the agent with never run commands. Applies to the next message.
+            People you share the agent with never run commands{{ seatsAvailable ? ', except its primary person (below)' : '' }}. Applies to the next message.
+          </p>
+        </div>
+
+        <!-- trinity-enterprise#1318: the person seated as primary (an admin's
+             act) has the agent work in full for them. Saved on change and read
+             live per turn. Managing the agent stays with its owner and admins. -->
+        <div v-if="seatsAvailable" class="space-y-1" data-testid="guardrails-primary-reach">
+          <BaseToggle
+            :model-value="primaryReach"
+            label="The agent works in full for its primary person"
+            aria-label="The agent works in full for its primary person"
+            :disabled="savingPrimary || saving"
+            @update:model-value="setPrimaryReach"
+          />
+          <p :class="HELP_CLASS">
+            On: the person seated as primary on this agent can have it run commands, its own
+            playbooks and the tools you added, and set up schedules, loops and reminders for
+            them, here and when another agent calls it during their turn. They still cannot
+            change its settings, credentials, instructions or sharing. Off: they get answers
+            without running commands, like anyone else you share the agent with. Applies to
+            the next message.
           </p>
         </div>
       </form>
@@ -94,8 +115,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
+import { useEnterpriseStore } from '../stores/enterprise'
 import BaseToggle from './base/BaseToggle.vue'
 import { HELP_CLASS } from './base/fieldClasses'
 
@@ -124,6 +146,7 @@ const MAX_TURNS = 500
 const DEFAULT_TURNS = 200
 
 const agentsStore = useAgentsStore()
+const enterprise = useEnterpriseStore()
 
 const loading = ref(false)
 const saving = ref(false)
@@ -138,6 +161,10 @@ const stored = ref({})
 // ent#926: absent means on (the default keeps channel agents working).
 const visitorShell = ref(true)
 const savingVisitor = ref(false)
+// trinity-enterprise#1318: seats come from the assignments module; absent = on.
+const seatsAvailable = computed(() => enterprise.isEntitled('assignments'))
+const primaryReach = ref(true)
+const savingPrimary = ref(false)
 
 function showToast(message, type = 'success') {
   if (props.notify) props.notify(message, type)
@@ -167,6 +194,7 @@ async function load() {
     otherKeys.value = rest
     stored.value = copy
     visitorShell.value = g.visitor_shell !== false
+    primaryReach.value = g.primary_reach !== false
   } catch (err) {
     console.error('Failed to load guardrails:', err)
     errorMessage.value = err.response?.data?.detail || 'Failed to load guardrails'
@@ -243,6 +271,33 @@ async function setVisitorShell(value) {
   }
 }
 
-onMounted(load)
+async function setPrimaryReach(value) {
+  if (savingPrimary.value) return
+  const previous = primaryReach.value
+  primaryReach.value = value
+  savingPrimary.value = true
+  errorMessage.value = ''
+  try {
+    const payload = { ...stored.value, primary_reach: value }
+    await agentsStore.setGuardrails(props.agentName, payload)
+    stored.value = payload
+    otherKeys.value = { ...otherKeys.value, primary_reach: value }
+    showToast(value
+      ? 'The agent works in full for its primary person again'
+      : 'The primary person can no longer have the agent run commands', 'success')
+  } catch (err) {
+    primaryReach.value = previous
+    const detail = err.response?.data?.detail || 'Failed to save the primary person setting'
+    errorMessage.value = detail
+    showToast(detail, 'error')
+  } finally {
+    savingPrimary.value = false
+  }
+}
+
+onMounted(() => {
+  enterprise.loadFeatureFlags?.().catch?.(() => {})
+  load()
+})
 watch(() => props.agentName, load)
 </script>

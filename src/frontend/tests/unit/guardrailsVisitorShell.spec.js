@@ -16,6 +16,10 @@ const setGuardrails = vi.fn()
 vi.mock('../../src/stores/agents', () => ({
   useAgentsStore: () => ({ getGuardrails, setGuardrails }),
 }))
+// ent#1318: the panel asks whether seats exist; this suite is about visitors.
+vi.mock('../../src/stores/enterprise', () => ({
+  useEnterpriseStore: () => ({ isEntitled: () => false, loadFeatureFlags: async () => {} }),
+}))
 
 // eslint-disable-next-line import/first
 import GuardrailsPanel from '../../src/components/GuardrailsPanel.vue'

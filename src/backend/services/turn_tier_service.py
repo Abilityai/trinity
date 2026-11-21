@@ -89,6 +89,9 @@ VISITOR = "visitor"
 # map any kind but `person`/`visitor` to None, so these change nothing there.
 MEMBER = "member"
 DELEGATED = "delegated"
+# trinity-enterprise#1318: a person seated as primary on the agent, while the
+# owner leaves `primary_reach` on (the default).
+PRIMARY = "primary"
 
 # Every execution-row column `turn_actor` reads. `db.get_running_turn_attribution`
 # (the ledger path) must select each of them, or a turn rates differently from
@@ -134,6 +137,9 @@ OWNER_CONFIGURED_TRIGGERS = frozenset({
 _NO_SCHEDULE_IDS = frozenset({"", "__manual__"})
 
 VISITOR_SHELL_KEY = "visitor_shell"
+# trinity-enterprise#1318: the owner's per-agent switch for a primary seat's
+# reach (default on). A guardrails key, like `visitor_shell`.
+PRIMARY_REACH_KEY = "primary_reach"
 
 
 def _user_tier(db, user_id, agent_name: str) -> str:
@@ -167,8 +173,55 @@ def register_person_tier_provider(provider: PersonTierProvider) -> None:
 
 
 def clear_person_tier_providers() -> None:
-    global _person_tier_provider
+    global _person_tier_provider, _primary_seat_provider
     _person_tier_provider = None
+    _primary_seat_provider = None
+
+
+# --- the primary-seat provider (trinity-enterprise#1318) ---------------------
+#
+# A second slot, not a second registration on the one above: that slot is the
+# member-agent module's, single and last-wins. Same contract: the provider is
+# asked ONLY about (person, this agent) — never which agent called — so the
+# permission edge between two agents never decides reach (ruling 4); only a
+# strict `True` counts, and a raise counts as no seat.
+
+_primary_seat_provider: Optional[PersonTierProvider] = None
+
+
+def register_primary_seat_provider(provider: PersonTierProvider) -> None:
+    """Register `provider(db, user_id, agent_name) -> bool`: does this person
+    hold the primary seat on this agent? Last registration wins."""
+    global _primary_seat_provider
+    _primary_seat_provider = provider
+
+
+def _holds_primary_seat(db, user_id: int, agent_name: str) -> bool:
+    provider = _primary_seat_provider
+    if provider is None:
+        return False
+    try:
+        return provider(db, user_id, agent_name) is True
+    except Exception:  # noqa: BLE001 - fail closed: an unreadable answer elevates nobody
+        return False
+
+
+def primary_reach_allowed(db, agent_name: str) -> bool:
+    """The owner's choice for the agent's primary person (default on)."""
+    try:
+        value = (db.get_guardrails_config(agent_name) or {}).get(PRIMARY_REACH_KEY, True)
+    except Exception:  # noqa: BLE001 - an unreadable setting keeps the default
+        value = True
+    return value is not False
+
+
+def primary_reach_off(db, agent_name: str, person) -> bool:
+    """Is `person` this agent's primary, held at share tier only because the
+    owner turned `primary_reach` off? Lets a refusal say so in plain words."""
+    person = _int_or_none(person)
+    if person is None or primary_reach_allowed(db, agent_name):
+        return False
+    return _holds_primary_seat(db, person, agent_name)
 
 
 def _provider_rates_owner(db, user_id: int, agent_name: str) -> bool:
@@ -184,12 +237,19 @@ def _provider_rates_owner(db, user_id: int, agent_name: str) -> bool:
 def _person_tier(db, user_id, agent_name: str) -> Tuple[str, Optional[str], Optional[int]]:
     """(tier, kind, person) for a person's turn: the owner or an admin first
     (`(owner, None, None)`, as before), then the registered provider's member,
-    else a shared person."""
+    then the agent's primary person while the owner leaves `primary_reach` on
+    (ent#1318), else a shared person. Every turn and every hop is rated here,
+    so a primary's direct, Workspace and schedule turns and a call another agent
+    makes during their turn all get the same answer."""
     if _user_tier(db, user_id, agent_name) == OWNER:
         return OWNER, None, None
     person = _int_or_none(user_id)
     if person is not None and _provider_rates_owner(db, person, agent_name):
         return OWNER, MEMBER, person
+    if (person is not None and _primary_seat_provider is not None
+            and primary_reach_allowed(db, agent_name)
+            and _holds_primary_seat(db, person, agent_name)):
+        return OWNER, PRIMARY, person
     return SHARE, PERSON, person
 
 
@@ -357,7 +417,7 @@ def turn_actor(db, agent_name: str, execution_id: Optional[str] = None, *,
                execution=None) -> Tuple[str, Optional[str], Optional[int]]:
     """(tier, kind, person id) for a turn, by `execution_id` or by the row itself
     (`execution`: any object or dict carrying the `LEDGER_COLUMNS`). `kind` is
-    `person` or `visitor` for a share turn, `member` or `delegated` for an
+    `person` or `visitor` for a share turn, `member`, `delegated` or `primary` for an
     owner turn that is a person's by rule, and None for the owner's own; the
     person id is the user the turn is for, if any."""
     if execution is None:
@@ -477,7 +537,16 @@ def restricts_standing_work(db, agent_name: str, tier: str, kind: Optional[str])
     return tier != OWNER and not shell_allowed(db, agent_name, tier, kind)
 
 
-def running_turn_restricts(db, agent_name: str) -> bool:
+def restricts_owner_routes(db, agent_name: str, tier: str, kind: Optional[str]) -> bool:
+    """May this turn NOT use the agent key on the other owner-tier platform
+    routes (settings, credentials, sharing, keys, creating agents)? Everything
+    `restricts_standing_work` restricts, and also a primary's turn: a primary
+    seat makes the agent work in full for that person, but managing the agent
+    stays with its owner and admins (ent#1318 ruling 3)."""
+    return kind == PRIMARY or restricts_standing_work(db, agent_name, tier, kind)
+
+
+def running_turn_restricts(db, agent_name: str, *, owner_routes: bool = False) -> bool:
     """Is any RUNNING turn on `agent_name` one that `restricts_standing_work`?
 
     Read from the ledger, never from a request: an agent key that omits the
@@ -488,9 +557,24 @@ def running_turn_restricts(db, agent_name: str) -> bool:
         rows = db.get_running_turn_attribution(agent_name)
     except Exception:  # noqa: BLE001 - fail closed
         return True
+    rule = restricts_owner_routes if owner_routes else restricts_standing_work
     for _, (tier, kind, _) in _rated_rows(db, agent_name, rows):
-        if restricts_standing_work(db, agent_name, tier, kind):
+        if rule(db, agent_name, tier, kind):
             return True
+    return False
+
+
+def running_primary_off(db, agent_name: str) -> bool:
+    """Is a RUNNING turn on `agent_name` the primary's, held back only by the
+    owner's `primary_reach` switch? Chooses the refusal's words, never whether
+    to refuse."""
+    try:
+        rows = db.get_running_turn_attribution(agent_name)
+        for row, (tier, kind, person) in _rated_rows(db, agent_name, rows):
+            if tier == SHARE and kind == PERSON and primary_reach_off(db, agent_name, person):
+                return True
+    except Exception:  # noqa: BLE001 - only the wording depends on it
+        return False
     return False
 
 
@@ -535,11 +619,11 @@ def turn_origin_user_id(db, principal) -> Optional[int]:
 
 def _is_the_owners_own(acting: Tuple[str, Optional[str], Optional[int]]) -> bool:
     """An OWNER answer with no person behind it. An owner turn that is a
-    person's by rule (`member`, `delegated`) still dispatches as that person,
+    person's by rule (`member`, `delegated`, `primary`) still dispatches as that person,
     so the next row records who the work is for and the delegation rule
     decides again there (trinity-enterprise#1148)."""
     tier, kind, person = acting[0], acting[1], acting[2]
-    return tier == OWNER and not (kind in (MEMBER, DELEGATED) and person)
+    return tier == OWNER and not (kind in (MEMBER, DELEGATED, PRIMARY) and person)
 
 
 def turn_origin_execution_id(db, principal) -> Optional[str]:

@@ -119,7 +119,13 @@ Under **Settings › Guardrails › Bounds › Manage rules**, the **Channel and
 - **On** (the default, so channel agents keep working as before): those conversations can use the shell, schedule standing work, and a Gemini or Codex agent answers them. The shell reaches everything the agent can, so turn this off if those visitors should not.
 - **Off**: they get answers without running commands. On a Gemini or Codex agent, a visitor's message is refused; a public-link visitor sees *This agent isn't taking conversations from public links right now. Please contact its owner.*
 
-The switch saves as soon as you change it and applies to the next message, with no restart. People you share the agent with never get the shell, whatever this switch says.
+The switch saves as soon as you change it and applies to the next message, with no restart. People you share the agent with never get the shell, whatever this switch says, except the agent's primary person (below).
+
+### The Agent's Primary Person
+
+On an instance that assigns people to agents, the person an admin seated as **primary** has the agent work in full for them: commands, its own playbooks, the tools you added, and schedules, loops, reminders and events set up for them, on every runtime and when another agent calls it during their turn. They still cannot change the agent's settings, credentials, instructions, keys or sharing, and neither can the agent during their turn.
+
+The **The agent works in full for its primary person** switch, below the visitor switch, turns this off for one agent (on by default). Off, the primary is treated like anyone else the agent is shared with, and a refusal says the owner turned it off. It saves on change and applies to the next message, with no restart. The switch appears only where people can be assigned to agents.
 
 ## Per-Agent Configuration
 
@@ -136,6 +142,7 @@ Owners can tighten guardrails for specific agents. Overrides are additive -- you
 | `extra_path_deny` | list (max 50) | Additional paths to protect |
 | `disallowed_tools` | list (max 50) | Claude Code tools to disable. Normally set through a [tool access profile](#tool-access) |
 | `visitor_shell` | bool | Whether channel and public-link visitors may run commands ([Visitors and the Shell](#visitors-and-the-shell)); default on |
+| `primary_reach` | bool | Whether the agent works in full for its primary person ([The Agent's Primary Person](#the-agents-primary-person)); default on |
 
 A task that stops at its turn limit fails with HTTP `422` and the error code `max_turns` (on the `X-Trinity-Error-Code` response header), and the execution's error reads *Task exceeded turn limit*. This applies to whichever cap stopped the task: the `max_turns_task` guardrail, or a tighter per-task `max_turns` sent with `POST /api/agents/{name}/task`. Retrying the same task stops at the same limit. The error text names the cap that bound and its remedy: if the guardrail stopped it, raise `max_turns_task`; if the caller's per-task `max_turns` stopped it, send a larger per-task value (it may not exceed the guardrail). Either way, splitting the work into smaller tasks also helps.
 
@@ -147,7 +154,7 @@ A task that stops at its turn limit fails with HTTP `422` and the error code `ma
 4. Click **Save**
 5. **Restart the agent** — the save is listed as **Guardrail rules** in the bar at the top of Settings, with a **Restart now** button
 
-The rules editor exposes the turn limits and the visitor switch. Disallowed tools are set through [Tool access](#tool-access) above; the extra deny lists are API-only. A UI save preserves both, so it never wipes overrides set via the API. The execution timeout has its own control under **Settings › General › Execution** (see [Agent Configuration](agent-configuration.md#execution-timeout)).
+The rules editor exposes the turn limits, the visitor switch and, where people can be assigned to agents, the primary person switch. Disallowed tools are set through [Tool access](#tool-access) above; the extra deny lists are API-only. A UI save preserves both, so it never wipes overrides set via the API. The execution timeout has its own control under **Settings › General › Execution** (see [Agent Configuration](agent-configuration.md#execution-timeout)).
 
 The same pane reads everything else that bounds the agent: [permissions to change itself](agent-configuration.md#permissions-to-change-itself), how many of its skills need approval (**Open Skills** to change them), the autonomy switch (read-only here; the chip in the header is the control), cross-model validation when the instance has the matching entitlement, and the [dispatch circuit breaker](agent-configuration.md#dispatch-circuit-breaker).
 

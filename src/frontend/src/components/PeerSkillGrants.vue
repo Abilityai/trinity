@@ -10,8 +10,10 @@
   -->
   <section class="mt-8" data-testid="peer-skill-grants">
     <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100">Library skills on agents this agent can call</h4>
-    <p class="mt-1 mb-3 text-sm text-gray-600 dark:text-gray-400">
+    <p class="mt-1 mb-3 text-sm text-gray-600 dark:text-gray-400" data-testid="peer-skill-grants-reach">
       This agent can run the skills an agent declares itself. A skill assigned from the skills library needs a grant per skill.
+      Either way, the called agent runs it within the reach of the person the turn is for: a skill that runs commands
+      works for that agent's owner and its primary person, not for someone it is only shared with.
     </p>
 
     <div v-if="view.state === 'loading'" class="h-16 rounded-lg bg-gray-100 dark:bg-gray-750 animate-pulse" aria-hidden="true"></div>

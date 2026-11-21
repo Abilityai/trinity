@@ -1865,12 +1865,17 @@ async def agent_execution_turn_tier(agent_name: str, execution_id: str, request:
     res = db.validate_mcp_api_key(auth_header[7:], track_usage=False)
     if not heartbeat_service.authorize_heartbeat(res, agent_name):
         raise HTTPException(status_code=403, detail="Turn tier requires the agent's own MCP key")
-    tier, kind, _ = turn_tier_service.turn_actor(db, agent_name, execution_id)
+    tier, kind, person = turn_tier_service.turn_actor(db, agent_name, execution_id)
     if tier == turn_tier_service.UNKNOWN:
         raise HTTPException(status_code=404, detail="Execution not found")
     # `shell` also answers whether a Gemini/Codex runtime may run the turn.
     # The person's identity is not part of the answer: the hook needs none.
-    return {"tier": tier, "kind": kind, "shell": turn_tier_service.shell_allowed(db, agent_name, tier, kind)}
+    answer = {"tier": tier, "kind": kind, "shell": turn_tier_service.shell_allowed(db, agent_name, tier, kind)}
+    # ent#1318: the agent's primary person, held back only by the owner's
+    # switch. Lets the hook and the runtimes say so; an older image ignores it.
+    if not answer["shell"] and turn_tier_service.primary_reach_off(db, agent_name, person):
+        answer["reason"] = "primary_off"
+    return answer
 
 
 @router.post("/{agent_name}/executions/{execution_id}/result")

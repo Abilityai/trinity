@@ -260,7 +260,7 @@ def test_the_owners_turn_keeps_the_shell(hook, monkeypatch):
         0, [("agent-a", "exec-1")])
 
 
-@pytest.mark.parametrize("kind", ["member", "delegated"])
+@pytest.mark.parametrize("kind", ["member", "delegated", "primary"])
 def test_an_owner_by_rule_turn_keeps_the_shell_and_the_owner_paths(hook, monkeypatch, kind):
     """ent#1148: the platform answers `owner` + shell for a member's turn or a
     delegated turn; the hook treats it as the owner's."""
@@ -425,6 +425,12 @@ def test_a_channel_visitor_keeps_the_shell_while_the_owner_allows_it(hook, monke
     # shell; its kind is outside the hook's two names and reads as None, never as a deny.
     (b'{"tier": "owner", "kind": "member", "shell": true}', ("owner", True, None)),
     (b'{"tier": "owner", "kind": "delegated", "shell": true}', ("owner", True, None)),
+    # ent#1318: a primary's turn is the owner's; held back by the switch, it says why.
+    (b'{"tier": "owner", "kind": "primary", "shell": true}', ("owner", True, None)),
+    (b'{"tier": "share", "kind": "person", "shell": false, "reason": "primary_off"}',
+     ("share", False, "primary_off")),
+    (b'{"tier": "owner", "kind": "primary", "shell": true, "reason": "primary_off"}',
+     ("owner", True, None)),
     (b'{"tier": "admin", "shell": true}', ("unreachable", False, None)),
 ])
 def test_the_shell_answer_is_read_as_a_strict_true(hook, platform, body, expected):
@@ -434,7 +440,8 @@ def test_the_shell_answer_is_read_as_a_strict_true(hook, platform, body, expecte
 
 
 @pytest.mark.parametrize("kind,expected", [("visitor", "channel or a public link"),
-                                           ("person", "shared with")])
+                                           ("person", "shared with"),
+                                           ("primary_off", "primary person")])
 def test_the_shell_refusal_names_who_the_turn_is_for(hook, monkeypatch, capsys, kind, expected):
     """Found live 2026-10-19: a public-link visitor was told the turn was for
     'a person the agent is shared with'."""

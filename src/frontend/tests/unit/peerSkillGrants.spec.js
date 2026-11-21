@@ -46,6 +46,15 @@ async function mountAs(role, view = VIEW) {
 describe('PeerSkillGrants (mounted)', () => {
   beforeEach(() => { vi.restoreAllMocks() })
 
+  it('says the person the turn is for keeps their own reach on the called agent (ent#1318)', async () => {
+    for (const role of ['admin', 'user']) {
+      const { wrapper } = await mountAs(role)
+      const text = wrapper.get('[data-testid="peer-skill-grants-reach"]').text()
+      expect(text).toContain('person the turn is for')
+      expect(text).toContain('primary')
+    }
+  })
+
   it('reads the edges of the agent it is mounted for', async () => {
     const { get } = await mountAs('admin')
     expect(get).toHaveBeenCalledWith('sales')

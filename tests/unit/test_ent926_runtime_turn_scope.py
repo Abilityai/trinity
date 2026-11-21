@@ -170,6 +170,12 @@ def test_a_channel_visitor_runs_while_the_owner_allows_it(monkeypatch):
     # ent#1148: an owner-by-rule turn is read by tier and shell; its kind reads as None.
     ({"tier": "owner", "kind": "member", "shell": True}, ("owner", True, None)),
     ({"tier": "owner", "kind": "delegated", "shell": True}, ("owner", True, None)),
+    # ent#1318: a primary's turn runs like the owner's; held back, it says why.
+    ({"tier": "owner", "kind": "primary", "shell": True}, ("owner", True, None)),
+    ({"tier": "share", "kind": "person", "shell": False, "reason": "primary_off"},
+     ("share", False, "primary_off")),
+    # The reason never widens: an owner answer carrying it is still the owner's.
+    ({"tier": "owner", "kind": "primary", "shell": True, "reason": "primary_off"}, ("owner", True, None)),
 ])
 def test_the_may_run_answer_is_a_strict_true(platform, body, expected):
     platform.reply = (200, body)
@@ -187,7 +193,18 @@ def test_a_visitor_the_owner_limited_is_told_so_not_called_a_shared_person(monke
     assert "shared with" not in exc.value.detail["message"]
 
 
-@pytest.mark.parametrize("kind", ["member", "delegated"])
+def test_a_primary_the_owner_held_back_is_told_so(monkeypatch):
+    """ent#1318: the owner turned `primary_reach` off; the refusal names that
+    switch rather than calling the agent's primary person a shared person."""
+    with pytest.raises(HTTPException) as exc:
+        _require(monkeypatch, "share", may_run=False, kind="primary_off")
+    assert exc.value.status_code == 403
+    assert "primary person" in exc.value.detail["message"]
+    assert "Guardrails" in exc.value.detail["message"]
+    assert "shared with" not in exc.value.detail["message"]
+
+
+@pytest.mark.parametrize("kind", ["member", "delegated", "primary"])
 def test_an_owner_by_rule_turn_runs(monkeypatch, kind):
     """ent#1148: a member's turn or a delegated turn runs on Gemini/Codex like the owner's."""
     assert _require(monkeypatch, "owner", may_run=True, kind=kind) == [("agent-a", "exec-1")]

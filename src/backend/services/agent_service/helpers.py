@@ -756,7 +756,8 @@ def check_guardrails_env_matches(container, agent_name: str) -> bool:
     # trinity-enterprise#341: `tool_access` records the owner's profile choice;
     # what it enforces is already in `disallowed_tools` and the read-only layer
     # (live), so a change to the record alone must not recreate the container.
-    live = {"visitor_shell", "tool_access"}
+    # trinity-enterprise#1318: `primary_reach` is read live per turn too.
+    live = {"visitor_shell", "tool_access", "primary_reach"}
     desired = {k: v for k, v in (db.get_guardrails_config(agent_name) or {}).items() if k not in live}
 
     if not desired and not current:

@@ -9564,6 +9564,18 @@
         "setup"
       ],
       "description": "Setup with an email (password form and emailed-link form) allow-lists the admin's address, so an email-code request mints a code and dispatches a send; another address still creates nothing; boot backfill and the admin's email change are wired."
+    },
+    {
+      "file": "unit/test_ent1318_primary_reach.py",
+      "feature": "trinity-enterprise#1318",
+      "added": "2026-11-21",
+      "categories": [
+        "backend",
+        "unit",
+        "security",
+        "auth"
+      ],
+      "description": "A person seated as primary rates (owner, primary, P) on direct, Workspace, schedule and agent-to-agent turns; the provider is asked only about (person, this agent); the owner's primary_reach switch (default on, live, no recreate) drops them to share with a plain-words reason; the agent key in a primary's turn may set up standing work but not use other owner-tier routes."
     }
   ]
 }
