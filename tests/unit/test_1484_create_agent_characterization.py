@@ -739,6 +739,33 @@ async def test_ent754_create_drops_a_recycled_names_skills_listing(crud_env, mon
     assert "run" in order and order.index("run") == 2
 
 
+@pytest.mark.asyncio
+async def test_ent165_create_drops_a_recycled_names_guardrail_reporter(crud_env, monkeypatch):
+    """trinity-enterprise#165: the create path drops the name's guardrail
+    reporter record BEFORE the container exists. A predecessor's record that
+    survived its teardown (the Redis clear is fail-open, and an ingest in
+    flight can write it back) carries a `first_report_at` from before this
+    agent existed, which would read its unreported history as covered."""
+    crud, ctx = crud_env
+    from services import guardrail_event_service
+
+    order = []
+    monkeypatch.setattr(
+        crud, "clear_agent_breakers", lambda n: order.append(("clear", n)))
+    monkeypatch.setattr(
+        guardrail_event_service, "clear_reporter", lambda n: order.append(("reporter", n)))
+
+    async def _run(*a, **k):
+        order.append("run")
+        return MagicMock()
+    ctx["docker_utils"].containers_run.side_effect = _run
+
+    await crud.create_agent_internal(_local_config("recycled"), _user(), None)
+
+    assert ("reporter", "recycled") in order
+    assert order.index(("reporter", "recycled")) < order.index("run")
+
+
 # ===========================================================================
 # Case 7 — ephemeral gate ORDER (earliest wins under overlap)
 # ===========================================================================

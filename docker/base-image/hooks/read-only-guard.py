@@ -105,6 +105,8 @@ def _check_path(path: str, cfg: dict) -> None:
             tool="Write/Edit/NotebookEdit/MultiEdit",
             path=norm,
             pattern=match,
+            rule=match,
+            code="read_only_path",
         )
 
 

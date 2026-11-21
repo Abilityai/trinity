@@ -280,12 +280,14 @@ def guard_shell(tool: str, *, verb: str = "exec") -> None:
     if shell:
         allow()
     if tier == "unreachable":
-        deny(COULD_NOT_CHECK, tool=tool, verb=verb, tier=tier)
+        deny(COULD_NOT_CHECK, tool=tool, verb=verb, tier=tier, code="tier_unreachable")
     if verb == "mcp":
-        reason = MCP_VISITOR_OFF if kind == "visitor" else MCP_OWNER_ONLY
+        reason, code = (MCP_VISITOR_OFF, "mcp_visitor_off") if kind == "visitor" else (MCP_OWNER_ONLY, "mcp_owner_only")
     else:
-        reason = SHELL_VISITOR_OFF if kind == "visitor" else SHELL_OWNER_ONLY
-    deny(reason, tool=tool, verb=verb, tier=tier, kind=kind)
+        reason, code = (SHELL_VISITOR_OFF, "shell_visitor_off") if kind == "visitor" else (SHELL_OWNER_ONLY, "shell_owner_only")
+    # `kind` is the spool record's own field (trinity-enterprise#165): the turn's
+    # kind is `turn_kind`.
+    deny(reason, tool=tool, verb=verb, tier=tier, turn_kind=kind, code=code)
 
 
 def is_platform_mcp_tool(tool: str) -> bool:
@@ -345,9 +347,11 @@ def main() -> None:
         log_event("turn_tier_owner", tool=tool, verb=verb, path=path)
         allow()
     if tier == "unreachable":
-        deny(COULD_NOT_CHECK, tool=tool, verb=verb, path=path, tier=tier)
-    deny(SEARCH_OWNER_ONLY if code == SEARCH_OWNER_TIER else OWNER_ONLY,
-         tool=tool, verb=verb, path=path, tier=tier, rule=code)
+        deny(COULD_NOT_CHECK, tool=tool, verb=verb, path=path, tier=tier, code="tier_unreachable")
+    search = code == SEARCH_OWNER_TIER
+    deny(SEARCH_OWNER_ONLY if search else OWNER_ONLY,
+         tool=tool, verb=verb, path=path, tier=tier, rule=code,
+         code="owner_only_search" if search else "owner_only_path")
 
 
 if __name__ == "__main__":

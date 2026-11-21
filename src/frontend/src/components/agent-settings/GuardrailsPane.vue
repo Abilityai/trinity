@@ -124,6 +124,10 @@
         <PersonMemorySection :agent-name="agentName" :notify="notify" />
       </div>
     </SettingsSection>
+
+    <!-- trinity-enterprise#165 S4: what the guardrails refused or hid, last 24 h.
+         Last in the pane, so its bounded list never moves the sections above. -->
+    <GuardrailEventsSection :agent-name="agentName" :runtime="runtime" />
   </div>
 </template>
 
@@ -146,6 +150,7 @@ import ToolAccessSection from './ToolAccessSection.vue'
 import SelfChangePermissionsPanel from '../settings/SelfChangePermissionsPanel.vue'
 import CrossModelValidationPanel from '../CrossModelValidationPanel.vue'
 import ReliabilityPanel from '../ReliabilityPanel.vue'
+import GuardrailEventsSection from './GuardrailEventsSection.vue'
 
 const props = defineProps({
   agentName: { type: String, required: true },
@@ -154,6 +159,8 @@ const props = defineProps({
   notify: { type: Function, default: null },
   // trinity-enterprise#341: the page's copy of the profile (the header toggle).
   toolAccessProfile: { type: String, default: '' },
+  // trinity-enterprise#165 S4: the agent's runtime, for the "no hooks" notice.
+  runtime: { type: String, default: '' },
 })
 const emit = defineEmits(['navigate-tab', 'tool-access-saved'])
 

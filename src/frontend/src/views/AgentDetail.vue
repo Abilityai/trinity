@@ -351,6 +351,7 @@
                     :is-system="!!agent.is_system"
                     :notify="showNotification"
                     :tool-access-profile="agent.tool_access_profile || ''"
+                    :runtime="agent.runtime || ''"
                     @navigate-tab="handleOverviewNavigate"
                     @tool-access-saved="onToolAccessSaved"
                   />

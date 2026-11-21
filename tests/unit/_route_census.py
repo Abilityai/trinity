@@ -963,6 +963,17 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
         "POST /api/agents/{agent_name}/executions/{execution_id}/result",
         "terminal result delivery; authenticates the agent's own key and path self-match (#1083)",
         _SIB_OWN_KEY),
+    "routers/guardrail_events.py::post_guardrail_events": (
+        "POST /api/agents/{agent_name}/guardrail-events",
+        "the in-container forwarder pushes the agent's own guardrail events; authenticates the agent's own "
+        "key outside get_current_user, path self-match (authorize_heartbeat, trinity-enterprise#165)",
+        _SIB_OWN_KEY),
+    "routers/guardrail_events.py::get_guardrail_events": (
+        "GET /api/agents/{agent_name}/guardrail-events",
+        "trinity-enterprise#165: a READ of the agent's own guardrail events and reporting state (owner tier, "
+        "ruling D8: rows name owner-only paths a shared person tried); the agent itself already holds the spool",
+        "owner tier (OwnedAgentByName): a sibling reads it only for an agent it spawned, never through an edge "
+        "(the ent#629 manage reach)"),
     "routers/agents.py::agent_execution_turn_tier": (
         "GET /api/agents/{agent_name}/executions/{execution_id}/turn-tier",
         "the in-container guard asks which tier its own turn acts for; authenticates the agent's own key and path self-match (ent#926)",
