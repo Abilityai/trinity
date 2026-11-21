@@ -1856,6 +1856,11 @@ async def agent_execution_turn_tier(agent_name: str, execution_id: str, request:
     runs, and by the Gemini/Codex runtimes before a turn starts. Same auth as the
     heartbeat: the agent's OWN agent-scoped MCP key, nothing else. A turn that
     is not found, or belongs to another agent, answers 404.
+
+    For a schedule-backed shared turn the answer also says why (#4281):
+    `cause`, the schedule's name, its creator and the `remedy` code, so the
+    refusal can name them instead of describing a chat. All four are null on
+    every other turn.
     """
     from services import turn_tier_service
 
@@ -1865,12 +1870,10 @@ async def agent_execution_turn_tier(agent_name: str, execution_id: str, request:
     res = db.validate_mcp_api_key(auth_header[7:], track_usage=False)
     if not heartbeat_service.authorize_heartbeat(res, agent_name):
         raise HTTPException(status_code=403, detail="Turn tier requires the agent's own MCP key")
-    tier, kind, _ = turn_tier_service.turn_actor(db, agent_name, execution_id)
-    if tier == turn_tier_service.UNKNOWN:
+    answer = turn_tier_service.turn_tier_answer(db, agent_name, execution_id)
+    if answer is None:
         raise HTTPException(status_code=404, detail="Execution not found")
-    # `shell` also answers whether a Gemini/Codex runtime may run the turn.
-    # The person's identity is not part of the answer: the hook needs none.
-    return {"tier": tier, "kind": kind, "shell": turn_tier_service.shell_allowed(db, agent_name, tier, kind)}
+    return answer
 
 
 @router.post("/{agent_name}/executions/{execution_id}/result")

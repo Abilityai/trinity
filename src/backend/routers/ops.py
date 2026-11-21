@@ -32,7 +32,7 @@ from utils.helpers import utc_now_iso
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 router = APIRouter(prefix="/api/ops", tags=["operations"])
-from services import fleet_ops_service, ops_costs_service
+from services import fleet_ops_service, ops_costs_service, schedule_tier_alerts, turn_tier_service
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +185,8 @@ async def list_all_schedules(
     List all schedules across all agents.
 
     Admin-only. Returns schedule information including next run times
-    and recent execution status.
+    and recent execution status, and what tier each schedule's runs get and
+    who created it (#4281).
     """
     # #2323 — per-route opt-in for the bounded read-only `ops` key.
     # `ADMIN_GATE_SCOPES` keeps ops keys out of admin gates by default, so a
@@ -205,6 +206,15 @@ async def list_all_schedules(
     # of a get_schedule_executions() call per schedule (N+1 that grew with the
     # total schedule count across the fleet).
     latest_by_schedule = db.get_latest_execution_per_schedule([s.id for s in schedules])
+    # #4281: rating every schedule reads its creator and its agent's owner. Two
+    # bulk queries up front keep this route's cost flat in the fleet size.
+    # The preload is an optimisation: when it fails, each row is rated by the
+    # per-row lookups, and shows `runs_as: null` if those fail too.
+    tier_lookups = turn_tier_service.RunTierLookups(db)
+    try:
+        tier_lookups.preload([s.agent_name for s in schedules], [s.owner_id for s in schedules])
+    except Exception as exc:  # noqa: BLE001 - degrade to per-row lookups, never fail the read
+        logger.warning("[#4281] run-tier preload failed on the fleet schedule read: %s", exc)
 
     # Build response with schedule details
     schedule_list = []
@@ -225,7 +235,10 @@ async def list_all_schedules(
             "next_run_at": schedule.next_run_at.isoformat() if schedule.next_run_at else None,
             # last_execution is the slim dict from get_latest_execution_per_schedule
             # (#1265): only dashboard fields, timestamps already ISO-normalised.
-            "last_execution": last_execution
+            "last_execution": last_execution,
+            **turn_tier_service.schedule_read_fields(
+                tier_lookups, schedule.agent_name, schedule, show_creator=True,
+                viewer_id=getattr(current_user, "id", None)),
         }
         schedule_list.append(schedule_data)
 
@@ -277,6 +290,9 @@ async def pause_all_schedules(
             paused += 1
         except Exception as e:
             logger.error(f"Failed to pause schedule {schedule.id}: {e}")
+    # #4281: this writes `enabled` without the schedule routes, so it decides
+    # the restricted-schedule alerts itself (one read per agent x creator).
+    schedule_tier_alerts.sync_schedules(schedules)
 
     return {
         "success": True,
@@ -323,6 +339,7 @@ async def resume_all_schedules(
             resumed += 1
         except Exception as e:
             logger.error(f"Failed to resume schedule {schedule.id}: {e}")
+    schedule_tier_alerts.sync_schedules(schedules)  # #4281, as pause above
 
     return {
         "success": True,
