@@ -456,20 +456,12 @@ def _prefetch(items: List[dict], email: str, is_platform: bool) -> None:
         linked = [item.get(key) for item in items for key in ("replaces", "replaced_by")]
         if any(linked):
             db.get_operator_queue_items_by_ids(linked)
-        gates = [item for item in items
-                 if item.get("raised_by") == "gate" and item.get("type") == "approval"]
-        records = db.get_gate_requests([g.get("request_id") for g in gates]) if gates else {}
         answerers = [item.get("disposed_by_email") or item.get("responded_by_email")
                      for item in items if _is_shared(item)]
         db.get_users_by_emails([email] + answerers)
-        if not (is_platform and gates):
-            return
-        username = _platform_username(email)
-        run_agents = [name for record in records.values() if isinstance(record, dict)
-                      for name in (record.get("agent_name"), record.get("source_agent"))]
-        if username and run_agents:
-            db.get_agent_owners(run_agents)
-            db.agents_shared_with_user(run_agents, username)
+        # The gate cards' own reads — shared with the operator's queue (#4672).
+        skill_gate_service.prefetch_cards(
+            items, run_viewer=_platform_username(email) if is_platform else None)
     except Exception:  # noqa: BLE001 — see the docstring: fall back to per-row reads
         logger.warning("[WorkspaceAsks] prefetch failed; reading per row", exc_info=True)
 

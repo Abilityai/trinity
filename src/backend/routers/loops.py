@@ -72,8 +72,10 @@ def _elapsed_seconds(loop: dict) -> Optional[int]:
     return max(0, int((end - started).total_seconds()))
 
 
-def _build_status_response(loop: dict) -> LoopStatusResponse:
-    runs_raw = db.list_loop_runs(loop["id"])
+def _build_status_response(loop: dict, runs_raw: Optional[list] = None) -> LoopStatusResponse:
+    # #4672: a list hands each loop its runs from ONE read; a single loop reads its own.
+    if runs_raw is None:
+        runs_raw = db.list_loop_runs(loop["id"])
     # #1155: total_cost is computed on read (no stored column to drift) — the
     # sum of every run's cost (NULL→0). sum(()) is 0.0, so a zero-run loop
     # reports 0.0 verbatim with no None special-case.
@@ -278,7 +280,10 @@ def list_loops(
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=400, detail="limit must be 1–200")
     loops = db.list_loops_for_agent(name, status=status, limit=limit)
-    return [_build_status_response(loop) for loop in loops]
+    # #4672: this is the Workspace rail's 12 s poll — one query for every
+    # loop's runs, not one per loop (up to 200).
+    runs = db.list_loop_runs_for_loops([loop["id"] for loop in loops])
+    return [_build_status_response(loop, runs.get(loop["id"], [])) for loop in loops]
 
 
 @loop_router.get("/{loop_id}", response_model=LoopStatusResponse)
