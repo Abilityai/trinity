@@ -814,3 +814,64 @@ describe("ent#1240 — GitHub refs on create_/update_project_task", () => {
     }
   });
 });
+
+describe("ent#1233 — a task's milestone", () => {
+  it("create and update forward `milestone`; null takes a task out of its milestone", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      createProjectTask: async (pid: string, body: Record<string, unknown>) => {
+        calls.push(["create", pid, body]);
+        return { id: "T-005", milestone: body.milestone };
+      },
+      updateProjectTask: async (pid: string, tid: string, body: Record<string, unknown>) => {
+        calls.push(["update", pid, tid, body]);
+        return { id: tid };
+      },
+    } as Partial<TrinityClient>);
+    await tools.create_project_task.execute({ project_id: "prj_1", title: "Invite", milestone: "ms_abc" } as never, {});
+    await tools.update_project_task.execute({ project_id: "prj_1", task_id: "T-005", milestone: null } as never, {});
+    assert.deepEqual(calls, [
+      ["create", "prj_1", { title: "Invite", milestone: "ms_abc" }],
+      ["update", "prj_1", "T-005", { milestone: null }],
+    ]);
+    assert.equal(tools.update_project_task.parameters.parse(
+      { project_id: "p", task_id: "T-001", milestone: null }).milestone, null);
+    assert.equal(tools.create_project_task.parameters.safeParse(
+      { project_id: "p", title: "x", milestone: "m".repeat(41) }).success, false);
+  });
+
+  it("list_project_tasks forwards `milestone`, and the client sends it as its own query parameter", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      listProjectTasks: (async (pid: string, status: string, _turn?: string, view?: string, milestone?: string) => {
+        calls.push([pid, status, view, milestone]);
+        return [];
+      }) as never,
+    });
+    await tools.list_project_tasks.execute({ project_id: "prj_1", milestone: "ms_abc" }, {});
+    await tools.list_project_tasks.execute({ project_id: "prj_1" }, {});
+    assert.deepEqual(calls, [["prj_1", "open", undefined, "ms_abc"], ["prj_1", "open", undefined, undefined]]);
+
+    const client = new RealClient("http://localhost:8000");
+    const seen: unknown[] = [];
+    (client as unknown as { request: unknown }).request = async (...args: unknown[]) => {
+      seen.push(args[1]);
+      return { tasks: [] };
+    };
+    await client.listProjectTasks("prj_1", "all", undefined, undefined, "none");
+    await client.listProjectTasks("prj_1", "open");
+    assert.deepEqual(seen, [
+      "/api/enterprise/projects/agent/projects/prj_1/tasks?status=all&milestone=none",
+      "/api/enterprise/projects/agent/projects/prj_1/tasks?status=open",
+    ]);
+  });
+
+  it("get_project passes the milestones through and offers no milestone write tool", async () => {
+    const milestones = [{ id: "ms_abc", name: "Beta", state: "in_progress", targets: [] }];
+    const tools = makeTools({ getMyProject: async () => ({ ...PROJECT, milestones }) }) as Record<string, unknown>;
+    const out = JSON.parse(await (tools.get_project as { execute: (p: unknown, c: unknown) => Promise<string> })
+      .execute({ project_id: PROJECT.id }, {}));
+    assert.deepEqual(out.milestones, milestones);
+    assert.deepEqual(Object.keys(tools).filter((n) => n.includes("milestone")), []);
+  });
+});

@@ -183,9 +183,16 @@ export const useProjectsStore = defineStore('projects', () => {
     return data
   }
 
+  // trinity-enterprise#1233: a task write moves its milestone's counts and state,
+  // so a page that shows milestones is re-read in the background (data kept).
+  function _refreshMilestones(id) {
+    if (pageState(id).data?.milestones?.length) void fetchProject(id)
+  }
+
   async function createTask(id, body) {
     const { data } = await portalHttp.post(url(id, '/tasks'), body, { headers: headers() })
     await Promise.all([fetchTasks(id), fetchLog(id)])
+    _refreshMilestones(id)
     return data
   }
 
@@ -193,6 +200,7 @@ export const useProjectsStore = defineStore('projects', () => {
     const { data } = await portalHttp.patch(url(id, `/tasks/${encodeURIComponent(taskId)}`), body, { headers: headers() })
     _mergeTask(id, data)
     await Promise.all([fetchTasks(id), fetchLog(id)])
+    _refreshMilestones(id)
     return data
   }
 
@@ -206,6 +214,7 @@ export const useProjectsStore = defineStore('projects', () => {
     const { data } = await portalHttp.patch(url(id, `/tasks/${encodeURIComponent(taskId)}`), body, { headers: headers() })
     _mergeTask(id, data)
     void Promise.all([fetchTasks(id), fetchLog(id)])
+    _refreshMilestones(id)
     return data
   }
 
@@ -369,10 +378,23 @@ export const useProjectsStore = defineStore('projects', () => {
     return data.results || []
   }
 
-  async function metricOptions(id) {
-    const { data } = await portalHttp.get(url(id, '/metric-options'), { headers: headers() })
+  // `all` (trinity-enterprise#1233): metrics already on the Metrics card too — a milestone target's picker.
+  async function metricOptions(id, { all = false } = {}) {
+    const { data } = await portalHttp.get(url(id, '/metric-options'),
+      all ? { headers: headers(), params: { all: true } } : { headers: headers() })
     return data.agents || []
   }
+
+  // --- trinity-enterprise#1233: the goal as milestones (a person with edit rights) ----
+  const milestoneUrl = (id, mid, tail = '') => url(id, `/milestones/${encodeURIComponent(mid)}${tail}`)
+  const createMilestone = (id, body) =>
+    _write(id, async () => (await portalHttp.post(url(id, '/milestones'), body, { headers: headers() })).data)
+  const updateMilestone = (id, mid, body) =>
+    _write(id, async () => (await portalHttp.patch(milestoneUrl(id, mid), body, { headers: headers() })).data)
+  const deleteMilestone = (id, mid) =>
+    _write(id, () => portalHttp.delete(milestoneUrl(id, mid), { headers: headers() }))
+  const setMilestoneTargets = (id, mid, targets) =>
+    _write(id, async () => (await portalHttp.put(milestoneUrl(id, mid, '/targets'), { targets }, { headers: headers() })).data)
 
   // trinity-enterprise#1155 — the person fields' scoped reads (one people search).
   async function fetchProjectPeople(id, q, purpose) {
@@ -439,6 +461,7 @@ export const useProjectsStore = defineStore('projects', () => {
     addTaskRefs, removeTaskRef,
     addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject, importEpic,
     setHealth, linkMetric, unlinkMetric, metricOptions, stewarding, fetchStewarding,
+    createMilestone, updateMilestone, deleteMilestone, setMilestoneTargets,
     requestStewardAccess, grantStewardAccess, startStewardWake, pauseStewardWake, requestToJoin, requestAgent,
     startPreview, startTask,
     writeContext, readContext, updateContext, deleteContext, markItemForAgents,
