@@ -392,7 +392,7 @@ def test_an_unvouched_loopback_jwt_is_refused_by_the_entry_fence(world, route, m
     fence refuses it on every route but the subscriber-task dispatch (ent#614).
     A pass would be a 2xx, not an incidental 401: the subject is a live admin and
     the token is not revoked."""
-    from jose import jwt
+    import jwt
 
     from config import ALGORITHM, SECRET_KEY
 

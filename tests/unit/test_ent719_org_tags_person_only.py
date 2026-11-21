@@ -270,7 +270,7 @@ def test_an_unvouched_loopback_jwt_is_refused_by_the_entry_fence(world, route, m
     """A real, signed loopback JWT with NO source agent: the entry fence refuses
     it on every route but the subscriber-task dispatch (ent#614). The subject is
     a live admin and the token is not revoked, so a pass would be a 2xx."""
-    from jose import jwt
+    import jwt
 
     from config import ALGORITHM, SECRET_KEY
 

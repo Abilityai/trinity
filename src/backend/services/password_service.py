@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import List, Optional
 
-from jose import jwt
+import jwt
 
 from config import ACCESS_TOKEN_EXPIRE_MINUTES
 from database import db
@@ -176,7 +176,7 @@ def change_own_password(username: str, current: str, new: str, token_mode: Optio
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
         mode=token_mode or "admin",
     )
-    signed_out = revoke_user_sessions(username, keep_jti=jwt.get_unverified_claims(fresh).get("jti"))
+    signed_out = revoke_user_sessions(username, keep_jti=jwt.decode(fresh, options={"verify_signature": False}).get("jti"))
     revoked, still_active = _settle_person_keys(username, revoke_keys)
     # abilityai/trinity-enterprise#863: the account's open connections were
     # authorized under the old password; re-check them now, on every worker

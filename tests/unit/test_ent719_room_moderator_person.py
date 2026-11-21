@@ -179,7 +179,7 @@ def keys(monkeypatch):
 
 
 def _jwt(username: str, **claims) -> str:
-    from jose import jwt
+    import jwt
 
     from config import ALGORITHM, SECRET_KEY
 

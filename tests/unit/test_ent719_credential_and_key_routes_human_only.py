@@ -758,7 +758,7 @@ def test_an_unvouched_loopback_jwt_is_refused_by_the_entry_fence(
     env, route, monkeypatch
 ):
     from config import ALGORITHM, SECRET_KEY
-    from jose import jwt
+    import jwt
 
     deps = dependencies.get_current_user.__globals__
     monkeypatch.setattr(

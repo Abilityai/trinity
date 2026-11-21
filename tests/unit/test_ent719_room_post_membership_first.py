@@ -437,7 +437,7 @@ def test_a_real_loopback_jwt_is_refused_before_the_room_is_reached(env):
     """A real, signed loopback JWT with no source agent, through real
     authentication (no override): the entry fence refuses it on this route."""
     from config import ALGORITHM, SECRET_KEY
-    from jose import jwt
+    import jwt
 
     _first, row = _store_a_member_post(env, "k-loop")
     before = _messages(env)

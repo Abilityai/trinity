@@ -329,7 +329,7 @@ def test_a_person_still_uses_every_room_route(rooms, person):
 def test_the_event_loopback_is_refused_on_every_room_use(rooms, key):
     """A real, signed loopback JWT with no source agent is stopped by the
     room door's own authentication, and nothing is created or renamed."""
-    from jose import jwt
+    import jwt
 
     room_id = _create(rooms, rooms.session, [A], name="kept").json()["id"]
     token = jwt.encode(

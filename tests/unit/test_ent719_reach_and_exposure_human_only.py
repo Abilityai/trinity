@@ -583,7 +583,7 @@ def test_an_unvouched_loopback_jwt_is_refused_at_the_entry_fence(world, monkeypa
     `get_current_user` entry fence refuses it on every route but the subscriber
     task dispatch. The admin it names exists and the token is not revoked, so a
     pass would be the route's success, not an incidental 401."""
-    from jose import jwt
+    import jwt
 
     from config import ALGORITHM, SECRET_KEY
 

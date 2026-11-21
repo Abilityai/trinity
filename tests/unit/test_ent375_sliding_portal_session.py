@@ -86,7 +86,7 @@ def policy(deps, monkeypatch):
 
 
 def _claims(deps, token: str) -> dict:
-    from jose import jwt
+    import jwt
     from config import ALGORITHM, SECRET_KEY
     return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
 
@@ -132,7 +132,7 @@ def _reissue_with_iat(deps, token: str, iat: int) -> str:
     of validity left) and an assertion that failed for a reason the product
     code had nothing to do with.
     """
-    from jose import jwt
+    import jwt
     from config import ALGORITHM, SECRET_KEY
     c = _claims(deps, token)
     idle_s, absolute_s = deps._portal_session_policy()

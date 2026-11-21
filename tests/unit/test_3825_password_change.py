@@ -310,11 +310,11 @@ class TestChangeRoute:
         assert _actions(api.audit) == ["password_changed"]
 
     def test_other_sessions_are_signed_out_and_the_fresh_token_is_kept(self, api):
-        from jose import jwt
+        import jwt
         name = _admin(api.db)
         client, old_token = api.as_(name)
         fresh = _put(client, OLD, NEW).json()["access_token"]
-        claims = lambda t: jwt.get_unverified_claims(t)  # noqa: E731
+        claims = lambda t: jwt.decode(t, options={"verify_signature": False})  # noqa: E731
         assert api.deps.session_predates_user_revoke(claims(old_token)) is True
         assert api.deps.session_predates_user_revoke(claims(fresh)) is False
 
@@ -588,11 +588,11 @@ class TestSessionCutoff:
     def test_the_event_loopback_token_is_not_a_session(self, deps):
         """EVT-001 mints `sub` = the provisioned admin with no `iat`; an admin
         password change must not refuse every event dispatch for 7 days."""
-        from jose import jwt
+        import jwt
         from services import event_dispatch_service
         from utils.admin_identity import admin_username
         assert deps.revoke_user_sessions(admin_username())
-        loopback = jwt.get_unverified_claims(event_dispatch_service._get_internal_token())
+        loopback = jwt.decode(event_dispatch_service._get_internal_token(), options={"verify_signature": False})
         assert loopback["scope"] == deps.EVENT_LOOPBACK_SCOPE
         assert deps.session_predates_user_revoke(loopback) is False
         # ...while a real session of the same user is still cut off.
@@ -601,14 +601,14 @@ class TestSessionCutoff:
     def test_same_second_boundary(self, deps, monkeypatch):
         """Within one second: a token minted before the change is refused, a
         sign-in after it is not (sub-second `iat_ms`, not `iat`, decides)."""
-        from jose import jwt
+        import jwt
         clock = {"ms": 1_700_000_000_200}
         monkeypatch.setitem(deps.create_access_token.__globals__, "_epoch_ms", lambda: clock["ms"])
-        before = jwt.get_unverified_claims(deps.create_access_token(data={"sub": "u6"}))
+        before = jwt.decode(deps.create_access_token(data={"sub": "u6"}), options={"verify_signature": False})
         clock["ms"] = 1_700_000_000_500
         assert deps.revoke_user_sessions("u6")
         clock["ms"] = 1_700_000_000_800
-        after = jwt.get_unverified_claims(deps.create_access_token(data={"sub": "u6"}))
+        after = jwt.decode(deps.create_access_token(data={"sub": "u6"}), options={"verify_signature": False})
         assert before["iat"] == after["iat"]  # same second
         assert deps.session_predates_user_revoke(before) is True
         assert deps.session_predates_user_revoke(after) is False
@@ -616,13 +616,13 @@ class TestSessionCutoff:
     def test_a_token_minted_in_the_cutoff_millisecond_is_refused(self, deps, monkeypatch):
         """`iat_ms == at_ms`: the mint and the change cannot be ordered, so the
         token is refused (`<=`, rounding toward revoking). One ms later passes."""
-        from jose import jwt
+        import jwt
         clock = {"ms": 1_700_000_000_500}
         monkeypatch.setitem(deps.create_access_token.__globals__, "_epoch_ms", lambda: clock["ms"])
-        same = jwt.get_unverified_claims(deps.create_access_token(data={"sub": "u8"}))
+        same = jwt.decode(deps.create_access_token(data={"sub": "u8"}), options={"verify_signature": False})
         assert deps.revoke_user_sessions("u8")
         clock["ms"] += 1
-        later = jwt.get_unverified_claims(deps.create_access_token(data={"sub": "u8"}))
+        later = jwt.decode(deps.create_access_token(data={"sub": "u8"}), options={"verify_signature": False})
         assert same["iat_ms"] == 1_700_000_000_500
         assert deps.session_predates_user_revoke(same) is True
         assert deps.session_predates_user_revoke(later) is False
@@ -636,8 +636,8 @@ class TestSessionCutoff:
         assert deps.session_predates_user_revoke({"sub": "u7", "iat": 1_700_000_001}) is False
 
     def test_every_platform_token_now_carries_iat(self, deps):
-        from jose import jwt
-        assert "iat" in jwt.get_unverified_claims(deps.create_access_token(data={"sub": "u5"}))
+        import jwt
+        assert "iat" in jwt.decode(deps.create_access_token(data={"sub": "u5"}), options={"verify_signature": False})
 
 
 # =============================================================================

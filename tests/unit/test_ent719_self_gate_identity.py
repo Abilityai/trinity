@@ -231,7 +231,7 @@ def test_a_loopback_token_is_refused_by_the_entry_fence(emit, vouched):
     """A real, signed event-loopback JWT, through real authentication: the
     entry fence confines it to the subscriber-task dispatch (ent#614), so it
     never reaches this route's gate."""
-    from jose import jwt
+    import jwt
 
     from config import ALGORITHM, SECRET_KEY
 

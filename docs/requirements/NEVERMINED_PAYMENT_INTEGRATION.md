@@ -353,6 +353,8 @@ can coexist but both provide `import jwt`. Verify during Docker build that:
 1. `python-jose` is still importable as `from jose import jwt`
 2. `pyjwt` doesn't shadow `python-jose`'s jwt module
 
+> Historical note (abilityai/trinity-enterprise#1124): the backend itself now signs and verifies its JWTs with PyJWT; python-jose stays installed only while a private module still imports it, so the coexistence check above is no longer a build concern.
+
 If conflict occurs: add `PyJWT` to pip install explicitly BEFORE `payments-py` to control resolution order.
 
 **Install source**: If PyPI version lags behind GitHub (PyPI shows 0.3.1, GitHub shows 1.3.4),

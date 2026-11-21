@@ -41,7 +41,7 @@ def _exp_in(seconds: int) -> int:
 
 
 def test_minted_token_carries_jti():
-    from jose import jwt
+    import jwt
     from config import SECRET_KEY, ALGORITHM
 
     token = dependencies.create_access_token({"sub": "alice"}, timedelta(minutes=5))

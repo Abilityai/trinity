@@ -510,7 +510,7 @@ def test_an_unvouched_loopback_jwt_is_refused_by_the_entry_fence(world, route_id
     `get_current_user`: the entry fence refuses it on every route but the
     subscriber-task dispatch. The route gates need not, and this pins that layer
     on these routes."""
-    from jose import jwt
+    import jwt
 
     token = jwt.encode(
         {
