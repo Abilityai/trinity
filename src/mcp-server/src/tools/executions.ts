@@ -200,6 +200,9 @@ export function createExecutionTools(
           context_max: execution.context_max || null,
           model_used: execution.model_used || null,
           compact_metadata: parseCompactMetadata(execution.compact_metadata),
+          // ent#1105: only when the platform attributed the run to a project
+          // this reader may see; absent otherwise (never a null placeholder).
+          ...(execution.project_id ? { project_id: execution.project_id } : {}),
         };
 
         if (include_log) {

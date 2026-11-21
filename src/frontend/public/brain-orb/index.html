@@ -4,9 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Cornelius — The Self-Rendering Mind</title>
-<!-- styles.css / orb.js are un-hashed and cached 1y-immutable by prod nginx: bump BOTH ?v= tokens to today's date on every edit -->
-<link rel="stylesheet" href="./styles.css?v=2026-09-06" />
-<link rel="stylesheet" href="./orb-trinity.css" />
+<!-- styles.css / orb.js are un-hashed and cached 1y-immutable by prod nginx: bump ALL ?v= tokens (styles.css, orb-trinity.css, orb.js, and the ambient-*.js imports inside orb.js / ambient-mode.js) to today's date on every edit -->
+<link rel="stylesheet" href="./styles.css?v=2026-11-19" />
+<link rel="stylesheet" href="./orb-trinity.css?v=2026-11-19" />
 </head>
 <body>
 <canvas id="scene" tabindex="0"></canvas>
@@ -78,6 +78,7 @@
   <div>briefing<span class="k">B</span></div>
   <div>demo<span class="k">P</span></div>
   <div>actions<span class="k">A</span></div>
+  <div id="ambientBtn" title="Ambient mode — watch only. Any key or click returns.">ambient<span class="k">M</span></div>
 </aside>
 
 <!-- lens: runtime visual controls (press L) — modes + brightness/focus/size/edge knobs -->
@@ -168,12 +169,53 @@
   <div class="tfoot">Tension edges are <b>immune to staleness</b> — they're surfaced as synthesis opportunities, never auto-resolved.</div>
 </section>
 
+<!-- ambient mode (trinity-enterprise#1302): the watch-only HUD. Shown only under body.ambient-on;
+     every value is written with textContent by ambient-mode.js. -->
+<div id="amLabels"></div>
+<div id="ambientHud" aria-hidden="true">
+  <div class="am-vignette"></div>
+  <div class="am am-id"><div class="am-h1" id="amAgent"></div><div class="am-cap">ambient · watch only · any key or click returns</div></div>
+  <div class="am am-clock"><div class="am-h1" id="amClock"></div><div class="am-cap" id="amDate"></div></div>
+
+  <div class="am am-panel am-stats">
+    <div class="am-grid">
+      <div><div class="am-big" id="amNotes">–</div><span class="am-cap">notes</span></div>
+      <div><div class="am-big" id="amLinks">–</div><span class="am-cap">links</span></div>
+      <div><div class="am-big" id="amFresh">–</div><span class="am-cap">new today</span></div>
+    </div>
+    <div class="am-cap am-head"><i class="am-led" id="amLed"></i><span id="amStatus">connecting</span></div>
+    <div class="am-row"><span id="amRunK">last run</span><b id="amRun">–</b></div>
+    <div class="am-row"><span>next</span><b id="amNext">–</b></div>
+    <div class="am-row"><span>queued</span><b id="amQueue">–</b></div>
+    <div class="am-row"><span>context</span><b id="amCtx">–</b></div>
+    <div class="am-row"><span>24h</span><b id="amDay">–</b></div>
+    <div class="am-row"><span>cost 24h</span><b id="amCost">–</b></div>
+  </div>
+
+  <div class="am am-panel am-used"><div class="am-cap am-head" id="amUsedCap">notes used</div><div id="amUsed"></div></div>
+
+  <div class="am am-mood" id="amMood">
+    <div class="am-cap">mood</div>
+    <div class="am-moodword" id="amMoodWord">unknown</div>
+    <div class="am-moodwhy" id="amMoodWhy"></div>
+  </div>
+
+  <div class="am am-status">
+    <div class="am-verb"><i class="am-dot"></i><span id="amVerb">connecting</span></div>
+    <div class="am-what" id="amWhat"></div>
+    <div class="am-cap" id="amSrc"></div>
+    <div class="am-missing" id="amMissing"></div>
+  </div>
+  <div class="am am-ribbon"><div class="am-track"></div><div id="amTicks"></div>
+    <span class="am-lab am-lab-l">-30 min</span><span class="am-lab am-lab-r">now</span></div>
+</div>
+
 <div id="toast"></div>
 
 <!-- markdown render (global `marked`) + sanitizer (Trinity H-005); first-party for prod CSP script-src 'self' -->
 <script src="./vendor/marked.min.js"></script>
 <script src="./vendor/purify.min.js"></script>
 <!-- orb renderer — externalized from the inline module so prod CSP (script-src 'self') serves it -->
-<script type="module" src="./orb.js?v=2026-09-06"></script>
+<script type="module" src="./orb.js?v=2026-11-19"></script>
 </body>
 </html>

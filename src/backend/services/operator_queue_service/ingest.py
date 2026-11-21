@@ -225,6 +225,9 @@ class IngestMixin:
         # the flood alert reads "runaway or compromised agent", and a too-long
         # label is an authoring slip that holds until the agent edits it.
         cap_held: dict[str, list] = {filechannel.HOLD_INVALID_OPTIONS: [], filechannel.HOLD_INVALID_TITLE: []}
+        # #4599: this cycle's judgement of NEW credential entries — the reader
+        # chain of the native raise, read once, and the kind's own checks.
+        credentials = filechannel.CredentialCycle(agent_name)
 
         for req in requests[:_oq.OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE]:
             if not isinstance(req, dict):
@@ -439,6 +442,29 @@ class IngestMixin:
                         f"{cap_hold} (#3243)")
                 continue
 
+            # #4599: a credential ask ends at ONE door, so a row is created only
+            # for a reader that door opens for, picked by the platform. An entry
+            # with no such reader (or one the kind's checks refuse) is HELD and
+            # named in the marker — a credential row nobody can fill could only
+            # be cancelled. Like the authoring caps: a new entry only, before
+            # the depth and rate caps, and not counted for the flood alert.
+            credential = None
+            if filechannel.is_credential_entry(req):
+                credential, hold = credentials.judge(req)
+                if hold:
+                    if hold in filechannel.CREDENTIAL_HOLDS:
+                        credentials.held[hold].append(req_id)
+                        hold_reason = filechannel._stronger_hold(hold_reason, hold)
+                    key = (agent_name, req_id, hold)
+                    if key not in self._cap_held_logged:
+                        if len(self._cap_held_logged) >= _oq._MAX_QUARANTINE_ENTRIES:
+                            self._cap_held_logged.clear()  # safety valve
+                        self._cap_held_logged.add(key)
+                        logger.warning(
+                            f"Holding credential request '{req_id}' from '{agent_name}': "
+                            f"{hold} (#4599)")
+                    continue
+
             # #1632 C3: DEPTH cap (hard, primary). At the cap STOP ingesting —
             # `admitted` only grows, so every later item is over too → break.
             if pending_count + admitted >= _oq.OPERATOR_QUEUE_MAX_PENDING_PER_AGENT:
@@ -468,7 +494,7 @@ class IngestMixin:
             # New item — clamp then create. The clamp runs INSIDE the try so any
             # clamp/create failure is quarantined by #1525 rather than hot-looping.
             try:
-                clamped = filechannel._clamp_ingested_item(req, agent_name)
+                clamped = filechannel._clamp_ingested_item(req, agent_name, credential=credential)
                 # trinity-enterprise#611: provenance from what the POLLER knows,
                 # keyword-only — never from the entry, which could claim any
                 # channel it likes.
@@ -595,9 +621,11 @@ class IngestMixin:
         # already the one wanted, and never again against a file a write was
         # already refused on.
         ingestion = filechannel._ingestion_marker(hold_reason, cap_held[filechannel.HOLD_INVALID_OPTIONS],
-                                                  cap_held[filechannel.HOLD_INVALID_TITLE])
+                                                  cap_held[filechannel.HOLD_INVALID_TITLE],
+                                                  credential=credentials.held)
         marker_due = (
             file_exists
+            and not credentials.unchecked  # #4599: an outage decides nothing about a hold
             and filechannel._marker_differs(queue_data, ingestion)
             and self._ingestion_write_refused.get(agent_name) != content_sha
         )

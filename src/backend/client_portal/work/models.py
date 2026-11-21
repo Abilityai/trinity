@@ -71,8 +71,8 @@ class WorkItem(BaseModel):
     """One execution, projected for the person who asked for it.
 
     An explicit projection, never a dump: `response`, `execution_log` and
-    `tool_calls` are not here, `error` is the sanitized 200-char summary and
-    only on a failed row, and every agent name that is not on the caller's
+    `tool_calls` are not here, `error` is the person-safe failure sentence
+    (`person_safe_failure`, #4482) and only on a failed row, and every agent name that is not on the caller's
     roster has already been masked to None (`agent_name` for a delegated
     child on an agent the caller cannot see; `delegated_by`; stage holders).
     """

@@ -309,6 +309,7 @@
         <PortalCredentialField
           v-else-if="controlsKind(ask) === 'credential'"
           :ask="ask"
+          :notify-answered="notifyAnswered"
           @provided="(answered) => credentialProvided(ask, answered)"
         />
 
@@ -474,7 +475,8 @@ const props = defineProps({
   // trinity-enterprise#610 (D8): the Inbox pane renders ONE ask through this
   // same component rather than a second card. `askIds` narrows to those asks
   // and wins over `pendingOnly`: an ask that ends while it is selected stays
-  // drawn in place, as ended, for the Inbox's tab visit (§3g S1, principle 5).
+  // drawn in place, as ended (§3g S1, principle 5) — unless the reader ended it
+  // themselves here, which `notifyAnswered` below tells the Inbox.
   askIds: { type: Array, default: null },
   // trinity-enterprise#610 (D8): namespaces EVERY data-testid this component
   // emits, the static ones included, so two instances rendering the same ask
@@ -497,6 +499,17 @@ const props = defineProps({
   // The agent's display name, when the surface has one (the Inbox pane) —
   // "Scout Bot recommends", not the slug (A2 round 1).
   agentLabel: { type: String, default: '' },
+  // The Inbox's "answer, then next": called with (askId, answered) once the
+  // server CONFIRMED the reader's own answer — never on a failure, never for a
+  // Dismiss. A function prop, not an emit: the Inbox pane is keyed by the item,
+  // so selecting another row while the answer is on the wire unmounts this
+  // card, and Vue drops an emit from an unmounted instance. A surface that
+  // passes it takes over what happens next, so the "Sent" line is not shown.
+  notifyAnswered: { type: Function, default: null },
+  // The same surface: how long this card ignores a send after it mounts. An
+  // auto-advance puts this ask's buttons where the last ask's were, and a late
+  // second click must not answer an ask the reader has not read (0 = never).
+  holdMs: { type: Number, default: 0 },
 })
 
 const emit = defineEmits(['open-thread'])
@@ -535,7 +548,7 @@ const coarsePointer = () => (
 const oneClick = (ask) => decidedByOptions(ask)
 function pick(ask, opt) {
   if (oneClick(ask)) {
-    if (busyId.value === ask.id) return
+    if (busyId.value === ask.id || held) return
     picks[ask.id] = opt
     submit(ask)
     return
@@ -666,11 +679,51 @@ function showConfirmation(message) {
 }
 
 // A timer that outlives the component would write to a dead ref on a chat
-// switch — the surface unmounts and remounts constantly.
+// switch — the surface unmounts and remounts constantly. `gone` covers the
+// other half: an answer confirmed AFTER the unmount (the reader moved on while
+// it was on the wire) must not start a timer nothing will clear.
+let gone = false
 onBeforeUnmount(() => {
+  gone = true
   confirmationTimers.forEach(clearTimeout)
   confirmationTimers = []
 })
+
+// `holdMs`: see the prop. Not reactive — nothing renders from it, the controls
+// look the same; a send inside the window is simply not taken.
+let held = props.holdMs > 0
+let holdTimer = held ? setTimeout(() => { held = false; holdTimer = null }, props.holdMs) : null
+onBeforeUnmount(() => { if (holdTimer) clearTimeout(holdTimer) })
+
+// #4502: what to say about an answer that landed. A surface that
+// takes the answer over (`notifyAnswered`, the Inbox pane) says nothing here.
+// "is picking this up" needs the agent to be running, and the response cannot
+// know that (answerConfirmation), so an answer that requested a wake re-reads
+// the roster first, quietly. Nothing is said while that read is out, and a
+// read that fails says only "Sent.": the roster in hand is from page load, and
+// the line must never claim an agent that has stopped since.
+// The read is bounded: a roster that does not answer must not hold the line
+// back, so after ROSTER_WAIT_MS it counts as a read that failed.
+const ROSTER_WAIT_MS = 1500
+async function confirmAnswer(answered, ask) {
+  if (props.notifyAnswered || gone) return
+  let availability = null
+  let verified = true
+  if (answered && answered.status === 'answered' && answered.resume_requested === true) {
+    let giveUp = null
+    try {
+      // `refreshRoster` resolves true only for a read that succeeded.
+      verified = (await Promise.race([
+        store.refreshRoster(),
+        new Promise((resolve) => { giveUp = setTimeout(resolve, ROSTER_WAIT_MS) }),
+      ])) === true
+    } catch (_) { verified = false }
+    clearTimeout(giveUp)
+    availability = (store.agents || []).find((a) => a && a.name === ask.agent_name)?.availability || null
+  }
+  if (gone) return
+  showConfirmation(answerConfirmation(answered, ask.agent_name, { availability, verified }))
+}
 
 // #2375: one label set and one controls rule across desktop, /m and the
 // Workspace — both come from utils/operatorQueue, the single home #2370
@@ -729,7 +782,7 @@ async function undoDismiss(ask) {
 // trinity-enterprise#1066: the secret field answered — the same confirmation
 // and focus landing as a typed answer (below), nothing kept.
 async function credentialProvided(ask, answered) {
-  showConfirmation(answerConfirmation(answered, ask.agent_name))
+  confirmAnswer(answered, ask)
   await nextTick()
   cardEls.get(ask.id)?.focus?.({ preventScroll: true })
 }
@@ -737,7 +790,7 @@ async function credentialProvided(ask, answered) {
 async function submit(ask) {
   // Enter is the main path now (B2): a second Enter while the first is on the
   // wire must not POST again (the second would be refused as already answered).
-  if (busyId.value === ask.id) return
+  if (busyId.value === ask.id || held) return
   // The shared builder decides the wire shape: the decision travels as
   // `response` (the field the agent reads), a note as `response_text`. It
   // returns null when there is nothing valid to send — no option picked,
@@ -757,12 +810,16 @@ async function submit(ask) {
       acknowledgeDivergence: !!diverged[ask.id],
     })
     delete diverged[ask.id]
+    // The server confirmed it: tell the surface that advances on that (the
+    // Inbox). Only here, on the success path — a refusal lands in `catch`.
+    props.notifyAnswered?.(ask.id, answered)
     // ent#468: the response was discarded here, so `resume_requested` and the
     // `answered` status were on the wire and read by nothing.
-    showConfirmation(answerConfirmation(answered, ask.agent_name))
+    confirmAnswer(answered, ask)
     delete drafts[ask.id]
     delete picks[ask.id]
     delete notes[ask.id]
+    if (gone) return
     // After Send the controls unmount (the ask ended), and focus fell to
     // <body>. It lands on the answered card instead, where the ending line
     // and the confirmation above say what happened. A card that left the

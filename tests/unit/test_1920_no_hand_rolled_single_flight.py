@@ -93,7 +93,12 @@ _ALLOWED = {
     "only if still its own. NOT adoptable: SingleFlightLock mints a unique token per acquire, so a second worker's "
     "refresh could never recognise the call's grant; the stable owner is the call id for exactly that",
     "services/skills_sync_service.py": "skills:sync:leader — leader lease (ent#236)",
+    "services/fleet_image_service.py": "fleetimage:leader — leader lease, stable cross-cycle worker id, the "
+    "monitoring shape (#4483)",
     "services/canary_service.py": "canary:leader — Lua-CAD leader lease, the 8th shape (#1881)",
+    "services/queue_stall_service.py": "queuestall:leader — the queue-stall monitor's leader lease (#4635), the "
+    "canary's Lua renew/release over a stable per-worker id. NOT adoptable: SingleFlightLock mints a unique token "
+    "per acquire, so a lease could never recognise — and therefore never renew — its own grant across ticks",
     "services/sync_health_service.py": "synchealth:leader — leader lease in the #1464 monitoring shape (#2742). NOT adoptable: SingleFlightLock mints a unique token per acquire, so a lease could never recognise — and therefore never refresh — its own grant across cycles; a stable per-worker id is kept for exactly that",
     "services/subscription_recovery_service.py": "subscription:recovery:leader — leader lease in the #1464 monitoring shape (#447). NOT adoptable: SingleFlightLock mints a UNIQUE token per acquire, so a lease could never recognise — and therefore never refresh — its own grant across cycles; this one keeps a stable per-worker id for exactly that",
     # --- pre-#1920 hand-rolled single-flight locks NOT in this issue's scope ---
@@ -125,6 +130,10 @@ _ALLOWED = {
     "flag (#2973) — a once-guard, not a mutex: no release, no token, TTL-expiry with the budget window only",
     "services/caller_wake_service.py": "{wake budget key}:alerted once-per-window 'wakes capped' notification "
     "marker (#4357) — a once-guard, not a mutex: no release, no token, TTL-expiry with the wake window only",
+    "services/chat_execution_service.py": "terminate_audit:{agent}:{execution_id} audit-row DEDUP claim (#4475) — "
+    "a once-guard, not a mutex: nothing waits on or renews it, it expires after 24 h, and it is deleted only when "
+    "the audit write fails so a repeat terminate can record the turn. Fails OPEN by design (a duplicate audit "
+    "row costs less than a missing one)",
 }
 
 # The sync-lock files #1920 adopted MUST no longer hand-roll a nx=True set.

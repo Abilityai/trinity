@@ -546,6 +546,7 @@ def test_j01_declares_both_marketplace_variants():
     catalog = yaml.safe_load((_ROOT / "tests/journeys/catalog.yaml").read_text())
     j01 = next(j for j in catalog["journeys"] if j["id"] == "J01")
     assert "digitalocean" in j01["lanes"]
-    assert {v["name"] for v in j01.get("variants") or []} == {"claimable", "pre-provisioned"}
+    # A superset: J01 may carry other cold-install variants (trinity-enterprise#1312).
+    assert {v["name"] for v in j01.get("variants") or []} >= {"claimable", "pre-provisioned"}
     rendered = (_ROOT / "docs/testing/JOURNEYS.md").read_text()
     assert "**J01 · claimable**" in rendered and "**J01 · pre-provisioned**" in rendered

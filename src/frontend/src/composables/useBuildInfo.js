@@ -18,8 +18,10 @@ const loading = ref(false)
 const error = ref(null)
 let inFlight = null
 
-async function load() {
-  if (info.value) return info.value
+// `force` re-asks a read the server refused: until a person accepts an
+// instance's terms of use every route answers 403 (trinity-enterprise#1327).
+async function load(force = false) {
+  if (info.value && !force) return info.value
   if (inFlight) return inFlight
   loading.value = true
   error.value = null

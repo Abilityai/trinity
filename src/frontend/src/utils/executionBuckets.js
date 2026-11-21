@@ -31,6 +31,12 @@ export const BUCKET_COLORS = {
   'Public': '#38bdf8',         // sky-400
   'Scheduled': '#22d3ee',      // cyan-400
   'Loops': '#e879f9',          // fuchsia-400 (deliberate accent, #1150)
+  // #3597: these three had no entry and fell back to Other's slate, so four
+  // stacked segments were one colour. Still cool hues, stepped away from their
+  // stack neighbours (Loops before, Agent-to-agent after).
+  'Reminders': '#818cf8',      // indigo-400
+  'Rooms': '#f472b6',          // pink-400
+  'Operator queue': '#c4b5fd', // violet-300
   'Agent-to-agent': '#2dd4bf', // teal-400
   'Voice': '#34d399',          // emerald-400
   'Other': '#94a3b8',          // slate-400

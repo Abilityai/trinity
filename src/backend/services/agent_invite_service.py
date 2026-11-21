@@ -24,7 +24,6 @@ from config import EMAIL_AUTH_ENABLED
 from database import db
 from services import login_policy_gate, rate_limiter
 from services.email_service import email_service
-from services.settings_service import get_public_chat_url
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +113,9 @@ def _inviter_label(username: str) -> str:
 
 
 def _workspace_url() -> str:
-    base = (os.getenv("FRONTEND_URL") or get_public_chat_url() or "").rstrip("/")
+    # ent#1255: FRONTEND_URL only. The public chat host serves only chat, so a
+    # link there lands the invitee on a 403.
+    base = (os.getenv("FRONTEND_URL") or "").rstrip("/")
     return f"{base}/workspace" if base else ""
 
 
@@ -130,6 +131,7 @@ async def _deliver(agent_name: str, email: str, username: str) -> bool:
             "You'll request a one-time code there to complete sign-in.",
         ],
         cta=("Open the Workspace", url) if url else None,
+        relay=("agent_invite", {"agent": agent_name, "inviter": _inviter_label(username), "url": url}),
     )
     try:
         return bool(await asyncio.wait_for(send, timeout=SEND_TIMEOUT_SECONDS))

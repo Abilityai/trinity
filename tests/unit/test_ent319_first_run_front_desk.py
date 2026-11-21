@@ -202,3 +202,25 @@ def test_unknown_user_is_not_first_run(monkeypatch, admin_user):
     ownership test anyway, but assert it rather than infer it."""
     _patch_db(monkeypatch, user_row=None, metadata={"my-agent": _meta()})
     assert onboarding_service.get_first_run_state(admin_user)["first_run"] is True
+
+
+def test_the_state_carries_a_mark_of_this_install(monkeypatch, admin_user):
+    """A browser remembers "setup closed" against this mark, so a fresh install
+    at the same address offers setup again instead of inheriting the close."""
+    import services.operator_intake_service as intake
+    _patch_db(monkeypatch, user_row=ADMIN_ROW, metadata={CORNELIUS: _meta()})
+    minted = []
+    monkeypatch.setattr(intake, "get_or_create_installation_id", lambda: minted.append(1) or "minted")
+    monkeypatch.setattr(intake, "get_installation_id", lambda: "0f3c9a12-aaaa-bbbb-cccc-dddddddddddd")
+    assert onboarding_service.get_first_run_state(admin_user)["install"] == "0f3c9a12"
+
+    # An install nothing has given an id yet: looking does not mint one (#2669).
+    monkeypatch.setattr(intake, "get_installation_id", lambda: None)
+    assert onboarding_service.get_first_run_state(admin_user)["install"] is None
+    assert minted == []
+
+    def broken():
+        raise RuntimeError("no settings table")
+    monkeypatch.setattr(intake, "get_installation_id", broken)
+    state = onboarding_service.get_first_run_state(admin_user)
+    assert state["install"] is None and state["first_run"] is True      # the mark is never a gate

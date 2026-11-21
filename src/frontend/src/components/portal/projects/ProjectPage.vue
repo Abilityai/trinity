@@ -62,7 +62,11 @@
         <span aria-hidden="true"> / </span><span>{{ p.name }}</span>
       </nav>
 
-      <header class="flex flex-col gap-4 sm:flex-row sm:items-start">
+      <!-- #4597: the header stacks at every width. Side by side, the action
+           group sized to its one-line max-content width and squeezed the
+           title and goal into a narrow column; on desktop it is its own
+           right-aligned row above the title instead (mobile keeps it last). -->
+      <header class="flex flex-col gap-4">
         <div class="min-w-0 flex-1 space-y-2">
           <div class="flex flex-wrap items-center gap-2">
             <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100 break-words">{{ p.name }}</h1>
@@ -106,7 +110,7 @@
             <span :title="absolute(p.updated_at)">Updated {{ relative(p.updated_at) }}</span>
           </p>
         </div>
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2 sm:order-first sm:justify-end" data-testid="project-actions">
           <BaseButton
             v-if="lifecycle.primary"
             :variant="lifecycle.primary.verb === 'stop' ? 'secondary' : 'primary'"
@@ -160,6 +164,7 @@
       <ProjectTasks v-if="!guest && tab === 'tasks'" :project="p" :project-id="p.id" @open-thread="(t) => $emit('open-thread', t)" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" :members="p.members || []" :is-creator="p.my_role === 'creator'" />
       <ProjectLog v-if="!guest && tab === 'log'" :project="p" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
       <ProjectMaterial v-if="!guest && tab === 'material'" :project="p" :my-email="myEmail" :agents="usableAgents" />
+      <ProjectRuns v-if="!guest && tab === 'runs'" :project-id="p.id" :agents="p.agents || []" />
 
       <div v-show="guest || tab === 'overview'" class="grid grid-cols-1 gap-4 lg:grid-cols-3 lg:items-start" data-testid="project-overview">
         <!-- ===================== main stack ===================== -->
@@ -362,6 +367,7 @@ import ProjectCreateModal from './ProjectCreateModal.vue'
 import ProjectTasks from './ProjectTasks.vue'
 import ProjectLog from './ProjectLog.vue'
 import ProjectMaterial from './ProjectMaterial.vue'
+import ProjectRuns from './ProjectRuns.vue'
 import ProjectHealthCard from './ProjectHealthCard.vue'
 import ProjectRollupCard from './ProjectRollupCard.vue'
 import ProjectMetricsCard from './ProjectMetricsCard.vue'
@@ -397,6 +403,7 @@ const TABS = [
   { id: 'tasks', label: 'Tasks' },
   { id: 'log', label: 'Log' },
   { id: 'material', label: 'Files & reports' },
+  { id: 'runs', label: 'Runs' },
 ]
 const tab = ref('overview')
 const archiveConfirm = ref(false)

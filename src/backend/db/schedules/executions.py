@@ -108,6 +108,9 @@ class ScheduleExecutionsMixin:
             # Verified AAuth peer of an inbound A2A call (ent#862); NULL otherwise.
             a2a_caller_identity=row["a2a_caller_identity"]
                 if "a2a_caller_identity" in row_keys else None,
+            # The platform-recorded turn this row continues (ent#1225).
+            continues_execution_id=row["continues_execution_id"]
+                if "continues_execution_id" in row_keys else None,
         )
 
     # =========================================================================
@@ -253,6 +256,7 @@ class ScheduleExecutionsMixin:
                 schedule_executions.c.source_channel,
                 schedule_executions.c.source_user_email,
                 schedule_executions.c.source_agent_name,
+                schedule_executions.c.continues_execution_id,
             )
             .where(and_(
                 schedule_executions.c.agent_name == agent_name,
@@ -882,6 +886,20 @@ class ScheduleExecutionsMixin:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_schedule_execution(row) if row else None
+
+    def get_turn_attribution(self, execution_id: str) -> Optional[Dict]:
+        """One execution's rating columns (`turn_tier_service.LEDGER_COLUMNS`)
+        and its `status`, or None — the turn a continuation follows
+        (trinity-enterprise#1225), without the row's response and log."""
+        c = schedule_executions.c
+        stmt = select(
+            c.id, c.agent_name, c.source_user_id, c.schedule_id, c.triggered_by,
+            c.source_channel, c.source_user_email, c.source_agent_name,
+            c.continues_execution_id, c.status,
+        ).where(c.id == execution_id)
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return dict(row) if row else None
 
     def get_execution_gate_state(self, execution_id: str) -> Optional[tuple]:
         """`(agent_name, status)` of one execution, or None — the two columns

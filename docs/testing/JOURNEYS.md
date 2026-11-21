@@ -46,5 +46,6 @@ A journey holds only if it holds on every shape listed for it.
 
 - **J01 · claimable** — I open my new one-click droplet in a browser and create the admin account there, without ever opening a terminal.
 - **J01 · pre-provisioned** — I gave a password when I created the droplet, so it has an admin from the start and nobody else can claim it.
+- **J01 · link-claim** — I open the setup link from my email, choose a password, and I'm in.
 - **J05 · inbox** — I open the Workspace and the Inbox tells me the run came back, and whether it finished, without my opening the agent.
 - **J11 · inbox** — When I open the Workspace, the brief is waiting in my Inbox, and reading it there clears it everywhere.

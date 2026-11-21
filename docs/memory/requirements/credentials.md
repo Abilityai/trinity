@@ -309,12 +309,41 @@ AES-256-GCM envelopes. What changed is how git *reads* one.
   thread, the execution log and the agent's next prompt.
 - **Behaviour**:
   - The agent asks **by name** with the MCP tool `ask_for_credential(name, why)`:
-    a `credential` ask (`context.credential_name`), addressed to the person of
-    the conversation. No options; the name is a variable name of at most 64
+    a `credential` ask (`context.credential_name`), addressed to the reader the
+    platform picks (below), never one the agent names. No options;
+    the name is a variable name of at most 64
     characters and never one the platform or the agent runtime writes itself
     (`services/credential_ask_policy.py`, mirrored from the agent image and held
     in parity by test). With no single person to ask it is refused (422
     `no_person`).
+  - The reader must be able to open the secret field, the only way a
+    credential ask is answered (#4579): the agent's primary person when the
+    agent is on their Workspace roster (shared with them, or theirs), else
+    the agent's owner when it is on the owner's; a deactivated account is
+    not a reader, and neither is an email blocked from the Workspace (the
+    client block, #4599). When neither can open it the ask is refused (422
+    `role_cannot_open_agent`, naming roles and never a person) and nothing
+    is filed (`role_addressing.resolve_credential_reader`). A pending
+    credential ask is re-addressed by the same rule.
+  - The refusal keeps the one code and names its real cause and remedy
+    (#4599): make sure the agent is shared with its primary person and that
+    they can sign in (a seated primary and the owner both cannot open it;
+    the remedy says what to check, never which one fails); assign a primary person and share the
+    agent with them (nobody is seated and the owner cannot open it); check
+    the owner's access to the Workspace (the owner is the primary person);
+    set the credential on the agent directly (a system agent, which is in
+    nobody's Workspace); or try again in a few minutes (the platform could
+    not check, and a primary who could not be checked is never passed over
+    for the owner). It never says which account state stops a person.
+  - A `type: "credential"` entry in the queue file
+    (`~/.trinity/operator-queue.json`) is addressed by the same chain and
+    runs the kind's own raise checks (#4599): the platform picks the reader
+    and the entry's `addressed_to_email` is ignored. An entry that cannot be
+    filed is held, not ingested: no row is created, the entry stays
+    `pending`, and its id is listed in the file's `platform.ingestion` block
+    under `role_cannot_open_agent`, `no_person` or `invalid_credential`. A
+    lookup that failed holds the entry for the cycle with no marker, and it
+    is read again on the next cycle.
   - The person sees a **masked secret field** in the thread (and wherever the
     ask card renders: Inbox, rail, agent page) and types the value there. It is
     posted once to `POST /api/enterprise/client-portal/asks/{id}/credential`

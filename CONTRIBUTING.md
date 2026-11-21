@@ -6,6 +6,10 @@ Thank you for your interest in contributing to Trinity! This document provides g
 
 Trinity is licensed under the [Apache License 2.0](LICENSE). Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in Trinity by you shall be licensed under the Apache License 2.0, without any additional terms or conditions (per Section 5 of the license).
 
+### Sign your commits (DCO)
+
+Contributions from outside the core team must be signed off under the [Developer Certificate of Origin](https://developercertificate.org/): every commit carries a `Signed-off-by: Your Name <you@example.com>` line, which `git commit -s` adds for you. By signing off you certify that you wrote the change or otherwise have the right to submit it under the project's license. This applies in full to code written with an AI assistant — see [AI-assisted contributions](#ai-assisted-contributions). A PR with unsigned commits is put on hold until they are signed (`git rebase --signoff dev` fixes a whole branch).
+
 ## Code of Conduct
 
 - Be respectful and inclusive
@@ -45,7 +49,7 @@ The project follows a 4-stage SDLC: Todo → In Progress → In Dev → Done, tr
 **All PRs target the `dev` branch.** `main` only receives release cuts (`dev` → `main`) performed by maintainers — a PR opened against `main` will be asked to retarget. Direct pushes to both `dev` and `main` are blocked by branch protection; everything lands via PR and is **squash-merged**.
 
 1. **Fork and clone** the repository
-2. **Find or create an issue** — every PR must link to an issue. Bugs go in [GitHub Issues](https://github.com/abilityai/trinity/issues); feature ideas start in [Discussions](https://github.com/abilityai/trinity/discussions) (see above) and get an issue once accepted
+2. **Find or create an issue** — every PR must link to an issue. Bugs go in [GitHub Issues](https://github.com/abilityai/trinity/issues); feature ideas start in [Discussions](https://github.com/abilityai/trinity/discussions) (see above) and get an issue once accepted. Read [Before you open a PR](#before-you-open-a-pr) first — it says which PRs we can take
 3. **Create a feature branch** from `dev`:
    ```bash
    git checkout dev && git pull origin dev
@@ -60,6 +64,29 @@ The project follows a 4-stage SDLC: Todo → In Progress → In Dev → Done, tr
    git commit -m "feat: Add support for custom metrics"
    ```
 8. **Push and create a PR against `dev`** — the description **must contain a closing keyword** for the linked issue: `Fixes #N`, `Closes #N`, or `Resolves #N`. A bare `#N` or `Refs #N` links the issue but does **not** trigger the status automation that moves it through the SDLC, so the issue strands in `status-in-progress` after merge.
+
+### Before you open a PR
+
+We want your fixes to land, and the fastest way there is knowing what we can and cannot merge.
+
+- **Bug fixes are welcome without asking first.** Link the bug's issue (file one if it does not exist). If a maintainer has not labelled the issue yet, we triage it when your PR arrives — you do not need to wait for that.
+- **Features need an accepted issue before the code.** A feature PR whose idea was never accepted by a maintainer — in a Discussion or on an issue — is closed with a pointer back to Discussions, however good the code is. Trinity is open-core and has a roadmap; some ideas overlap with work already planned, and we would rather tell you that before you build it than after.
+- **Check nobody else is on it.** If the issue is assigned or marked `status-in-progress`, comment there before starting.
+- **Keep it small.** Under ~50 files and ~1,000 changed lines unless a maintainer agreed to the larger scope on the issue.
+- **Three open PRs at a time until five have merged.** Each PR is read in full by a person. If you open more, we review the three oldest and the rest wait their turn — they are not closed.
+- **Some paths get a deeper review and take longer:** dependency manifests and lockfiles, Dockerfiles and shell scripts, CI workflows, MCP configuration, agent templates, and the instruction files AI coding tools load (`CLAUDE.md`, `AGENTS.md`, `docs/memory/architecture.md`). Say in the PR description why the change is needed.
+
+We aim to reply to every PR within one working day, even if the reply is only where it sits in the queue.
+
+### AI-assisted contributions
+
+Using an AI coding assistant is fine — much of Trinity is built that way. Three rules:
+
+1. **A person is accountable for every PR.** You have read the whole diff, you can explain it, and you answer review comments yourself. PRs opened by an unattended agent, with nobody behind them who can do that, are closed.
+2. **Say so.** Note in the PR description that the change was AI-assisted. It changes nothing about how the PR is judged; it tells the reviewer what to look for.
+3. **You sign for it.** The DCO sign-off covers generated code exactly as it covers code you typed.
+
+PR descriptions, comments and code comments are reviewed as content. Text written to steer an automated reviewer is treated as a reason to close the PR.
 
 ### Commit Message Format
 
@@ -87,6 +114,8 @@ Every PR is validated against the Trinity development methodology before merge �
 ### Process Checklist
 
 - [ ] PR targets `dev` (not `main`)
+- [ ] Every commit is signed off (`git commit -s`) — see [Sign your commits](#sign-your-commits-dco)
+- [ ] A feature PR links an issue a maintainer accepted — see [Before you open a PR](#before-you-open-a-pr)
 - [ ] PR title/body carries a **closing keyword** (`Fixes #N` / `Closes #N` / `Resolves #N`) referencing an existing issue
 - [ ] Commit messages are descriptive and use the conventional prefix (`feat`/`fix`/`refactor`/`docs`)
 - [ ] PR is focused — fewer than ~50 changed files (larger PRs will be asked to split)
@@ -149,6 +178,7 @@ Other workflows (backend unit tests, frontend build, image smoke tests) run on P
 
 ### After You Open the PR
 
+0. CI on a PR from outside the core team waits for a maintainer to approve each workflow run — a repository setting that applies to every outside contributor, not a judgment on your PR
 1. A maintainer reviews the code and runs the validation pass, resulting in **APPROVE**, **REQUEST CHANGES** (with a concrete fix list), or **NEEDS DISCUSSION** (scope/architecture questions)
 2. Address requested changes and push to the same branch — re-review happens on the same PR
 3. On approval the PR is **squash-merged to `dev`**; automation moves the linked issue to `status-in-dev`

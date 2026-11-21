@@ -1,7 +1,7 @@
-"""Marketplace release scripts (abilityai/trinity-enterprise#1094).
+"""Marketplace release scripts (abilityai/trinity-enterprise#1094, #710).
 
-Runs the real scripts under `packer/digitalocean/scripts/` against fake `doctl`,
-`curl`, `ssh`, `packer` and `git` binaries. The fakes share one JSON world file,
+Runs the real scripts under `packer/digitalocean/scripts/` and `packer/aws/scripts/`
+against fake `doctl`, `aws`, `curl`, `ssh`, `packer` and `git` binaries. The fakes share one JSON world file,
 so a droplet the script creates stays until the script deletes it.
 Related flow: docs/memory/feature-flows/hosted-install.md
 """
@@ -21,6 +21,12 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[2]
 _PACKER = _ROOT / "packer" / "digitalocean"
 _SCRIPTS = _PACKER / "scripts"
+_AWS = _ROOT / "packer" / "aws"
+_AWS_SCRIPTS = _AWS / "scripts"
+_AMI = "ami-0abc1234def567890"
+_INSTANCE = "i-0abc1234def567890"
+_PRODUCT = "prod-test123"
+_ROLE = "arn:aws:iam::000000000000:role/ingest"
 _TOKEN = "dop_v1_testtoken"
 _TAG = "v1.0.0"
 _SNAPSHOT = "1000001"
@@ -28,7 +34,7 @@ _APP = "app123"
 _PAGE = "https://203.0.113.7/"
 
 _FAKE = r'''#!__PY__
-import json, os, re, sys
+import json, os, re, shlex, sys
 tool = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
 base = os.environ["FAKE_WORLD"]
@@ -81,9 +87,51 @@ if tool == "doctl":
         save()
         finish()
     finish()
+if tool == "aws":
+    maybe_hang(joined)
+    if "describe-images" in joined:
+        finish(world["ami"] + "\n")
+    if "create-key-pair" in joined:
+        world["key_pairs"].append(args[args.index("--key-name") + 1])
+        save()
+        finish("KEY\n")
+    if "delete-key-pair" in joined:
+        world["key_pairs"] = []
+        save()
+        finish()
+    if "create-stack" in joined:
+        world["stacks"].append(args[args.index("--stack-name") + 1])
+        save()
+        finish("{}")
+    if "stack-create-complete" in joined:
+        finish()
+    if "describe-stacks" in joined:
+        finish((world["instance_id"] if "InstanceId" in joined else world["trinity_url"]) + "\n")
+    if "describe-security-groups" in joined:
+        finish(world["ingress"])
+    if "delete-stack" in joined:
+        if not world["delete_fails"]:
+            world["stacks"] = []
+        save()
+        finish()
+    if "stack-delete-complete" in joined:
+        finish("", 1 if world["stacks"] else 0)
+    if "start-change-set" in joined:
+        finish("cs1\n", world["change_set_rc"])
+    if "describe-change-set" in joined:
+        status = world["change_set_states"].pop(0) if len(world["change_set_states"]) > 1 else world["change_set_states"][0]
+        save()
+        finish(json.dumps({"Status": status, "FailureDescription": "preparation failed", "ChangeSet": [
+            {"ErrorDetailList": [{"ErrorCode": "DUPLICATE_VERSION_TITLE", "ErrorMessage": "title in use"}]}]}))
+    finish()
 if tool == "ssh":
-    command = " ".join(args[next(i for i, a in enumerate(args) if a.startswith("root@")) + 1:])
+    command = " ".join(args[next(i for i, a in enumerate(args) if a.startswith(("root@", "ubuntu@"))) + 1:])
+    # The AWS check wraps each host command as: sudo bash -c <quoted command>.
+    if command.startswith("sudo bash -c "):
+        command = shlex.split(command)[3]
     maybe_hang(command)
+    if "setup/admin-password" in command and "claim_code" in stdin:
+        finish(world["claim_right"] if world["instance_id"] in stdin else world["claim_wrong"])
     probed = re.search(r"http://[0-9.]+:(\d+)", command)
     if probed:
         port = probed.group(1)
@@ -124,6 +172,8 @@ if tool == "curl":
                 finish("", 22)
             finish(body, rc)
     finish("", 7)
+if tool == "op":
+    finish(world.get("op_key", "KEY-FROM-1PASSWORD\n"), world.get("op_rc", 0))
 if tool == "packer":
     if args[0] == "build":
         if world.get("packer_hang"):
@@ -197,7 +247,7 @@ class Rig:
         fake = self.bin / "_fake"
         fake.write_text(_FAKE.replace("__PY__", sys.executable))
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
-        for tool in ("doctl", "curl", "ssh", "packer", "git"):
+        for tool in ("doctl", "aws", "curl", "ssh", "packer", "git", "op"):
             (self.bin / tool).symlink_to(fake)
         self.key = tmp / "key"
         self.key.write_text("k")
@@ -224,8 +274,32 @@ class Rig:
             "git_diff_rc": 0,
             "git_tag_rc": 0,
             "repo_root": str(self.work),
+            "ami": f"available\tv2.0\t{_TAG}",
+            "key_pairs": [],
+            "stacks": [],
+            "instance_id": _INSTANCE,
+            "trinity_url": _PAGE,
+            "ingress": "443\t443\ttcp\t0.0.0.0/0\n22\t22\ttcp\t198.51.100.1/32\n80\t80\ttcp\t0.0.0.0/0\n",
+            "claim_right": "200",
+            "claim_wrong": "403",
+            "change_set_rc": 0,
+            "change_set_states": ["PREPARING", "SUCCEEDED"],
         }
         self.save()
+
+    def aws(self) -> "Rig":
+        """What an instance of the AWS AMI answers, on top of the shared defaults."""
+        self.world["ssh"] = [
+            ["setup/status", '{"setup_completed": false, "claim_required": "instance-id"}', 0],
+            ["/etc/trinity/cloud", "aws\n", 0],
+            ["meta-data/", "", 28],
+        ] + self.world["ssh"]
+        self.world["curl"] = [
+            ["checkip", "198.51.100.1\n", 200, 0],
+            [_PAGE, "HTTP/2 200\n\n<title>Trinity</title>", 200, 0],
+        ] + self.world["curl"]
+        self.save()
+        return self
 
     def save(self) -> None:
         self.world_path.write_text(json.dumps(self.world))
@@ -265,13 +339,14 @@ class Rig:
             "TRINITY_SSH_KEY_FILE": str(self.key),
             "TRINITY_BOOT_CHECK_TIMEOUT": "1",
             "TRINITY_BOOT_CHECK_POLL": "0",
+            "TRINITY_MP_POLL": "0",
         }
         env.update(extra)
         return env
 
-    def run(self, script: str, *args, env: dict | None = None) -> subprocess.CompletedProcess:
+    def run(self, script: str, *args, env: dict | None = None, scripts: Path = _SCRIPTS) -> subprocess.CompletedProcess:
         return subprocess.run(
-            ["bash", str(_SCRIPTS / script), *args],
+            ["bash", str(scripts / script), *args],
             cwd=self.work,
             env=env or self.env(),
             capture_output=True,
@@ -454,6 +529,15 @@ class TestBootCheck:
         assert result.returncode == 0, result.stdout + result.stderr
         assert self._pass_file(rig).read_text().splitlines() == [f"tag={_TAG}", "caddy=2.11.8"]
         assert rig.state()["droplets"] == []
+
+    def test_a_key_from_1password_is_gone_when_the_check_exits(self, rig: Rig) -> None:
+        env = rig.env(TRINITY_SSH_KEY_OP="op://vault/item/key", TMPDIR=str(rig.work))
+        del env["TRINITY_SSH_KEY_FILE"]
+        result = rig.run("boot-check.sh", _SNAPSHOT, _TAG, env=env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        ssh = rig.calls("ssh")[0]["args"]
+        assert Path(ssh[ssh.index("-i") + 1]).parent == rig.work, "ssh was not given the fetched key"
+        assert list(rig.work.iterdir()) == []
 
     def test_droplet_shuts_itself_down_and_uses_the_snapshot_region(self, rig: Rig) -> None:
         self._run(rig)
@@ -749,6 +833,39 @@ class TestBuild:
         assert "TRINITY_SSH_KEY_ID" in result.stderr
         assert not rig.calls("packer")
 
+    def _op_env(self, rig: Rig) -> dict:
+        env = rig.env(TRINITY_SSH_KEY_OP="op://vault/item/key", TMPDIR=str(rig.work))
+        del env["TRINITY_SSH_KEY_FILE"]
+        return env
+
+    def test_a_key_from_1password_is_gone_when_the_build_exits(self, rig: Rig) -> None:
+        result = rig.run("mp-build.sh", _TAG, env=self._op_env(rig))
+        assert result.returncode == 0, result.stderr
+        assert [c["args"] for c in rig.calls("op")] == [["read", "op://vault/item/key"]]
+        build = next(c for c in rig.calls("packer") if c["args"][0] == "build")
+        key_arg = next(a for a in build["args"] if a.startswith("ssh_private_key_file="))
+        key_file = Path(key_arg.split("=", 1)[1])
+        assert key_file.parent == rig.work, "the build was not given the fetched key"
+        assert not key_file.exists()
+        assert list(rig.work.iterdir()) == []
+
+    def test_a_locked_1password_builds_nothing_and_leaves_no_key(self, rig: Rig) -> None:
+        rig.world["op_rc"] = 1
+        rig.save()
+        result = rig.run("mp-build.sh", _TAG, env=self._op_env(rig))
+        assert result.returncode != 0
+        assert "1Password" in result.stderr
+        assert not [c for c in rig.calls("packer") if c["args"][0] == "build"]
+        assert list(rig.work.iterdir()) == []
+
+    def test_no_key_source_builds_nothing_and_names_both(self, rig: Rig) -> None:
+        env = rig.env()
+        del env["TRINITY_SSH_KEY_FILE"]
+        result = rig.run("mp-build.sh", _TAG, env=env)
+        assert result.returncode != 0
+        assert "TRINITY_SSH_KEY_OP" in result.stderr and "TRINITY_SSH_KEY_FILE" in result.stderr
+        assert not [c for c in rig.calls("packer") if c["args"][0] == "build"]
+
     def test_a_checkout_that_differs_from_the_tag_builds_nothing(self, rig: Rig) -> None:
         rig.world["git_diff_rc"] = 1
         rig.save()
@@ -829,7 +946,219 @@ def test_a_build_can_no_longer_submit() -> None:
 def test_checked_containers_exist_in_the_hosted_compose() -> None:
     """boot-check.sh addresses containers by name; compose owns those names."""
     compose = (_ROOT / "docker-compose.hosted.yml").read_text()
-    script = (_SCRIPTS / "boot-check.sh").read_text()
+    script = (_SCRIPTS / "boot-lib.sh").read_text()
     for service in ("backend", "frontend", "scheduler", "mcp-server"):
         assert f"container_name: trinity-{service}" in compose
         assert service in script
+
+
+@pytest.fixture
+def aws(rig: Rig) -> Rig:
+    return rig.aws()
+
+
+class TestAwsBootCheck:
+    def _run(self, rig: Rig, **env) -> subprocess.CompletedProcess:
+        return rig.run("boot-check.sh", _AMI, _TAG, env=rig.env(**env), scripts=_AWS_SCRIPTS)
+
+    def _pass_file(self, rig: Rig) -> Path:
+        return rig.home / ".trinity-marketplace" / f"{_AMI}.pass"
+
+    def _assert_failed_and_cleaned(self, rig: Rig, result) -> None:
+        assert result.returncode != 0, result.stdout
+        assert not self._pass_file(rig).exists()
+        assert rig.state()["stacks"] == [] and rig.state()["key_pairs"] == []
+
+    def test_pass_writes_the_record_and_deletes_the_stack_and_key(self, aws: Rig) -> None:
+        result = self._run(aws)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._pass_file(aws).read_text() == f"tag={_TAG}\n"
+        assert aws.state()["stacks"] == [] and aws.state()["key_pairs"] == []
+        create = next(c["args"] for c in aws.calls("aws") if "create-stack" in c["args"])
+        assert f"ParameterKey=ImageId,ParameterValue={_AMI}" in create
+        assert "ParameterKey=SshCidr,ParameterValue=198.51.100.1/32" in create
+        assert create[create.index("--template-body") + 1] == f"file://{_AWS_SCRIPTS}/../trinity.cfn.yaml"
+
+    def test_the_instance_is_told_to_shut_itself_down(self, aws: Rig) -> None:
+        self._run(aws)
+        assert any("shutdown" in " ".join(c["args"]) and "+45" in " ".join(c["args"]) for c in aws.calls("ssh"))
+
+    @pytest.mark.parametrize("ami", [
+        "available\tv2.0\tv0.9.9", "pending\tv2.0\tv1.0.0", "available\tNone\tv1.0.0", "",
+    ])
+    def test_an_ami_that_is_wrong_never_creates_anything(self, aws: Rig, ami: str) -> None:
+        aws.world["ami"] = ami
+        aws.save()
+        assert self._run(aws).returncode != 0
+        assert not [c for c in aws.calls("aws") if "create-stack" in c["args"] or "create-key-pair" in c["args"]]
+
+    def test_the_claim_carries_the_instance_id_and_secrets_stay_out_of_argv(self, aws: Rig) -> None:
+        self._run(aws)
+        claims = [json.loads(c["stdin"]) for c in aws.calls("ssh") if "admin-password" in " ".join(c["args"])]
+        assert [c["claim_code"] for c in claims] == ["i-00000000000000000", _INSTANCE]
+        _assert_no_secret_in_argv(aws, claims[0]["password"])
+        _assert_no_secret_in_argv(aws, "jwt123")
+
+    @pytest.mark.parametrize("key,value,reason", [
+        ("claim_wrong", "200", "a wrong instance ID returned 200"),
+        ("claim_right", "403", "returned 403"),
+        ("ingress", "22\t22\ttcp\t0.0.0.0/0\n80\t80\ttcp\t0.0.0.0/0\n443\t443\ttcp\t0.0.0.0/0\n", "security group"),
+        ("trinity_url", "", "stack outputs"),
+    ])
+    def test_each_aws_side_failure_fails_and_cleans_up(self, aws: Rig, key, value, reason) -> None:
+        aws.world[key] = value
+        aws.save()
+        result = self._run(aws)
+        self._assert_failed_and_cleaned(aws, result)
+        assert reason in result.stderr, result.stderr
+
+    @pytest.mark.parametrize("needle,out,rc", [
+        ("shutdown -P", "", 1),
+        ("setup/status", '{"setup_completed": false}', 0),
+        ("setup/status", '{"setup_completed": true, "claim_required": "instance-id"}', 0),
+        ("cloud-init status", "status: error\n", 1),
+        ("/etc/trinity/cloud", "digitalocean\n", 0),
+        ("TRINITY_INSTALL_SOURCE", "", 1),
+        ("Config.Image}}' trinity-scheduler", "ghcr.io/abilityai/trinity-scheduler:v0.9.5\n", 0),
+        ("iptables", "", 1),
+        ("latest/api/token", "", 7),
+        ("meta-data/", "", 0),
+        ("meta-data/", "", 127),
+    ])
+    def test_each_instance_check_failure_fails_and_cleans_up(self, aws: Rig, needle, out, rc) -> None:
+        aws.set_ssh(needle, out, rc)
+        self._assert_failed_and_cleaned(aws, self._run(aws))
+
+    def test_the_install_source_checked_is_the_aws_one(self, aws: Rig) -> None:
+        self._run(aws)
+        assert any("TRINITY_INSTALL_SOURCE=aws-marketplace" in " ".join(c["args"]) for c in aws.calls("ssh"))
+
+    def test_a_page_with_the_digitalocean_header_fails(self, aws: Rig) -> None:
+        aws.set_curl(_PAGE, "HTTP/2 200\nx-do-marketplace: trinity\n\n<title>Trinity</title>")
+        result = self._run(aws)
+        self._assert_failed_and_cleaned(aws, result)
+        assert "DigitalOcean marketplace header" in result.stderr
+
+    def test_a_failed_recheck_removes_the_earlier_pass(self, aws: Rig) -> None:
+        record = aws.pass_record(_AMI)
+        aws.set_ssh("iptables", "", 1)
+        assert self._run(aws).returncode != 0
+        assert not record.exists()
+
+    def test_a_stack_that_will_not_delete_exits_nonzero_and_says_so(self, aws: Rig) -> None:
+        aws.world["delete_fails"] = True
+        aws.save()
+        result = self._run(aws)
+        assert result.returncode != 0
+        assert "still billing" in result.stderr
+
+    def test_a_signal_mid_run_deletes_the_stack(self, aws: Rig) -> None:
+        aws.world["hang_on"] = "cloud-init status"
+        aws.save()
+        proc = subprocess.Popen(
+            ["bash", str(_AWS_SCRIPTS / "boot-check.sh"), _AMI, _TAG],
+            cwd=aws.work, env=aws.env(TRINITY_BOOT_CHECK_TIMEOUT="60"),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        deadline = time.time() + 20
+        while time.time() < deadline and not any(
+            "cloud-init" in " ".join(c["args"]) for c in aws.calls("ssh")
+        ):
+            time.sleep(0.1)
+        assert aws.state()["stacks"], "stack was never created"
+        os.killpg(proc.pid, signal.SIGTERM)
+        assert proc.wait(timeout=30) == 143
+        assert aws.state()["stacks"] == [] and aws.state()["key_pairs"] == []
+
+
+class TestAwsSubmit:
+    def _run(self, rig: Rig, *args, **env) -> subprocess.CompletedProcess:
+        env = rig.env(**{"TRINITY_AWS_PRODUCT_ID": _PRODUCT, "TRINITY_AWS_INGESTION_ROLE_ARN": _ROLE, **env})
+        return rig.run("mp-submit.sh", *args, env=env, scripts=_AWS_SCRIPTS)
+
+    def _change_sets(self, rig: Rig) -> list:
+        return [c["args"] for c in rig.calls("aws") if "start-change-set" in c["args"]]
+
+    def test_requires_an_ami_argument(self, rig: Rig) -> None:
+        assert self._run(rig).returncode == 2
+        assert self._change_sets(rig) == []
+
+    def test_refuses_an_ami_without_a_pass_record(self, rig: Rig) -> None:
+        result = self._run(rig, _AMI, TRINITY_AWS_SUBMIT="apply")
+        assert result.returncode != 0
+        assert "boot-check.sh" in result.stderr
+        assert self._change_sets(rig) == []
+
+    def test_missing_product_id_fails_and_names_it(self, rig: Rig) -> None:
+        rig.pass_record(_AMI)
+        result = self._run(rig, _AMI, TRINITY_AWS_PRODUCT_ID="")
+        assert result.returncode != 0
+        assert "TRINITY_AWS_PRODUCT_ID" in result.stderr
+        assert self._change_sets(rig) == []
+
+    def test_a_dry_run_is_the_default_and_keeps_the_record(self, rig: Rig) -> None:
+        record = rig.pass_record(_AMI)
+        result = self._run(rig, _AMI)
+        assert result.returncode == 0, result.stderr
+        (args,) = self._change_sets(rig)
+        assert args[args.index("--intent") + 1] == "VALIDATE"
+        assert "SUCCEEDED" in result.stdout
+        assert record.exists()
+
+    def test_apply_sends_the_tested_ami_under_the_recorded_tag(self, rig: Rig) -> None:
+        record = rig.pass_record(_AMI)
+        result = self._run(rig, _AMI, TRINITY_AWS_SUBMIT="apply")
+        assert result.returncode == 0, result.stderr
+        (args,) = self._change_sets(rig)
+        assert args[args.index("--intent") + 1] == "APPLY"
+        (change,) = json.loads(args[args.index("--change-set") + 1])
+        assert change["Entity"]["Identifier"] == _PRODUCT
+        details = json.loads(change["Details"])
+        assert details["Version"]["VersionTitle"] == _TAG
+        source = details["DeliveryOptions"][0]["Details"]["AmiDeliveryOptionDetails"]["AmiSource"]
+        assert source["AmiId"] == _AMI and source["AccessRoleArn"] == _ROLE
+        assert not record.exists()
+
+    @pytest.mark.parametrize("intent", ["", "apply"])
+    def test_a_change_set_aws_rejects_while_preparing_fails_and_keeps_the_record(self, rig: Rig, intent) -> None:
+        """start-change-set answers before AWS has checked anything."""
+        record = rig.pass_record(_AMI)
+        rig.world["change_set_states"] = ["PREPARING", "FAILED"]
+        rig.save()
+        result = self._run(rig, _AMI, TRINITY_AWS_SUBMIT=intent)
+        assert result.returncode != 0
+        assert "DUPLICATE_VERSION_TITLE" in result.stderr, result.stderr
+        assert record.exists()
+
+    @pytest.mark.parametrize("intent", ["", "apply"])
+    def test_no_verdict_within_the_wait_exits_three_and_keeps_the_record(self, rig: Rig, intent) -> None:
+        """A new AMI stayed PREPARING past the wait on the real account; that is no rejection."""
+        record = rig.pass_record(_AMI)
+        rig.world["change_set_states"] = ["PREPARING"]
+        rig.save()
+        result = self._run(rig, _AMI, TRINITY_AWS_SUBMIT=intent)
+        assert result.returncode == 3
+        assert "describe-change-set" in result.stderr and "cs1" in result.stderr
+        assert "did not accept" not in result.stderr
+        assert record.exists()
+
+    def test_an_apply_aws_is_still_scanning_counts_as_submitted(self, rig: Rig) -> None:
+        record = rig.pass_record(_AMI)
+        rig.world["change_set_states"] = ["PREPARING", "APPLYING"]
+        rig.save()
+        assert self._run(rig, _AMI, TRINITY_AWS_SUBMIT="apply").returncode == 0
+        assert not record.exists()
+
+    def test_a_refused_apply_keeps_the_record(self, rig: Rig) -> None:
+        record = rig.pass_record(_AMI)
+        rig.world["change_set_rc"] = 254
+        rig.save()
+        assert self._run(rig, _AMI, TRINITY_AWS_SUBMIT="apply").returncode != 0
+        assert record.exists()
+
+
+def test_an_aws_build_can_no_longer_submit() -> None:
+    template = (_AWS / "trinity.pkr.hcl").read_text()
+    assert "shell-local" not in template
+    assert "mp-submit" not in template.split("post-processor", 1)[1]

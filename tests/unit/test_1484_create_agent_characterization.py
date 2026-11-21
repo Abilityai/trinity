@@ -1112,6 +1112,69 @@ async def test_2693_corrupt_bundled_avatar_keeps_prompt_seed(crud_env, monkeypat
     ctx["docker_utils"].containers_run.assert_awaited()
 
 
+async def _create_github_with_bundled_avatar(crud, ctx, monkeypatch, tmp_path, name,
+                                             metadata, avatar_bytes):
+    """#4570: drive a `github:` create whose repo ships `avatar.png`. The fetch
+    is the only network edge stubbed; the install and the DB stamp are real crud."""
+    _patch_repo_validation(monkeypatch, crud)
+    ctx["template_service"].fetch_template_metadata_result_for_create.return_value = (
+        metadata, None)
+
+    def _fake_fetch(repo, pat, ref, filename, max_bytes):
+        return avatar_bytes if filename == "avatar.png" else None
+
+    monkeypatch.setattr(crud, "_fetch_github_file_bytes", _fake_fetch)
+    monkeypatch.setattr(crud.avatar_paths, "AVATAR_DIR", tmp_path / "avatars")
+    await crud.create_agent_internal(
+        _github_config(name, template="github:someowner/somerepo@v1.2.0"), _user(), None)
+
+
+@pytest.mark.asyncio
+async def test_4570_github_bundled_avatar_is_stamped_as_default(crud_env, monkeypatch, tmp_path):
+    """#4570: the bundled file was installed but nothing pointed at it, so
+    `avatar_url` stayed null and every surface showed initials. The install must
+    be followed by the same default-avatar stamp a `local:` template gets, seeded
+    with the template's own `avatar_prompt`."""
+    crud, ctx = crud_env
+    await _create_github_with_bundled_avatar(
+        crud, ctx, monkeypatch, tmp_path, "gh-av", {"avatar_prompt": "a small owl"}, _png_bytes())
+
+    installed = (tmp_path / "avatars" / "gh-av.webp").read_bytes()
+    assert installed[:4] == b"RIFF" and installed[8:12] == b"WEBP"
+    ctx["db"].set_default_avatar.assert_called_once()
+    assert ctx["db"].set_default_avatar.call_args.args[:2] == ("gh-av", "a small owl")
+
+
+@pytest.mark.asyncio
+async def test_4570_github_bundled_avatar_without_prompt_still_stamped(crud_env, monkeypatch, tmp_path):
+    """A template may ship the file without an `avatar_prompt`. `get_avatar_identity`
+    drops a row whose prompt is empty, so the stamp needs a non-empty prompt or
+    `avatar_url` stays null all the same."""
+    crud, ctx = crud_env
+    await _create_github_with_bundled_avatar(
+        crud, ctx, monkeypatch, tmp_path, "gh-noprompt", {}, _png_bytes())
+
+    assert (tmp_path / "avatars" / "gh-noprompt.webp").exists()
+    ctx["db"].set_default_avatar.assert_called_once()
+    name, prompt = ctx["db"].set_default_avatar.call_args.args[:2]
+    assert name == "gh-noprompt"
+    assert isinstance(prompt, str) and prompt.strip()
+
+
+@pytest.mark.asyncio
+async def test_4570_failed_github_avatar_install_is_not_stamped(crud_env, monkeypatch, tmp_path):
+    """No file, no stamp: a URL pointing at an avatar that was never written would
+    break the image on every surface instead of falling back to initials."""
+    crud, ctx = crud_env
+    await _create_github_with_bundled_avatar(
+        crud, ctx, monkeypatch, tmp_path, "gh-badav", {"avatar_prompt": "a small owl"},
+        b"not an image")
+
+    assert not (tmp_path / "avatars" / "gh-badav.webp").exists()
+    ctx["db"].set_default_avatar.assert_not_called()
+    ctx["docker_utils"].containers_run.assert_awaited()
+
+
 def test_2693_first_run_fleet_ships_bundled_avatars():
     """AC4: every agent in the bundled first-run manifest carries both a bundled
     image and the `avatar_prompt` that makes it installable + regenerable."""
@@ -1715,3 +1778,132 @@ async def test_ent704_git_mode_pushes_for_fork_to_own(crud_env, monkeypatch):
     assert result.git_mode["source_mode"] is True
     assert result.git_mode["pushes"] is True
     assert result.git_mode["reason"] == "fork-to-own: the agent owns its fork"
+
+
+# ===========================================================================
+# #4387 — template `library_skills:` reach `_materialize_agent_files` only
+# through the §21.3.1 `skills.manage` fence. Drives a whole creation so the
+# CALL SITE is pinned: handing `tr.declared_library_skills` straight through
+# would let an agent key without the grant obtain library skills by creating
+# an agent from a template that names them, and the unit tests of the fence
+# helper alone would stay green.
+# ===========================================================================
+
+
+_LIBRARY_SKILLS = ["user-research", "survey-setup"]
+
+
+@pytest.fixture
+def library_skills_env(crud_env, monkeypatch, tmp_path):
+    crud, ctx = crud_env
+    tpl = tmp_path / "libtpl"
+    tpl.mkdir()
+    (tpl / "template.yaml").write_text(
+        "type: business-assistant\nlibrary_skills:\n"
+        + "".join(f"  - {n}\n" for n in _LIBRARY_SKILLS)
+    )
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path, tmp_path))
+    # The ent#591 template-source bound is its own suite's subject; held open
+    # here so an agent-key creator reaches the library-skills fence.
+    monkeypatch.setattr(crud.template_source_policy, "enforce", AsyncMock())
+
+    # The fence reads the grant through `dependencies.db`: point it at this
+    # harness's mocked db, whichever db that module was imported against.
+    import dependencies
+    monkeypatch.setattr(dependencies, "db", ctx["db"])
+    ctx["db"].agent_has_capability.return_value = False
+    audit = []
+
+    async def _audit(request, user, action, capability, target, **details):
+        audit.append({"action": action, "capability": capability,
+                      "target": target, **details})
+    monkeypatch.setattr(dependencies, "_audit_capability", _audit)
+
+    materialized = []
+
+    async def _spy(*args, **kwargs):
+        materialized.append(kwargs)
+    monkeypatch.setattr(crud, "_materialize_agent_files", _spy)
+    return crud, ctx, audit, materialized
+
+
+def _agent_key_user(agent="orchestrator"):
+    u = _user(agent_name=agent)
+    u.mcp_scope = "agent"
+    return u
+
+
+@pytest.mark.asyncio
+async def test_4387_a_person_creating_from_the_template_gets_its_library_skills(
+    library_skills_env,
+):
+    crud, ctx, audit, materialized = library_skills_env
+    await crud.create_agent_internal(
+        AgentConfig(name="lib-person", template="local:libtpl"), _user(), None)
+
+    (kw,) = materialized
+    assert kw["declared_library_skills"] == _LIBRARY_SKILLS
+    assert kw["library_skills_assigned_by_agent"] is None
+    assert audit == []
+
+
+@pytest.mark.asyncio
+async def test_4387_an_agent_key_without_skills_manage_gets_none(library_skills_env):
+    crud, ctx, audit, materialized = library_skills_env
+    status = await crud.create_agent_internal(
+        AgentConfig(name="lib-nogrant", template="local:libtpl"),
+        _agent_key_user(), None)
+
+    assert status is not None  # the refusal costs the skills, never the creation
+    (kw,) = materialized
+    assert kw["declared_library_skills"] == []
+    (row,) = audit
+    assert row["action"] == "capability_refused"
+    assert row["capability"] == "skills.manage"
+    assert row["target"] == "lib-nogrant"
+    assert row["library_skills"] == _LIBRARY_SKILLS
+
+
+@pytest.mark.asyncio
+async def test_4387_an_agent_key_holding_skills_manage_gets_them_attributed(
+    library_skills_env,
+):
+    crud, ctx, audit, materialized = library_skills_env
+    ctx["db"].agent_has_capability.return_value = True
+    await crud.create_agent_internal(
+        AgentConfig(name="lib-grant", template="local:libtpl"),
+        _agent_key_user(), None)
+
+    (kw,) = materialized
+    assert kw["declared_library_skills"] == _LIBRARY_SKILLS
+    assert kw["library_skills_assigned_by_agent"] == "orchestrator"
+    ctx["db"].agent_has_capability.assert_any_call("orchestrator", "skills.manage")
+    assert [r["action"] for r in audit] == ["capability_used"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("holds_grant", [False, True])
+async def test_4387_an_ephemeral_creation_never_runs_the_library_skills_fence(
+    library_skills_env, monkeypatch, holds_grant,
+):
+    """Nothing can be assigned to an ephemeral agent, so an agent key spawning
+    one from a template that declares `library_skills` must leave neither a
+    `capability_refused` nor a `capability_used` row. The real
+    `_permitted_library_skills` and `capability_refusal` are in place — only
+    the audit sink is captured — so a row here would mean the fence ran."""
+    crud, ctx, audit, materialized = library_skills_env
+    _entitle(monkeypatch, crud)
+    ctx["db"].get_agent_ephemeral_info.return_value = {"is_ephemeral": False}
+    ctx["db"].agent_has_capability.return_value = holds_grant
+    config = AgentConfig(
+        name="lib-ghost", template="local:libtpl", ephemeral={"max_executions": 3})
+    await crud.create_agent_internal(config, _agent_key_user(), None)
+
+    assert config.ephemeral  # the creation really took the ephemeral path
+    (kw,) = materialized
+    assert kw["declared_library_skills"] == []
+    assert audit == []
+    assert "skills.manage" not in [
+        c.args[1] for c in ctx["db"].agent_has_capability.call_args_list
+        if len(c.args) > 1
+    ]

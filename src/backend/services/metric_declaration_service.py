@@ -264,6 +264,11 @@ def _points(agent_name: str, metric: str) -> List[Dict[str, Any]]:
              "detail": None, "count": min(count, POINT_COUNT_LIMIT), "last_point_at": newest}]
 
 
+# Join findings that mean an objective file was not (fully) read.
+_UNCHECKED_OBJECTIVE_FINDINGS = frozenset(
+    {"objective_invalid", "objective_unreadable", "objectives_read_timeout"})
+
+
 async def _objectives(agent_name: str, metric: str) -> List[Dict[str, Any]]:
     from services import objective_join_service
 
@@ -271,6 +276,14 @@ async def _objectives(agent_name: str, metric: str) -> List[Dict[str, Any]]:
         objective_join_service.read_objective_join(agent_name), _LOOKUP_TIMEOUT)
     if joined.get("unavailable"):
         raise RuntimeError(joined["unavailable"])
+    # The join answers `unavailable: None` with the failure in `findings` when an
+    # objective file does not parse, cannot be read, or the read ran out of time.
+    # The metric may be cited in exactly that file, so it is a source that could
+    # not be checked (#4586), not "no objective uses it".
+    for finding in joined.get("findings") or []:
+        code = (finding or {}).get("code")
+        if code in _UNCHECKED_OBJECTIVE_FINDINGS:
+            raise RuntimeError(code)
     out = []
     for objective in joined.get("objectives") or []:
         if any((m or {}).get("name") == metric for m in objective.get("metrics") or []):

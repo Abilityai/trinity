@@ -2282,12 +2282,26 @@ export function composerAvailabilityNotice(agent, { memberTier = viewerIsMemberT
 //     promise the turn succeeded. A failure after this point surfaces as a
 //     FAILED execution row and an audit entry on the operator's side.
 //
+//   * #4502 — an agent that is NOT RUNNING is not picking anything up.
+//     `resume_requested` says a wake was requested; whether it could be
+//     delivered is `wake_state`, which the answer response never carries (the
+//     dispatch that learns the agent is stopped runs after it). So the caller
+//     passes the roster's `availability` for the agent: `stopped` and
+//     `unavailable` say only "Sent.", and so does a row that already reads
+//     `wake_state: 'pending'`. `unknown` (Docker could not be asked) and an
+//     agent the roster does not list keep the sentence — the dispatch itself
+//     still tries in that case. And `verified: false` — the caller could not
+//     read the roster just now — says only "Sent.": a roster from page load is
+//     not evidence the agent is still running.
+//
 // Returns null when there is nothing honest to say, so the caller renders
 // nothing rather than an empty line.
-export function answerConfirmation(answered, agentLabel = null) {
+const NOT_RUNNING = new Set(['stopped', 'unavailable'])
+export function answerConfirmation(answered, agentLabel = null, { availability = null, verified = true } = {}) {
   if (!answered || answered.status !== 'answered') return null
   const who = (agentLabel || answered.agent_name || 'the agent')
-  return answered.resume_requested === true
+  const deferred = answered.wake_state === 'pending' || NOT_RUNNING.has(availability) || verified === false
+  return answered.resume_requested === true && !deferred
     ? `Sent — ${who} is picking this up.`
     : 'Sent.'
 }

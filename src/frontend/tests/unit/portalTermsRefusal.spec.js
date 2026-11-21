@@ -100,13 +100,15 @@ describe('ruling A(1): the terms on a portal session', () => {
     expect(handler).not.toHaveBeenCalled()
   })
 
-  it('loadTerms reads on the portal bearer; acceptTerms posts the version and clears the refusal', async () => {
+  it('loadTerms reads on the portal bearer; acceptTerms posts the version and leaves the refusal to the roster reload', async () => {
     const seen = []
     portalHttp.defaults.adapter = async (config) => {
       seen.push({ method: config.method, url: config.url, auth: config.headers?.Authorization, data: config.data })
       const data = config.url.endsWith('/accept')
         ? { accepted: true, created: true, version: '2026-11', accepted_at: 'x' }
-        : { required: true, version: '2026-11', title: 'T', text: 'body', accepted: false, is_default: true }
+        : config.url.endsWith('/my-agents')
+          ? { agents: [{ name: 'scout' }] }
+          : { required: true, version: '2026-11', title: 'T', text: 'body', accepted: false, is_default: true }
       return { status: 200, data, headers: {}, config, statusText: 'OK' }
     }
     store.termsRefusal = 'terms_required'
@@ -117,8 +119,14 @@ describe('ruling A(1): the terms on a portal session', () => {
     const out = await store.acceptTerms('2026-11')
     expect(out.accepted).toBe(true)
     expect(seen[1]).toMatchObject({ method: 'post', url: '/api/terms/accept', auth: 'Bearer tok', data: JSON.stringify({ version: '2026-11' }) })
-    expect(store.termsRefusal).toBe(null)
+    // #4515: the refusal is what keeps `PortalTerms` mounted for its
+    // `accepted` emit; clearing it here unmounted the screen first and the
+    // emit was dropped. The re-bootstrap's roster read is what ends it.
+    expect(store.termsRefusal).toBe('terms_required')
     expect(store.terms.accepted).toBe(true)
+    await store.fetchRoster()
+    expect(store.termsRefusal).toBe(null)
+    expect(store.agents.map((a) => a.name)).toEqual(['scout'])
   })
 
   it('a refused accept rejects with the server error and keeps the refusal', async () => {

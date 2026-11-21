@@ -2830,7 +2830,8 @@ async def _audit_capability(
     target: Optional[str], **details,
 ) -> None:
     """One AUTHORIZATION row about a capability. Best-effort: an audit failure
-    never changes what the caller gets."""
+    never changes what the caller gets. Safe with `request=None`, for a fence
+    applied off the request path (agent creation from a system deploy, #4387)."""
     try:
         from services.platform_audit_service import (
             platform_audit_service, AuditEventType, principal_actor,
@@ -2844,12 +2845,12 @@ async def _audit_capability(
             event_action=action,
             source="api",
             **actor,
-            actor_ip=request.client.host if request.client else None,
+            actor_ip=getattr(getattr(request, "client", None), "host", None),
             target_type="agent",
             target_id=target,
-            endpoint=request.scope["path"],
-            request_id=getattr(request.state, "request_id", None),
-            details={"capability": capability, "method": request.method, **details},
+            endpoint=(getattr(request, "scope", None) or {}).get("path"),
+            request_id=getattr(getattr(request, "state", None), "request_id", None),
+            details={"capability": capability, "method": getattr(request, "method", None), **details},
         )
     except Exception:  # noqa: BLE001
         logger.warning("capability audit failed for %s (%s)", capability, action)
@@ -3669,3 +3670,20 @@ SkillManagedAgentByName = Annotated[str, Depends(get_skill_managed_agent_by_name
 
 # Current user type alias
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+def check_requested_project(request: Any, current_user: Any, agent_name: str) -> None:
+    """Refuse a dispatch whose body names a ``project_id`` the platform will not
+    attribute (ent#1105). Call it BEFORE any admission, claim, slot or row.
+
+    The decision is the execution-attribution seam's; this only maps its
+    refusal onto the HTTP response — 422 ``project_attribution_unavailable``
+    when no edition attributes executions to projects.
+    """
+    from services import execution_attribution
+    try:
+        execution_attribution.check(
+            getattr(request, "project_id", None),
+            principal=current_user, agent_name=agent_name)
+    except execution_attribution.AttributionRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail())

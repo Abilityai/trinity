@@ -2,10 +2,11 @@
 
 Workshops, demos, and deep-dives on building and running autonomous agents with Trinity. Grouped by topic, **newest first** within each group.
 
-> New recordings land most weeks. For the full archive and live sessions, see [ability.ai/workshops](https://www.ability.ai/workshops).
+> New recordings land most weeks. For the full archive and live sessions, see [ability.ai/workshops](https://www.ability.ai/workshops). Short narrated product demos — one per feature, with captions and chapters — play on the [hosted video page](https://docs.ability.ai/videos) under **Product Demos** and on the matching guide pages of the docs site.
 
 ## Start Here — Platform Overview
 
+- [Trinity 1.0 — The Complete Course](https://youtu.be/Q3-YFXz8NSI) — *Oct 2026* · everything in Trinity 1.0, end to end, in one 76-minute video; jump to any of its 41 chapters from the YouTube timeline
 - [Trinity v0.9.0 — Release Tour](https://youtu.be/cp45vwZF7Ns) — *Aug 2026* · multi-agent org structures, Workspace in every build, the shared skills library, bidirectional A2A
 - [Trinity Architecture Explained](https://youtu.be/XDLOq1crF9w) — *Jul 2026* · animated explainer (4:44): one scheduled task end to end — container, gate, delegation, approval, audit, breakers
 - [Trinity v0.8.0 — Release Tour](https://youtu.be/wxCC6QGtLMA) — *Jul 2026* · voice replies across channels, Brain Orb, Grid dashboard, enterprise identity

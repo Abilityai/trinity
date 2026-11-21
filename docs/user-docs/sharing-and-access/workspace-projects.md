@@ -23,6 +23,8 @@ Projects appear on instances licensed for them. On an instance without the entit
 
 From the **Projects** list, **New project** asks for a name and a goal, who the steward is (you, someone else at the company, or an agent you can use), an optional tracker link, visibility, and the agents that may work on it. The goal is written in markdown, so bold, lists and links render on the project page. **Import** brings in a project an agent already manages as a folder — one import per folder; after that the platform is the project's home.
 
+**Import → From a GitHub epic** turns an epic into a project: paste `owner/repo#123` or the issue's link. The epic's title becomes the project's name and its link the tracker link; each of its sub-issues becomes a task with no owner yet, keeping a link to its issue (see [GitHub issues and PRs](#github-issues-and-prs)). Open sub-issues arrive *to do*, closed ones *done*. You are the steward, and the project begins **Not started** until a person presses **Start project**. It is a one-time copy: nothing is written back to GitHub, and an epic can be imported once. Only sub-issues Trinity can read are imported (at most 100, one level deep); the dialog names any it left out. For an epic in a public repository, the first paragraph of its description becomes the goal; otherwise the goal names the epic. The project skills read the imported project through the platform's project tools, as for any project.
+
 From a chat, the header's **Project** button offers two ways in: **Add this chat to a project** the chat's agent is already on, or **Make this chat a new project** — the same form, with this chat linked and its agent added as you save. A room can be added to a project but not turned into one. The pinned **Main** chat never belongs to a project; start a new chat for it.
 
 An agent can also start a project for its owner from its own `/project-init` skill, once an admin has granted the agent the **Start projects** permission — see [Platform mode](../abilities/agent-dev-plugin.md). The owner is the creator and first member; nobody else gains access.
@@ -68,6 +70,8 @@ The Tasks tab has two views of the same tasks, **List** and **Board**; it opens 
 
 **Board** shows one column per step a task goes through: **Active**, **Awaiting verification** and **Done**, each with its count. A task that is blocked, needs a decision or is paused stays in **Active** and carries a badge saying so; the column header counts them. A card shows the task's id and title, **P1** when it is one, who it is assigned to (a person, an agent or both), who created it and how long ago it last changed. Opening a card's title opens the same task the list opens.
 
+![A project's Tasks tab in Board view: Active, Awaiting verification and Done columns, with a blocked task and Confirm buttons on finished work](../../screenshots/workspace-project-board.webp)
+
 - **Move a card** by dragging it to another column. With a keyboard, focus the card's title, press **←** or **→** to pick a column, then **Enter** to move it there (**Esc** cancels). The card shows **Saving…** in its new column until the server has it; if the move is refused, the card goes back and a message says why.
 - **Into Done.** From **Awaiting verification**, a move to **Done** is your confirmation, the same as **Confirm** on the card. From **Active** it asks first and needs a short reason — where the result is, or why the task is no longer needed — because the task never waited for verification and nothing has checked the work. The reason is added to the task's log, where the agents on the project read it.
 - **A done task** can only be moved back to **Active**, which reopens it.
@@ -82,6 +86,8 @@ An agent cannot mark a task done. When it finishes, it moves the task to **Await
 Setting a task done while its agent never claimed it (it isn't in **Awaiting verification**) needs a **Note** saying how it was finished; the note goes in the task's log and the task shows *Done without a done claim*, because its output may not exist. Tasks waiting on it still become ready, and name it.
 
 Every row and every open task names **who created it** (a person, or an agent marked *(agent)*) and **who it is for**: the person who owns it and the agent doing it.
+
+**Editing a task.** A member who can change tasks edits its **Title**, **Objective**, **Definition of done** and **Owner** in the open task, alongside its status and note, and one **Save** sends only what changed. Clearing the objective, the definition of done or the owner removes it. The limits are the ones at creation — a title of up to 200 characters, an objective or definition of done of up to 4,000 — checked before you save, and a refusal is shown under the field it names, keeping what you typed. The task's agent is not changed here. A done task shows these fields disabled with *Reopen the task to change its …*; reopen it first. Edits and owner changes appear in the task's log as **Edited** and **Owner**.
 
 #### GitHub issues and PRs
 
@@ -121,6 +127,8 @@ The **Steward** card on the Overview shows who it is, the project's health as a 
 
 A goal and a steward do not start a project: a person does. A new project begins **Not started**.
 
+![A running project: Stop project and the Mode menu set to Propose in the header, the Continue card, Where it stands, and the Steward card showing when Trinity last woke the steward](../../screenshots/workspace-project-mode-steward.webp)
+
 | State | What it means for agents |
 |-------|--------------------------|
 | **Not started** | No task's run starts. The steward may write the plan (tasks, notes, the log) before you press **Start project**; other agents' turns with no person in them can't write to it. |
@@ -153,6 +161,8 @@ Lowering the mode to Track withdraws pending proposals; going from Auto to Propo
 
 Open a task and use **Run this task** to start its work from the project itself:
 
+![A task open on Run this task: the agent picker, Start, and the preview of what the agent is given — the objective, the definition of done, the context files and the recent task log](../../screenshots/workspace-project-task-run.webp)
+
 - **Pick the agent.** You're offered the agents working on the project that you can use. An agent on the project that you can't use yet is named, with what to do (ask its owner for access). With none at all, add one in **Members & access** first.
 - **Preview what it gets.** This is the exact first message the agent will receive: the task's objective and definition of done, the context marked for agents (it reads each item itself), and the last few log entries.
 - **Start** opens a chat with that agent, tied to the task. The first message is sent once, even if you press Start twice. Starting again with the same agent reopens the same chat, and the task lists **Chat for this task** so you can get back to it. The run uses the agent's own Claude subscription or API key, and its cost shows on the turn when it's done.
@@ -160,6 +170,12 @@ Open a task and use **Run this task** to start its work from the project itself:
 Only members and the creator can start a run. Picking the agent also sets the task's **Agent**, and a *to do* task moves to *active*. A task for a person can't be started.
 
 On a project that is not started, stopped or done, **Run this task** says why in place of **Start**; the task's chats stay open. A task with a run under way names it — **Run R-… on {agent}: Running** — and **Start** is refused with a run already under way. A refused **Start** always says why, by name.
+
+### Runs
+
+The **Runs** tab lists the runs behind the project across its agents. The cards at the top give the total cost and the cost and run count for each agent. Each row shows a run's status, agent, model, cost, how long it ran, when, and the task it belongs to. Filter by **Agent**, **Status** and **Window**. Runs are kept for 90 days.
+
+![A project's Runs tab: the total cost and a card per agent, then each run with its status, agent, model, cost, run time and task](../../screenshots/workspace-project-runs.webp)
 
 ### Files, reports and decisions
 
@@ -176,19 +192,24 @@ A brief often needs more room than a task's fields: a call transcript, your view
 
 ### Members, agents and visibility
 
-**Members & access** is where the creator adds people by their work email, adds agents, and invites guests.
+**Members & access** is where the creator adds people, adds agents, and invites guests.
+
+**Picking a person.** Every field that names a person — a member, a guest, the steward in **New project** and **Edit project**, a task's owner — is a people picker: start typing a name or email and pick from the suggestions, using ↑ ↓ and Enter or a click. Who appears is decided by the server: the people you may add there, never the whole instance. The member, steward and task-owner fields need a person picked from the list, and text that matches no one says so by name. The guest field also takes an outside email typed in full, since a guest may have no account yet.
 
 - **Visibility** is **Members only** (the default) or **Company** — every platform user at your company can open a Company project and work on it with its agents, but only members write its tasks and log; only members can open a Members-only one.
 - **Adding an agent** you own takes effect at once. Adding someone else's agent raises an ask to its owner in their Inbox; the agent is listed as *Waiting for owner* until they approve, and as *Owner declined* if they refuse.
 - **Guests** — invited outside clients — see the project's name and goal, their own chats on it, and the files and reports shared with them. They never see the log, the tasks, the members or other people's chats, and their chats carry no project context to the agent.
 - **Where you stand.** Under the goal, the project page says your role and what it lets you do: the creator can change everything; a member can add and change tasks, write in the log and add files; a company viewer can open the project and chat with its agents, but only members change its tasks, log and files. If you aren't a member, one line in place of **New task**, the log entry form and **Add from…** says who can add you. On an archived project the line says nothing changes until the creator restores it. The **Awaiting verification** group says who confirms a finished task: a member, or the steward agent by name when it is active on the project.
 - **Ask to join.** Someone who can open a company project but isn't on it gets **Ask to join** under the role line. The project's creator gets one decision in their **Inbox**. **Approve** adds them as a member, and **Decline** sends back the reason the creator gives. While a request waits, the page says who it waits on, and asking again doesn't send a second one. Guests are invited and never see this.
+- **A linked room's agents.** Linking a room never adds its agents to the project. When some of them aren't on it, the room's header shows a chip beside the project badge — *2 not on it*, or *1 waiting on owner* — that opens **Agents in this room** with each agent's state. The creator gets **Add** for an agent they can add (someone else's agent still asks its owner first) and sees *Not on your list* for one they can't; a member sees the states and who can add. After the creator links a room that has such agents, the list opens on its own.
 - **Ask to add a room's agent.** In a room linked to the project, a member who can't add an agent gets **Ask to add** in the room's agents list. The creator decides in their Inbox. If they approve and the agent is someone else's, its owner is asked next, as always.
 - **Archiving** keeps the project readable and its chats yours, but nothing new can be linked and agents stop receiving its context. **Restore** undoes it.
 
 ## For Agents
 
-Agents reach a project through the MCP tools the platform exposes to them — `list_projects`, `get_project`, `list_project_tasks`, `get_project_log`, `read_project_context` (a brief people marked for agents, 200 KB a call), `create_project_task` (with `parent`, `blocked_by` and `for_person`), `update_project_task` (`parent` — `null` clears it — `blocked_by_add`, `blocked_by_remove`, `for_person`), `add_project_task_note`, `add_project_log_entry`, `link_to_project`, `propose_project_changes` (any agent on the project, with the project-management permission), and for a steward agent `get_steward_digest`, `set_project_health` and `start_project_task`. `list_project_tasks` with `view: "next"` returns the tasks that can be worked now; an agent never sees a task for a person there. Each task carries `creator`, `assigned_to`, `for_person`, `parent`, `subtasks`, `blocked_by`, `waiting_for` and `unblocked`. Projects carry `state` and `mode`; tasks carry `needs_go` and `needs_decision`. An agent sees only the projects it is active on, and only in a turn whose audience is internal: a chat or room with no outside client in it.
+Agents reach a project through the MCP tools the platform exposes to them — `list_projects`, `get_project`, `list_project_tasks`, `get_project_log`, `read_project_context` (a brief people marked for agents, 200 KB a call), `create_project_task` (with `parent`, `blocked_by` and `for_person`), `update_project_task` (`parent` — `null` clears it — `blocked_by_add`, `blocked_by_remove`, `for_person`), `add_project_task_note`, `add_project_log_entry`, `link_to_project`, `propose_project_changes` (any agent on the project, with the project-management permission), `list_project_executions` (the project's runs; a run the agent cannot open shows only its agent and status), and for a steward agent `get_steward_digest`, `set_project_health` and `start_project_task`. `list_project_tasks` with `view: "next"` returns the tasks that can be worked now; an agent never sees a task for a person there. Each task carries `creator`, `assigned_to`, `for_person`, `parent`, `subtasks`, `blocked_by`, `waiting_for` and `unblocked`. Projects carry `state` and `mode`; tasks carry `needs_go` and `needs_decision`. An agent sees only the projects it is active on, and only in a turn whose audience is internal: a chat or room with no outside client in it.
+
+A person's own user-scoped MCP key works on the project tools too, acting as that person with their Workspace permissions. A Workspace-only account cannot create an MCP key.
 
 `start_project_task` (`project_id`, `task_id`, `agent`): As a project's steward, start one task's run on an agent you name. The platform never picks the task or the agent. What happens depends on the project's mode, which only a person sets: in Track a person starts every run, so this is refused (`mode_track`); in Propose, and on a task held for a person's go in any mode, it becomes a proposal the task's person approves (state `proposed`); in Auto the run starts (state `started`). The run is the person's: the one in this conversation, or, in a turn with no person, the person who turned Auto on (refused as `auto_origin_unavailable` when they can no longer start that agent here). Other refusals: the project is not running (`project_not_started`, `project_stopped`, `project_done`); `only_the_steward_starts`; the task is done, awaiting its check, for a person (`task_is_for_a_person`), needs a decision, blocked or waiting on another task; the agent is not on the project; `agent_consent_predates_runs`; a run is already live (`task_run_live`) or proposed. A refusal never asks you to widen a permission. A run ends one of two ways: the worker moves the task to pending-verification with its evidence, or raises an ask with `context.run_id`. In a turn with no person, an agent may move a task to active or pending-verification only as that task's run. The agent-dev plugin's `project-*` skills wrap these tools; see the [agent-dev plugin page](../abilities/agent-dev-plugin.md).
 
@@ -201,7 +222,7 @@ Agents reach a project through the MCP tools the platform exposes to them — `l
 - **An agent can request the people part; its primary contact approves it.** With the project-management permission, any agent on the project can request members to add or remove (work emails; to add, also a canon role written `role:<id>` — the people who hold it when you approve), other agents to add or remove, and an owner for each task. The request goes to the agent's **primary contact** — the person assigned on the agent's **Access** tab, or its owner when nobody is assigned — as one decision in their **Inbox**, showing the whole change, not to the project's creator. **Approve** applies exactly that, once, as you; anything you could not do on the project yourself is listed as not applied, by name, and the log records who requested it and who approved it. **Decline** applies nothing, and the reason you give is what the agent reads next. It can also ask for a new steward or a change to who can open the project. Only the project's creator can apply member, agent, steward and visibility changes, and a member can apply task owners, so a primary contact who could apply none of a request is not asked: the agent is told why and nothing is raised. One request waits at a time, and the **Steward** card says who it is waiting on. If the agent leaves the project before you answer, its request is withdrawn and nothing from it is applied. Adding an agent someone else owns still asks that agent's owner.
 - **Waking the steward is off until a person starts it.** An agent steward is woken only after someone starts it on the Steward card, and only while its owner has autonomy on for it. A person steward is never woken.
 - **A stopped project doesn't silence an open task chat.** Stopping refuses new runs, but a message you send in a task's existing chat still reaches its agent; the stopped banner says so.
-- **Import is one-way.** A folder project imported from an agent is managed on the platform from then on; nothing syncs back to the folder.
+- **Import is one-way.** A folder project imported from an agent, or a GitHub epic, is managed on the platform from then on; nothing syncs back to the folder or to GitHub.
 
 ## See Also
 

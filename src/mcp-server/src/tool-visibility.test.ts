@@ -808,7 +808,8 @@ describe("ent#719 human-only tools are listed exactly to the keys their backend 
     // Every tool above but the key read and the three whose rows keep their own
     // kind (close_room `none`, respond_to_operator_queue `in-tool`,
     // revoke_agent_delegation `enforce`); the first test above pins those three.
-    assert.equal(rows, 10, "the rows naming a human-only rule are not the ten this guard expects");
+    // Plus the five person-only project tools (trinity-enterprise#1322).
+    assert.equal(rows, 15, "the rows naming a human-only rule are not the fifteen this guard expects");
   });
 
   it("each description says who may call it and fits the 2,048-character cap, hidden tools included", async () => {
@@ -874,5 +875,178 @@ describe("ent#719 human-only tools are listed exactly to the keys their backend 
     });
     // Every call was decided by the backend, not by the tool list.
     assert.equal(srv.requests.length, 1 + shown.length, srv.requests.join(", "));
+  });
+});
+
+describe("trinity-enterprise#1322 project tools are listed to exactly the keys that can call them", () => {
+  /**
+   * Written out here, not derived from the code under test. The shared tools
+   * act as the calling agent (its own key) or as the person (their own
+   * user-scoped key, on the Workspace routes). Starting a task's run and
+   * proposing changes stay an agent's: the person's start is not built, and a
+   * person makes a change directly instead of proposing it. No other scope is
+   * shown a project tool: the system key, connector, delegate, ops and any
+   * future scope.
+   */
+  const SHARED = [
+    "list_projects", "get_project", "list_project_tasks", "create_project_task", "update_project_task",
+    "add_project_task_note", "read_project_context", "get_project_log", "add_project_log_entry",
+    "link_to_project", "get_steward_digest", "create_project", "import_project", "list_project_executions",
+    "set_project_health",
+  ];
+  const EXPECTED: Record<string, string[]> = {
+    ...Object.fromEntries(SHARED.map((t) => [t, ["agent", "user"]])),
+    start_project_task: ["agent"],
+    propose_project_changes: ["agent"],
+    // A person's acts: a person's own user key only (CP-P4).
+    set_project_lifecycle: ["user"],
+    update_project_settings: ["user"],
+    set_steward_waking: ["user"],
+    manage_project_members: ["user"],
+    decide_project_runs: ["user"],
+  };
+  const KEYS: Record<string, KeyRow> = {
+    user: { scope: "user" },
+    agent: { scope: "agent", agent_name: "alpha" },
+    system: { scope: "system", agent_name: "trinity-system" },
+    connector: { scope: "connector", agent_name: "alpha" },
+    portal_delegate: { scope: "portal_delegate" },
+    ops: { scope: "ops" },
+    some_future_tier: { scope: "some_future_tier" },
+  };
+
+  let srv: KeyedServer;
+  const listing: Record<string, string[]> = {};
+  before(async () => {
+    srv = await bootKeyedServer(KEYS);
+    for (const key of Object.keys(KEYS)) listing[key] = await listedTo(srv.url, key);
+  });
+  after(async () => {
+    await srv?.stop();
+  });
+
+  it("covers every registered project tool, and each carries its own access check", async () => {
+    const { createProjectTools } = await import("./tools/projects.js");
+    const tools = Object.values(createProjectTools({ getBaseUrl: () => "http://x" } as any, true)) as Array<{
+      name: string; canAccess?: unknown;
+    }>;
+    assert.deepEqual(tools.map((t) => t.name).sort(), Object.keys(EXPECTED).sort(),
+      "a project tool was added or removed: give it a row here and its own canAccess");
+    // Without its own canAccess a tool inherits the operator gate and is shown
+    // to the system key; the listing test below would catch it too.
+    for (const t of tools) assert.equal(typeof t.canAccess, "function", `${t.name} has no canAccess of its own`);
+  });
+
+  it("each project tool is listed to exactly its scopes, for every key scope", () => {
+    assert.ok(listing.user.length > 100, `only ${listing.user.length} tools for a user key — the census is not seeing the server`);
+    for (const [tool, scopes] of Object.entries(EXPECTED)) {
+      const shown = Object.keys(KEYS).filter((key) => listing[key].includes(tool)).sort();
+      assert.deepEqual(shown, [...scopes].sort(), `${tool} is listed to [${shown}], expected [${scopes}]`);
+    }
+  });
+
+  it("a person-only project tool is listed to user keys exactly", () => {
+    const personRows = Object.keys(EXPECTED).filter((t) => {
+      const policy = TOOL_ACCESS_POLICY[t];
+      return policy?.kind === "baselined" && policy.owner === HUMAN_ONLY_POLICY_OWNER.person;
+    });
+    assert.deepEqual(personRows.sort(), Object.keys(EXPECTED).filter((t) => EXPECTED[t].join() === "user").sort(),
+      "a user-only project tool must carry the person policy row, and vice versa");
+    for (const [tool, policy] of Object.entries(TOOL_ACCESS_POLICY)) {
+      if (!(tool in EXPECTED)) continue;
+      if (policy.kind === "baselined" && policy.owner === HUMAN_ONLY_POLICY_OWNER.person) {
+        assert.deepEqual(EXPECTED[tool], ["user"], `${tool}: its row says person, but this census expects [${EXPECTED[tool]}]`);
+      }
+    }
+  });
+
+  it("a key calling a project tool it is not shown gets 'not found', and the backend is never asked", async () => {
+    let refused = 0;
+    for (const key of ["agent", "user", "system", "ops"]) {
+      const hidden = Object.keys(EXPECTED).filter((tool) => !EXPECTED[tool].includes(KEYS[key].scope));
+      srv.requests.length = 0;
+      await asKey(srv.url, key, async (c) => {
+        for (const tool of hidden) {
+          await assert.rejects(
+            () => c.callTool({ name: tool, arguments: { project_id: "prj_ghost", task_id: "T-001", agent: "alpha" } }),
+            (err: unknown) => NOT_FOUND.test(String((err as Error)?.message ?? err)),
+            `${tool}: a ${key} key calling it by name must be rejected as not found`,
+          );
+          refused += 1;
+        }
+      });
+      assert.deepEqual(srv.requests, [], `a ${key} key's refused calls reached the backend: ${srv.requests.join(", ")}`);
+    }
+    // 5 person tools for the agent key; 2 agent-only tools for the user key; all 22 for the system and ops keys.
+    assert.equal(refused, 5 + 2 + 22 + 22);
+  });
+
+  // Text built from a backend answer: get_project's waiting-proposal pointer,
+  // which the fake backend above never returns.
+  it("the proposal pointer a person's key reads names only tools a user key is listed", async () => {
+    const withProposal = await bootKeyedServer({ user: { scope: "user" } }, (method, path) =>
+      method === "GET" && path === "/api/enterprise/projects/prj_1"
+        ? { status: 200, body: { id: "prj_1", proposal: { ask_id: "ask_1", summary: "x" } } }
+        : { status: 200, body: {} });
+    try {
+      const res = await asKey(withProposal.url, "user", (c) => c.callTool({ name: "get_project", arguments: { project_id: "prj_1" } }));
+      const out = JSON.parse(((res as { content: Array<{ text: string }> }).content[0]).text);
+      const pointer = String(out.proposal?.how_to_decide ?? "");
+      assert.ok(pointer, `no how_to_decide on the proposal: ${JSON.stringify(out)}`);
+      const universe = new Set(Object.values(listing).flat());
+      const named = (pointer.match(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g) ?? []).filter((w) => universe.has(w));
+      assert.ok(named.length > 0, "the pointer names no tool, so this test checks nothing");
+      assert.deepEqual(named.filter((n) => !listing.user.includes(n)), [], `the pointer names tools a user key is not listed: ${pointer}`);
+    } finally {
+      await withProposal.stop();
+    }
+  });
+
+  /**
+   * No text a key reads names a tool that key cannot call: the description of
+   * every project tool it is listed, and the refusals those tools give it. A
+   * tool name is any name some key is listed; the reader's own listing is the
+   * set it may be pointed at.
+   */
+  it("no description or refusal points a key at a tool it is not listed", async () => {
+    const universe = new Set(Object.values(listing).flat());
+    const named = (text: string) => (text.match(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g) ?? []).filter((w) => universe.has(w));
+    const ARGS = [
+      { project_id: "prj_1", task_id: "T-001", item_id: "brief", title: "x", body: "x", kind: "note", target_id: "r1",
+        state: "on-track", name: "x", goal: "x", path: "p", agent: "alpha", action: "start", on: true, add_agents: ["beta"] },
+      { project_id: "prj_1", agent_name: "beta" },
+      { project_id: "prj_1", item_id: "brief", offset: 10, path: "p" },
+      {},
+    ];
+    for (const key of ["user", "agent"]) {
+      const listed = new Set(listing[key]);
+      const project = Object.keys(EXPECTED).filter((t) => listed.has(t));
+      const bad: string[] = [];
+      await asKey(srv.url, key, async (c) => {
+        for (const t of (await c.listTools()).tools) {
+          if (!project.includes(t.name)) continue;
+          for (const n of named(t.description ?? "")) if (!listed.has(n)) bad.push(`${t.name} description → ${n}`);
+        }
+        for (const tool of project) {
+          for (const args of ARGS) {
+            const res = await c.callTool({ name: tool, arguments: args }).catch((e: unknown) => ({ content: [{ type: "text", text: String(e) }] }));
+            const text = ((res as { content?: Array<{ text?: string }> }).content ?? []).map((x) => x.text ?? "").join(" ");
+            for (const n of named(text)) if (!listed.has(n)) bad.push(`${tool} refusal → ${n}`);
+          }
+        }
+      });
+      assert.deepEqual([...new Set(bad)], [], `a ${key} key is pointed at tools it is not listed`);
+    }
+  });
+
+  it("a keyed session always has a scope: a key row with none acts as the person", async () => {
+    const noScope = await bootKeyedServer({ bare: {} as KeyRow });
+    try {
+      assert.ok((await listedTo(noScope.url, "bare")).includes("set_project_lifecycle"), "a scope-less key row is not listed as a user key");
+      await asKey(noScope.url, "bare", (c) => c.callTool({ name: "get_project", arguments: { project_id: "prj_1" } }));
+      assert.deepEqual(noScope.requests.filter((r) => r.startsWith("GET /api/enterprise/")), ["GET /api/enterprise/projects/prj_1"]);
+    } finally {
+      await noScope.stop();
+    }
   });
 });

@@ -1,0 +1,11 @@
+{
+  "name": "trinity-opencode-providers",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Provider packages pre-seeded into the agent base image for the OpenCode runtime. Installed with `npm ci` from the lockfile beside this file (#4435).",
+  "dependencies": {
+    "@ai-sdk/anthropic": "3.0.143",
+    "@ai-sdk/openai": "3.0.144",
+    "@ai-sdk/openai-compatible": "2.0.94"
+  }
+}

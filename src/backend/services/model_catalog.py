@@ -55,6 +55,7 @@ one-way — ``settings_service`` imports this, never the reverse.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 
@@ -104,13 +105,15 @@ class ModelEntry:
 # The ordered catalog. Order is preserved into the picker and the admin dropdown.
 # Model ids verified against the ``claude-api`` skill (do not state ids from
 # memory): ``claude-opus-5-5`` is the current Opus tier and ``claude-opus-5`` the
-# prior point release within it (still served, still selectable); the ``-5``
+# prior point release within it (still served, still selectable), and
+# ``claude-sonnet-5-5`` / ``claude-sonnet-5`` are the same pair one tier down;
+# ``claude-fable-5-2`` and ``claude-haiku-5-5`` are the current Fable and Haiku; the ``-5``
 # family and ``claude-sonnet-4-6`` are current; ``opus-4-8/4-7/4-6`` are the
 # prior Opus generation (legacy). The date-suffixed ids are kept verbatim.
 #
 # Canonical lineup (keep this comment as the bump-anchor):
 #     https://platform.claude.com/docs/en/about-claude/models/overview
-# Last synced: 2026-09-23 (#2987 — Claude Opus 5.5)
+# Last synced: 2026-11-18 (#4528 — Claude Sonnet 5.5, Haiku 5.5, Fable 5.2)
 MODEL_CATALOG: tuple[ModelEntry, ...] = (
     # Current generation.
     ModelEntry(
@@ -136,10 +139,21 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         True,
         False,
     ),
+    # #4528: the current Fable. Like every Fable it stays out of the Workspace
+    # composer (ent#403), so it takes no `workspace` slot from anyone.
+    ModelEntry(
+        "claude-fable-5-2",
+        "Claude Fable 5.2",
+        "Most capable \u2014 longest tasks (latest)",
+        True,
+        True,
+        False,
+        min_claude_code="2.1.321",
+    ),
     ModelEntry(
         "claude-fable-5-1",
         "Claude Fable 5.1",
-        "Most capable \u2014 longest tasks (latest)",
+        "Most capable \u2014 longest tasks (prior point release)",
         True,
         True,
         False,
@@ -153,14 +167,27 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         False,
     ),
     ModelEntry(
-        "claude-sonnet-5",
-        "Claude Sonnet 5",
+        "claude-sonnet-5-5",
+        "Claude Sonnet 5.5",
         "Fast + smart, 1M context (latest)",
         True,
         True,
         False,
         workspace=True,
         workspace_tier="Balanced \u2014 fast and smart",
+        min_claude_code="2.1.284",
+    ),
+    # The prior point release in the Sonnet tier (#4528) — the same treatment
+    # Opus 5 got in #2987: still served, still selectable, and without the two
+    # things that moved to 5.5, the "(latest)" marker and the Workspace
+    # "Balanced" slot (one option, not a list).
+    ModelEntry(
+        "claude-sonnet-5",
+        "Claude Sonnet 5",
+        "Fast + smart, 1M context (prior point release)",
+        True,
+        True,
+        False,
     ),
     # Prior Opus generation — still selectable, relabelled Legacy (#2086).
     ModelEntry(
@@ -172,16 +199,27 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
     ModelEntry(
         "claude-sonnet-4-6", "Claude Sonnet 4.6", "Fast + smart", True, True, True
     ),
-    # Public-channel-selectable but NOT an admin default (#1080).
+    # Public-channel-selectable but NOT an admin default (#1080) — the rule is
+    # about the cheap tier, so it holds for every Haiku. Haiku 5.5 (#4528) is the
+    # current one and takes the Workspace "Fastest" slot, which is one option.
     ModelEntry(
-        "claude-haiku-4-5-20251001",
-        "Claude Haiku 4.5",
-        "Fastest, cheapest",
+        "claude-haiku-5-5",
+        "Claude Haiku 5.5",
+        "Fastest, cheapest (latest)",
         True,
         False,
         False,
         workspace=True,
         workspace_tier="Fastest",
+        min_claude_code="2.1.293",
+    ),
+    ModelEntry(
+        "claude-haiku-4-5-20251001",
+        "Claude Haiku 4.5",
+        "Fastest, cheapest (prior generation)",
+        True,
+        False,
+        False,
     ),
     # Legacy, picker-only (neither public-channel nor admin-default).
     ModelEntry(
@@ -272,6 +310,17 @@ _MODEL_FAMILY_PREFIXES: tuple[str, ...] = (
 )
 
 
+# Abilityai/lilu#652: OpenCode's `-m` takes `provider/model`, never a bare id, so
+# none of the families above can name a model for it and every per-request
+# override 422'd here. A TWIN of `agent_service/helpers.py::_OPENCODE_MODEL_RE`
+# (create-time) and of the agent image's `opencode_runtime._PROVIDER_MODEL_RE`
+# (turn-time) — mirrored, not imported, because this module is a stdlib-only
+# leaf. `test_lilu652_*` asserts the three patterns are byte-identical.
+_OPENCODE_MODEL_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][\w./:@+-]*$"
+)
+
+
 class InvalidModelError(ValueError):
     """A caller-supplied model id that cannot name a model (#2796).
 
@@ -281,7 +330,7 @@ class InvalidModelError(ValueError):
     """
 
 
-def validate_dispatch_model(raw: str | None) -> str | None:
+def validate_dispatch_model(raw: str | None, runtime: str | None = None) -> str | None:
     """Normalise and shape-check a caller-supplied model id for a dispatch.
 
     Order matches ``client_portal.service.validate_requested_model`` and is
@@ -291,6 +340,11 @@ def validate_dispatch_model(raw: str | None) -> str | None:
 
     Args:
         raw: The model id as the caller sent it, or ``None``.
+        runtime: The target agent's runtime (``trinity.agent-runtime`` label),
+            or ``None`` for the Claude/Gemini/Codex family gate. ``opencode``
+            accepts ``provider/model`` ONLY (Abilityai/lilu#652): a bare id is
+            what the agent refuses one spawn later, so it is refused here,
+            where the error can name it.
 
     Returns:
         The stripped id, or ``None`` to inherit. The value is never rewritten
@@ -304,13 +358,21 @@ def validate_dispatch_model(raw: str | None) -> str | None:
     model = (raw or "").strip() or None
     if model is None:
         return None
-    if model.lower().startswith(_MODEL_FAMILY_PREFIXES):
-        return model
     # Bounded before it is echoed. The field is deliberately unbounded at the
     # payload layer, so without this an authenticated caller could have a
     # megabyte-long value reflected verbatim into the error body — the same
     # reasoning, and the same 64-char cut, as the ent#403 Workspace refusal.
     shown = model if len(model) <= 64 else model[:64] + "…"
+    if runtime == "opencode":
+        if _OPENCODE_MODEL_RE.match(model):
+            return model
+        raise InvalidModelError(
+            f"'{shown}' is not an OpenCode model id. OpenCode agents take "
+            f"'provider/model', such as 'ollama/qwen3.6:27b' or "
+            f"'anthropic/claude-sonnet-5'."
+        )
+    if model.lower().startswith(_MODEL_FAMILY_PREFIXES):
+        return model
     raise InvalidModelError(
         f"'{shown}' is not a model id. Use a short alias (sonnet, opus, haiku, "
         f"fable) or a full id such as '{_recommended[0].id}'."
