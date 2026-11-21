@@ -250,7 +250,7 @@ import PortalInboxSkeleton from './PortalInboxSkeleton.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { viewState, staleBannerMessage } from '@/utils/loadingState'
 import {
-  actionItems, unreadItems, allItems, inboxCounts, defaultInboxTab, normalizeInboxTab,
+  actionItems, unreadItems, allItems, inboxCounts, defaultInboxTab, normalizeInboxTab, landingTabToWrite,
   stableRows, emptyVisit, isGhost, resolveItem, parseItemKey, listHeadLabel,
   markAllLabel, markAllConfirm, allFooterNotes, pageWindow, PAGE_SIZE, inboxLayout, listHeadExact,
   INBOX_TAB_SHELL, agentFacets, filterByAgent, activeAgentFilter, normalizeFrom, FROM_ALL,
@@ -344,6 +344,12 @@ watch([asksVerdict, () => props.threadsLoaded, () => store.asksFailed, () => pro
   const settled = (asksVerdict.value || store.asksFailed) && (props.threadsLoaded || props.threadsFailed)
   if (settled) initialTab.value = defaultInboxTab(counts.value)
 }, { immediate: true })
+// #4347: a bare `/workspace/inbox` states the tab it landed on, ONCE, so a
+// reload is stable. A tab the URL already names is never rewritten.
+watch(initialTab, (chosen) => {
+  const write = landingTabToWrite(route.query.tab, chosen)
+  if (write) replaceQuery({ tab: write })
+}, { immediate: true })
 const tab = computed(() => normalizeInboxTab(route.query.tab) || initialTab.value || 'action')
 const tabLabel = computed(() => ({ action: 'Action', unread: 'Unread', all: 'All' }[tab.value]))
 
@@ -424,7 +430,7 @@ const baseItems = computed(() => {
   return allItems(props.threads, store.asks, props.previews, Date.now(), store.mentions)
 })
 const footerNotes = computed(() => (tab.value === 'all'
-  ? allFooterNotes({ askCount: store.asks.length })
+  ? allFooterNotes({ askCount: store.asks.length, hasAsk: shownItems.value.some((it) => it?.type === 'ask') })
   : []))
 
 // §3g S5 (T2): the URL holds only what the reader OPENED. The desktop
@@ -629,9 +635,11 @@ const empty = computed(() => {
       : {
           title,
           body: 'When an agent you work with needs a decision from you, it lands here.',
-          ...(caughtUpNow.value && counts.value.came > 0
-            ? { link: { to: { path: route.path, query: { tab: 'unread' } }, label: 'See what came back' } }
-            : {}),
+          // #4347: never a blank pane — what came back when something did,
+          // else the one thing a client can always do.
+          link: counts.value.came > 0
+            ? { to: { path: route.path, query: { tab: 'unread' } }, label: 'See what came back' }
+            : { to: { path: '/workspace', query: { new: '1' } }, label: 'Start a chat' },
         }
   }
   if (tab.value === 'unread') {

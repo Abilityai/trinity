@@ -15,7 +15,7 @@ import { dirname, resolve } from 'node:path'
 import { marked } from '../../src/utils/markedConfig.js'
 import {
   decorateCodeBlocks, stripCodeBlockMarkers, codeLanguageLabel, codeBlockText,
-  CODE_BLOCK_VOCAB, DATA_CODE_BLOCK, DATA_COPY_CODE, CODE_BLOCK_FALLBACK_LABEL,
+  CODE_BLOCK_VOCAB, DATA_CODE_BLOCK, DATA_COPY_CODE,
 } from '../../src/utils/codeBlocks.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -50,17 +50,21 @@ describe('decorateCodeBlocks — the shapes marked produces', () => {
     expect(html).toContain('<pre><code class="language-bash">ls -la\n</code></pre>')
   })
 
-  it('labels an unlabelled block neutrally rather than dropping it', () => {
+  // #4346: an unlabelled block printed "CODE" over plain text — a label
+  // that says nothing. It keeps Copy, with no label bar.
+  it('gives an unlabelled block Copy but no label bar', () => {
     const html = render('```\nplain\n```')
     expect(buttons(html)).toBe(1)
-    expect(langOf(html)).toBe(CODE_BLOCK_FALLBACK_LABEL)
+    expect(html).not.toContain('code-block-bar')
+    expect(langOf(html)).toBeUndefined()
+    expect(html).toContain(`<div class="code-block code-block-plain" ${DATA_CODE_BLOCK}>`)
   })
 
   it('treats indented and ~~~ blocks the same — marked renders them the same', () => {
     for (const md of ['    indented code\n', '~~~\ntilde fence\n~~~']) {
       const html = render(md)
       expect(buttons(html), md).toBe(1)
-      expect(langOf(html), md).toBe(CODE_BLOCK_FALLBACK_LABEL)
+      expect(html, md).not.toContain('code-block-bar')
     }
   })
 
@@ -106,10 +110,10 @@ describe('the language label — the only non-constant byte injected', () => {
     for (const bad of ['a"b', "a'b", 'a<b', 'a>b', 'a&b', 'a b', '-lead', '', null, 'x'.repeat(30)]) {
       expect(codeLanguageLabel(bad), String(bad)).toBe('')
     }
-    // ...and the block still renders, under the neutral label.
+    // ...and the block still renders, with Copy and no label.
     const html = fence('a"b', 'x')
     expect(buttons(html)).toBe(1)
-    expect(langOf(html)).toBe(CODE_BLOCK_FALLBACK_LABEL)
+    expect(langOf(html)).toBeUndefined()
   })
 
   it('reads the language out of a class list that carries other classes', () => {

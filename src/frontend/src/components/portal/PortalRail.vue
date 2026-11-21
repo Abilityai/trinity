@@ -4,9 +4,10 @@
 
   Three forms, one component, one body:
 
-    collapsed   a 48px strip beside the conversation — an expand control, then
-                one icon button per tab this session may see, each carrying its
-                activity signal so the rail says what is live without opening
+    collapsed   a 64px strip beside the conversation — an expand control, then
+                one labelled icon button per tab this session may see (#4347),
+                each carrying its activity signal so the rail says what is live
+                without opening
     open        a 384px column — an `OverflowTabs` strip + collapse control over
                 a body that is its OWN scroll axis (principle 8; the chat keeps
                 the other)
@@ -68,12 +69,15 @@
           <!-- One button per VISIBLE tab; the signal rides the icon's corner.
                gray-400 idle, gray-600 (dark gray-300) when it carries one, so
                the tab with something to say is also the darker glyph
-               (principle 24: shape and weight, never hue alone). -->
+               (principle 24: shape and weight, never hue alone).
+               #4347: the tab's label sits under its icon (10px, the operator's
+               accepted exception to the 11px floor), and the dot's meaning is
+               in the hover title and the accessible name (`s.title`). -->
           <button
             v-for="s in strip"
             :key="s.id"
             type="button"
-            :class="[ICON_BTN, 'relative', s.shape ? 'text-gray-600 dark:text-gray-300' : 'text-gray-400']"
+            :class="[TAB_BTN, 'relative', s.shape ? 'text-gray-600 dark:text-gray-300' : 'text-gray-400']"
             :title="`${s.title} · ${TAB_KEY_HINT} next tab`"
             :aria-label="`Open ${s.title}`"
             :aria-keyshortcuts="TAB_KEY_SHORTCUTS"
@@ -81,13 +85,15 @@
             @click="openOn(s.id)"
           >
             <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" :d="iconPath(s.id)" /></svg>
-            <span v-if="s.shape" class="absolute top-1 right-1" :class="dotClass(s.shape)" aria-hidden="true"></span>
+            <span class="max-w-full truncate px-0.5 text-[10px] font-medium leading-none" data-rail-tab-label aria-hidden="true">{{ s.label }}</span>
+            <span v-if="s.shape" class="absolute top-1 right-2.5" :class="dotClass(s.shape)" aria-hidden="true"></span>
           </button>
         </div>
-        <!-- ent#621 (follow-up): 48px holds no panel, so the collapsed strip
-             carries the tips as ONE door at its foot — the same list the open
-             rail's panel opens, and gone with it once dismissed. -->
-        <PortalKeyTips v-if="keyTips" compact class="mt-auto" @open-keys="$emit('open-keys')" />
+        <!-- ent#621 (follow-up): the strip holds no panel, so it carries the
+             tips as ONE door at its foot — the same list the open rail's panel
+             opens. #4347: the door keeps its place whether or not the tips
+             panel is shown or was dismissed; it is how a person finds them. -->
+        <PortalKeyTips compact class="mt-auto" @open-keys="$emit('open-keys')" />
       </template>
 
       <!-- ========================== OPEN / SHEET ========================== -->
@@ -121,6 +127,14 @@
             </button>
           </div>
         </div>
+
+        <!-- #4347: a phone has no hover, so the sheet states what each dot on
+             its strip means ("Info · 2 suggestions"), in one line under it. -->
+        <p
+          v-if="mode === 'sheet' && signalNotes.length"
+          :class="['shrink-0 px-4 pt-2 text-xs', META_INK]"
+          data-testid="portal-rail-signal-notes"
+        >{{ signalNotes.join(', ') }}</p>
 
         <!-- The body: the rail's own scroll axis. Exactly ONE tab's content is
              mounted, and only a tab from `tabs` can be `active`. `rail-scroll`
@@ -170,7 +184,7 @@
             <div v-else-if="!activeSignal.live" class="py-8 text-center" data-testid="portal-rail-empty">
               <svg class="w-7 h-7 mx-auto mb-3 text-gray-300 dark:text-gray-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" :d="iconPath(active.id)" /></svg>
               <p class="text-sm font-semibold">{{ empty.title }}</p>
-              <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400 max-w-[36ch] mx-auto">{{ empty.body }}</p>
+              <p :class="['mt-1.5 text-xs max-w-[36ch] mx-auto', META_INK]">{{ empty.body }}</p>
               <BaseButton
                 v-if="empty.action"
                 size="sm"
@@ -257,6 +271,8 @@ const active = computed(() => {
 })
 
 const strip = computed(() => collapsedSignals(props.signals, props.tabs))
+// #4347: each signalled tab's meaning, for the sheet's line under its strip.
+const signalNotes = computed(() => strip.value.filter((s) => s.shape).map((s) => s.title))
 const stripTabs = computed(() =>
   props.tabs.map((t) => {
     const sig = signalFor(props.signals, t)
@@ -334,18 +350,23 @@ function onBodyScroll() {
 }
 
 // ---- ink ----------------------------------------------------------------------
-// Design pass values: collapsed 48px (`w-12`), open 384px (`w-96`), 36px
-// icon buttons. Widths are the rail's own for now; #492 hands them to the
+// Design pass values: collapsed 64px (`w-16`, #4347 — was 48px; the extra
+// width carries each tab's label), open 384px (`w-96`), 36px icon buttons. Widths are the rail's own for now; #492 hands them to the
 // shell's grid variables.
 const ASIDE = {
-  collapsed: 'w-12 flex flex-col border-l border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900',
+  collapsed: 'w-16 flex flex-col border-l border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900',
   // ent#492: the OPEN rail's width is `--ws-rail`, set by the shell's grid and
-  // dragged by the handle. Collapsed stays a fixed 48px strip — it is an
+  // dragged by the handle. Collapsed stays a fixed 64px strip — it is an
   // expand control, not a column, which is why the handle disappears with it.
   open: 'w-[var(--ws-rail,24rem)] flex flex-col min-h-0 border-l border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900',
   sheet: 'absolute inset-x-0 bottom-0 max-h-[85vh] rounded-t-2xl bg-white dark:bg-gray-900 shadow-xl flex flex-col',
 }
-const ICON_BTN = 'w-9 h-9 rounded-lg flex items-center justify-center hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition'
+const BTN_HOVER = 'hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition'
+const ICON_BTN = `w-9 h-9 rounded-lg flex items-center justify-center ${BTN_HOVER}`
+// #4347: a collapsed tab is an icon over its label, inside the 64px strip.
+const TAB_BTN = `w-14 py-1.5 rounded-lg flex flex-col items-center gap-1 ${BTN_HOVER}`
+// Tertiary ink, written once for the two lines that use it.
+const META_INK = 'text-gray-500 dark:text-gray-400'
 
 // Two shapes, one hue (principle 24). Live: 8px dot in a 3px ring at 28%,
 // pulsing only where motion is welcome; a static ring under

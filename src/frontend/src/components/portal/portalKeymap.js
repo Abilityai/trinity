@@ -634,6 +634,32 @@ export function loadKeyTipsDismissed(storage) {
   }
 }
 
+/**
+ * #4347: whether this browser has EARNED the tips — the person used a shortcut
+ * or opened the list. Hidden until then, so a first visit is not handed a
+ * keyboard card. Its own key, so an earn never undoes a dismissal.
+ */
+export const KEY_TIPS_EARNED_KEY = 'trinity-workspace-key-tips-earned'
+
+export function loadKeyTipsEarned(storage) {
+  try {
+    return !!storage && typeof storage.getItem === 'function'
+      && storage.getItem(KEY_TIPS_EARNED_KEY) === 'earned'
+  } catch {
+    return false
+  }
+}
+
+export function saveKeyTipsEarned(storage) {
+  try {
+    if (!storage || typeof storage.setItem !== 'function') return false
+    storage.setItem(KEY_TIPS_EARNED_KEY, 'earned')
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function saveKeyTipsDismissed(storage, dismissed) {
   try {
     if (!storage || typeof storage.setItem !== 'function') return false

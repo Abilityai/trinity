@@ -43,6 +43,11 @@
         @retry="reload"
       />
 
+      <!-- #4346: a client session gets the chart only — no counters and no
+           counter skeleton. The numbers are an operator's reading of the agent;
+           a client has no way to tell what a "task" or a retry is. -->
+      <template v-else-if="!technical"></template>
+
       <!-- #2540/#1927: gated on the VERDICT (`loaded`), never on a request
            being open, so a window change or a background refresh leaves the
            numbers on screen instead of flashing back to placeholders. -->
@@ -56,18 +61,21 @@
         <span class="sr-only">Loading this agent's activity…</span>
       </template>
 
-      <template v-else>
+      <div v-else class="contents" data-testid="portal-band-counters">
         <div>
           <div class="text-lg font-semibold tabular-nums leading-tight">{{ stats.total_executions }}</div>
           <div class="text-[11px] text-gray-500 dark:text-gray-400">tasks · last {{ WINDOW_LABEL }}</div>
         </div>
         <div>
           <div class="text-lg font-semibold tabular-nums leading-tight">{{ pct(stats.success_rate) }}</div>
-          <div class="text-[11px] text-gray-500 dark:text-gray-400">completed</div>
+          <!-- #4346: "20 tasks · 0% succeeded" with no word of what it means
+               read as a broken band; the caption says it on the same line, so
+               the 39px stat-block budget holds. -->
+          <div class="text-[11px] text-gray-500 dark:text-gray-400">succeeded<span v-if="zeroWithRuns" data-testid="portal-band-zero-note"> · none of the {{ stats.total_executions }} runs succeeded — the Work tab shows why</span></div>
         </div>
         <div>
           <div class="text-lg font-semibold tabular-nums leading-tight">{{ pct(stats.first_try?.rate) }}</div>
-          <div class="text-[11px] text-gray-500 dark:text-gray-400" title="Succeeded without needing a retry">first try</div>
+          <div class="text-[11px] text-gray-500 dark:text-gray-400 whitespace-nowrap">succeeded without a retry</div>
         </div>
         <!-- ent#366: a RAW TALLY, never a percentage — one thumbs-down out of
              one rating renders as "100% negative", a number that looks like
@@ -80,7 +88,7 @@
           </div>
           <div class="text-[11px] text-gray-500 dark:text-gray-400">{{ ratingsCaption }}</div>
         </div>
-      </template>
+      </div>
 
       <!-- The chart (trinity-enterprise#968): the agent's activity as a waveform
            signature — `ActivityWave`, which owns its own loading face (resting
@@ -170,6 +178,7 @@ import InlineError from '@/components/InlineError.vue'
 import { BUCKET_COLORS, bucketsForChart, hasChartActivity } from '@/utils/executionBuckets'
 import { PORTAL_BUCKET_LABELS } from './portalUtils'
 import { usePortalAgentPage } from '@/composables/usePortalAgentPage'
+import { useClientPortalStore } from '@/stores/clientPortal'
 
 const props = defineProps({
   agentName: { type: String, required: true },
@@ -185,6 +194,10 @@ const WINDOW_LABEL = '7 days'
 const { stats, ratings, loaded, error, denied, reload } = usePortalAgentPage(
   toRef(props, 'agentName'), timeWindow,
 )
+const portal = useClientPortalStore()
+// #4346: the counters are for a platform session; a client sees the chart.
+const technical = computed(() => portal.isPlatformSession)
+const zeroWithRuns = computed(() => (stats.value?.total_executions || 0) > 0 && stats.value?.success_rate === 0)
 const chartBuckets = computed(() => bucketsForChart(stats.value))
 const hasActivity = computed(() => hasChartActivity(stats.value))
 const ratingsCaption = computed(() => (

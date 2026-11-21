@@ -76,8 +76,8 @@ test.describe('Workspace compact header', () => {
     // The AC keeps the stats strip. Asserted by its captions, not by a class:
     // a height target is trivially met by deleting the thing being measured.
     expect(probe.statsText).toMatch(/tasks · last 7 days/)
-    expect(probe.statsText).toMatch(/completed/)
-    expect(probe.statsText).toMatch(/first try/)
+    expect(probe.statsText).toMatch(/succeeded/)
+    expect(probe.statsText).toMatch(/without a retry/)
     // Fixed at 7 days: no selector, and no legend beside the bars.
     expect(probe.hasPeriodSelector).toBe(false)
     expect(probe.hasSideLegend).toBe(false)

@@ -27,8 +27,6 @@ export const CODE_BLOCK_VOCAB = Object.freeze({
   attrs: Object.freeze(['class', 'type', 'aria-label', DATA_CODE_BLOCK, DATA_COPY_CODE]),
 })
 
-export const CODE_BLOCK_FALLBACK_LABEL = 'code'
-
 const OPEN = '<pre><code'
 const CLOSE = '</code></pre>'
 // The label is the ONLY non-constant byte injected into the HTML, so its
@@ -43,7 +41,7 @@ const CODE_OPEN_ATTRS_RE = /^(?:\s+class="[^"]*")?\s*$/
 /**
  * The language label for a fence's info string, or `''` when it is not one we
  * are willing to print. `c++` and `objective-c` pass; `a"b` does not, and the
- * bar falls back to a neutral "code" rather than dropping the block.
+ * block renders with Copy and no label bar rather than being dropped (#4346).
  */
 export function codeLanguageLabel(info) {
   const s = String(info ?? '').trim().toLowerCase()
@@ -144,12 +142,20 @@ export function decorateCodeBlocks(html) {
     const classMatch = attrs.match(LANGUAGE_CLASS_RE)
     const label = classMatch ? codeLanguageLabel(classMatch[1]) : ''
 
+    const copy = `<button type="button" class="code-block-copy" ${DATA_COPY_CODE} aria-label="Copy code">Copy</button>`
     out += s.slice(cursor, start)
-    out += `<div class="code-block" ${DATA_CODE_BLOCK}>`
-    out += '<div class="code-block-bar">'
-    out += `<span class="code-block-lang">${label || CODE_BLOCK_FALLBACK_LABEL}</span>`
-    out += `<button type="button" class="code-block-copy" ${DATA_COPY_CODE} aria-label="Copy code">Copy</button>`
-    out += '</div>'
+    if (label) {
+      out += `<div class="code-block" ${DATA_CODE_BLOCK}>`
+      out += '<div class="code-block-bar">'
+      out += `<span class="code-block-lang">${label}</span>`
+      out += copy
+      out += '</div>'
+    } else {
+      // #4346: no language, no label bar — a "CODE" overline over plain text
+      // says nothing. Copy stays, placed in the block's corner.
+      out += `<div class="code-block code-block-plain" ${DATA_CODE_BLOCK}>`
+      out += copy
+    }
     out += s.slice(start, blockEnd)
     out += '</div>'
     cursor = blockEnd

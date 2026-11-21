@@ -536,6 +536,7 @@
           <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <PortalWorkCard
             :item="liveCardItem"
+            :technical="store.isPlatformSession"
             :live-step="liveStepLine"
             :elapsed-seconds="cardElapsedSeconds"
             :children="liveChildren"
@@ -556,6 +557,7 @@
           <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <PortalWorkCard
             :item="terminalCardItem"
+            :technical="store.isPlatformSession"
             show-open-in-work
             @ask-about-it="askAboutIt"
             @open-work="emit('open-work')"
@@ -896,6 +898,27 @@
                 >
                   <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
                 </button>
+                <!-- #4347: the first-visit hint, in the control row that already
+                     exists — showing or dismissing it moves nothing. It gives
+                     way (truncates) before the model picker or Send do. -->
+                <span
+                  v-if="composerHint"
+                  class="min-w-0 ml-1 flex items-center gap-1 text-xs"
+                  :class="META_INK_CLASS"
+                  data-testid="portal-composer-hint"
+                >
+                  <span class="min-w-0 truncate">{{ composerHint }}</span>
+                  <button
+                    type="button"
+                    class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl hover:opacity-70 focus:outline-none focus:ring-2 focus:ring-action-primary-500/40"
+                    aria-label="Hide this tip"
+                    title="Hide this tip"
+                    data-testid="portal-composer-hint-dismiss"
+                    @click="dismissComposerHint"
+                  >
+                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+                  </button>
+                </span>
                     <!-- Right cluster: the model picker, then Send. `ml-auto`
                          rather than a spacer element, and `min-w-0` so the picker
                          is the thing that truncates when the row runs out — never
@@ -984,7 +1007,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, viewerIsMemberTier, assistantStarting, memberTierRefusal, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags, isNewChatTranscript } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerHintText, loadComposerHintDismissed, saveComposerHintDismissed, composerAvailabilityNotice, viewerIsMemberTier, assistantStarting, memberTierRefusal, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags, isNewChatTranscript } from './portalUtils'
 import { tailSignature, tailLimit, adoptLocalIds, freshRows, tailOverflowed, TAIL_LIMIT_CAP } from './portalThreadTail'
 // ent#621: the same wrap the typeahead's roving selection uses — one modulo.
 import { cycleIndex } from './portalKeymap'
@@ -1080,6 +1103,7 @@ import BaseSelect from '../base/BaseSelect.vue'
 import BaseButton from '../base/BaseButton.vue'
 import { useUserPreferencesStore } from '@/stores/userPreferences'
 import { PREF_KEYS } from '@/utils/gridStorageKeys'
+import { safeStorage } from '@/utils/safeStorage'
 import {
   INHERIT_VALUE,
   defaultOptionText,
@@ -1580,6 +1604,7 @@ const liveStepLine = computed(() => {
     streamActivity: streaming.value ? liveStreamActivity.value : null,
     activity: workStore.activityFor(liveCardItem.value),
     nowMs: Date.now(),
+    technical: store.isPlatformSession,
   })
 })
 // Delegated work this turn handed on — found by the CHAT, not the agent.
@@ -2159,14 +2184,22 @@ const typeaheadRows = computed(() => typeaheadBound.value.visible.map((c, i) => 
 // chose, and inserting it is how the wrong agent (or `@undefined`) ships.
 watch(typeaheadBound, (b) => { activeIndex.value = clampActiveIndex(activeIndex.value, b.visible.length) })
 
-// The only part of this change that reaches a user who does not already know the
-// feature exists. `@` is advertised only with the capability — a placeholder
-// promising something the build cannot do is the #2128 dead end in text form.
+// #4347: the placeholder is the message and nothing else; the two triggers are
+// taught once, by the dismissible hint below, not as syntax on every visit.
 const composerPlaceholder = computed(() => {
   if (listening.value) return 'Listening…'
-  const base = `Message ${agentDisplayName(props.agent)}…  ·  / for skills`
-  return store.multiAgentChatAvailable ? `${base}  ·  @ to add an agent` : base
+  return `Message ${agentDisplayName(props.agent)}…`
 })
+// The first-visit hint. `@` only with the capability — a hint promising
+// something the build cannot do is the #2128 dead end in text form.
+const composerHintDismissed = ref(loadComposerHintDismissed(safeStorage()))
+const composerHint = computed(() => (
+  composerHintDismissed.value ? '' : composerHintText({ multiAgent: store.multiAgentChatAvailable })
+))
+function dismissComposerHint() {
+  composerHintDismissed.value = true
+  saveComposerHintDismissed(safeStorage())
+}
 
 function closeTypeahead() {
   typeaheadTrigger.value = null

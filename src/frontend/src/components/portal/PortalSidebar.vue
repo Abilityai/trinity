@@ -344,6 +344,23 @@
           @dismiss="failedDismissed = true"
         />
 
+        <!-- #4347: on the Inbox, whose All tab lists these same chats, the
+             groups fold behind one toggle so the rows are not on screen twice.
+             The archived toggle's recipe; the person's choice is remembered. -->
+        <button
+          v-if="inboxActive && activeThreads.length"
+          type="button"
+          class="mt-3 w-full flex items-center gap-1 px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide"
+          :class="META_INK"
+          :aria-expanded="!chatsFolded"
+          data-testid="sidebar-chats-toggle"
+          @click="toggleChatsOnInbox"
+        >
+          <svg class="w-3 h-3 transition-transform" :class="chatsFolded ? '' : 'rotate-90'" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7" /></svg>
+          Chats · {{ activeThreads.length }}
+        </button>
+
+        <template v-if="!chatsFolded">
         <!-- Starred first, and LIFTED OUT of the date groups below (a starred
              chat appears exactly once — see partitionStarred). -->
         <div v-if="starred.length" class="mt-3">
@@ -373,6 +390,7 @@
             @toggle-star="$emit('toggle-star', t)"
           />
         </div>
+        </template>
 
         <!-- ent#841: closed (archived) chats — nothing is deleted, and this is
              where they are found again. Collapsed by default: they are out of
@@ -483,7 +501,8 @@ import {
   agentResultsLabel, agentToggleLabel, showAgentToggle, SEARCH_PLACEHOLDER,
   WORKSPACE_INBOX, askBadgeTitle, SETUP_PENDING_LINE, SETUP_OVERDUE_LINE,
 } from './portalUtils'
-import { inboxCounts } from './portalInbox'
+import { inboxCounts, loadInboxSidebarChatsOpen, saveInboxSidebarChatsOpen } from './portalInbox'
+import { safeStorage } from '@/utils/safeStorage'
 // ent#621: every key hint on this sidebar is DERIVED from the one map. A typed
 // glyph here would be a second declaration of the same chord, free to go stale
 // the day the map changes.
@@ -545,6 +564,9 @@ const props = defineProps({
   // ent#473: async (thread, title) => void — the shell owns the optimistic
   // list update and the request; a row only edits.
   rename: { type: Function, default: null },
+  // #4347: the Inbox route is open — its All tab lists these chats, so the
+  // groups fold behind a toggle unless the person opened them.
+  inboxActive: { type: Boolean, default: false },
 })
 // The New room door's recipe (trinity-enterprise#701). New chat shared it until
 // #4353 took that button out of the sidebar.
@@ -599,6 +621,13 @@ const archived = computed(() => props.threads
   .filter((t) => t.archived_at)
   .sort((a, b) => String(b.archived_at).localeCompare(String(a.archived_at))))
 const archivedOpen = ref(false)
+// #4347: folded on the Inbox unless this browser chose to open them.
+const chatsOnInboxOpen = ref(loadInboxSidebarChatsOpen(safeStorage()))
+const chatsFolded = computed(() => props.inboxActive && !chatsOnInboxOpen.value)
+function toggleChatsOnInbox() {
+  chatsOnInboxOpen.value = !chatsOnInboxOpen.value
+  saveInboxSidebarChatsOpen(safeStorage(), chatsOnInboxOpen.value)
+}
 
 // The failed-read banner: dismissible, and back on the NEXT failure (a
 // recovered read clears it on its own, since `threadsFailed` drops).

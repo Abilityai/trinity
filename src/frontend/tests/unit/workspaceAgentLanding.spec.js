@@ -123,7 +123,9 @@ describe('deliveryFailureReason', () => {
   it('has its own words for the statuses that carry no detail', () => {
     expect(deliveryFailureReason(err(413))).toMatch(/too large/i)
     expect(deliveryFailureReason(err(429))).toMatch(/too many/i)
-    expect(deliveryFailureReason(err(500))).toMatch(/500/)
+    // #4344: no status code in the copy.
+    expect(deliveryFailureReason(err(500))).not.toMatch(/500/)
+    expect(deliveryFailureReason(err(500))).toMatch(/our side/i)
   })
 })
 

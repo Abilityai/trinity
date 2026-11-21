@@ -1,6 +1,6 @@
 <template>
   <!-- The rail's shortcut tips (ent#621 follow-up), in the rail's two desktop
-       forms. COMPACT is the collapsed strip's: 48px holds no panel, so it is
+       forms. COMPACT is the collapsed strip's: 64px holds no panel, so it is
        one icon that opens the full list. -->
   <div v-if="compact" class="pb-2 flex justify-center">
     <button

@@ -131,7 +131,7 @@ describe('#2597 — the band fails the other way, and is fixed with it', () => {
     // the same v-if chain, never a banner rendered beside a live row.
     const failIdx = band.indexOf('v-if="error && !loaded"')
     const skeletonIdx = band.indexOf('v-else-if="!loaded"')
-    const statsIdx = band.indexOf('<template v-else>')
+    const statsIdx = band.indexOf('<div v-else class="contents" data-testid="portal-band-counters">')
     expect(failIdx).toBeGreaterThan(-1)
     expect(skeletonIdx).toBeGreaterThan(failIdx)
     expect(statsIdx).toBeGreaterThan(skeletonIdx)

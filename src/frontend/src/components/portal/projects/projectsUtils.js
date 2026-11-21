@@ -7,6 +7,8 @@
  */
 
 import { askUrgencyCompare } from '../portalInbox'
+import { humaniseEnum } from '../portalLabels'
+import { MAIN_TAB_LABEL } from '../portalUtils'
 
 // ent#1235: the stored status keeps its values; people read Running / Stopped.
 export const STATUS_BADGE = Object.freeze({ not_started: 'neutral', active: 'success', paused: 'warning', done: 'neutral' })
@@ -255,7 +257,7 @@ const CODE_MESSAGE = {
   owner_unreachable: "This agent's owner can't be asked here. Ask them to add it to the project themselves.",
   already_linked: 'This chat is already in a project. Detach it there first.',
   agent_not_on_project: "Add this chat's agent to the project first, then try again.",
-  main_chat: "The Main chat can't belong to a project. Start a new chat for it.",
+  main_chat: `The ${MAIN_TAB_LABEL.toLowerCase()} chat can't belong to a project. Start a new chat for it.`,
   archived: 'This project is archived. Restore it to add to it.',
   not_permitted: 'Only the person who created this project can change that.',
   unknown_person: 'Only people at your company can be added. Check the email, e.g. name@your-company.com.',
@@ -1025,3 +1027,15 @@ export function refLabel(ref) {
 
 export const REFS_MAX = 10
 export const REF_TEXT_MAX = 300
+
+// #4344 — a project item's kind and a task's priority, as words.
+const MATERIAL_KINDS = Object.freeze({ file: 'File', report: 'Report', decision: 'Decision' })
+export function materialKindLabel(kind) {
+  return Object.prototype.hasOwnProperty.call(MATERIAL_KINDS, kind) ? MATERIAL_KINDS[kind] : humaniseEnum(kind)
+}
+/** `p1` → "P1"; anything else humanised; nothing → "—". */
+export function priorityLabel(priority) {
+  if (typeof priority !== 'string' || !priority.trim()) return '—'
+  const p = priority.trim()
+  return /^p\d$/i.test(p) ? p.toUpperCase() : humaniseEnum(p)
+}

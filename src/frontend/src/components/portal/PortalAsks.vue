@@ -412,6 +412,7 @@ import QueueBrief from '../operator/QueueBrief.vue'
 import PortalCredentialField from './PortalCredentialField.vue'
 import { agentLabels } from './portalInbox'
 import { useClientPortalStore } from '@/stores/clientPortal'
+import { personFacingError } from '@/utils/personFacingError'
 import {
   expiredLabel, askThreadLink, answerConfirmation, ANSWER_CONFIRMATION_MS,
 } from './portalUtils'
@@ -839,9 +840,7 @@ async function submit(ask) {
     // The backend's refusals are already written for a human ("This ask expired
     // before it was answered."), so surface them rather than replacing them with
     // a generic failure.
-    errors[ask.id] = err.response?.data?.detail?.message
-      || err.response?.data?.detail
-      || 'Could not send your answer.'
+    errors[ask.id] = personFacingError(err, 'Could not send your answer.')
   } finally {
     busyId.value = null
   }

@@ -451,8 +451,8 @@ describe('ent#523 — the agent page was dismantled, not dropped', () => {
   it('the stats and the chart are in the always-visible band', () => {
     expect(BAND).toContain('ActivityWave') // the chart, as a wave since trinity-enterprise#968
     expect(BAND).toMatch(/tasks · last/)
-    expect(BAND).toMatch(/completed/)
-    expect(BAND).toMatch(/first try/)
+    expect(BAND).toMatch(/succeeded/)                 // #4346: was "completed"
+    expect(BAND).toMatch(/succeeded without a retry/) // #4346: was "first try"
   })
 
   it('chats, what it can do and reports are in Agent details', () => {

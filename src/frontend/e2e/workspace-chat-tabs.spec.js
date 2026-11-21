@@ -127,7 +127,7 @@ test.describe('Workspace chat tabs', () => {
     // Uniform means Main too — a four-character label costs the same 192px as
     // a sentence. That is the trade the operator's ruling buys, and asserting
     // it here is what stops someone "optimising" Main back to intrinsic width.
-    const main = m.tabs.find((t) => t.label === 'Main')
+    const main = m.tabs.find((t) => t.label === 'Ongoing')
     if (main) expect(main.w, 'the pinned Main tab shares the width').toBe(TAB_WIDTH)
 
     expect(m.overflowX, 'the strip never makes the page scroll sideways').toBeLessThanOrEqual(1)

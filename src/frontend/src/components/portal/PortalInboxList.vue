@@ -222,7 +222,7 @@
 import { onBeforeUnmount, ref, watch } from 'vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
-import { relativeTime } from './portalUtils'
+import { relativeTime, MAIN_TAB_LABEL } from './portalUtils'
 import { newLabel, isChatItem, roomAgentsLabel } from './portalInbox'
 import { mentionWhere } from './portalMentions'
 import { priorityBadge, expiresSoonLabel, needsExpiryTick, nextExpiryEntry, askKindIcon } from './portalAskUrgency'
@@ -263,7 +263,7 @@ let zone = ''
 try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || '' } catch { zone = '' }
 const absolute = (iso) => (iso ? `${formatLocalDateTime(iso)}${zone ? ` (${zone})` : ''}` : undefined)
 
-const threadTitle = (it) => (it.is_main ? 'Main' : (it.title || 'Chat')) + (it.archived ? ' · archived' : '')
+const threadTitle = (it) => (it.is_main ? MAIN_TAB_LABEL : (it.title || 'Chat')) + (it.archived ? ' · archived' : '')
 const outcomeOf = (it) => (it.type === 'thread' ? it.latest?.outcome || null : null)
 
 // Ink by ground (#2201): tertiary ink is for surface, not chrome — a selected

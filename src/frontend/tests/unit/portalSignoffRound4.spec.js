@@ -94,7 +94,7 @@ describe('2 — the Inbox pane header for an ask', () => {
     expect(h).not.toContain('Sign the Acme')
   })
   it('a chat keeps agent · chat title', () => {
-    expect(paneHeading({ type: 'thread', is_main: true }, 'scout')).toBe('scout · Main')
+    expect(paneHeading({ type: 'thread', is_main: true }, 'scout')).toBe('scout · Ongoing')
     expect(paneHeading({ type: 'thread', title: 'Q3' }, 'scout')).toBe('scout · Q3')
   })
 })

@@ -174,8 +174,8 @@
       <div v-for="r in reports" :key="r.id" class="mb-2 rounded-xl border border-gray-200 dark:border-gray-800">
         <button class="w-full px-3 py-2.5 flex items-center gap-2 text-left" @click="toggleReport(r.id)">
           <span class="min-w-0 flex-1">
-            <span class="block text-sm font-medium truncate">{{ r.title || r.report_type }}</span>
-            <span class="block text-[11px] text-gray-400">{{ r.report_type }} · {{ relative(r.created_at) }}</span>
+            <span class="block text-sm font-medium truncate">{{ reportTitle(r) }}</span>
+            <span class="block text-[11px] text-gray-400">{{ reportTypeLabel(r.report_type) }} · {{ relative(r.created_at) }}</span>
           </span>
           <svg class="w-4 h-4 text-gray-400 shrink-0 transition" :class="{ 'rotate-180': openReport === r.id }" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
         </button>
@@ -243,6 +243,7 @@ import PortalSuggestions from './PortalSuggestions.vue'
 import PortalAgentAutonomy from './PortalAgentAutonomy.vue'
 import PortalAsksWaitingLine from './PortalAsksWaitingLine.vue'
 import { agentDisplayName } from '@/utils/agentName'
+import { reportTitle, reportTypeLabel } from './portalLabels'
 import { capCount } from '@/utils/tabTitle'
 import { availabilityChip, viewerIsMemberTier, assistantStarting, threadTitle, MAIN_TAB_LABEL, asksHomeRoute, capabilitySection } from './portalUtils'
 import { usePortalProgressStore } from '@/stores/portalProgress'

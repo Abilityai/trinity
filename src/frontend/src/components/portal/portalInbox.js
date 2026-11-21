@@ -14,7 +14,7 @@
 
 import {
   STAGE_QUERY_KEYS, WORKSPACE_ROOT, WORKSPACE_INBOX, totalUnread, askBadgeTitle, unreadBadgeTitle,
-  askThreadLink,
+  askThreadLink, MAIN_TAB_LABEL,
 } from './portalUtils'
 import { capCount } from '@/utils/tabTitle'
 import { queueTypeLabel } from '@/utils/operatorQueue'
@@ -133,6 +133,37 @@ export function defaultInboxTab({ needs = 0, came = 0 } = {}) {
   if (needs > 0) return 'action'
   if (came > 0) return 'unread'
   return 'all'
+}
+
+// #4347: the tab a bare Inbox URL should be rewritten to state — the chosen
+// landing tab, only when the URL names none. A named tab is never rewritten
+// (that would be the redirect loop the landing rule must not become).
+export function landingTabToWrite(queryTab, chosen) {
+  if (normalizeInboxTab(queryTab)) return null
+  return normalizeInboxTab(chosen)
+}
+
+// #4347: while the Inbox is open, the sidebar's chat groups fold behind one
+// toggle so All's rows are not on screen twice. Opening them is the person's
+// call and is remembered for this browser (a convenience; a storage that
+// refuses just folds them again next load).
+export const INBOX_SIDEBAR_CHATS_KEY = 'trinity-workspace-inbox-sidebar-chats'
+export function loadInboxSidebarChatsOpen(storage) {
+  try {
+    return !!storage && typeof storage.getItem === 'function' && storage.getItem(INBOX_SIDEBAR_CHATS_KEY) === 'open'
+  } catch {
+    return false
+  }
+}
+export function saveInboxSidebarChatsOpen(storage, open) {
+  try {
+    if (!storage || typeof storage.setItem !== 'function') return false
+    if (open) storage.setItem(INBOX_SIDEBAR_CHATS_KEY, 'open')
+    else storage.removeItem(INBOX_SIDEBAR_CHATS_KEY)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function askItem(a) {
@@ -408,11 +439,12 @@ export function pageWindow(items, limit = PAGE_SIZE, selectedKey = null) {
 }
 
 // §3g D-4b / T16: what All's footer says, beyond the paging line. The ended-ask
-// window always; the asks read's cap only when it was hit (server pagination +
+// window when an ask is listed; the asks read's cap only when it was hit (server pagination +
 // a total is #3059). trinity-enterprise#959: rooms are in the Inbox now, so the
 // "Rooms aren't in the Inbox yet" note is gone.
-export function allFooterNotes({ askCount = 0 } = {}) {
-  const notes = ['Answered, expired and cancelled asks drop off after 7 days.']
+// #4346: the ended-ask note only when the visible list holds an ask (`hasAsk`).
+export function allFooterNotes({ askCount = 0, hasAsk = false } = {}) {
+  const notes = hasAsk ? ['Answered, expired and cancelled asks drop off after 7 days.'] : []
   // #3679: the server returns pending asks oldest first, so a capped read
   // keeps the longest-waiting ones and drops the newest.
   if (askCount >= ASKS_READ_CAP) notes.push(`Showing your first ${ASKS_READ_CAP} asks: the ones waiting longest come first.`)
@@ -913,7 +945,7 @@ export function paneHeading(item, agentLabel = '') {
     const kind = queueTypeLabel(item.ask?.kind) || 'Question'
     return `${agentLabel} · ${kind}`
   }
-  const chat = item?.is_main ? 'Main' : (item?.title || 'Chat')
+  const chat = item?.is_main ? MAIN_TAB_LABEL : (item?.title || 'Chat')
   return `${agentLabel} · ${chat}`
 }
 

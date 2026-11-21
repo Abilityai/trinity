@@ -194,12 +194,14 @@ describe('honest state — loading ≠ empty ≠ failed (principle 15)', () => {
     expect(has(w, 'inbox-row-ask:a1')).toBe(true)
   })
 
-  it("a platform session's empty Action points at Operations (A9); a client's does not", async () => {
+  // #4347: a client's empty Action is never a blank pane either — it names
+  // the one thing a client can always do.
+  it("a platform session's empty Action points at Operations (A9); a client's at a new chat", async () => {
     store.asksLoaded = true
     const w = await mountInbox({ isPlatform: true }, { query: { tab: 'action' } })
-    expect(has(w, 'inbox-empty-link')).toBe(true)
+    expect(w.find('[data-testid="inbox-empty-link"]').text()).toBe('Open Operations')
     await w.setProps({ isPlatform: false })
-    expect(has(w, 'inbox-empty-link')).toBe(false)
+    expect(w.find('[data-testid="inbox-empty-link"]').text()).toBe('Start a chat')
   })
 })
 
@@ -302,6 +304,7 @@ describe('reading a chat (D11)', () => {
 
 describe('All says what it holds (§3g D-4)', () => {
   it('lists an old chat, and its footer says how ended asks leave', async () => {
+    store.asks = [ask('a1')]
     store.asksLoaded = true
     const w = await mountInbox({ threads: [thread('old', { last_message_at: iso(90 * 24 * 60) })] }, { query: { tab: 'all' } })
     expect(has(w, 'inbox-row-thread:old')).toBe(true)
@@ -309,11 +312,19 @@ describe('All says what it holds (§3g D-4)', () => {
     expect(w.find('[data-testid="inbox-list-footer"]').text()).not.toContain('Rooms')
   })
 
+  // #4346: a list with no ask on it has no use for the ended-ask note.
+  it('a list with no asks carries no ended-ask footer', async () => {
+    store.asksLoaded = true
+    const w = await mountInbox({ threads: [thread('old', { last_message_at: iso(90 * 24 * 60) })] }, { query: { tab: 'all' } })
+    expect(has(w, 'inbox-row-thread:old')).toBe(true)
+    expect(w.find('[data-testid="inbox-list-footer"]').exists()).toBe(false)
+  })
+
   it('trinity-enterprise#959: no "rooms aren\'t here" note, even to a viewer who has rooms', async () => {
     store.asksLoaded = true
     const threads = [thread('t1'), { id: 'r1', is_room: true, member: true, title: 'Room', last_message_at: iso(2) }]
     const w = await mountInbox({ threads }, { query: { tab: 'all' } })
-    expect(w.find('[data-testid="inbox-list-footer"]').text()).not.toContain('Rooms')
+    expect(w.text()).not.toContain("Rooms aren't")
     expect(has(w, 'inbox-row-room:r1')).toBe(true)
   })
 
@@ -819,10 +830,11 @@ describe('answer, then next: the reader\'s own answer crosses its row off (the o
     await router.replace({ path: '/workspace/inbox', query: { tab: 'action' } })
     await flushPromises()
     expect(w.find('[data-testid="inbox-empty"]').text()).toContain('Nothing needs your answer')
-    expect(has(w, 'inbox-empty-link')).toBe(false)
+    // #4347: still pointed at what came back — the link no longer waits for "caught up".
+    expect(w.find('[data-testid="inbox-empty-link"]').text()).toBe('See what came back')
   })
 
-  it('the last ask: a client with nothing unread gets no link; a platform session keeps Operations', async () => {
+  it('the last ask: a client with nothing unread is offered a new chat; a platform session keeps Operations', async () => {
     store.asks = [ask('q1')]
     store.asksLoaded = true
     store.answerAsk = answering()
@@ -830,7 +842,7 @@ describe('answer, then next: the reader\'s own answer crosses its row off (the o
     await send(w, 'q1')
     await settle()
     expect(w.find('[data-testid="inbox-empty"]').text()).toContain('All caught up')
-    expect(has(w, 'inbox-empty-link')).toBe(false)
+    expect(w.find('[data-testid="inbox-empty-link"]').text()).toBe('Start a chat')   // #4347
     await w.setProps({ isPlatform: true })
     expect(w.find('[data-testid="inbox-empty-link"]').text()).toBe('Open Operations')
     // A click on the active tab is a new visit: the plain empty copy again.

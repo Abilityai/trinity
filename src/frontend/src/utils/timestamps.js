@@ -98,6 +98,18 @@ export function unitsAgo(n, unit) {
 }
 
 /**
+ * #4346: the date a relative time falls back to past a week — "Oct 21", with
+ * the year only when it is not this year ("Dec 30, 2025"). `en-US` is pinned
+ * because `toLocaleDateString()` with no arguments prints a bare ISO date in
+ * several locales; the absolute time stays in the caller's `title`.
+ */
+export function shortDate(date, now = new Date()) {
+  const opts = { month: 'short', day: 'numeric' }
+  if (date.getFullYear() !== now.getFullYear()) opts.year = 'numeric'
+  return date.toLocaleDateString('en-US', opts)
+}
+
+/**
  * Format relative time (e.g., "2 hours ago")
  *
  * @param {string} timestamp - ISO 8601 timestamp string (UTC)
@@ -114,7 +126,7 @@ export function formatRelativeTime(timestamp) {
   if (diffSeconds < 3600) return unitsAgo(Math.floor(diffSeconds / 60), 'minute')
   if (diffSeconds < 86400) return unitsAgo(Math.floor(diffSeconds / 3600), 'hour')
   if (diffSeconds < 604800) return unitsAgo(Math.floor(diffSeconds / 86400), 'day')
-  return date.toLocaleDateString()
+  return shortDate(date, now)
 }
 
 /**

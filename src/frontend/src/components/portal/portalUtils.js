@@ -384,7 +384,34 @@ export const NEW_CHAT_TAB_LABEL = 'New chat'
 // ent#523: the pinned Main chat's tab label. A constant because three places
 // have to agree on it — the strip, the details list, and the test — and a chat
 // whose title is literally "Main" would otherwise be indistinguishable from it.
-export const MAIN_TAB_LABEL = 'Main'
+// #4346: "Ongoing", not "Main" — a person-facing name, printed from here only.
+export const MAIN_TAB_LABEL = 'Ongoing'
+
+// #4347: the composer teaches its two typeahead triggers ONCE, in a hint a
+// person can dismiss, instead of in the placeholder on every visit. `@` is
+// taught only with the capability (the #2128 rule the placeholder used).
+// Remembered per browser — a convenience, so a storage that refuses simply
+// shows the hint again next load.
+export const COMPOSER_HINT_KEY = 'trinity-workspace-composer-hint'
+export function composerHintText({ multiAgent = false } = {}) {
+  return multiAgent ? 'Type / to pick a skill, @ to bring in another agent' : 'Type / to pick a skill'
+}
+export function loadComposerHintDismissed(storage) {
+  try {
+    return !!storage && typeof storage.getItem === 'function' && storage.getItem(COMPOSER_HINT_KEY) === 'dismissed'
+  } catch {
+    return false
+  }
+}
+export function saveComposerHintDismissed(storage) {
+  try {
+    if (!storage || typeof storage.setItem !== 'function') return false
+    storage.setItem(COMPOSER_HINT_KEY, 'dismissed')
+    return true
+  } catch {
+    return false
+  }
+}
 
 // trinity-enterprise#657: `draftKeys` is the drafts store's key set. A tab
 // whose thread holds unsent text carries `hasDraft` (keyed on the TAB id, not
@@ -829,7 +856,7 @@ export function deliveryFailureReason(err) {
   if (!err?.response) return "Couldn't reach Trinity — check your connection and try again."
   if (err.response.status === 413) return 'That message or attachment is too large.'
   if (err.response.status === 429) return 'Too many messages just now — wait a moment and retry.'
-  return `The message wasn't delivered (error ${err.response.status}).`
+  return 'Something went wrong on our side. Try again.'
 }
 
 // #2128 — one place decides what a click does to the selection, so single- and
@@ -1815,7 +1842,7 @@ export function transcriptionErrorMessage(err) {
   if (err.response.status === 429) return 'Too many voice messages just now — wait a moment and try again.'
   if (err.response.status === 413) return 'That recording is too long.'
   if (err.response.status === 404) return 'Voice input is not set up on this workspace — type your message instead.'
-  return `Transcription failed (error ${err.response.status}) — type your message instead.`
+  return 'Something went wrong on our side. Try again, or type your message instead.'
 }
 
 // One verdict for a finished dictation attempt, so "what do we tell the user"

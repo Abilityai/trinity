@@ -208,12 +208,12 @@ describe('D10 — selection scopes the rail, never activeAgentName', () => {
       const ro = observers.find((o) => o.els.includes(col))
       expect(ro).toBeTruthy() // the column is observed although it mounted late
       const report = async (px) => { ro.cb([{ contentRect: { width: px } }]); await flushPromises() }
-      // Collapsed rail (the default): a 48px target.
+      // Collapsed rail (the default): a 64px target (#4347).
       await report(0)
-      expect(inbox().props('railAllowance')).toBe(48) // just entered: nothing lost yet
+      expect(inbox().props('railAllowance')).toBe(64) // just entered: nothing lost yet
       await report(20)
-      expect(inbox().props('railAllowance')).toBe(28)
-      await report(48)
+      expect(inbox().props('railAllowance')).toBe(44)
+      await report(64)
       expect(inbox().props('railAllowance')).toBe(0)
     } finally {
       globalThis.ResizeObserver = Real

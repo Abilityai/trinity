@@ -234,7 +234,7 @@
         <dl class="grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Owner</dt><dd class="truncate text-gray-900 dark:text-gray-100">{{ task.owner ? ownerLabel(task.owner) : '—' }}</dd></div>
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Agent</dt><dd class="truncate text-gray-900 dark:text-gray-100">{{ task.agent || '—' }}</dd></div>
-          <div><dt class="text-xs text-gray-500 dark:text-gray-400">Priority</dt><dd class="uppercase text-gray-900 dark:text-gray-100">{{ task.priority }}</dd></div>
+          <div><dt class="text-xs text-gray-500 dark:text-gray-400">Priority</dt><dd class="text-gray-900 dark:text-gray-100">{{ priorityLabel(task.priority) }}</dd></div>
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Updated</dt><dd class="text-gray-900 dark:text-gray-100" :title="formatLocalDateTime(task.updated_at)">{{ formatRelativeTime(task.updated_at) }}</dd></div>
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Created by</dt><dd class="truncate text-gray-900 dark:text-gray-100" data-testid="project-task-creator">{{ creatorOf(task) || '—' }}</dd></div>
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Subtask of</dt><dd class="font-mono text-gray-900 dark:text-gray-100">{{ task.parent || '—' }}</dd></div>
@@ -452,7 +452,7 @@ import {
   verificationRule, waitingLabel, withheldLine,
   RUN_BADGE, liveRun, needsDecisionReason, projectState, runLabel,
   doneWithoutClaim, UNCLAIMED_MEANING,
-  boardColumns, boardMinWidth, boardMove, readTasksView, writeTasksView, TASK_TEXT_MAX } from './projectsUtils'
+  boardColumns, boardMinWidth, boardMove, readTasksView, writeTasksView, TASK_TEXT_MAX, priorityLabel } from './projectsUtils'
 
 const props = defineProps({
   // trinity-enterprise#1132: the page read, for the withheld line and the rule.

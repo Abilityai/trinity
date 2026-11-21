@@ -81,6 +81,7 @@
                   v-for="it in list"
                   :key="it.id"
                   :item="it"
+                  :technical="portal.isPlatformSession"
                   compact
                   :elapsed-seconds="elapsedOf(it)"
                   :live-step="stepOf(it)"
@@ -99,6 +100,7 @@
                 v-for="it in store.live"
                 :key="it.id"
                 :item="it"
+                :technical="portal.isPlatformSession"
                 compact
                 :show-agent="!it.agent_name"
                 :elapsed-seconds="elapsedOf(it)"
@@ -123,12 +125,12 @@
                 <span class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 truncate">{{ agent }}</span>
               </div>
               <div class="space-y-2">
-                <PortalWorkCard v-for="it in list" :key="it.id" :item="it" compact @ask-about-it="onAsk" />
+                <PortalWorkCard v-for="it in list" :key="it.id" :item="it" compact :technical="portal.isPlatformSession" @ask-about-it="onAsk" />
               </div>
             </div>
           </template>
           <div v-else class="mt-2 space-y-2">
-            <PortalWorkCard v-for="it in shownEarlier" :key="it.id" :item="it" compact :show-agent="!it.agent_name" @ask-about-it="onAsk" />
+            <PortalWorkCard v-for="it in shownEarlier" :key="it.id" :item="it" compact :show-agent="!it.agent_name" :technical="portal.isPlatformSession" @ask-about-it="onAsk" />
           </div>
           <BaseButton
             v-if="store.earlier.length > EARLIER_PREVIEW"
@@ -218,7 +220,10 @@ function elapsedOf(item) {
 // check re-runs on the tab's own tick; a line the agent stopped renewing
 // drops out rather than sticking.
 function stepOf(item) {
-  return resolveActivityText({ live: true, activity: store.activityFor(item), nowMs: nowMs.value })
+  return resolveActivityText({
+    live: true, activity: store.activityFor(item), nowMs: nowMs.value,
+    technical: portal.isPlatformSession,
+  })
 }
 function childrenOf(item) {
   return childrenForChat(store.now, item.chat_id, item.id)

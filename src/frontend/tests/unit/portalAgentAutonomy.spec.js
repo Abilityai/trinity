@@ -103,7 +103,7 @@ describe('PortalAgentAutonomy (mounted)', () => {
   it('shows the level, the graduated class and the evidence it rests on', async () => {
     const w = await mountWith(page())
     expect(axios.get).toHaveBeenCalledWith(URL, expect.anything())
-    expect(w.get('[data-testid="portal-autonomy-level"]').text()).toBe('L2')
+    expect(w.get('[data-testid="portal-autonomy-level"]').text()).toBe('Delegated')
     expect(w.get('[data-testid="portal-autonomy-ceiling"]').text()).toContain('Delegated classes')
     const card = w.get('[data-testid="portal-autonomy-class-graduated"]')
     expect(card.text()).toContain('vendor-renewal')
@@ -162,7 +162,7 @@ describe('PortalAgentAutonomy (mounted)', () => {
     const card = w.get('[data-testid="portal-autonomy-class-on_request"]')
     expect(card.text()).toContain('earned — blocked by the dial')
     expect(card.text()).toContain('the instance dial is below L2')
-    expect(w.get('[data-testid="portal-autonomy-ceiling"]').text()).toContain('nothing runs unprompted below L2')
+    expect(w.get('[data-testid="portal-autonomy-ceiling"]').text()).toContain('nothing runs unprompted at this level')
   })
 
   it('says so when the agent hard off is on — whatever a class earned', async () => {

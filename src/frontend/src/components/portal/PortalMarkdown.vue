@@ -236,6 +236,17 @@ onBeforeUnmount(() => { clearTimeout(announceTimer) })
 .prose-portal :deep(.code-block-copy) {
   @apply rounded px-1.5 py-0.5 normal-case tracking-normal text-[11px] font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-action-primary-500/40;
 }
+/* #4346: an unlabelled block has no bar; Copy sits in its top-right corner,
+   and the code keeps clear of it. */
+.prose-portal :deep(.code-block-plain) {
+  @apply relative;
+}
+.prose-portal :deep(.code-block-plain > .code-block-copy) {
+  @apply absolute top-1 right-1 select-none;
+}
+.prose-portal :deep(.code-block-plain > pre) {
+  @apply pr-14;
+}
 /* Feedback in colour AND in the word the button now carries. */
 .prose-portal :deep(.code-block-copy[data-state="ok"]) {
   @apply text-status-success-700 dark:text-status-success-400;

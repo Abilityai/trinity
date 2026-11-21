@@ -94,7 +94,7 @@
             class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 text-[12.5px]"
             :data-testid="'portal-decision-' + d.status">
           <div class="flex items-center gap-2 flex-wrap">
-            <BaseBadge :variant="outcomeVariant(d.outcome)">{{ d.outcome }}</BaseBadge>
+            <BaseBadge :variant="outcomeVariant(d.outcome)">{{ decisionOutcomeLabel(d.outcome) }}</BaseBadge>
             <span class="font-medium">{{ d.decided }}</span>
             <BaseBadge v-if="d.status === 'expired'" variant="warning" dot>expired</BaseBadge>
             <BaseBadge v-else-if="d.status === 'routed'" variant="warning" dot>routed to canon</BaseBadge>
@@ -144,7 +144,7 @@
         <ul class="mt-1 space-y-1">
           <li v-for="d in history" :key="d.id" class="text-[11.5px] text-gray-400 px-3"
               :data-testid="'portal-decision-' + d.status">
-            <BaseBadge variant="neutral">{{ d.status }}</BaseBadge>
+            <BaseBadge variant="neutral">{{ decisionStatusLabel(d.status) }}</BaseBadge>
             {{ d.decided }} <span v-if="d.close_reason">— {{ d.close_reason }}</span>
             <span v-if="d.status === 'superseded'"> · corrected</span>
           </li>
@@ -180,6 +180,7 @@ import BaseButton from '@/components/base/BaseButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseTextarea from '@/components/base/BaseTextarea.vue'
+import { decisionOutcomeLabel, decisionStatusLabel } from './portalLabels'
 
 const props = defineProps({
   agentName: { type: String, required: true },
