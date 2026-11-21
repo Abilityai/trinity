@@ -857,6 +857,7 @@ _OPS_RECEIVERS = frozenset({"_operator_queue_ops", "_queue_mention_ops", *_OPS_C
 #: accessor fails `test_every_queue_accessor_is_placed` until it is one or the other.
 _ROW_ACCESSORS = frozenset({
     "get_operator_queue_item", "get_operator_queue_item_for_agent_by_request_id",
+    "get_operator_queue_items_by_ids",   # #4671: the batch form of the first — same rows
     "list_operator_queue_items", "list_operator_queue_items_walk",
     "list_pending_operator_queue_asks", "list_recent_operator_queue_endings",
     "list_expired_operator_queue_proposals", "list_pending_operator_queue_proposals",
@@ -931,6 +932,11 @@ _ROW_READERS = {
                     "with no content — id, agent, kind, status, created_at, chat id and the reason enum, "
                     "never a title, question, options or context — shown only to the chat's owner "
                     "(`get_portal_session`, then the roster)"),
+    (_PORTAL_ASKS, "_prefetch"): (
+        "internal", "#4671: the asks a page's rows link to (`replaces` / `replaced_by`), read in one "
+                    "query to answer `_linked_request_id`'s per-row read for the rest of the request; "
+                    "the rows are returned to nobody here — what leaves is still only what "
+                    "`_linked_request_id` decides, a request_id its addressee could already see"),
     (_PORTAL_ASKS, "_owned_ask"): (
         "addressee", "the viewer's own ask (`_is_addressed_to`, visible kinds, then the roster — or, for "
                      "the reserved reach family the gate raised about them, trinity-enterprise#981, or an "

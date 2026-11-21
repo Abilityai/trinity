@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 
+from utils import request_memo
 from utils.helpers import parse_iso_timestamp, utc_now_iso
 from services.chat_title import (
     chat_title_problem,
@@ -2014,8 +2015,13 @@ def may_manage_canvases(agent_name: str, email: str | None, *,
     return bool(core_db.can_user_share_agent(user["username"], agent_name))
 
 
+@request_memo.memoized
 def roster_agent_names(email: str | None, include_owned: bool) -> set[str]:
     """The set of agent names on the caller's roster — THE access boundary.
+
+    Memoized inside a `request_memo.scope()` (#4671): a read that re-checks
+    the roster once per agent asks the same two queries each time, so the
+    scope answers them once. Treat the returned set as read-only.
 
     #2198: extracted so the per-agent gate above and the cross-agent batch read
     (`list_all_sessions`) resolve membership through one implementation rather
