@@ -248,7 +248,7 @@ describe('#2128 structure guards', () => {
     for (const term of ['store.unavailable', 'store.error']) {
       expect(branch, `the room branch must distinguish ${term}`).toContain(term)
     }
-    const claimAt = branch.indexOf("isn't available on this instance")
+    const claimAt = branch.indexOf("This conversation isn't available here")
     expect(claimAt, 'the room branch never states the capability is absent').toBeGreaterThan(-1)
     // …and that claim must come last, after both qualifying arms.
     for (const term of ['store.unavailable', 'store.error']) {

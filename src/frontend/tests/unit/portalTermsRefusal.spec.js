@@ -75,7 +75,8 @@ describe('fetchRoster on a terms refusal', () => {
     expect(store.unavailable).toBe(true)
     await roster(403, { detail: 'Forbidden' })
     expect(store.termsRefusal).toBe(null)
-    expect(store.error).toBe('Forbidden')
+    // #4344: a bare word is machine text, not a sentence — the store's own line.
+    expect(store.error).toBe("Couldn't load your agents. Try again.")
   })
 
   it('a refusal followed by any other failure drops the terms state', async () => {

@@ -829,7 +829,7 @@ export function deliveryFailureReason(err) {
   if (!err?.response) return "Couldn't reach Trinity — check your connection and try again."
   if (err.response.status === 413) return 'That message or attachment is too large.'
   if (err.response.status === 429) return 'Too many messages just now — wait a moment and retry.'
-  return `The message wasn't delivered (error ${err.response.status}).`
+  return 'Something went wrong on our side. Try again.'
 }
 
 // #2128 — one place decides what a click does to the selection, so single- and
@@ -1815,7 +1815,7 @@ export function transcriptionErrorMessage(err) {
   if (err.response.status === 429) return 'Too many voice messages just now — wait a moment and try again.'
   if (err.response.status === 413) return 'That recording is too long.'
   if (err.response.status === 404) return 'Voice input is not set up on this workspace — type your message instead.'
-  return `Transcription failed (error ${err.response.status}) — type your message instead.`
+  return 'Something went wrong on our side. Try again, or type your message instead.'
 }
 
 // One verdict for a finished dictation attempt, so "what do we tell the user"

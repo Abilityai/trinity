@@ -3,7 +3,7 @@
     <div class="flex items-center justify-between gap-2 mb-2">
       <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">What it may do unprompted</h2>
       <BaseBadge v-if="page" :variant="page.ceiling_allows_unprompted ? 'success' : 'neutral'" dot
-                 data-testid="portal-autonomy-level">{{ page.level }}</BaseBadge>
+                 data-testid="portal-autonomy-level">{{ autonomyLevelLabel(page.level) }}</BaseBadge>
     </div>
 
     <!-- Loading = no data yet for THIS agent (never "fetch in flight"): the
@@ -33,7 +33,7 @@
       <p class="text-[12.5px] text-gray-500 dark:text-gray-400 mb-2" data-testid="portal-autonomy-ceiling">
         {{ page.level_label }}
         <template v-if="!page.ceiling_allows_unprompted">
-          · nothing runs unprompted below L2
+          · nothing runs unprompted at this level
         </template>
       </p>
       <InlineError
@@ -145,6 +145,7 @@ import { viewState } from '@/utils/loadingState'
 import InlineError from '@/components/InlineError.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
+import { autonomyLevelLabel } from './portalLabels'
 
 const props = defineProps({
   agentName: { type: String, required: true },

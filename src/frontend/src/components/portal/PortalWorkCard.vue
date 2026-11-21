@@ -127,7 +127,7 @@
     </ul>
 
     <!-- A terminal that is not success: the honest line, then the lesser control. -->
-    <p v-if="!live && item.error" class="mt-1.5 text-xs text-status-danger-700 dark:text-status-danger-300 break-words" data-testid="portal-work-error">{{ item.error }}</p>
+    <p v-if="!live && item.error" class="mt-1.5 text-xs text-status-danger-700 dark:text-status-danger-300 break-words" data-testid="portal-work-error">{{ technical ? item.error : 'This run failed' }}</p>
     <p v-if="!live && item.outcome === 'lost'" class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">Nothing is watching this any more — it may still finish, but it can't be followed from here.</p>
 
     <div v-if="hasActions" class="mt-2.5 flex flex-wrap items-center gap-2">
@@ -201,6 +201,9 @@ const props = defineProps({
   // appears, nor a feed row going stale mid-turn — those are other jumps,
   // not a reason to widen this flag. Every other host keeps the default.
   reserveLiveRows: { type: Boolean, default: false },
+  // #4344: a platform session reads the execution's error summary; a client
+  // reads "This run failed". Fails closed — a host that omits it is a client.
+  technical: { type: Boolean, default: false },
 })
 defineEmits(['stop', 'open-work', 'ask-about-it'])
 

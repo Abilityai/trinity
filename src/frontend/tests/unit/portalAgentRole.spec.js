@@ -253,7 +253,7 @@ describe('PortalAgentRole (mounted)', () => {
     expect(w.findAll('[data-testid="portal-role-objective"]')).toHaveLength(0)
     // The rest of the card is untouched — the owner can still flip readiness.
     expect(w.get('[data-testid="portal-role-title"]').text()).toBe('Sales Lead')
-    expect(w.get('[data-testid="portal-role-readiness"]').text()).toContain('calibrating')
+    expect(w.get('[data-testid="portal-role-readiness"]').text()).toContain('Calibrating')
     expect(w.find('[data-testid="portal-role-flip"]').exists()).toBe(true)
   })
 
@@ -355,13 +355,14 @@ describe('PortalAgentRole (mounted)', () => {
   it('readiness shows who flipped it and when; a template-claimed ready without a stamp is called out', async () => {
     const stamped = await mountWith(card({ readiness: { status: 'ready', changed_at: fresh, changed_by: 'owner@example.com', source: 'owner', unstamped_ready: false } }))
     const r = stamped.get('[data-testid="portal-role-readiness"]').text()
-    expect(r).toContain('ready')
+    expect(r).toContain('Ready')
     expect(r).toContain('by owner@example.com')
     expect(stamped.find('[data-testid="portal-role-walkthrough"]').exists()).toBe(false)   // only while calibrating
 
     setActivePinia(createPinia()); document.body.innerHTML = ''
     const unstamped = await mountWith(card({ readiness: { status: 'calibrating', source: 'template', unstamped_ready: true } }))
     expect(unstamped.get('[data-testid="portal-role-unstamped"]').text()).toContain('no owner has stamped it')
+    expect(unstamped.get('[data-testid="portal-role-unstamped"]').find('code').exists()).toBe(false)   // #4344: no code span for a client
   })
 
   it('the flip is offered to the owner only, goes through a confirm, posts, and re-reads', async () => {
@@ -379,7 +380,7 @@ describe('PortalAgentRole (mounted)', () => {
     confirm.click()
     await flushPromises()
     expect(axios.post).toHaveBeenCalledWith(`${URL}/readiness`, { status: 'ready' }, expect.anything())
-    expect(w.get('[data-testid="portal-role-readiness"]').text()).toContain('ready')
+    expect(w.get('[data-testid="portal-role-readiness"]').text()).toContain('Ready')
     expect(w.get('[data-testid="portal-role-flip"]').text()).toBe('Back to calibrating')
   })
 

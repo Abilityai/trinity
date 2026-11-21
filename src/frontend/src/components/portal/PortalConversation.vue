@@ -536,6 +536,7 @@
           <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <PortalWorkCard
             :item="liveCardItem"
+            :technical="store.isPlatformSession"
             :live-step="liveStepLine"
             :elapsed-seconds="cardElapsedSeconds"
             :children="liveChildren"
@@ -556,6 +557,7 @@
           <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <PortalWorkCard
             :item="terminalCardItem"
+            :technical="store.isPlatformSession"
             show-open-in-work
             @ask-about-it="askAboutIt"
             @open-work="emit('open-work')"

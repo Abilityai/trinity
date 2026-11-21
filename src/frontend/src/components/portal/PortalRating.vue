@@ -78,6 +78,7 @@
 <script setup>
 import { ref, computed, nextTick, watch } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
+import { personFacingError } from '@/utils/personFacingError'
 import {
   ratingLabels,
   nextRating,
@@ -127,7 +128,7 @@ async function send(value, text) {
     return res
   } catch (e) {
     // A failed verb gets a home next to its control, never a console line.
-    error.value = e?.response?.data?.detail || "Couldn't save that."
+    error.value = personFacingError(e, "Couldn't save that. Try again.")
     return null
   } finally {
     sending.value = false

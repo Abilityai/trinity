@@ -15,7 +15,7 @@
       <div class="rounded-xl border border-gray-200 dark:border-gray-800 px-3 py-2.5">
         <div class="flex items-center gap-2 flex-wrap">
           <span class="text-sm font-medium" data-testid="portal-role-title">{{ card.role.title || card.role.id || 'Role' }}</span>
-          <BaseBadge v-if="card.role.status" :variant="card.role.status === 'active' ? 'success' : 'warning'">{{ card.role.status }}</BaseBadge>
+          <BaseBadge v-if="card.role.status" :variant="card.role.status === 'active' ? 'success' : 'warning'">{{ roleStatusLabel(card.role.status) }}</BaseBadge>
           <BaseBadge v-if="card.role.stale" variant="warning" dot>past review</BaseBadge>
         </div>
         <p v-if="card.role.error" class="mt-1 text-xs text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-error">
@@ -118,7 +118,7 @@
       <div class="mt-3 rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 text-[12.5px]" data-testid="portal-role-readiness">
         <div class="flex items-center gap-2 flex-wrap">
           <span class="text-gray-400">Readiness</span>
-          <BaseBadge :variant="readiness.status === 'ready' ? 'success' : 'warning'" dot>{{ readiness.status }}</BaseBadge>
+          <BaseBadge :variant="readiness.status === 'ready' ? 'success' : 'warning'" dot>{{ readinessLabel(readiness.status) }}</BaseBadge>
           <span v-if="readiness.changed_at" class="text-gray-400">
             since <span :title="readiness.changed_at">{{ relative(readiness.changed_at) }}</span>
             <template v-if="readiness.source === 'rollout'"> · carried over when the readiness gate shipped</template>
@@ -131,7 +131,7 @@
           Its scheduled brief is paused until {{ card.can_flip_readiness ? 'you mark' : 'its owner marks' }} it ready.
         </p>
         <p v-if="readiness.unstamped_ready" class="mt-1 text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-unstamped">
-          The agent's file says <code class="font-mono">ready</code>, but no owner has stamped it — only the owner's stamp counts.
+          The agent's file marks it ready, but no owner has stamped it — only the owner's stamp counts.
         </p>
         <p v-if="readiness.status === 'calibrating' && card.walkthrough && !card.walkthrough.unavailable" class="mt-1 text-gray-400" data-testid="portal-role-walkthrough">
           Your walkthrough: {{ card.walkthrough.asks }} of {{ card.walkthrough.target }} asks
@@ -183,6 +183,7 @@ import InlineError from '@/components/InlineError.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
+import { readinessLabel, roleStatusLabel } from './portalLabels'
 
 const props = defineProps({
   agentName: { type: String, required: true },

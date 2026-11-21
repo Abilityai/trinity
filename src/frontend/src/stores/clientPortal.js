@@ -20,6 +20,7 @@ import {
 import axios from 'axios'
 import { notifyPlatformUnauthorized, setPlatformUnauthorizedHandler } from '@/utils/platformSession'
 import { isTermsRefusal, notifyTermsRefusal } from '@/utils/termsGate'
+import { personFacingError } from '@/utils/personFacingError'
 import { useAuthStore } from './auth'
 // The value the auth store sends on its own sign-in calls (`client: 'web'`),
 // spelled here rather than imported: specs mock the auth store whole.
@@ -191,7 +192,7 @@ const SESSION_ROTATION_HEADER = 'x-trinity-session-token'
 // operator's customer, who can neither buy the missing module nor act on
 // knowing it exists.
 export const MULTI_AGENT_UNAVAILABLE =
-  'Chats with more than one agent are not available on this instance.'
+  "Chats with more than one agent aren't available here."
 
 // ent#375 — adopt a rotated session token wherever it arrives.
 //
@@ -2899,10 +2900,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
         this.termsRefusal = isTermsRefusal(err) ? err.response.data.detail.code : null
         this.accountHasNoEmail = refusalCode(err) === 'account_has_no_email'
         this.error = this.unavailable
-          ? 'The workspace is not available on this instance.'
+          ? "The workspace isn't available here."
           : this.termsRefusal
             ? (err.response.data.detail.message || 'Accept the current terms to continue.')
-            : (err.response?.data?.detail || 'Failed to load your agents.')
+            : personFacingError(err, "Couldn't load your agents. Try again.")
         this.agents = []
         // #2128: the attempt reached a verdict — the room route may stop
         // showing its neutral placeholder and render the honest failure copy.

@@ -138,7 +138,9 @@ describe('#2212 transcription failures keep the backend’s own words', () => {
   })
 
   it('does not blame the connection when the request reached us', () => {
-    expect(transcriptionErrorMessage({ response: { status: 500, data: {} } })).toContain('500')
+    // #4344: no status code in the copy.
+    expect(transcriptionErrorMessage({ response: { status: 500, data: {} } })).not.toContain('500')
+    expect(transcriptionErrorMessage({ response: { status: 500, data: {} } })).toMatch(/our side/i)
     expect(transcriptionErrorMessage({ response: { status: 500, data: {} } })).not.toMatch(/reach Trinity/i)
   })
 

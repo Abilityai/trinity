@@ -125,7 +125,7 @@ describe('what only source can answer', () => {
 
   it('shows a failed rating next to its own control', () => {
     // A rating that silently failed leaves the person believing they were heard.
-    expect(rating).toContain('error.value = e?.response?.data?.detail')
+    expect(rating).toContain('error.value = personFacingError(e, ')
     expect(rating).not.toContain('console.error')
   })
 

@@ -370,7 +370,7 @@ describe('workspace roster failures are honest (AC: no dead empty state)', () =>
 
     expect(store.unavailable).toBe(true)
     expect(store.agents).toEqual([])
-    expect(store.error).toMatch(/not available/i)
+    expect(store.error).toMatch(/isn't available/i)
   })
 
   it('a transient failure is reported as a failure, and is retryable', async () => {
@@ -383,7 +383,8 @@ describe('workspace roster failures are honest (AC: no dead empty state)', () =>
     await store.fetchRoster()
 
     expect(store.unavailable).toBe(false)   // NOT "unavailable on this instance"
-    expect(store.error).toBe('upstream down')
+    // #4344: a 5xx detail is not shown to a client — the store's own line is.
+    expect(store.error).toBe("Couldn't load your agents. Try again.")
   })
 
   it('an empty roster stays an empty roster', async () => {

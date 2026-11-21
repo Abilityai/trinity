@@ -250,8 +250,9 @@ describe('an expired session found mid-conversation (AC4)', () => {
     // session. `sendMessage` clears the error itself, so New is the path on
     // which a stale one would outlive the card.
     const w = await verifiedConversation()
-    const failure = Object.assign(new Error('Request failed with status code 500'), {
-      response: { status: 500, data: { detail: 'The agent hit a wall.' } },
+    // #4344: a 5xx detail is never shown, so the stale error is a 409's sentence.
+    const failure = Object.assign(new Error('Request failed with status code 409'), {
+      response: { status: 409, data: { detail: 'The agent hit a wall.' } },
     })
     routes.post = vi.fn(async () => Promise.reject(failure))
     await w.vm.sendMessage('first try')

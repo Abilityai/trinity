@@ -301,6 +301,7 @@ import { ChatMessages, ChatInput, ChatEmptyState, ChatHistoryDropdown } from '..
 import { shouldCancelOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../utils/turnCancel'
 import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } from '../utils/execution-status'
 import { useAuthStore } from '../stores/auth'
+import { personFacingError } from '../utils/personFacingError'
 
 const route = useRoute()
 const token = computed(() => route.params.token)
@@ -430,7 +431,7 @@ const requestCode = async () => {
     if (err.response?.status === 429) {
       verifyError.value = 'Too many requests. Please wait a few minutes and try again.'
     } else {
-      verifyError.value = err.response?.data?.detail || 'Failed to send verification code.'
+      verifyError.value = personFacingError(err, 'Could not send a verification code. Try again.')
     }
   } finally {
     verifyLoading.value = false
@@ -467,7 +468,7 @@ const verifyCode = async () => {
     }
   } catch (err) {
     console.error('Failed to verify code:', err)
-    verifyError.value = err.response?.data?.detail || 'Failed to verify code.'
+    verifyError.value = personFacingError(err, 'Could not check that code. Try again.')
   } finally {
     verifyLoading.value = false
   }
@@ -899,7 +900,7 @@ const sendMessage = async (userMessage, files = []) => {
     } else if (err.response?.status === 429) {
       chatError.value = 'Too many requests. Please wait a moment.'
     } else {
-      chatError.value = err.response?.data?.detail || 'Failed to send message. Please try again.'
+      chatError.value = personFacingError(err, 'Failed to send message. Please try again.')
     }
   } finally {
     chatLoading.value = false

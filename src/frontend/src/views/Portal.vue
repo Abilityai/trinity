@@ -57,7 +57,7 @@
         <template v-if="step === 'email'">
           <h1 class="text-xl font-semibold mb-1">Sign in to your agents</h1>
           <p class="text-sm text-gray-500 dark:text-gray-400 mb-6">
-            Enter the email an operator shared agents with — we'll send a 6-digit code.
+            Enter the email your agents were shared with — we'll send a 6-digit code.
           </p>
           <form @submit.prevent="onRequest" class="space-y-3">
             <input
@@ -422,7 +422,7 @@
             <button :class="STAGE_ACTION" @click="store.fetchRoster()">Try again</button>
           </template>
           <template v-else>
-            <p :class="STAGE_TITLE">This conversation isn't available on this instance</p>
+            <p :class="STAGE_TITLE">This conversation isn't available here</p>
             <p :class="STAGE_BODY">
               Chats with more than one agent aren't enabled here. Start a chat with a single agent instead.
             </p>
@@ -478,7 +478,7 @@
         <div v-else-if="projectsRoute" :class="STAGE_WRAP" data-testid="projects-unavailable">
           <p :class="STAGE_TITLE">Projects aren't available here</p>
           <p :class="STAGE_BODY">
-            They're not enabled on this instance, or not for your account. Ask an administrator if you expected them.
+            They're not turned on here, or not for your account. Ask whoever shared your agents if you expected them.
           </p>
           <button :class="STAGE_ACTION" @click="router.push('/workspace')">Back to chats</button>
         </div>
@@ -1096,6 +1096,7 @@ import {
 // ent#557: the tab title's unread half. The router owns the label; this pushes
 // the count. See `utils/tabTitle.js` for why neither writes `document.title`.
 import { setUnreadCount, clearUnreadCount } from '@/utils/tabTitle'
+import { personFacingError } from '@/utils/personFacingError'
 import {
   VOICE_QUERY_KEY,
   voiceAutoStart,
@@ -1170,7 +1171,7 @@ async function onRequest() {
     step.value = 'code'; code.value = ''
     startResendCooldown()
     await nextTick(); codeInput.value?.focusFirst()
-  } catch (err) { error.value = err.response?.data?.detail || 'Could not send a code. Try again.' }
+  } catch (err) { error.value = personFacingError(err, 'Could not send a code. Try again.') }
   finally { busy.value = false }
 }
 async function onResend() {
@@ -1207,7 +1208,7 @@ async function onVerify() {
       router.push({ path: '/login', query: { redirect: resumeTo || route.fullPath, email: address } })
       return
     }
-    error.value = err.response?.status === 401 ? 'Invalid or expired code.' : (err.response?.data?.detail || 'Verification failed.')
+    error.value = err.response?.status === 401 ? 'Invalid or expired code.' : personFacingError(err, 'Could not check that code. Try again.')
     code.value = ''
     await nextTick(); codeInput.value?.focusFirst()
   } finally { busy.value = false }
@@ -1829,9 +1830,7 @@ async function onPickerConfirm(agentNames) {
     // one selected agent) and that reason still has to surface.
     pickerError.value = err?.code === 'rooms_unavailable'
       ? (err.message || MULTI_AGENT_UNAVAILABLE)
-      : (err?.response?.data?.detail?.message
-        || err?.response?.data?.detail
-        || 'Could not start that chat.')
+      : personFacingError(err, 'Could not start that chat.')
   } finally {
     pickerBusy.value = false
   }
@@ -1948,9 +1947,7 @@ async function onEscalateToRoom({ agents, message, attachments = [], tags = [] }
     prefill.value = ''
     await nextTick()
     prefill.value = message || ''
-    pickerError.value = err?.response?.data?.detail?.message
-      || err?.response?.data?.detail
-      || 'Could not start a group chat with those agents.'
+    pickerError.value = personFacingError(err, 'Could not start a group chat with those agents.')
   } finally {
     escalating.value = false
   }
@@ -1960,7 +1957,7 @@ async function onEscalateToRoom({ agents, message, attachments = [], tags = [] }
 // below it, which are the same four states rendered in the same file. Local
 // consts, not a module: both consumers live here, and a component extraction
 // for two <p> pairs is more abstraction than the duplication costs.
-const WORKSPACE_UNAVAILABLE_TITLE = "Workspace isn't available on this instance"
+const WORKSPACE_UNAVAILABLE_TITLE = "Workspace isn't available here"
 const ROSTER_LOAD_FAILED_TITLE = "Couldn't load your agents"
 
 // #2128 — the ink for the three empty/refusal stages, written ONCE.

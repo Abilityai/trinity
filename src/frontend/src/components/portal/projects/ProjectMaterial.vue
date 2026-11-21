@@ -79,7 +79,7 @@
       <ul class="mt-1.5 space-y-2">
         <li v-for="d in decisions" :key="d.id" class="rounded-lg border border-gray-200 dark:border-gray-750 bg-white dark:bg-gray-800 px-3 py-2 text-sm">
           <div class="flex items-center gap-2">
-            <BaseBadge :variant="d.outcome === 'approved' ? 'success' : d.outcome === 'killed' ? 'danger' : 'warning'">{{ d.outcome }}</BaseBadge>
+            <BaseBadge :variant="d.outcome === 'approved' ? 'success' : d.outcome === 'killed' ? 'danger' : 'warning'">{{ decisionOutcomeLabel(d.outcome) }}</BaseBadge>
             <p class="min-w-0 flex-1 truncate text-gray-900 dark:text-gray-100">{{ d.decided }}</p>
             <ItemMenu :item="d" kind="decision" :can-share="false" :can-remove="canRemove(d)" @remove="remove('decision', d)" />
           </div>
@@ -105,7 +105,7 @@
           <p v-if="!pickable.length" class="text-sm text-gray-600 dark:text-gray-300">Nothing of yours on {{ pickerAgent }} that isn't already on a project.</p>
           <ul class="max-h-72 divide-y divide-gray-100 overflow-y-auto dark:divide-gray-750">
             <li v-for="it in pickable" :key="`${it.kind}:${it.id}`" class="flex items-center gap-3 py-2 text-sm">
-              <BaseBadge>{{ it.kind }}</BaseBadge>
+              <BaseBadge>{{ materialKindLabel(it.kind) }}</BaseBadge>
               <span class="min-w-0 flex-1 truncate text-gray-900 dark:text-gray-100">{{ it.label }}</span>
               <BaseButton size="sm" variant="secondary" :loading="adding === it.id" @click="add(it)">Add</BaseButton>
             </li>
@@ -141,7 +141,8 @@ import { useProjectsStore } from '@/stores/projects'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import { humanSize } from '@/components/portal/portalFiles'
 import ProjectContext from './ProjectContext.vue'
-import { isTextMime, projectErrorMessage, sameEmail, withheldLine } from './projectsUtils'
+import { isTextMime, materialKindLabel, projectErrorMessage, sameEmail, withheldLine } from './projectsUtils'
+import { decisionOutcomeLabel } from '../portalLabels'
 
 const props = defineProps({
   project: { type: Object, required: true },

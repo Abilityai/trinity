@@ -211,6 +211,7 @@
                  store action is the Work tab's own. -->
             <PortalWorkCard
               :item="it"
+              :technical="store.isPlatformSession"
               show-agent
               :elapsed-seconds="elapsedOf(it)"
               :live-step="stepOf(it)"

@@ -96,6 +96,7 @@
 <script setup>
 import { nextTick, ref, reactive, watch } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
+import { personFacingError } from '@/utils/personFacingError'
 import ReportRenderer from '@/components/reports/ReportRenderer.vue'
 import ReportSummary from '@/components/reports/ReportSummary.vue'
 import InlineError from '@/components/InlineError.vue'
@@ -165,7 +166,7 @@ async function loadPayload(d) {
     payloads[d.id] = full?.payload ?? {}
     if (full?.row_meta) rowMeta[d.id] = full.row_meta
   } catch (e) {
-    errors[d.id] = e?.response?.data?.detail || "Couldn't open this deliverable."
+    errors[d.id] = personFacingError(e, "Couldn't open this deliverable.")
   }
 }
 
