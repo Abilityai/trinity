@@ -1227,7 +1227,13 @@ class PortalHistory(BaseModel):
     # True when the ceiling cut rows off the OLD end, so the client can say
     # "earlier messages aren't shown" instead of rendering a thread that
     # silently starts mid-call. Declared for the same reason as the two above.
+    # Superseded by `has_earlier`; kept one release for tabs on the old client.
     truncated: bool = False
+    # trinity-enterprise#594: rows older than the first message exist (whether
+    # the ceiling or the typed-turn count cut them), and the opaque `?before=`
+    # cursor that reads the next older page (None when there is none).
+    has_earlier: bool = False
+    next_before: Optional[str] = None
 
 
 # --- Operator controls over a signed-in client (ent#281) ----------------------
