@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1329_setup_registration_terms.py",
+      "feature": "trinity-enterprise#1329",
+      "added": "2026-11-21",
+      "categories": [
+        "backend",
+        "setup",
+        "terms"
+      ],
+      "description": "trinity-enterprise#1329: a registered provider of registration terms gates first-run setup from an emailed link (required/changed/unavailable, claim untouched), the terms route, the recorded acceptance, and the setup admin's instance-terms acceptance. Inert with no provider."
+    },
+    {
       "file": "unit/test_4564_capacity_db_bound.py",
       "feature": "#4564",
       "added": "2026-11-13",
