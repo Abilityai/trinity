@@ -620,11 +620,12 @@ async def request_email_login_code(request: Request):
     login_request = await _parse_body(request, EmailLoginRequest)
     email = login_request.email.lower()
 
-    # #186: every branch below returns a byte-identical body + status, and the
-    # email send is dispatched fire-and-forget, so a caller cannot distinguish a
-    # whitelisted (registered) email from a non-whitelisted one by body, status,
-    # or response latency. Do NOT reintroduce a distinct message, extra fields
-    # (e.g. expires_in_seconds), a 429, or a blocking send — each re-opens the
+    # #186: every MEMBERSHIP-DEPENDENT branch below returns a byte-identical
+    # body + status, and the email send is dispatched fire-and-forget, so a
+    # caller cannot distinguish a whitelisted (registered) email from a
+    # non-whitelisted one by body, status, or response latency. Do NOT
+    # reintroduce a distinct message, extra fields (e.g. expires_in_seconds), a
+    # 429, or a blocking send after the shared-budget check — each re-opens the
     # enumeration oracle (pentest 3.3.3).
     generic_response = {
         "success": True,
@@ -633,15 +634,22 @@ async def request_email_login_code(request: Request):
 
     # ent#1253: the per-address budget shared with the channels and MCP login.
     # Charged before the whitelist check, so every address spends it alike.
+    # #4603: its refusal depends only on how often the address was asked for,
+    # never on membership, so it is stated — the same 429 and sentence the
+    # channel doors send — instead of a body promising a code that never comes.
     if not channel_login_limit.address_allowed(email):
         logger.warning("email-code suppressed: shared rate limit for %r", email)
-        return generic_response
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=channel_login_limit.OVER_LIMIT_REPLY,
+        )
 
     # Non-whitelisted: return the generic body without revealing membership.
     if not db.is_email_whitelisted(email):
         return generic_response
 
-    # Rate limit: over-limit returns the SAME generic body (not a 429) so a
+    # Rate limit on minted code rows (which exist only for whitelisted
+    # addresses): over-limit returns the SAME generic body (not a 429) so a
     # repeat-request status differential can't be used as a membership oracle.
     # WARN server-side (fail-loud) so ops can still distinguish a rate-limit
     # suppression from a mail outage.

@@ -143,7 +143,12 @@ def _web_request(email, *, whitelisted, monkeypatch):
     monkeypatch.setattr(email_service_mod, "EmailService", _FakeEmailService)
 
     async def _go():
-        await auth_mod.request_email_login_code(_FakeRequest({"email": email}))
+        from fastapi import HTTPException
+        try:
+            await auth_mod.request_email_login_code(_FakeRequest({"email": email}))
+        except HTTPException as exc:
+            # #4603: the shared-budget refusal is stated as a 429.
+            assert exc.status_code == 429
         await asyncio.sleep(0.05)
 
     asyncio.run(_go())

@@ -1910,6 +1910,9 @@ def portal_people(agent_name: str, q: str = Query("", max_length=64),
 @router.get("/agents/{agent_name}/history", response_model=PortalHistory)
 def portal_history(agent_name: str, session_id: str | None = None,
                    limit: int | None = Query(None, ge=1, le=50),
+                   before: str | None = Query(
+                       None, max_length=200,
+                       description="Cursor from the previous page's next_before (ent#594)"),
                    principal: PortalPrincipal = Depends(get_portal_principal)):
     """The client's persisted conversation with a rostered agent (oldest-first),
     so it survives a refresh / re-sign-in. With ``?session_id=`` returns that
@@ -1921,6 +1924,10 @@ def portal_history(agent_name: str, session_id: str | None = None,
     narrow read the reply poll makes every few hundred milliseconds: the newest
     N rows, whatever their source — never the window, and nothing here can
     widen it.
+
+    trinity-enterprise#594: ``?before=`` (a page's ``next_before``) reads the
+    next OLDER window; a malformed cursor, or one sent with ``limit``, is a
+    named 422 ``invalid_cursor``.
     """
     email = principal.email
     # ent#358: the scope of what a caller can DO must equal what they can
@@ -1930,7 +1937,11 @@ def portal_history(agent_name: str, session_id: str | None = None,
     try:
         return service.get_history(agent_name, email, session_id=session_id,
                                    include_owned=include_owned, limit=limit,
-                                   viewer_is_person=principal.is_person)
+                                   viewer_is_person=principal.is_person, before=before)
+    except service.InvalidHistoryCursor:
+        raise HTTPException(status_code=422, detail={
+            "code": "invalid_cursor",
+            "message": "That page cursor is not valid. Reload the conversation."})
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 

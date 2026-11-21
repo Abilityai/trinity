@@ -41,9 +41,15 @@ export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX, ena
   // told us where the reader is.
   const following = ref(true)
   const unread = ref(0)
+  // trinity-enterprise#594: the distance from the bottom `holdPosition` keeps
+  // while older rows grow the transcript ABOVE the reader. null = no hold.
+  let held = null
 
   /** Recompute from where the reader actually is. Bind to the container's `scroll`. */
   function onScroll() {
+    // The first scroll that moves the reader relative to the bottom is theirs
+    // (the hold's own `scrollTop` write leaves the distance unchanged).
+    if (held !== null && Math.abs(distanceFromBottom(scrollEl.value) - held) > HOLD_TOLERANCE_PX) held = null
     const near = isNearBottom(scrollEl.value, threshold)
     following.value = near
     // Re-arming clears the count by construction — there is no detached state
@@ -62,6 +68,9 @@ export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX, ena
    * @param {number} [count] how many messages landed — 0 is legal and counts nothing
    */
   async function onArrive(count = 1) {
+    // Growth at the BOTTOM must not drag a held reader (the hold keeps the
+    // distance from the bottom, which an arrival below them changes).
+    held = null
     if (following.value) {
       await scrollToBottomNow()
       return
@@ -71,6 +80,7 @@ export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX, ena
 
   /** The user asked to be at the bottom: go there and start following again. */
   async function pinToBottom() {
+    held = null
     if (!enabled()) {
       // No transcript yet: an empty state reads from the top.
       await nextTick()
@@ -95,6 +105,7 @@ export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX, ena
    * load pins it.
    */
   function reset() {
+    held = null
     following.value = true
     unread.value = 0
   }
@@ -109,7 +120,37 @@ export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX, ena
    * put them; the normal scroll rule re-arms following if they scroll down.
    */
   function detach() {
+    held = null
     following.value = false
+  }
+
+  /**
+   * Run `mutate` (rows prepended ABOVE the reader — trinity-enterprise#594's
+   * "Show earlier") without moving what the reader is looking at.
+   *
+   * Prepending grows the transcript above the viewport, and a browser keeps
+   * `scrollTop`, so the content under the reader would jump down by the height
+   * of the new rows. The distance from the BOTTOM is what the prepend leaves
+   * unchanged, so that is what is recorded and restored. Later growth (an older
+   * bubble's markdown or image settling) is covered by the same observer that
+   * re-pins a following reader: while a hold stands it re-applies the distance.
+   * No frame chasing, for the reason `scrollToBottomNow` gives. The hold ends on
+   * the reader's own first scroll, a pin, a reset or a detach.
+   */
+  async function holdPosition(mutate) {
+    held = distanceFromBottom(scrollEl.value)
+    try {
+      await mutate()
+    } finally {
+      await nextTick()
+      applyHold()
+    }
+  }
+
+  function applyHold() {
+    const el = scrollEl.value
+    if (!el || held === null) return
+    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - held)
   }
 
   /**
@@ -166,7 +207,10 @@ export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX, ena
   function observe(el) {
     disconnectObserver()
     if (!el || typeof ResizeObserver === 'undefined') return
-    observer = new ResizeObserver(() => { if (following.value) pin() })
+    observer = new ResizeObserver(() => {
+      if (held !== null) applyHold()
+      else if (following.value) pin()
+    })
     // The CONTAINER reports a viewport change (a resized window, a dragged
     // column); its first child is the content wrapper and reports the
     // transcript growing. Both matter and they are different events.
@@ -193,8 +237,12 @@ export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX, ena
     scrollToLatest,
     reset,
     detach,
+    holdPosition,
   }
 }
+
+/** How far a scroll may move the reader before it counts as theirs and ends a hold. */
+const HOLD_TOLERANCE_PX = 2
 
 /**
  * How forgiving "at the bottom" is, in px.
