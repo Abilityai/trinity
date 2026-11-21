@@ -22,8 +22,8 @@ from fastapi import HTTPException, Request
 from models import AgentConfig, AgentStatus, User
 from db_models import ScheduleCreate
 from database import db
+from services import docker_service
 from services.docker_service import (
-    docker_client,
     get_agent_by_name,
     get_agent_container,
     get_next_available_port,
@@ -578,7 +578,7 @@ async def workspace_volume_exists(name: str) -> bool:
     `False` on NotFound, `True` when the volume exists, and RAISES on any
     other error (including no Docker client).
     """
-    if not docker_client:
+    if not docker_service.get_docker_client():
         raise RuntimeError("Docker is not available")
     try:
         await volume_get(f"agent-{name}-workspace")
@@ -619,16 +619,25 @@ async def create_volume_refusal(name: str) -> Optional[CreateVolumeRefusal]:
 
 
 async def _guard_leftover_workspace_volume(
-    config: AgentConfig, adopt_existing_workspace: bool
+    config: AgentConfig,
+    adopt_existing_workspace: bool,
+    docker_available: Optional[bool] = None,
 ) -> None:
     """#1667: refuse a leftover workspace volume that NOTHING claims unless the
     caller explicitly declares an adopt. Raised BEFORE the docker try-block so
     the 409 isn't flattened to a generic 500 (nothing is built yet to roll
-    back). Ghosts are volume-less, so they never reach here."""
+    back). Ghosts are volume-less, so they never reach here.
+
+    #4406: create passes `docker_available` from the one client read it also
+    uses to decide whether to build the container. Two separate reads could
+    disagree while Docker reconnects: this check skipped on None, then the
+    build saw the client and silently adopted a leftover volume."""
+    if docker_available is None:
+        docker_available = bool(docker_service.get_docker_client())
     if (
         not config.ephemeral
         and not adopt_existing_workspace
-        and docker_client
+        and docker_available
     ):
         try:
             refusal = await create_volume_refusal(config.name)
@@ -3601,9 +3610,10 @@ def _cleanup_copy_artifacts(handles: _RollbackHandles) -> None:
     user's retry; safe because ``copy_volume_name`` is set only after this
     attempt created+populated it."""
     snapshot_import.cleanup_staging(handles.copy_staging_dir)
-    if handles.copy_volume_name and docker_client:
+    client = docker_service.get_docker_client()
+    if handles.copy_volume_name and client:
         try:
-            docker_client.volumes.get(handles.copy_volume_name).remove(force=True)
+            client.volumes.get(handles.copy_volume_name).remove(force=True)
         except Exception as cleanup_exc:  # noqa: BLE001 — NotFound/in-use both fine
             logger.warning(
                 "Failed to remove pre-populated copy volume %s after creation "
@@ -3751,7 +3761,7 @@ async def _cleanup_bind_failed_container(agent_name: str, floor_ts: Optional[str
         )
         return False
     try:
-        target = docker_client.containers.get(f"agent-{agent_name}")
+        target = docker_service.get_docker_client().containers.get(f"agent-{agent_name}")
     except Exception as lookup_exc:  # noqa: BLE001
         status = getattr(getattr(lookup_exc, "response", None), "status_code", None)
         if status == 404:
@@ -4183,7 +4193,13 @@ async def create_agent_internal(
     # volume unless the caller (deploy-local #950) explicitly declares an adopt.
     # Raised HERE, before the docker try-block, so the 409 isn't flattened to a
     # generic 500 (nothing is built yet, so nothing to roll back).
-    await _guard_leftover_workspace_volume(config, adopt_existing_workspace)
+    # #4406: read the Docker client once per create. The guard and the
+    # container build below both go by this value, so a reconnect landing
+    # between them cannot skip the guard and still build.
+    docker_available = bool(docker_service.get_docker_client())
+    await _guard_leftover_workspace_volume(
+        config, adopt_existing_workspace, docker_available=docker_available
+    )
 
     # #1560: reaching here means the name is free — but `is_agent_name_reserved`
     # only stops matching once the retention purge hard-deletes the row, and the
@@ -4287,7 +4303,7 @@ async def create_agent_internal(
         ),
     )
 
-    if docker_client:
+    if docker_available:
         # ent#313: the except-path needs whatever handle we got. It stays None
         # when the failure happens inside container creation itself — the
         # reclaim re-derives it by name under provenance gates.

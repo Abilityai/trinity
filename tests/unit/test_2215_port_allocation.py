@@ -241,6 +241,7 @@ def test_demo_mode_still_allocates_from_base(env):
     """`docker_client is None` (demo mode) keeps the empty-set behaviour —
     crud's own 503 fires later; the allocator must not start raising there."""
     env.monkeypatch.setattr(ds, "docker_client", None)
+    env.monkeypatch.setattr(ds, "_next_docker_attempt_monotonic", float("inf"))  # #4406: no reconnect
     assert ds.get_next_available_port() == 2222
 
 

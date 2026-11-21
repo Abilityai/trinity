@@ -56,7 +56,7 @@ from typing import Optional
 from database import db
 from utils.admin_identity import admin_username
 from models import User
-from services.docker_service import docker_client
+from services import docker_service
 from services.cornelius_agent_service import cornelius_agent_service
 from services import platform_alerts
 from redis_breaker_util import get_breaker_redis, SingleFlightLock
@@ -322,7 +322,7 @@ class SystemSeedService:
         result = {"system": None, "action": None, "status": None, "message": None}
 
         # 0. Docker required (demo mode has no containers).
-        if docker_client is None:
+        if docker_service.get_docker_client() is None:
             return self._skip(result, "docker_unavailable", "Docker not available — skipping system seed")
 
         # 1. Already seeded? Durable flag survives agent deletion — never

@@ -25,7 +25,8 @@ from typing import Optional, Dict, Any, Literal
 
 import redis
 
-from services.docker_service import docker_client, get_agent_container
+from services import docker_service
+from services.docker_service import get_agent_container
 from services.docker_utils import container_exec_run
 from services.agent_ssh_binding import (
     AGENT_SSH_BIND_ADDRESS_ENV,
@@ -667,6 +668,7 @@ async def sweep_agent_ssh_posture() -> Dict[str, Any]:
         "Agent SSH ports are published on %s (%s=%s, source: %s)",
         configured, AGENT_SSH_BIND_ADDRESS_ENV, configured, source,
     )
+    docker_client = docker_service.get_docker_client()
     if not docker_client:
         return report
 

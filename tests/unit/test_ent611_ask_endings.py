@@ -599,9 +599,9 @@ def _install_wake(monkeypatch, *, enabled=True, state="running", replay=False, r
     from types import SimpleNamespace
     import services as _services_pkg
     # The running check goes through `docker_utils.agent_container_state_async`,
-    # which binds `docker_client` from `services.docker_service` at IMPORT. Load
-    # it for real first, or a first import under the stub below would bind the
-    # stub's (absent) client for the rest of the session.
+    # which binds the `services.docker_service` module at IMPORT. Load it for
+    # real first, or a first import under the stub below would bind the stub
+    # (which has no client) for the rest of the session.
     import services.docker_utils  # noqa: F401
 
     calls, audit, keys = [], [], []

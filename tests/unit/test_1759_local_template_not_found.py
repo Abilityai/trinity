@@ -84,7 +84,7 @@ def _load_crud(monkeypatch):
     docker_mod.errors.NotFound = _NotFound
 
     docker_service = MagicMock()
-    docker_service.docker_client = MagicMock()
+    docker_service.get_docker_client = MagicMock(return_value=MagicMock())
     docker_service.get_agent_by_name = MagicMock(return_value=None)
     docker_service.get_next_available_port = MagicMock(return_value=2222)
     docker_service.get_agent_status_from_container = MagicMock(return_value=MagicMock())

@@ -2,6 +2,7 @@
 Docker service for managing agent containers.
 """
 import logging
+import threading
 import time
 from typing import Dict, List, Optional, Set, Union
 import docker
@@ -29,7 +30,7 @@ _last_socket_warn_monotonic: Optional[float] = None
 _last_warn_monotonic: Dict[str, float] = {}
 
 
-def _warn_throttled(slot: str, message: str, *args) -> None:
+def _warn_throttled(slot: str, message: str, *args, level: int = logging.WARNING) -> None:
     """WARN at most once per `_SOCKET_WARN_THROTTLE_S` per `slot` (#2196).
 
     Same rationale as `list_all_agents_fast`'s throttle: a denied socket is a
@@ -41,7 +42,7 @@ def _warn_throttled(slot: str, message: str, *args) -> None:
     last = _last_warn_monotonic.get(slot)
     if last is None or now - last >= _SOCKET_WARN_THROTTLE_S:
         _last_warn_monotonic[slot] = now
-        logger.warning(message, *args)
+        logger.log(level, message, *args)
 
 
 # Initialize Docker client
@@ -51,13 +52,95 @@ except Exception as e:
     print(f"Warning: Could not connect to Docker: {e}")
     docker_client = None
 
+# #4406: a backend that boots before the Docker socket is reachable used to keep
+# `docker_client = None` until restart, so the roster stayed empty. The readers in
+# this module, and every caller outside it, go through get_docker_client(), which
+# retries with backoff. Never `from services.docker_service import docker_client`:
+# that binds the value from import time and never sees a reconnect.
+_DOCKER_RETRY_INITIAL_S = 1.0
+_DOCKER_RETRY_MAX_S = 60.0
+_docker_retry_delay_s = _DOCKER_RETRY_INITIAL_S
+_next_docker_attempt_monotonic: Optional[float] = None
+_docker_connect_lock = threading.Lock()
+
+
+def get_docker_client():
+    """The Docker client, or None while Docker is unreachable.
+
+    When there is no client, this starts one connect attempt on a background
+    thread and returns None right away, so no caller (sync or on the event loop)
+    ever waits on `docker.from_env()`, which can block for a TCP timeout. The
+    attempt stores the client for the next call. Attempts are spaced from
+    `_DOCKER_RETRY_INITIAL_S`, doubling up to `_DOCKER_RETRY_MAX_S`, so the 5s
+    poll loops do not hammer a dead socket, and only one runs at a time.
+    """
+    if docker_client is not None:
+        return docker_client
+    if not _docker_connect_lock.acquire(blocking=False):
+        return None  # an attempt is already running
+    if docker_client is not None or (
+        _next_docker_attempt_monotonic is not None
+        and time.monotonic() < _next_docker_attempt_monotonic
+    ):
+        _docker_connect_lock.release()
+        return docker_client
+    try:
+        _start_docker_connect()
+    except Exception as e:
+        # A thread that cannot start is a failed attempt: no client yet, the next
+        # attempt waits out the delay, and the caller gets None like any other
+        # reader instead of an exception.
+        _schedule_next_docker_attempt()
+        _docker_connect_lock.release()
+        _warn_throttled("docker_connect", "Could not start a Docker connect attempt: %s", e)
+        return None
+    except BaseException:
+        _docker_connect_lock.release()
+        raise
+    return None
+
+
+def _schedule_next_docker_attempt() -> None:
+    """After a failed attempt: the next one waits the current delay, which doubles."""
+    global _docker_retry_delay_s, _next_docker_attempt_monotonic
+    _next_docker_attempt_monotonic = time.monotonic() + _docker_retry_delay_s
+    _docker_retry_delay_s = min(_docker_retry_delay_s * 2, _DOCKER_RETRY_MAX_S)
+
+
+def _start_docker_connect() -> None:
+    threading.Thread(
+        target=_attempt_docker_connect, name="docker-reconnect", daemon=True
+    ).start()
+
+
+def _attempt_docker_connect() -> None:
+    """One connect attempt. The caller holds `_docker_connect_lock`; this releases it."""
+    global docker_client, _docker_retry_delay_s, _next_docker_attempt_monotonic
+    try:
+        try:
+            client = docker.from_env()
+        except Exception as e:
+            # From when the attempt failed, so a slow failure still waits out the delay.
+            _schedule_next_docker_attempt()
+            # INFO: an install that runs without Docker on purpose (demo mode) logs
+            # this once a minute while something polls the roster (#4406 review).
+            _warn_throttled("docker_connect", "Docker still unreachable: %s", e, level=logging.INFO)
+            return
+        docker_client = client
+        _docker_retry_delay_s = _DOCKER_RETRY_INITIAL_S
+        _next_docker_attempt_monotonic = None
+        logger.info("Connected to Docker after it was unreachable")
+    finally:
+        _docker_connect_lock.release()
+
 
 def get_agent_container(name: str):
     """Get agent container directly from Docker by name."""
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return None
     try:
-        container = docker_client.containers.get(f"agent-{name}")
+        container = client.containers.get(f"agent-{name}")
         return container
     except docker.errors.NotFound:
         return None
@@ -183,10 +266,11 @@ def get_agent_status_from_container(container) -> AgentStatus:
 
 def list_all_agents() -> List[AgentStatus]:
     """List all Trinity agent containers from Docker."""
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return []
     try:
-        containers = docker_client.containers.list(
+        containers = client.containers.list(
             all=True,
             filters={"label": "trinity.platform=agent"}
         )
@@ -206,10 +290,11 @@ def list_ephemeral_agent_containers() -> list:
     objects — callers read ``.labels`` (``trinity.agent-name``,
     ``trinity.created``) for the grace-window check.
     """
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return []
     try:
-        return docker_client.containers.list(
+        return client.containers.list(
             all=True,
             filters={"label": "trinity.ephemeral=true"},
         )
@@ -233,10 +318,11 @@ def list_all_agents_fast() -> List[AgentStatus]:
 
     Performance: ~50ms for 10 agents vs ~2-3s with full metadata.
     """
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return []
     try:
-        containers = docker_client.containers.list(
+        containers = client.containers.list(
             all=True,
             filters={"label": "trinity.platform=agent"}
         )
@@ -355,10 +441,11 @@ def agent_container_states() -> Optional[Dict[str, str]]:
     was in that list until #2541 folded it into the stopped tuple on both
     normalizers, so all three mappings now agree on it — see RESTART-005.)
     """
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return None
     try:
-        containers = docker_client.containers.list(
+        containers = client.containers.list(
             all=True,
             filters={"label": "trinity.platform=agent"},   # server-side; unaffected by sparse
             sparse=True,
@@ -407,10 +494,11 @@ def agent_container_runtimes() -> Optional[Dict[str, str]]:
     documents. Denying a working affordance on every Claude agent because one
     Docker read hiccuped is the #2196 inversion.
     """
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return None
     try:
-        containers = docker_client.containers.list(
+        containers = client.containers.list(
             all=True,
             filters={"label": "trinity.platform=agent"},   # server-side; unaffected by sparse
             sparse=True,
@@ -455,10 +543,11 @@ def agent_container_runtime_labels() -> Optional[Dict[str, Optional[str]]]:
     A name absent from the mapping means *this agent has no container*, which
     is again distinct from both.
     """
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return None
     try:
-        containers = docker_client.containers.list(
+        containers = client.containers.list(
             all=True,
             filters={"label": "trinity.platform=agent"},   # server-side; unaffected by sparse
             sparse=True,
@@ -494,10 +583,11 @@ def agent_container_state(name: str) -> Optional[str]:
     without this check a container merely *named* ``agent-x`` would read as
     absent on the roster and present on the page.
     """
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return None
     try:
-        container = docker_client.containers.get(f"agent-{name}")
+        container = client.containers.get(f"agent-{name}")
     except docker.errors.NotFound:
         # The distinction `get_agent_container` cannot make: Docker answered,
         # and the answer is "there is no such container".
@@ -587,10 +677,11 @@ def _existing_agent_ports_strict() -> Set[int]:
     mode) still returns the empty set — crud's own 503 fires later, preserving
     demo behaviour. A malformed per-container label skips that container only.
     """
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return set()
     try:
-        containers = docker_client.containers.list(
+        containers = client.containers.list(
             all=True,
             filters={"label": "trinity.platform=agent"},
         )
@@ -815,7 +906,7 @@ async def execute_command_in_container(
             f"execute_command_in_container needs a positive timeout, got {timeout!r}"
         )
 
-    if not docker_client:
+    if not get_docker_client():
         return {"exit_code": 1, "output": "Docker client not available", "timed_out": False}
 
     loop = asyncio.get_running_loop()

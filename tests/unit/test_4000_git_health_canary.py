@@ -248,8 +248,9 @@ def e2e(db_backend, monkeypatch):
             return types.SimpleNamespace(exit_code=0, output=b"")
 
     docker = types.ModuleType("services.docker_service")
-    docker.docker_client = types.SimpleNamespace(
+    _client = types.SimpleNamespace(
         containers=types.SimpleNamespace(list=lambda filters=None: [_Container()]))
+    docker.get_docker_client = lambda: _client
     monkeypatch.setitem(sys.modules, "services.docker_service", docker)
     slot = types.ModuleType("services.slot_service")
 

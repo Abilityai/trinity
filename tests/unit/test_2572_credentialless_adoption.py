@@ -686,6 +686,11 @@ def _stub_container_edges(monkeypatch) -> None:
         lambda c: types.SimpleNamespace(status="exited")
     )
     monkeypatch.setitem(sys.modules, "services.docker_service", docker_service)
+    # `from services import docker_service` reads the package attribute first;
+    # without this the stub is used or ignored depending on test order (#4406).
+    import services
+
+    monkeypatch.setattr(services, "docker_service", docker_service, raising=False)
 
 
 # ===========================================================================

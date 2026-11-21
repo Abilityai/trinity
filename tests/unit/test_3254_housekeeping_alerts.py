@@ -102,7 +102,7 @@ def seed(db, monkeypatch, tmp_path):
     monkeypatch.setattr(sss, "db", db)
     monkeypatch.setattr(db, "get_user_by_username", lambda username: dict(ADMIN))
     monkeypatch.setattr(db, "is_agent_name_reserved", lambda name: False)
-    monkeypatch.setattr(sss, "docker_client", object())
+    monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=object(): _c)
     monkeypatch.setattr(sss, "get_breaker_redis", lambda: None)
     monkeypatch.delenv(sss.MANIFEST_ENV_VAR, raising=False)
     bundled = tmp_path / "default-system.yaml"
@@ -343,7 +343,7 @@ def test_a_partial_converge_keeps_partial(seed, db):
 
 
 def _docker_down(seed):
-    seed.monkeypatch.setattr(sss, "docker_client", None)
+    seed.monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=None: _c)
 
 
 def _already_seeded(seed):

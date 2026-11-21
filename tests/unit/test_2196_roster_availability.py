@@ -465,6 +465,7 @@ def test_the_batch_read_distinguishes_empty_from_unreadable(monkeypatch):
     ds = _services_module("docker_service")
 
     monkeypatch.setattr(ds, "docker_client", None)
+    monkeypatch.setattr(ds, "_next_docker_attempt_monotonic", float("inf"))  # #4406: no reconnect
     assert ds.agent_container_states() is None            # could not be asked
 
     def _boom(**kwargs):
@@ -505,6 +506,7 @@ def test_the_single_read_reports_missing_only_when_docker_answered(monkeypatch):
     assert ds.agent_container_state("scout") is None
 
     monkeypatch.setattr(ds, "docker_client", None)
+    monkeypatch.setattr(ds, "_next_docker_attempt_monotonic", float("inf"))  # #4406: no reconnect
     assert ds.agent_container_state("scout") is None
 
 
@@ -545,6 +547,7 @@ def test_list_all_agents_fast_still_returns_empty_on_a_docker_fault(monkeypatch)
     assert ds.list_all_agents_fast() == []
 
     monkeypatch.setattr(ds, "docker_client", None)
+    monkeypatch.setattr(ds, "_next_docker_attempt_monotonic", float("inf"))  # #4406: no reconnect
     assert ds.list_all_agents_fast() == []
 
 

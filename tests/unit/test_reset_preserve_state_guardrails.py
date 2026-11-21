@@ -478,12 +478,21 @@ def _restore_sys_modules():
     poisons later importers too), and restores both on teardown.
     """
     saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    _pkg = sys.modules.get("services")
+    _missing = object()
+    saved_attr = getattr(_pkg, "docker_service", _missing) if _pkg is not None else _missing
     saved_git = {
         k: v for k, v in sys.modules.items() if k.startswith("services.git_service")
     }
     try:
         yield
     finally:
+        # The loader sets the package attribute to its stub too (#4406).
+        if _pkg is not None:
+            if saved_attr is _missing:
+                _pkg.__dict__.pop("docker_service", None)
+            else:
+                _pkg.docker_service = saved_attr
         for name, module in saved.items():
             if module is None:
                 sys.modules.pop(name, None)
@@ -522,7 +531,11 @@ def _load_git_service():
     database_mock.AgentGitConfig = Mock
     database_mock.GitSyncResult = Mock
     sys.modules["database"] = database_mock
-    sys.modules["services.docker_service"] = Mock()
+    docker_service_stub = Mock()
+    sys.modules["services.docker_service"] = docker_service_stub
+    # `from services import docker_service` reads the package attribute first (#4406).
+    if "services" in sys.modules:
+        sys.modules["services"].docker_service = docker_service_stub
     sys.modules["services.activity_service"] = activity_module
 
     for key in list(sys.modules.keys()):

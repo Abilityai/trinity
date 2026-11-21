@@ -643,7 +643,9 @@ def _load_ssh_service(monkeypatch, docker_client=None):
     mock_redis = Mock()
     mock_redis.from_url = Mock(return_value=Mock())
     exec_run = AsyncMock()
-    docker_service = types.SimpleNamespace(docker_client=docker_client, get_agent_container=Mock())
+    docker_service = types.SimpleNamespace(
+        get_docker_client=lambda: docker_client, get_agent_container=Mock()
+    )
     docker_utils = types.SimpleNamespace(container_exec_run=exec_run)
     monkeypatch.setitem(sys.modules, "redis", mock_redis)
     monkeypatch.setitem(sys.modules, "services.docker_service", docker_service)
@@ -652,6 +654,8 @@ def _load_ssh_service(monkeypatch, docker_client=None):
     spec = importlib.util.spec_from_file_location("ssh_service_1168", _BACKEND / "services/ssh_service.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    # #4406: ssh_service reaches the client through docker_service.get_docker_client().
+    mod.docker_service = docker_service
     return mod, exec_run
 
 

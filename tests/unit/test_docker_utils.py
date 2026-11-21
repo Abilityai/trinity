@@ -43,10 +43,10 @@ def get_docker_utils():
         )
         docker_utils = importlib.util.module_from_spec(spec)
 
-        # Inject mocked docker_client before exec
-        docker_utils.docker_client = mock_docker_client
-
         spec.loader.exec_module(docker_utils)
+
+        # #4406: docker_utils reaches the client through docker_service.get_docker_client().
+        docker_utils.docker_service = Mock(get_docker_client=Mock(return_value=mock_docker_client))
 
         return docker_utils, mock_docker_client
 

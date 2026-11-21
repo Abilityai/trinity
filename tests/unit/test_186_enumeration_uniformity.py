@@ -306,6 +306,8 @@ def _no_docker(monkeypatch):
     existing, defeating the enumeration-uniformity 404 (#186)."""
     monkeypatch.setitem(sys.modules, "services", _REAL_SERVICES_PKG)
     monkeypatch.setitem(sys.modules, "services.docker_service", _REAL_DOCKER_SERVICE)
+    # `from services import docker_service` reads the package attribute first (#4406).
+    monkeypatch.setattr(_REAL_SERVICES_PKG, "docker_service", _REAL_DOCKER_SERVICE, raising=False)
     monkeypatch.setattr(
         _REAL_DOCKER_SERVICE, "get_agent_by_name", lambda name: None, raising=False
     )
