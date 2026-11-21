@@ -38,7 +38,9 @@ async function requestCode({ delivers }) {
 const notice = (w) => w.find('[data-testid="login-no-email-provider"]')
 
 describe('Login — an install with no email provider (#3655)', () => {
-  beforeEach(() => { window.location.hash = '' })
+  // #4603: each test asks for a code for the same address; start every one
+  // with an empty request clock.
+  beforeEach(() => { window.location.hash = ''; window.sessionStorage.clear() })
 
   it('says no email was sent, where the code is, and the other ways in', async () => {
     const w = await requestCode({ delivers: false })

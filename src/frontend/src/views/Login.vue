@@ -142,11 +142,13 @@
 
                 <button
                   type="submit"
-                  :disabled="loginLoading || !emailInput"
+                  :disabled="loginLoading || !emailInput || cooldownMs > 0"
                   class="w-full flex justify-center py-3 px-4 border border-transparent text-sm font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 dark:focus:ring-offset-gray-800 disabled:opacity-50 transition-colors"
                 >
                   {{ loginLoading ? 'Sending code...' : 'Send Verification Code' }}
                 </button>
+                <InlineError :message="overBudgetMessage" />
+                <p v-if="cooldownMs > 0" data-testid="login-code-cooldown" :class="HELP_CLASS">{{ cooldownText }}</p>
               </form>
             </div>
 
@@ -172,6 +174,7 @@
                   </p>
                   <BaseButton size="sm" variant="secondary" class="mt-2" @click="useAdminLogin">Admin Login</BaseButton>
                 </div>
+                <InlineError v-else-if="overBudgetMessage" :message="overBudgetMessage" />
                 <p v-else class="text-sm text-gray-600 dark:text-gray-400">
                   📧 If <strong class="text-gray-900 dark:text-white">{{ emailInput }}</strong> is registered, a 6-digit code is on its way.
                 </p>
@@ -205,6 +208,20 @@
                 >
                   {{ loginLoading ? 'Verifying...' : 'Verify & Sign In' }}
                 </button>
+
+                <!-- #4603: ask again from here, under the same cooldown. -->
+                <div class="space-y-1">
+                  <BaseButton
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    class="w-full"
+                    data-testid="login-resend-code"
+                    :disabled="loginLoading || cooldownMs > 0"
+                    @click="handleRequestCode"
+                  >Resend code</BaseButton>
+                  <p v-if="cooldownMs > 0" data-testid="login-code-cooldown" :class="[HELP_CLASS, 'text-center']">{{ cooldownText }}</p>
+                </div>
 
                 <button
                   type="button"
@@ -321,6 +338,10 @@ import { landingAfterSignIn } from '../utils/workspaceOnly'
 import { HELP_CLASS } from '../components/base/fieldClasses'
 import QrCode from '../components/QrCode.vue'
 import BaseButton from '../components/base/BaseButton.vue'
+import InlineError from '../components/InlineError.vue'
+import {
+  codeRequestWaitMs, formatWait, recordCodeRequest, recordOverBudget,
+} from '../utils/loginCodeCooldown'
 
 const router = useRouter()
 const route = useRoute()
@@ -351,6 +372,24 @@ const codeInput = ref('')
 const codeSent = ref(false)
 const countdown = ref(0)
 const countdownInterval = ref(null)
+
+// #4603: the page's own request clock. `now` ticks once a second so the
+// remaining wait re-renders; the wait itself is derived from stored request
+// times, so going back to the email step or reloading does not reset it.
+const now = ref(Date.now())
+const nowTimer = setInterval(() => { now.value = Date.now() }, 1000)
+const overBudgetMessage = ref('')
+const requestsLogged = ref(0)            // storage is not reactive: bumped on each write
+const cooldownMs = computed(() => {
+  void requestsLogged.value
+  return codeRequestWaitMs(emailInput.value, now.value)
+})
+const cooldownText = computed(() =>
+  'Trinity sends at most 3 codes per 10 minutes to one address, shared with ' +
+  'Telegram, Slack, WhatsApp and MCP sign-in. You can ask again in ' +
+  `${formatWait(cooldownMs.value)}.`
+)
+watch(emailInput, () => { overBudgetMessage.value = '' })
 
 // UI state for switching between login methods
 const showAdminLogin = ref(false)
@@ -415,6 +454,7 @@ const startCountdown = (seconds) => {
 
 // Cleanup countdown on unmount
 onUnmounted(() => {
+  clearInterval(nowTimer)
   if (countdownInterval.value) {
     clearInterval(countdownInterval.value)
   }
@@ -422,14 +462,25 @@ onUnmounted(() => {
 
 // Email authentication handlers
 const handleRequestCode = async () => {
+  now.value = Date.now()
+  if (cooldownMs.value > 0) return       // #4603: Enter must not bypass the held button
   loginLoading.value = true
   authStore.clearError()
 
-  const result = await authStore.requestEmailCode(emailInput.value)
+  const email = emailInput.value
+  const result = await authStore.requestEmailCode(email)
+  now.value = Date.now()
   if (result.success) {
+    recordCodeRequest(email, now.value)
+    requestsLogged.value++
+    overBudgetMessage.value = ''
     codeSent.value = true
     codeInput.value = ''
     startCountdown(result.expiresInSeconds || 600)
+  } else if (result.overBudget) {
+    recordOverBudget(email, now.value)
+    requestsLogged.value++
+    overBudgetMessage.value = result.error
   }
 
   loginLoading.value = false
