@@ -8,9 +8,26 @@
  *
  * Mounted (#2918): the number on screen is the bug, so the test reads it.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { ref } from 'vue'
+import { setActivePinia, createPinia } from 'pinia'
+
+// #4346: the counters are a platform session's — the auth store says signed in
+// and no portal token is held, so `isPlatformSession` is true.
+vi.mock('@/stores/auth', () => ({
+  useAuthStore: () => ({ isAuthenticated: true, authHeader: {}, logout: vi.fn() }),
+}))
+vi.mock('axios', () => {
+  const mk = () => ({
+    get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn(),
+    interceptors: { request: { use: vi.fn() }, response: { use: vi.fn() } },
+    defaults: { headers: { common: {} } },
+  })
+  return { default: Object.assign({ get: vi.fn(), post: vi.fn(), create: mk },
+    { interceptors: { request: { use: vi.fn() }, response: { use: vi.fn() } }, defaults: { headers: { common: {} } } }) }
+})
+beforeEach(() => { setActivePinia(createPinia()) })
 
 const state = { stats: ref({}) }
 vi.mock('@/composables/usePortalAgentPage', () => ({
@@ -46,17 +63,17 @@ describe('#3138 — the band renders 0..1 ratios as percentages', () => {
     [0.994, '99%'],         // rounds, never claims 100% early
     [0, '0%'],              // measured and zero is a real 0%
   ])('success rate %s reads %s', (ratio, shown) => {
-    expect(rates(ratio, null)).toContain(`${shown}completed`)
+    expect(rates(ratio, null)).toContain(`${shown}succeeded`)
   })
 
   it('first try uses the same scale', () => {
-    expect(rates(null, 1)).toContain('100%first try')
-    expect(rates(null, 0.25)).toContain('25%first try')
+    expect(rates(null, 1)).toContain('100%succeeded without a retry')
+    expect(rates(null, 0.25)).toContain('25%succeeded without a retry')
   })
 
   it('a rate never measured reads — , never 0%', () => {
     const text = rates(null, undefined)
-    expect(text).toContain('—completed')
-    expect(text).toContain('—first try')
+    expect(text).toContain('—succeeded')
+    expect(text).toContain('—succeeded without a retry')
   })
 })

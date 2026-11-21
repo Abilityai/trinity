@@ -148,6 +148,19 @@ def slash_name(text: Optional[str]) -> Optional[str]:
     return m.group(1).lower() if m else None
 
 
+def playbook_display_name(p: Playbook) -> str:
+    """#4346: the skill's display title for a person — never `/name` slash syntax.
+
+    A hint with no title of its own carries its slug as the title, so a title
+    that is empty or merely the slug is humanised (`deal-review` → `Deal review`).
+    """
+    title = (p.title or "").strip()
+    if title and title.lower() != p.name.lower():
+        return title
+    words = re.sub(r"[-_]+", " ", p.name).strip()
+    return words[:1].upper() + words[1:] if words else "this skill"
+
+
 def playbooks_from_briefing(items) -> List[Playbook]:
     """Briefing hint items → playbooks. Use-case hints are dropped (see `_STARTER`)."""
     out: List[Playbook] = []
@@ -320,7 +333,7 @@ def build(signals: Signals, *, agent_name: str, now: datetime,
             continue
         add("unused_playbook", Suggestion(
             key=f"unused_playbook:{p.name}", kind="invoke", source="capability", door="platform",
-            title=p.title, signal=f"You haven't run /{p.name} yet", description=p.description,
+            title=p.title, signal=f"You haven't tried {playbook_display_name(p)} yet", description=p.description,
             action=SuggestionAction(type="prefill", value=f"/{p.name} "),
         ), p.name)
 

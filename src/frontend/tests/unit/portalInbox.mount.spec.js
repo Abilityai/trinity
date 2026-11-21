@@ -302,6 +302,7 @@ describe('reading a chat (D11)', () => {
 
 describe('All says what it holds (§3g D-4)', () => {
   it('lists an old chat, and its footer says how ended asks leave', async () => {
+    store.asks = [ask('a1')]
     store.asksLoaded = true
     const w = await mountInbox({ threads: [thread('old', { last_message_at: iso(90 * 24 * 60) })] }, { query: { tab: 'all' } })
     expect(has(w, 'inbox-row-thread:old')).toBe(true)
@@ -309,11 +310,19 @@ describe('All says what it holds (§3g D-4)', () => {
     expect(w.find('[data-testid="inbox-list-footer"]').text()).not.toContain('Rooms')
   })
 
+  // #4346: a list with no ask on it has no use for the ended-ask note.
+  it('a list with no asks carries no ended-ask footer', async () => {
+    store.asksLoaded = true
+    const w = await mountInbox({ threads: [thread('old', { last_message_at: iso(90 * 24 * 60) })] }, { query: { tab: 'all' } })
+    expect(has(w, 'inbox-row-thread:old')).toBe(true)
+    expect(w.find('[data-testid="inbox-list-footer"]').exists()).toBe(false)
+  })
+
   it('trinity-enterprise#959: no "rooms aren\'t here" note, even to a viewer who has rooms', async () => {
     store.asksLoaded = true
     const threads = [thread('t1'), { id: 'r1', is_room: true, member: true, title: 'Room', last_message_at: iso(2) }]
     const w = await mountInbox({ threads }, { query: { tab: 'all' } })
-    expect(w.find('[data-testid="inbox-list-footer"]').text()).not.toContain('Rooms')
+    expect(w.text()).not.toContain("Rooms aren't")
     expect(has(w, 'inbox-row-room:r1')).toBe(true)
   })
 

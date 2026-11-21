@@ -384,7 +384,8 @@ export const NEW_CHAT_TAB_LABEL = 'New chat'
 // ent#523: the pinned Main chat's tab label. A constant because three places
 // have to agree on it — the strip, the details list, and the test — and a chat
 // whose title is literally "Main" would otherwise be indistinguishable from it.
-export const MAIN_TAB_LABEL = 'Main'
+// #4346: "Ongoing", not "Main" — a person-facing name, printed from here only.
+export const MAIN_TAB_LABEL = 'Ongoing'
 
 // trinity-enterprise#657: `draftKeys` is the drafts store's key set. A tab
 // whose thread holds unsent text carries `hasDraft` (keyed on the TAB id, not

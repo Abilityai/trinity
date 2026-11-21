@@ -83,7 +83,7 @@
           </ol>
         </template>
         <p v-else class="mt-1 text-[12.5px] text-gray-900 dark:text-gray-100">
-          {{ ctx.origin.is_main ? 'Filed in your Main chat' : `Filed in “${ctx.origin.title || 'a chat'}”` }}
+          {{ ctx.origin.is_main ? FILED_IN_MAIN : `Filed in “${ctx.origin.title || 'a chat'}”` }}
         </p>
         <button
           type="button"
@@ -148,7 +148,7 @@ import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { viewState } from '@/utils/loadingState'
 import { askContextMeta } from './portalAskUrgency'
-import { relativeTime } from './portalUtils'
+import { relativeTime, MAIN_TAB_LABEL } from './portalUtils'
 
 const props = defineProps({
   // The ask as the card renders it (the store's WorkspaceAsk).
@@ -179,16 +179,18 @@ const view = computed(() => viewState({ hasLoaded: loaded.value, error: failed.v
 const meta = computed(() => askContextMeta(props.ask, ctx.value.run))
 // A verified Main keeps its generated title in the DB; every other surface calls
 // it "Main" (the tab strip), so this one does too.
+// #4346: the primary chat's name comes from the one constant.
+const FILED_IN_MAIN = `Filed in your ${MAIN_TAB_LABEL.toLowerCase()} chat`
 const originName = computed(() => {
   const o = ctx.value.origin
   if (!o) return ''
-  return o.is_main ? 'Main' : (o.title || 'Untitled chat')
+  return o.is_main ? MAIN_TAB_LABEL : (o.title || 'Untitled chat')
 })
 const filedElsewhere = computed(() => {
   const o = ctx.value.origin
   const own = props.ask.chat_id
   if (!o || !o.verified || !own || own === o.chat_id) return ''
-  return 'Filed in your Main chat'
+  return FILED_IN_MAIN
 })
 const originUrl = computed(() => {
   const o = ctx.value.origin

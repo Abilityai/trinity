@@ -81,9 +81,17 @@ describe('All lists my rooms alongside my chats (AC 2)', () => {
   })
 
   it('the footer no longer says rooms are missing (AC 5)', () => {
-    const notes = allFooterNotes({ hasRooms: true, askCount: 0 })
+    const notes = allFooterNotes({ hasRooms: true, askCount: 1, hasAsk: true })
     expect(notes.join(' ')).not.toMatch(/Rooms/)
     expect(notes).toEqual(['Answered, expired and cancelled asks drop off after 7 days.'])
+  })
+
+  // #4346: the ended-ask note is about asks — a list with none has no use for it.
+  it('the ended-ask note renders only when the list shows an ask', () => {
+    expect(allFooterNotes({ askCount: 0, hasAsk: false })).toEqual([])
+    expect(allFooterNotes({ askCount: 3, hasAsk: false })).toEqual([])
+    expect(allFooterNotes({})).toEqual([])
+    expect(allFooterNotes({ askCount: 3, hasAsk: true })).toEqual(['Answered, expired and cancelled asks drop off after 7 days.'])
   })
 })
 

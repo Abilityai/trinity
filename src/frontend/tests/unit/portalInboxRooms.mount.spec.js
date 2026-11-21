@@ -235,7 +235,8 @@ describe('All (AC 2, AC 5)', () => {
   it('lists my rooms beside my chats, and no footer note about rooms', async () => {
     const w = await mountInbox({ threads: [thread('t1', { last_message_at: iso(30) }), room('r1', { last_message_at: iso(5) })] }, { tab: 'all' })
     expect(w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))).toEqual(['room:r1', 'thread:t1'])
-    expect(w.find('[data-testid="inbox-list-footer"]').text()).not.toContain('Rooms')
+    // #4346: no asks listed, so no footer at all — and no rooms note either way.
+    expect(w.text()).not.toContain("Rooms aren't")
   })
 })
 

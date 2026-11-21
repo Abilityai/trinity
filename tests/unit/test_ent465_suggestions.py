@@ -181,9 +181,19 @@ class TestRules:
         unused = [s for s, _ in pairs if s.key.startswith("unused_playbook:")]
         assert [s.key for s in unused] == ["unused_playbook:weekly-report", "unused_playbook:a", "unused_playbook:b"]
         first = unused[0]
-        assert first.signal == "You haven't run /weekly-report yet"
+        # #4346: the skill's display title, never the slash syntax.
+        assert first.signal == "You haven't tried Weekly report yet"
         assert first.action.type == "prefill" and first.action.value == "/weekly-report "
         assert first.description == "Summarise the week"
+
+    def test_unused_playbook_signal_names_the_skill_without_slash_syntax(self):
+        """#4346: a hint with no title falls back to a humanised name, not `/advise`."""
+        svc = _svc()
+        P = svc.Playbook
+        pairs = _build(svc.Signals(playbooks=[P("advise", "advise"), P("deal-review", "")]))
+        signals = [s.signal for s, _ in pairs if s.key.startswith("unused_playbook:")]
+        assert signals == ["You haven't tried Advise yet", "You haven't tried Deal review yet"]
+        assert not any("/" in sig for sig in signals)
 
     def test_schedule_names_are_capped(self):
         long = "x" * 300

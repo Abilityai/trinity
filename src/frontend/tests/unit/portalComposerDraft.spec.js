@@ -186,7 +186,7 @@ describe('PortalChatTabs — the mark on a tab, and the provisional tab a draft 
     const w = mount(PortalChatTabs, { props: { threads, agentName: 'scribe', activeId: 'main', draftKeys: new Set(['thread:t2']) } })
     const buttons = tabButtons(w)
     const second = buttons.find((b) => b.text().includes('Second'))
-    const main = buttons.find((b) => b.text().includes('Main'))
+    const main = buttons.find((b) => b.text().includes('Ongoing'))
     expect(second.find(MARK).exists()).toBe(true)
     expect(main.find(MARK).exists()).toBe(false)
     // …and the mirror row (what the fit decision measures) carries it too.

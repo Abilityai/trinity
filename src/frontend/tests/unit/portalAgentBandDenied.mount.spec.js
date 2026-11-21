@@ -9,6 +9,9 @@ import { mount } from '@vue/test-utils'
 import { ref } from 'vue'
 
 const state = { denied: ref(false), error: ref(null), loaded: ref(false) }
+// #4346: the band shows its counters to a platform session only; these specs
+// are about the platform band's wiring.
+vi.mock('@/stores/clientPortal', () => ({ useClientPortalStore: () => ({ isPlatformSession: true }) }))
 vi.mock('@/composables/usePortalAgentPage', () => ({
   usePortalAgentPage: () => ({
     stats: ref({}), ratings: ref({ total: 0, unavailable: false }),

@@ -107,4 +107,13 @@ describe.each([
     expect(fmt(ago(2 * H))).toBe('2 hours ago')
     expect(fmt(ago(6 * D))).toBe('6 days ago')
   })
+
+  // #4346: past a week, a short readable date — never the locale's bare
+  // `toLocaleDateString()`, which prints an ISO date in several locales.
+  it('past seven days reads a short date, the year only when it differs', () => {
+    expect(fmt(ago(7 * D))).toBe('Oct 4')
+    expect(fmt(ago(10 * D))).toBe('Oct 1')
+    expect(fmt('2025-12-30T12:00:00Z')).toBe('Dec 30, 2025')
+    expect(fmt(ago(10 * D))).not.toMatch(/\d{4}-\d{2}-\d{2}|\//)
+  })
 })

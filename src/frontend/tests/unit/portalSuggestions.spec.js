@@ -54,7 +54,7 @@ const FEEDBACK = `${URL}/feedback`
 function item(over = {}) {
   return {
     key: 'unused_playbook:weekly-report', kind: 'invoke', source: 'capability', door: 'platform',
-    title: 'Weekly report', signal: "You haven't run /weekly-report yet", description: 'Summarise the week',
+    title: 'Weekly report', signal: "You haven't tried Weekly report yet", description: 'Summarise the week',
     action: { type: 'prefill', value: '/weekly-report ' },
     ...over,
   }
@@ -81,7 +81,7 @@ describe('PortalSuggestions', () => {
     const w = mountIt()
     await flushPromises()
     expect(axios.get).toHaveBeenCalledWith(URL, expect.anything())
-    expect(w.get('[data-testid="portal-suggestion-signal"]').text()).toBe("You haven't run /weekly-report yet")
+    expect(w.get('[data-testid="portal-suggestion-signal"]').text()).toBe("You haven't tried Weekly report yet")
     await w.get('[data-testid="portal-suggestion-accept"]').trigger('click')
     expect(w.emitted('use-playbook')).toEqual([['/weekly-report ']])
     expect(axios.post).toHaveBeenCalledWith(FEEDBACK, { key: 'unused_playbook:weekly-report', action: 'accept' }, expect.anything())
@@ -129,7 +129,7 @@ describe('PortalSuggestions', () => {
   })
 
   it('dismiss hides at once; a failed write restores it with the error beside it', async () => {
-    axios.get.mockResolvedValue({ data: payload([item(), item({ key: 'unused_playbook:triage', title: 'Triage', signal: "You haven't run /triage yet" })]) })
+    axios.get.mockResolvedValue({ data: payload([item(), item({ key: 'unused_playbook:triage', title: 'Triage', signal: "You haven't tried Triage yet" })]) })
     let reject
     axios.post.mockImplementation(() => new Promise((_, r) => { reject = r }))
     const w = mountIt()

@@ -9,7 +9,7 @@
  *   sections  Where it came from (the verified thread's messages + "Open the
  *             conversation", anchor=m:) → Delivered in that chat (anchor=d:,
  *             verified threads only) → Your recent answers
- *   fallback  an unverified origin reads "Filed in your Main chat", no excerpt
+ *   fallback  an unverified origin reads "Filed in your ongoing chat", no excerpt
  *   states    a skeleton while there is no verdict, then LoadFailed dense with a
  *             retry — never an empty context on a failed read
  */
@@ -148,7 +148,7 @@ describe('PortalAskContext (mounted)', () => {
 
   it('an unverified origin says where it was filed, with no excerpt and no deliverables read', async () => {
     const w = await mountCtx({ origin: MAIN, run: null, recent_answers: [] })
-    expect(el(w, 'inbox-ask-context-origin').text()).toContain('Filed in your Main chat')
+    expect(el(w, 'inbox-ask-context-origin').text()).toContain('Filed in your ongoing chat')
     expect(w.findAll('[data-testid="inbox-ask-context-message"]')).toHaveLength(0)
     expect(store.fetchSessionDeliverablesStrict).not.toHaveBeenCalled()
     expect(el(w, 'inbox-ask-context-answers').exists()).toBe(false)
@@ -193,12 +193,12 @@ describe('A2 round 1 — what the context says, and how it loads', () => {
 
   it('a verified Main origin is called "Main", never its generated title', async () => {
     const w = await mountCtx({ origin: { ...VERIFIED, is_main: true, title: 'Q3 invoices' }, run: RUN, recent_answers: [] })
-    expect(el(w, 'inbox-ask-context-origin-title').text()).toBe('Main')
+    expect(el(w, 'inbox-ask-context-origin-title').text()).toBe('Ongoing')
   })
 
   it('an origin that is not where the ask was filed says both, and the link names the chat', async () => {
     const w = await mountCtx({ origin: VERIFIED, run: RUN, recent_answers: [] }, ask({ chat_id: 's-main' }))
-    expect(el(w, 'inbox-ask-context-filed').text()).toBe('Filed in your Main chat')
+    expect(el(w, 'inbox-ask-context-filed').text()).toBe('Filed in your ongoing chat')
     expect(el(w, 'inbox-ask-context-open').text()).toBe('Open “September close”')
     // Filed where it was raised: nothing extra to say.
     const same = await mountCtx({ origin: VERIFIED, run: RUN, recent_answers: [] }, ask({ chat_id: 's-run' }))

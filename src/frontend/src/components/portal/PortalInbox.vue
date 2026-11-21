@@ -424,7 +424,7 @@ const baseItems = computed(() => {
   return allItems(props.threads, store.asks, props.previews, Date.now(), store.mentions)
 })
 const footerNotes = computed(() => (tab.value === 'all'
-  ? allFooterNotes({ askCount: store.asks.length })
+  ? allFooterNotes({ askCount: store.asks.length, hasAsk: shownItems.value.some((it) => it?.type === 'ask') })
   : []))
 
 // §3g S5 (T2): the URL holds only what the reader OPENED. The desktop
