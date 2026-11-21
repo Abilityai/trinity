@@ -215,8 +215,15 @@ describe('assistant panel', () => {
       await useAssistantStore().loadStatus()
       await openPanel()
     }
+    const signedIn = async (on) => {
+      const { useAuthStore } = await import('@/stores/auth')
+      useAuthStore().isAuthenticated = on
+    }
 
-    beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout'] }) })
+    beforeEach(async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout'] })
+      await signedIn(true)
+    })
     afterEach(() => { vi.useRealTimers() })
 
     it('pending, then accepted: the terms box is never shown and nothing is accepted', async () => {
@@ -261,6 +268,73 @@ describe('assistant panel', () => {
       await vi.advanceTimersByTimeAsync(60000)
       await flushPromises()
       expect(reads()).toBe(5)
+    })
+
+    it('a message or a starter sent while it is being read again is held, never sent', async () => {
+      statusReads = [{ ...PENDING }, { ...PENDING }]
+      status = { ...NOT_AGREED }
+      await load()
+      await say('how are my agents?')
+      expect(sent(TURN)).toEqual([])
+      const starter = wrapper.findAll('[data-testid="assistant-starters"] button')[0]
+      expect(starter).toBeTruthy()
+      await starter.trigger('click')
+      await flushPromises()
+      expect(sent(TURN)).toEqual([])
+    })
+
+    it('pending, then accepted: a message held meanwhile goes once the read settles', async () => {
+      statusReads = [{ ...PENDING }, { ...AGREED }]
+      status = { ...AGREED }
+      await load()
+      await say('how are my agents?')
+      expect(sent(TURN)).toEqual([])
+      await vi.advanceTimersByTimeAsync(500)
+      await flushPromises()
+      expect(sent(TURN).map((c) => c.body.message)).toEqual(['how are my agents?'])
+      expect(sent('/api/enterprise/assistant/terms/accept')).toEqual([])
+    })
+
+    it('pending, then not accepted: the box shows with the message still held', async () => {
+      statusReads = [{ ...PENDING }, { ...NOT_AGREED }]
+      status = { ...NOT_AGREED }
+      await load()
+      await say('how are my agents?')
+      await vi.advanceTimersByTimeAsync(500)
+      await flushPromises()
+      expect(box().exists()).toBe(true)
+      expect(wrapper.get('[data-testid="assistant-waiting"]').text()).toContain('how are my agents?')
+      expect(sent(TURN)).toEqual([])
+      expect(sent('/api/enterprise/assistant/terms/accept')).toEqual([])
+    })
+
+    it('stops reading again once the person signs out', async () => {
+      statusReads = [{ ...PENDING }, { ...PENDING }, { ...PENDING }, { ...PENDING }, { ...PENDING }]
+      status = { ...PENDING }
+      await load()
+      await vi.advanceTimersByTimeAsync(500)
+      await flushPromises()
+      expect(reads()).toBe(2)
+      await signedIn(false)
+      await vi.advanceTimersByTimeAsync(60000)
+      await flushPromises()
+      expect(reads()).toBe(2)
+      const { useAssistantStore } = await import('@/stores/assistant')
+      expect(useAssistantStore().settling).toBe(false)
+    })
+
+    it('stops reading again once the panel is torn down', async () => {
+      statusReads = [{ ...PENDING }, { ...PENDING }, { ...PENDING }, { ...PENDING }, { ...PENDING }]
+      status = { ...PENDING }
+      await load()
+      await vi.advanceTimersByTimeAsync(500)
+      await flushPromises()
+      expect(reads()).toBe(2)
+      wrapper.unmount()
+      wrapper = { unmount() {} }
+      await vi.advanceTimersByTimeAsync(60000)
+      await flushPromises()
+      expect(reads()).toBe(2)
     })
 
     it('no pending marker: the box is offered at once and the status is read once', async () => {

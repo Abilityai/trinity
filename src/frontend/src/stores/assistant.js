@@ -23,6 +23,7 @@ import { useOnboardingStore } from './onboarding'
 import { buildContext, buildFleet, describePage } from '../utils/assistantContext'
 import { acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, validBuild, webLink } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
+import { useAuthStore } from './auth'
 
 export const FEATURE_ID = 'assistant'
 
@@ -51,6 +52,7 @@ const JOB_POLL_LIMIT = 450 // 30 minutes
 // carries on with what it has, exactly as a status without the marker does.
 const SETTLE_DELAYS_MS = [500, 1000, 2000, 4000]
 const reportPending = (status) => status?.bind?.state === 'pending'
+let settleRun = 0   // bumped by stopSettling(): a loop from an earlier run reads nothing more
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -214,16 +216,25 @@ export const useAssistantStore = defineStore('assistant', {
      * A status without the marker never starts this (older backends included).
      */
     async _settle() {
+      const run = ++settleRun
       this.settling = true
       try {
         for (const ms of SETTLE_DELAYS_MS) {
           await wait(ms)
+          // Signed out, or the panel was torn down: no read without a credential.
+          if (run !== settleRun || !useAuthStore().isAuthenticated) return
           await this.loadStatus()
           if (!reportPending(this.status)) return
         }
       } finally {
-        this.settling = false
+        if (run === settleRun) this.settling = false
       }
+    },
+
+    /** The panel is going away: the re-read loop, if one runs, stops before its next read. */
+    stopSettling() {
+      settleRun++
+      this.settling = false
     },
 
     /**

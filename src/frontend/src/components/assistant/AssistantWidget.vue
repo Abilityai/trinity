@@ -883,7 +883,9 @@ function send(text) {
   const message = String(text || '').trim()
   if (!message || store.sending) return
   draft.value = ''
-  if (needsAgreement.value) return store.hold(message)     // kept until they agree; one click sends it
+  // Kept until they agree; one click sends it. While the status is still being read
+  // again (trinity-enterprise#1330) it is held too: nobody has agreed yet.
+  if (needsAgreement.value || (store.settling && !store.agreed)) return store.hold(message)
   store.send(message, route)
 }
 
@@ -927,6 +929,15 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', onWindowResize)
   window.removeEventListener('keydown', onKey)
   store.setOpen(false)
+  store.stopSettling()
+})
+
+// The re-read settled and the terms were already accepted: what was held goes now.
+watch(() => store.settling, (on, was) => {
+  if (!was || on || !store.agreed || !store.waiting) return
+  const held = store.waiting
+  store.waiting = ''
+  store.send(held, route)
 })
 
 // What the assistant just did may have ticked a step: read them again when a turn ends.
