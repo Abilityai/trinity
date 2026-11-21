@@ -531,6 +531,13 @@
         </div>
 
         <!-- Composer -->
+        <!-- The status is being read again before the terms are offered (trinity-enterprise#1330) -->
+        <p
+          v-if="store.settling && !store.agreed"
+          class="mx-3 mb-1 mt-3 text-[12.5px] text-gray-500 dark:text-gray-400 animate-pulse motion-reduce:animate-none shrink-0"
+          aria-live="polite"
+          data-testid="assistant-finishing"
+        >Finishing setup…</p>
         <!-- Before the first message, once per instance: one button, no email -->
         <div
           v-if="needsAgreement"
@@ -739,7 +746,9 @@ function helpWith(step) {
 }
 
 // Nothing leaves this instance until someone here has agreed to the trial's terms.
-const needsAgreement = computed(() => Boolean(store.status) && !store.agreed)
+// While the status is still being settled (trinity-enterprise#1330) the box waits:
+// the next read may say the terms were already accepted.
+const needsAgreement = computed(() => Boolean(store.status) && !store.agreed && !store.settling)
 
 const termsOpen = ref(false)
 function toggleTerms() {

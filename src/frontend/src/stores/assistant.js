@@ -45,6 +45,12 @@ const neverOpened = () => {
   }
 }
 const JOB_POLL_LIMIT = 450 // 30 minutes
+// trinity-enterprise#1330: right after setup the status can be read before the
+// instance's account report has landed, and says so with `bind.state: 'pending'`.
+// It is read again after each of these waits; after the last one the panel
+// carries on with what it has, exactly as a status without the marker does.
+const SETTLE_DELAYS_MS = [500, 1000, 2000, 4000]
+const reportPending = (status) => status?.bind?.state === 'pending'
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -107,6 +113,7 @@ export const useAssistantStore = defineStore('assistant', {
     absent: false,       // 404/403 seen: no assistant on this build
     status: null,        // GET /status; null until first read
     statusError: '',
+    settling: false,     // the status said the account report is still pending: it is being read again
     conversationId: null,
     messages: [],        // { id, role: 'user' | 'assistant' | 'note', content, cards? }
     sending: false,
@@ -183,6 +190,7 @@ export const useAssistantStore = defineStore('assistant', {
         this.checkedAt = Date.now()
         this.greet(data?.nudge)
         this.dropStale()
+        if (reportPending(data) && !this.settling) this._settle()     // not awaited: the panel says it is finishing meanwhile
         // Nobody here has started with the assistant yet: it says hello once per
         // browser session until someone does, whatever this browser saw before.
         if (data?.available && !this.agreed && !this.panelOpen && !helloGiven()) {
@@ -196,6 +204,25 @@ export const useAssistantStore = defineStore('assistant', {
           return
         }
         this.statusError = "Couldn't load the assistant. Check your connection and try again."
+      }
+    },
+
+    /**
+     * The account report was still pending when the status was read, so what it
+     * says about the terms may be out of date. Read it again with backoff until
+     * the marker is gone, or give up after the last wait and keep what was read.
+     * A status without the marker never starts this (older backends included).
+     */
+    async _settle() {
+      this.settling = true
+      try {
+        for (const ms of SETTLE_DELAYS_MS) {
+          await wait(ms)
+          await this.loadStatus()
+          if (!reportPending(this.status)) return
+        }
+      } finally {
+        this.settling = false
       }
     },
 

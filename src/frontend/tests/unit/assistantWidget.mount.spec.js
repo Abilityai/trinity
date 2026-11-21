@@ -22,11 +22,12 @@ let jobs         // answers to the job's status, in order
 let runs = []    // answers to a run's status, in order
 let afterAgreeing = null   // the line Trinity opens with once someone has agreed
 let checklist = {}       // what the getting-started endpoint answers
+let statusReads = []     // answers to /status, in order, before falling back to `status`
 
 vi.mock('@/api', () => {
   const respond = (method, url, body) => {
     calls.push({ method, url, body })
-    if (url === '/api/enterprise/assistant/status') return { ...status }
+    if (url === '/api/enterprise/assistant/status') return statusReads.length ? statusReads.shift() : { ...status }
     if (url === '/api/enterprise/assistant/turn' || url === '/api/enterprise/assistant/turn/continue') {
       return turns.shift() || { status: 'final', conversation_id: 'c1', text: 'Done.', cards: [], allowance: ALLOWANCE }
     }
@@ -108,6 +109,7 @@ describe('assistant panel', () => {
     runs = []
     afterAgreeing = null
     checklist = {}
+    statusReads = []
     status = { available: true, contacted: true, reachable: true, plan: 'free', email: null, allowance: null, trial_terms: { version: 't0', url: '', accepted: 't0' }, profile_known: true }
     localStorage.clear()
     sessionStorage.clear()
@@ -193,6 +195,81 @@ describe('assistant panel', () => {
       await flushPromises()
       expect(wrapper.findAll('.bubble').map((b) => b.text())).toEqual(["You don't have an agent yet. Tell me one task you'd hand off."])
       expect(sent(TURN)).toEqual([])
+    })
+  })
+
+  // trinity-enterprise#1330: the first status after setup can arrive before the
+  // instance's account report has landed. While the status says that report is
+  // still pending, the terms box is not offered; the status is read again with
+  // backoff and only then is the box decided.
+  describe('while the account report is still pending', () => {
+    const NOT_AGREED = { available: true, contacted: false, reachable: null, plan: null, email: null, allowance: null, trial_terms: { version: 't0', url: '', accepted: null } }
+    const PENDING = { ...NOT_AGREED, bind: { state: 'pending' } }
+    const AGREED = { ...NOT_AGREED, contacted: true, reachable: true, plan: 'free', trial_terms: { version: 't0', url: '', accepted: 't0' } }
+    const box = () => wrapper.find('[data-testid="assistant-terms-first"]')
+    const reads = () => sent('/api/enterprise/assistant/status').length
+    const load = async () => {
+      await flushPromises()
+      calls.length = 0      // the panel's own read on mount is not one of these
+      const { useAssistantStore } = await import('@/stores/assistant')
+      await useAssistantStore().loadStatus()
+      await openPanel()
+    }
+
+    beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout'] }) })
+    afterEach(() => { vi.useRealTimers() })
+
+    it('pending, then accepted: the terms box is never shown and nothing is accepted', async () => {
+      statusReads = [{ ...PENDING }, { ...AGREED }]
+      status = { ...AGREED }
+      await load()
+      expect(box().exists()).toBe(false)
+      expect(wrapper.find('[data-testid="assistant-finishing"]').exists()).toBe(true)
+      for (const ms of [500, 1000, 2000, 4000]) {
+        await vi.advanceTimersByTimeAsync(ms)
+        await flushPromises()
+        expect(box().exists()).toBe(false)
+      }
+      expect(reads()).toBe(2)
+      expect(wrapper.find('[data-testid="assistant-finishing"]').exists()).toBe(false)
+      expect(sent('/api/enterprise/assistant/terms/accept')).toEqual([])
+    })
+
+    it('pending, then not accepted: the box appears after the re-read', async () => {
+      statusReads = [{ ...PENDING }, { ...NOT_AGREED }]
+      status = { ...NOT_AGREED }
+      await load()
+      expect(box().exists()).toBe(false)
+      await vi.advanceTimersByTimeAsync(500)
+      await flushPromises()
+      expect(reads()).toBe(2)
+      expect(box().exists()).toBe(true)
+      expect(sent('/api/enterprise/assistant/terms/accept')).toEqual([])
+    })
+
+    it('still pending after every re-read: it gives up and offers the box as before', async () => {
+      statusReads = [{ ...PENDING }, { ...PENDING }, { ...PENDING }, { ...PENDING }, { ...PENDING }]
+      status = { ...PENDING }
+      await load()
+      await vi.advanceTimersByTimeAsync(500 + 1000 + 2000)
+      await flushPromises()
+      expect(box().exists()).toBe(false)
+      await vi.advanceTimersByTimeAsync(4000)
+      await flushPromises()
+      expect(reads()).toBe(5)
+      expect(box().exists()).toBe(true)
+      await vi.advanceTimersByTimeAsync(60000)
+      await flushPromises()
+      expect(reads()).toBe(5)
+    })
+
+    it('no pending marker: the box is offered at once and the status is read once', async () => {
+      status = { ...NOT_AGREED }
+      await load()
+      expect(box().exists()).toBe(true)
+      await vi.advanceTimersByTimeAsync(10000)
+      await flushPromises()
+      expect(reads()).toBe(1)
     })
   })
 
