@@ -812,6 +812,19 @@ class ChannelMessageRouter:
         # off the same identity. Fall back to the channel-native source id.
         source_email = verified_email or adapter.get_source_identifier(message)
 
+        # The access/suspension gate has already run. Bind a platform identity
+        # only for this agent's owner in a verified DM: general admin/shared
+        # access is not ownership, and a group's verifier is not its speaker.
+        source_user_id = None
+        if verified_email and not is_group:
+            try:
+                user = db.get_user_by_email(verified_email)
+                owner = db.get_agent_owner(agent_name)
+                if user and owner and user.get("id") is not None and user["id"] == owner["owner_id"]:
+                    source_user_id = user["id"]
+            except Exception:  # noqa: BLE001
+                logger.warning(f"[ROUTER:{channel}] owner identity lookup failed")
+
         # MEM-001 (#895): inject per-user memory for verified channel users.
         # Excluded in group mode because `verified_email` there is the
         # *unlocker's* email (set once per group, not per-speaker), so
@@ -877,6 +890,7 @@ class ChannelMessageRouter:
                 triggered_by=channel,
                 conversation_key=f"channel:{session_id}" if session_id else None,
                 source_user_email=source_email,
+                source_user_id=source_user_id,
                 timeout_seconds=None,  # Uses agent's configured timeout (TIMEOUT-001)
                 allowed_tools=public_allowed_tools,
                 # #894: per-agent public-channel model override (None → platform default).
