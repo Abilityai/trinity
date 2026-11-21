@@ -471,3 +471,33 @@ describe("#2807 the label is a mechanism: no deny site bypasses accessDenied", (
     assert.ok(branches >= 20, `expected the deny branches to be visible to the guard, found ${branches}`);
   });
 });
+
+describe("trinity-enterprise#1322 a project tool call's audit row carries the key's scope", () => {
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it("get_project made with a person's user key records mcp_scope 'user'", async () => {
+    configureAudit({ apiUrl: "http://audit.test", secret: "test-secret" });
+    const rows: AuditRow[] = [];
+    const routes: string[] = [];
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/internal/audit")) {
+        rows.push(JSON.parse(String(init?.body)));
+        return json({ event_id: "ev_1", status: "logged" });
+      }
+      routes.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
+      return json({ id: "prj_1", name: "P" });
+    }) as typeof fetch;
+    const { createProjectTools } = await import("./tools/projects.js");
+    const tools = createProjectTools(fakeClient(true), true);
+    const userSession = { scope: "user", userId: "u1", keyId: "k1", keyName: "kn", mcpApiKey: "trinity_mcp_test" } as any;
+    const out = JSON.parse(await withAudit("get_project", tools.get_project.execute as any)({ project_id: "prj_1" }, { session: userSession }));
+    assert.equal(out.success, true, JSON.stringify(out));
+    assert.deepEqual(routes, ["GET /api/enterprise/projects/prj_1"], "the call took the person's route");
+    assert.equal(rows.length, 1, "exactly one audit row");
+    assert.equal(rows[0].details.tool, "get_project");
+    assert.equal(rows[0].mcp_scope, "user");
+  });
+});

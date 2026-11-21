@@ -11,6 +11,25 @@
  *   main loop · boot
  */
 import * as THREE from './vendor/three.module.js';
+import { createAmbient } from './ambient-mode.js?v=2026-11-19';
+
+/* ============================ ambient mode — exit seam (trinity-enterprise#1302) ============================ */
+/* Registered FIRST, in the capture phase, so that the click / key / scroll that leaves
+   the watch-only mode is consumed here and never also picks a node, closes a panel or
+   zooms: the orb comes back exactly as it was. Moving the pointer is not deliberate
+   and does nothing. AMBIENT is created at boot (see the end of this file). */
+let AMBIENT=null, _amSwallowUp=false, AGENT_NAME='';
+function _amLeave(e){
+  if(!AMBIENT || !AMBIENT.active) return;
+  if(e.type==='keydown' && (e.metaKey || e.ctrlKey || /^(Shift|Control|Alt|Meta|CapsLock)$/.test(e.key))) return;   // browser shortcuts (reload, screenshot) pass through
+  if(e.type==='pointerdown') _amSwallowUp=true;
+  e.preventDefault(); e.stopImmediatePropagation();
+  AMBIENT.exit();
+}
+addEventListener('keydown', _amLeave, true);
+addEventListener('pointerdown', _amLeave, true);
+addEventListener('wheel', _amLeave, {capture:true, passive:false});
+addEventListener('pointerup', e=>{ if(_amSwallowUp){ _amSwallowUp=false; e.stopImmediatePropagation(); } }, true);
 
 /* ============================ data load ============================ */
 /* Trinity embed handshake (#58): an AgentBrainOrb.vue host posts
@@ -48,6 +67,7 @@ async function loadData(){
     // base and carry the platform JWT — replaces the old localhost voice proxy.
     VOICE_PROXY = (ctx.apiBase || '') + '/api/agents/' + encodeURIComponent(ctx.agentName) + '/brain-orb';
     ORB_HEADERS = ctx.authToken ? { Authorization: 'Bearer ' + ctx.authToken } : {};
+    AGENT_NAME = ctx.agentName;
     SCOPE_ENABLED = true;
     // #60 Phase 3: un-hide the voice tile only when the host says voice is available
     // (platform flag + agent capability). orb-trinity.css keeps it hidden otherwise.
@@ -1789,6 +1809,7 @@ addEventListener('keydown',e=>{
   else if(k==='l'){ toggleLens(); }
   else if(k==='s'){ toggleScopePanel(); }   // C is reserved for a future control
   else if(k==='a'){ toggleActions(); }
+  else if(k==='m'){ if(AMBIENT) AMBIENT.enter(); }   // M = ambient (watch-only) mode; any key or click leaves it
   else if(k==='escape'){ pinned=false; endLinkMode(); toggleActions(false);
     $('reading').classList.remove('show'); $('inspector').classList.remove('show'); closeTension(); setHover(-1); }
 });
@@ -1799,6 +1820,7 @@ addEventListener('pointerup',e=>{ dragging=false;
   if(downTarget===canvas && !dragged) pick(e.clientX,e.clientY); });   // only pick when the orb itself was clicked
 let dragging=false,px=0,py=0;
 addEventListener('pointermove',e=>{
+  if(AMBIENT && AMBIENT.active) return;   // watch-only: a stray pointer must not hover-select
   if(dragging){
     const dx=e.clientX-px, dy=e.clientY-py; px=e.clientX;py=e.clientY;
     if(Math.abs(e.clientX-downX)+Math.abs(e.clientY-downY)>4) dragged=true;
@@ -1878,7 +1900,7 @@ addEventListener('resize',()=>{
 });
 
 /* ============================ movable HUD panels ============================ */
-const INTERACTIVE='button,a,input,select,textarea,.li,.chip,.close,.vclose,.dom,.bh-toggle,.tile-x,.dchip,#inspContent,#readBody,#tenBody,[data-node],[data-conv],.conn';
+const INTERACTIVE='#ambientBtn,button,a,input,select,textarea,.li,.chip,.close,.vclose,.dom,.bh-toggle,.tile-x,.dchip,#inspContent,#readBody,#tenBody,[data-node],[data-conv],.conn';
 function makeDraggable(el){
   if(!el) return;
   el.style.cursor='move'; el.style.userSelect='none';
@@ -2058,6 +2080,7 @@ function animate(now){
   camera.position.z=camDist;
   updateLabels();
   updateLiveNotes();   // pulse + reposition labels for session-captured notes
+  if(AMBIENT) AMBIENT.update(dt);
 
   renderer.render(scene,camera);
 }
@@ -2078,6 +2101,41 @@ addEventListener('pointerdown', e=>{
   if(!(e.target.closest && e.target.closest('#search,#inspContent,#readBody,#tenBody,input,textarea'))) grabFocus();
 }, true);
 
+/* ============================ ambient mode (trinity-enterprise#1302) ============================ */
+// The mode itself lives in ambient-mode.js / ambient-core.js. This is only the seam:
+// what it may read from the orb, and how the orb is put back when it ends.
+function initAmbient(){
+  AMBIENT=createAmbient({
+    THREE, root, scene, camera,
+    nodes:()=>NODES, data:()=>DATA, indexOf:id=>idIndex.get(id),
+    heat:()=>nodePoints ? nodePoints.geometry.attributes.aHeat : null,
+    agentName:()=>AGENT_NAME,
+    agentBase:()=>VOICE_PROXY ? VOICE_PROXY.replace(/\/brain-orb$/,'') : '',
+    headers:()=>ORB_HEADERS,
+    setOrbState:s=>setState(s),
+    // glide a note to the front WITHOUT frameNodes(): that stamps lastZoom, which
+    // freezes all motion for FREEZE_IDLE_S — on a watch-only screen it would look dead
+    focus:i=>{ const n=NODES[i]; if(n && n._pos) focusDir(n._pos, 250); },
+    snapshot:()=>{
+      const sel=(pinned && hoverIndex>=0 && !(clusterLines && clusterLines.visible)) ? hoverIndex : -1;
+      const s={q:root.quaternion.clone(), dist:camTargetDist, auto, state, sel};
+      auto=false; focusing=false;                       // no scripted demo states while watching the real thing
+      if(sel>=0){ pinned=false; setHover(-1); }
+      return s;
+    },
+    restore:s=>{
+      if(!s) return;
+      focusing=false; root.quaternion.copy(s.q); camTargetDist=s.dist; auto=s.auto;
+      state=s.state; $('stateName').innerHTML=`<span class="dot" style="background:${STATES[state].dot};box-shadow:0 0 8px ${STATES[state].dot}"></span>${STATES[state].name}`;
+      $('stateDesc').textContent=STATES[state].desc;
+      if(s.sel>=0 && NODES[s.sel]){ setHover(s.sel); pinned=true; }
+      grabFocus();
+    },
+  });
+  const b=$('ambientBtn'); if(b && AMBIENT) b.addEventListener('click',()=>AMBIENT.enter());
+  window.orbAmbient=()=>AMBIENT ? AMBIENT.debug() : null;
+}
+
 /* ============================ boot ============================ */
 loadData().then(d=>{
   buildGraph(d);
@@ -2085,6 +2143,7 @@ loadData().then(d=>{
   grabFocus();
   initActions();   // detect the action backend (proxy) and enable capture/connect/run-skill if present
   loadScopes();    // populate the live mount-set (for the scope panel + voice scope tools)
+  initAmbient();   // watch-only mode (M) — read-only, composes existing platform reads
   // mirror the agent's most recent real activity, then settle to idle
   const a=(d.activity||[])[0];
   if(a && STATES[a.state]){

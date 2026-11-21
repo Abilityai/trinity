@@ -1,4 +1,4 @@
-# mcp: none — Workspace client surface; no MCP tool targets it (#2198)
+# mcp: none — no MCP tool calls these routes; their auth door (portal_auth.get_portal_principal) admits a person's own user key, which tools/projects.ts uses for a person on the Workspace project routes, and refuses agent keys (#2198)
 """FastAPI router for the Workspace / client portal (epic #78, exposure #79).
 
 OSS core since ent#356 — mounted in every build, entitlement-free. Individual

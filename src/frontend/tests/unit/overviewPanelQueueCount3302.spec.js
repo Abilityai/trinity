@@ -38,21 +38,11 @@ vi.mock('axios', () => {
   const instance = { get, post: vi.fn(), interceptors: { request: { use: vi.fn() }, response: { use: vi.fn() } } }
   return { default: { ...instance, create: () => instance } }
 })
-vi.mock('../../src/components/TrendLineChart.vue', () => ({ default: { name: 'TrendLineChart', template: '<div />' } }))
-vi.mock('../../src/components/StackedBarChart.vue', () => ({ default: { name: 'StackedBarChart', template: '<div />' } }))
-vi.mock('../../src/components/CompatibilityPanel.vue', () => ({ default: { name: 'CompatibilityPanel', template: '<div />' } }))
 
 import axios from 'axios'
 import OverviewPanel from '../../src/components/OverviewPanel.vue'
-import { useAgentsStore } from '../../src/stores/agents'
-import { useExecutionsStore } from '../../src/stores/executions'
 
 async function mountPanel() {
-  const agents = useAgentsStore()
-  agents.getAgentInfo = vi.fn(async () => ({}))
-  const executions = useExecutionsStore()
-  executions.fetchAgentAnalytics = vi.fn(async () => null)
-  executions.fetchSchedulesSummary = vi.fn(async () => null)
   const wrapper = mount(OverviewPanel, {
     props: { agent: { name: NAME, status: 'running' } },
     global: { stubs: { 'router-link': { template: '<a data-testid="needs-attention"><slot /></a>' } } },

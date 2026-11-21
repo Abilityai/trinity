@@ -173,7 +173,7 @@
 
 | Flow | Document | Description |
 |------|----------|-------------|
-| Overview Tab | [agent-overview-dashboard.md](feature-flows/agent-overview-dashboard.md) | Default landing tab — multi-day trend charts + analytics endpoint (#1107) |
+| Overview Tab | [agent-overview-dashboard.md](feature-flows/agent-overview-dashboard.md) | Default landing tab — now / activity / measures / agent-reported metrics / schedules / health, one footprint per section in every state (#1107, rebuilt trinity-enterprise#1317) |
 | Tab Overflow (More ▾) | [agent-detail-tab-overflow.md](feature-flows/agent-detail-tab-overflow.md) | Reusable `OverflowTabs.vue` — tabs collapse into a "More" dropdown instead of horizontal scroll (#1114) |
 | Agent Settings home | [agent-settings-home.md](feature-flows/agent-settings-home.md) | One Settings tab with a pane rail (General, Guardrails, People, Storage, …), `?section=` deep links, one restart banner (trinity-enterprise#887/#888/#890/#891) |
 | Tasks Tab | [tasks-tab.md](feature-flows/tasks-tab.md) | Task execution UI with history |
