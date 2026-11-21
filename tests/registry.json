@@ -43,6 +43,17 @@
       "description": "#4671/#4672: utils/request_memo contract (no cache outside a scope, nothing outlives one, no cross-principal answer, failures not remembered) and the db batch readers match their per-item twins."
     },
     {
+      "file": "unit/test_4674_loop_health.py",
+      "feature": "#4674",
+      "added": "2026-11-20",
+      "categories": [
+        "backend",
+        "reliability",
+        "observability"
+      ],
+      "description": "#4671/#4674: services/loop_health.py — a blocked event loop is reported once with pid, duration and the blocking frame (a merely busy or awaiting loop is not); a captured stack belongs to its own stall; only code locations are logged; tick timing names slow background cycles; the six loops are wrapped with the sleep outside; BACKEND_WORKERS is configurable with default 2 in prod and hosted compose."
+    },
+    {
       "file": "unit/test_ent1329_setup_registration_terms.py",
       "feature": "trinity-enterprise#1329",
       "added": "2026-11-21",
