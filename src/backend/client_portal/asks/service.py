@@ -25,6 +25,7 @@ from services.operator_queue_choices import (
     ReservedAnswerError,
     ResponseNotOfferedError,
 )
+from utils import request_memo
 from utils.helpers import iso_cutoff, utc_now_iso
 
 from .models import WorkspaceAsk, WorkspaceAskNotice
@@ -434,6 +435,46 @@ def _decode_cursor(cursor: Optional[str]) -> int:
     return int(m.group(1))
 
 
+def _prefetch(items: List[dict], email: str, is_platform: bool) -> None:
+    """Read once what `_project` would otherwise read per row (#4671).
+
+    One query each for: the asks these rows link to (`replaces` /
+    `replaced_by`), the gate records behind the approvals, the people who
+    answered a shared ask, and — for a platform viewer, whose gate cards carry
+    run links — the owners of, and the viewer's shares on, the agents those
+    runs are on. Each batch read answers the matching per-item read for the
+    rest of the `request_memo.scope()`, so `_project` and `card_view` are
+    unchanged and still decide everything; they just find the answer already
+    read.
+
+    Best-effort by design: an optimisation that fails must not become an
+    outage, so a failure here is logged and the per-row reads run as they
+    always did — with their own error handling, which is the behaviour the
+    503 contract was written against.
+    """
+    try:
+        linked = [item.get(key) for item in items for key in ("replaces", "replaced_by")]
+        if any(linked):
+            db.get_operator_queue_items_by_ids(linked)
+        gates = [item for item in items
+                 if item.get("raised_by") == "gate" and item.get("type") == "approval"]
+        records = db.get_gate_requests([g.get("request_id") for g in gates]) if gates else {}
+        answerers = [item.get("disposed_by_email") or item.get("responded_by_email")
+                     for item in items if _is_shared(item)]
+        db.get_users_by_emails([email] + answerers)
+        if not (is_platform and gates):
+            return
+        username = _platform_username(email)
+        run_agents = [name for record in records.values() if isinstance(record, dict)
+                      for name in (record.get("agent_name"), record.get("source_agent"))]
+        if username and run_agents:
+            db.get_agent_owners(run_agents)
+            db.agents_shared_with_user(run_agents, username)
+    except Exception:  # noqa: BLE001 — see the docstring: fall back to per-row reads
+        logger.warning("[WorkspaceAsks] prefetch failed; reading per row", exc_info=True)
+
+
+@request_memo.scoped
 def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = None,
                    include_ended: bool = False, limit: int = PAGE_MAX,
                    cursor: Optional[str] = None, chat_id: Optional[str] = None) -> AsksPage:
@@ -445,6 +486,13 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
     queue or the roster cannot be read (trinity-enterprise#610, PR A0) — an
     outage is never answered with an empty page, which the client would render
     as "nothing is waiting".
+
+    The whole read runs inside one `request_memo.scope()` (#4671), so its
+    query count does not grow with the rows or agents it lists: the roster is
+    read once however many agents are re-checked against it, and `_prefetch`
+    reads what the projection needs per row in one query per kind. Nothing
+    about WHO sees WHAT moved — `_on_roster` is still asked per agent and
+    still fails closed per agent, and `_project` is the same projection.
 
     `chat_id` (trinity-enterprise#610, the 09-30 ruling amended) is ONE chat's
     own read: the asks the platform stamped as raised in a turn of that chat
@@ -526,6 +574,7 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
         logger.warning("[WorkspaceAsks] list failed", exc_info=True)
         raise AsksUnavailable("queue unreadable") from e
 
+    _prefetch(items or [], email, is_platform)
     out = [_project(item, viewer_email=email, is_platform=is_platform) for item in items or []]
     if chat_id is not None:
         out = [a for a in out if _in_chat(a, chat_id)]

@@ -41,6 +41,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine, make_insert
 from .tables import operator_queue, schedule_executions, skill_gate_requests
+from utils import request_memo
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -171,11 +172,30 @@ class SkillGateRequestOperations:
                         dispatched_execution_id)
             return False
 
+    @request_memo.memoized_method
     def get_gate_request(self, request_id: str) -> Optional[Dict]:
         stmt = select(skill_gate_requests).where(skill_gate_requests.c.request_id == request_id)
         with get_engine().connect() as conn:
             r = conn.execute(stmt).first()
         return _row(r) if r else None
+
+    def get_gate_requests(self, request_ids) -> Dict[str, Optional[Dict]]:
+        """`{request id: record or None}` in ONE query (#4671) — the batch
+        form of `get_gate_request`. Inside a `request_memo.scope()` it also
+        answers the per-id read for the rest of the scope, so a list of gate
+        approvals reads their records once instead of per card."""
+        ids = [i for i in dict.fromkeys(request_ids or []) if isinstance(i, str) and i]
+        found: Dict[str, Dict] = {}
+        if ids:
+            stmt = select(skill_gate_requests).where(skill_gate_requests.c.request_id.in_(ids))
+            with get_engine().connect() as conn:
+                for r in conn.execute(stmt):
+                    record = _row(r)
+                    found[record["request_id"]] = record
+        out = {i: found.get(i) for i in ids}
+        for request_id, record in out.items():
+            self.get_gate_request.prime(request_id, value=record)
+        return out
 
     def get_gate_request_by_dispatched_execution(self, execution_id: str) -> Optional[Dict]:
         """The record whose approved run is `execution_id`, if any."""
