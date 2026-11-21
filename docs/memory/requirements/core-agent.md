@@ -115,6 +115,12 @@
 - **Description**: Real-time container metrics on the agent's Overview tab (moved from the header by trinity-enterprise#887)
 - **Key Features**: CPU/memory usage, network I/O, uptime display, auto-refresh every 10 seconds
 
+### 1.6a Agent Overview tab (#1107; rebuilt trinity-enterprise#1317)
+- **Status**: 🚧 In Dev
+- **Description**: The default tab on the agent page is a page about the agent, top to bottom: **Now** (state, next scheduled run, items needing attention, New task), **Activity** (runs per day with failures on the same scale, and what started the window's runs as one split bar, 7d/14d/30d) beside **Recent work**, three measures over the same window (**Finished** with its denominator, **Time per run**, **Context used** as a share of the window), **Reported by this agent** (declared metrics), **Schedules** and **Health**.
+- **Rules**: every section keeps one footprint across loading, empty, failed and ready; an agent with no runs, schedules, metrics or health checks still gets the whole page (ghost charts, `—` for anything never measured, an empty state naming what will appear and one next action); a failed read is a failed section and never another agent's figures; no cost tile (the header owns cost); the compatibility report is not on this tab (Settings › General).
+- **Flow**: `feature-flows/agent-overview-dashboard.md`
+
 ### 1.7 Agent Settings home (trinity#966; trinity-enterprise#887, #888, #890, #891, #353, #951)
 - **Status**: 🚧 In Dev — General, Credentials, Guardrails, People, Storage panes built; Channels and Integrations hold only the cards the old flat Settings list carried, and point at the Sharing / Permissions / A2A / Payments tabs until their steps land
 - **Description**: The agent page splits into a working strip and ONE Settings home: Settings is the last tab, pinned outside the overflow menu, with a left rail of panes, each answering one question. The header keeps identity (avatar, name, id, description), running state, the autonomy chip, the Brain door and Start/Stop; trinity-enterprise#950 amended it to also show the bound GitHub repository (linked, with branch and changed / ahead / behind counts, from the live git status — nothing when no repo is bound or the agent is stopped), the tags (two chips and a counted "+N"; owners add and remove them in a dialog that reuses the Settings › General tag editor) and a small context-window chart for a running agent ("—" until there is a reading, never a 0% ring), and to drop the Workspace and Talk doors (the Workspace is in the nav; the voice call lives in its composer). trinity-enterprise#955 (operator, 2026-10-19) brought two in-place edits back to the header for owners: a pencil beside the name that edits the **display label** inline (pre-filled with the label, never the slug; Enter/blur save, Esc cancels, empty clears), and the hover overlay on the avatar (camera when there is none; change-prompt + next-emotion when one exists with an identity prompt) — the same `set-label` / `open-avatar-modal` / `cycle-emotion` events Settings › General's Identity rows emit, so the page keeps one handler per verb. The id rename stays in Settings only. The same ruling restored the pre-#3798 rows: the funding badge doubling as the subscription switcher (row 1), the autonomy and read-only toggles with the tags and the live CPU / MEM sparklines (row 2), the 7-day spend row (row 3), and the GitHub line — repo, branch, commit, changed / ahead / behind — only when a repository is connected and **without** Pull / Push / Refresh (row 4; the Git tab keeps the verbs). `AgentLiveStrip` is deleted and Overview no longer shows a strip. Nothing else.
@@ -2470,6 +2476,22 @@ with a `template.yaml` allow-list ceiling + #1083 detached-execution integration
 issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
 
 ---
+- **FR-12 — Ambient (watch-only) mode (trinity-enterprise#1302)**: one control and one key (`M`) switch
+  the orb into a hands-off view for a wall screen; any deliberate key, click or scroll returns to the
+  interactive orb with selection, scope and camera as they were (a moving pointer does nothing). With no
+  input it shows: a plain-language line for the current run's step, the notes used in the current or most
+  recent run (lit on the graph, listed by title, the camera glides to them), live stats (status, running /
+  last run, next scheduled, queued, context, 24h runs / failures / cost, note and link counts), and a
+  **mood** — one word from a fixed first-match ladder (unknown · asleep · struggling · strained · working ·
+  backed up · digesting · neglected · resting) with the deciding signal shown beside it. **Frontend-only
+  and read-only**: it composes existing viewer-scoped `GET` routes (agent, executions list / stream / log,
+  queue, schedules, brain-orb data) and issues nothing else — no new endpoint, no write, no run, no voice
+  session. **Withheld by construction**: prompt text, reply text, reasoning, raw commands, search queries,
+  web addresses and the names of files that are not notes; a run is named only when it is a playbook
+  (`/name`) or a named schedule. **Honest status**: a stopped agent, a lost feed and an expired sign-in are
+  each stated in words and the visuals drop to rest; the idle replay of the last run is labelled "not live";
+  a viewer who cannot read the agent's runs sees graph + status and is told what is hidden. Buffers are
+  capped and every scene object it creates is disposed, so it can run for hours.
 
 ## Default Cornelius Agent — Auto-Seed on Fresh Install (trinity-enterprise#107)
 

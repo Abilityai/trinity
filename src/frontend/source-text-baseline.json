@@ -19,7 +19,7 @@
     "src/frontend/tests/unit/clipboardFeedback.spec.js": 4,
     "src/frontend/tests/unit/credentialSteps.spec.js": 1,
     "src/frontend/tests/unit/filesPanelPreviewClip.spec.js": 3,
-    "src/frontend/tests/unit/firstRunSteps.spec.js": 12,
+    "src/frontend/tests/unit/firstRunSteps.spec.js": 11,
     "src/frontend/tests/unit/funnelFormat.spec.js": 1,
     "src/frontend/tests/unit/gridTokens.spec.js": 8,
     "src/frontend/tests/unit/hardeningGuide.spec.js": 3,

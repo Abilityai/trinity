@@ -11,6 +11,11 @@ import { VIEW_MODES, DEFAULT_VIEW_MODE } from '@/utils/viewModes'
 
 // #3109: how long a burst of `agent_created` events is gathered into one refetch.
 export const AGENT_CREATED_COALESCE_MS = 300
+// More new names than this in one refetch is a roster swap (another session's
+// import, a restored backup), not agents being made: nothing is animated.
+export const ARRIVAL_BATCH_MAX = 12
+// How long a new name stays in `arrivals` for a surface to pick up.
+export const ARRIVAL_NEWS_MS = 15000
 
 export const useNetworkStore = defineStore('network', () => {
   // State
@@ -199,6 +204,30 @@ export const useNetworkStore = defineStore('network', () => {
     convertAgentsToNodes(ownerFilteredAgents.value)
   }
 
+  // Agents that joined the fleet while the dashboard was open. A name counts
+  // only when it is missing from the last roster fetched under the SAME tag
+  // filter: a first load, or a filter being lifted, brings rows into view
+  // that were never away. The render surfaces animate these in.
+  const arrivals = ref([])
+  let rosterNames = null
+  let rosterTags = null
+  function noteArrivals(rows, tagsKey) {
+    const names = new Set((rows || []).map((a) => a.name))
+    if (rosterNames && rosterTags === tagsKey) {
+      const fresh = [...names].filter((n) => !rosterNames.has(n) && !arrivals.value.includes(n))
+      if (fresh.length && fresh.length <= ARRIVAL_BATCH_MAX) {
+        arrivals.value = [...arrivals.value, ...fresh]
+        // Whether or not a surface showed them, they stop being news.
+        setTimeout(() => fresh.forEach(settleArrival), ARRIVAL_NEWS_MS)
+      }
+    }
+    rosterNames = names
+    rosterTags = tagsKey
+  }
+  function settleArrival(name) {
+    if (arrivals.value.includes(name)) arrivals.value = arrivals.value.filter((n) => n !== name)
+  }
+
   async function fetchAgents() {
     loading.value = true
     loadError.value = false
@@ -208,6 +237,7 @@ export const useNetworkStore = defineStore('network', () => {
         params.tags = filterTags.value.join(',')
       }
       const response = await axios.get('/api/agents', { params })
+      noteArrivals(response.data, params.tags || '')
       agents.value = response.data
       // Write-through (ent#260 / #1643): keep agentsStore.agents warm from the
       // same response — with the Agents page gone this is the base fetch that
@@ -951,6 +981,8 @@ export const useNetworkStore = defineStore('network', () => {
 
     // Remove from agents list
     agents.value = agents.value.filter(a => a.name !== event.agent_name)
+    rosterNames?.delete(event.agent_name)
+    settleArrival(event.agent_name)
   }
 
   // #47: keep the WS-driven working map current. `chat_start`/`schedule_start`
@@ -2029,6 +2061,8 @@ export const useNetworkStore = defineStore('network', () => {
 
     // Actions
     fetchAgents,
+    arrivals,
+    settleArrival,
     fetchPermissionEdges,
     setFilterTags,
     setFilterQuery,

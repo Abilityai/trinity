@@ -108,7 +108,11 @@
           <template v-if="!chartsLoading">
             <!-- Empty days keep a faint baseline stub so sparse data reads as a
                  14-day rhythm instead of a lone bar floating in a void. -->
-            <div v-if="activityDays.length" class="stack">
+            <!-- Nothing has run: the outline of the chart to come, plainly not data. -->
+            <div v-if="quiet" class="stack ghost" data-testid="tile-ghost-activity" aria-hidden="true">
+              <span v-for="(h, i) in GHOST_BARS" :key="i" class="col"><i class="gb" :style="{ height: h + 'px' }"></i></span>
+            </div>
+            <div v-else-if="activityDays.length" class="stack">
               <span v-for="(d, i) in activityDays" :key="i" class="col" :title="d.date + ' — ' + d.total + ' runs'">
                 <template v-if="d.total > 0">
                   <i v-if="d.sched" class="bs" :style="{ height: d.schedPx + 'px' }"></i>
@@ -140,6 +144,9 @@
                 <polyline class="ctxline" :class="contextLevelClass" :points="contextPoints.line"></polyline>
                 <circle class="ctxdot" :class="contextLevelClass" :cx="contextPoints.lastX" :cy="contextPoints.lastY" r="2.6"></circle>
               </svg>
+              <svg v-else-if="quiet" class="ctxsvg" viewBox="0 0 160 32" preserveAspectRatio="none" data-testid="tile-ghost-context" aria-hidden="true">
+                <path class="ctxghost" d="M0 26 C 22 24, 34 15, 54 17 S 92 25, 112 13 S 146 7, 160 9"></path>
+              </svg>
               <div v-else class="ctxflat"></div>
             </div>
           </template>
@@ -162,6 +169,7 @@
         <b :title="costIsApproximate ? 'API-price equivalent of subscription usage — not a bill' : null">{{ costIsApproximate ? '≈' : '' }}{{ formatCostCompact(stats.totalCost || 0) }}</b> <span class="dim">·</span>
         {{ lastExecutionDisplay }}
       </span>
+      <span v-else-if="quiet" class="t-stats empty" data-testid="tile-quiet">{{ quietWords }}</span>
       <span v-else class="t-stats empty">No tasks (24h)</span>
     </div>
 
@@ -446,6 +454,9 @@ const activityDays = computed(() => {
 
 const activityTotal = computed(() => analytics.value?.total_executions ?? 0)
 
+// The shape an activity chart takes once there is something to chart.
+const GHOST_BARS = [7, 11, 9, 14, 11, 17, 13, 19, 15, 22, 17, 24, 20, 26]
+
 const contextMax = computed(() => ctxStats.value?.contextMax || 200000)
 
 // Live context level drives the color + headline; per-day analytics draw the line.
@@ -499,6 +510,15 @@ const contextTooltip = computed(() => {
 
 // --- Zone 4: success + stats (24h window) ---
 const hasTasks = computed(() => (stats.value?.taskCount || 0) > 0)
+
+// Loaded, and nothing to show: no run in the chart's window and no context
+// history. The charts then draw their own outline instead of a flat line.
+const quiet = computed(() => !!analytics.value && activityTotal.value === 0 && !contextPoints.value && !hasTasks.value)
+const quietWords = computed(() => {
+  const made = Date.parse(props.agent?.created || props.agent?.created_at || '')
+  const recent = Number.isFinite(made) && (props.now || Date.now()) - made < 14 * 86400000
+  return recent ? 'Waiting for its first run' : 'No runs in 14 days'
+})
 const successRate = computed(() => Math.round(stats.value?.successRate || 0))
 const successClass = computed(() =>
   successRate.value >= 90 ? 'ok' : successRate.value >= 50 ? 'mid' : 'bad'
@@ -855,6 +875,24 @@ watch(
   height: 2px;
   background: var(--gv-bar-track);
   opacity: 0.7;
+}
+/* the chart to come: dashed outlines, never filled, so it cannot read as data */
+.stack.ghost .col {
+  opacity: 1;
+}
+.stack.ghost .col i.gb {
+  border: 1px dashed var(--gv-bar-track);
+  border-bottom-style: solid;
+  border-radius: 2px;
+  background: transparent;
+}
+.ctxghost {
+  fill: none;
+  stroke: var(--gv-bar-track);
+  stroke-width: 1.6;
+  stroke-dasharray: 3 4;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
 }
 .stack.flat {
   align-items: center;

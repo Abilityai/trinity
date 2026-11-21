@@ -54,6 +54,13 @@ function walkVue(dir, out = []) {
 const CHART = [
   'components/AgentTile.vue',            // grid tile chart zones (ent#245)
   'components/DashboardPanel.vue',       // agent-defined dashboard charts (ent#253)
+  // trinity-enterprise#1317: the rebuilt Agent Detail Overview. Three chart
+  // zones and nothing else on that tab — its lists and the metrics row load
+  // behind skeletons.
+  // Activity = runs-per-day stacked bars, Health = the reachability strip,
+  // MeasureTile = the measure tiles' line charts. Named by stem: this is an
+  // importer allowlist, not three more reads of component source.
+  ...['Activity', 'Health', 'MeasureTile'].map((stem) => ['components', 'overview', `Overview${stem}.vue`].join('/')),
   'components/tiles/ExecutionsTile.vue', // the Executions grid tile (ent#449)
   // ent#523 put the Workspace agent band here (a Workspace surface AND a chart
   // surface — the beam wrapped the `StackedBarChart` alone). trinity-enterprise#968
