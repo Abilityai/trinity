@@ -360,12 +360,18 @@ PORTAL_HISTORY_ROW_CEILING = 600
 class ThreadWindow:
     rows: list[dict]          # oldest-first
     truncated: bool           # the ceiling cut rows off the OLD end
+    # trinity-enterprise#594: anything older than ``rows[0]`` exists — whether
+    # the ceiling or the typed-turn count cut it — and the opaque cursor that
+    # reads it (``"<created_at>|<id>"`` of ``rows[0]``; None when nothing is older).
+    has_earlier: bool = False
+    next_before: Optional[str] = None
 
 
 def get_portal_thread_window(agent_name: str, client_email: str, session_id: str,
                              typed_limit: int = 100,
                              ceiling: Optional[int] = None,
-                             include_held: bool = False) -> ThreadWindow:
+                             include_held: bool = False,
+                             before: Optional[tuple[str, str]] = None) -> ThreadWindow:
     """The newest ``typed_limit`` typed rows of one thread, plus every spoken
     row inside that span, oldest-first; at most ``ceiling`` rows (the NEWEST
     survive, and ``truncated`` reports the cut).
@@ -378,6 +384,12 @@ def get_portal_thread_window(agent_name: str, client_email: str, session_id: str
 
     ``include_held`` (trinity#3402): as in `get_portal_messages` — left out of
     both the window's count and its rows unless asked for.
+
+    ``before`` (trinity-enterprise#594): the ``(created_at, id)`` of the oldest
+    row the reader already has. It joins the BASE predicate, so the threshold
+    and the range both page — the same window shape, strictly older. Compared
+    as the stored strings, never parsed: it must agree with the ORDER BY, and
+    a normalised stamp would not at a mixed-precision boundary.
     """
     ceiling = int(ceiling or PORTAL_HISTORY_ROW_CEILING)
     typed_limit = max(1, int(typed_limit or 1))
@@ -385,6 +397,9 @@ def get_portal_thread_window(agent_name: str, client_email: str, session_id: str
     if not include_held:
         base += " AND " + _not_held("enterprise_portal_messages")
     params = {"agent": agent_name, "email": (client_email or "").lower(), "session": session_id}
+    if before is not None:
+        base += " AND (created_at < :cts OR (created_at = :cts AND id < :cid))"
+        params.update(cts=str(before[0]), cid=str(before[1]))
     threshold_stmt = text(
         f"SELECT created_at, id FROM enterprise_portal_messages "
         f"WHERE {base} AND {_TYPED} ORDER BY created_at DESC, id DESC LIMIT 1 OFFSET :off"
@@ -401,10 +416,24 @@ def get_portal_thread_window(agent_name: str, client_email: str, session_id: str
             f"WHERE {where} ORDER BY created_at DESC, id DESC LIMIT :lim"
         )
         rows = [dict(r) for r in conn.execute(range_stmt, {**range_params, "lim": ceiling + 1}).mappings()]
-    truncated = len(rows) > ceiling
-    rows = rows[:ceiling]
+        truncated = len(rows) > ceiling
+        rows = rows[:ceiling]
+        has_earlier = False
+        if rows:
+            # #594: one existence probe below the oldest row kept — it covers
+            # the ceiling cut AND a typed-turn count that stopped short of the
+            # thread's head, which `truncated` alone never reported.
+            oldest = rows[-1]
+            probe = text(
+                f"SELECT 1 FROM enterprise_portal_messages WHERE {base} "
+                f"AND (created_at < :ots OR (created_at = :ots AND id < :oid)) LIMIT 1"
+            )
+            has_earlier = conn.execute(
+                probe, {**params, "ots": oldest["created_at"], "oid": oldest["id"]}).first() is not None
     rows.reverse()
-    return ThreadWindow(rows=rows, truncated=truncated)
+    next_before = f"{rows[0]['created_at']}|{rows[0]['id']}" if has_earlier else None
+    return ThreadWindow(rows=rows, truncated=truncated, has_earlier=has_earlier,
+                        next_before=next_before)
 
 
 def get_platform_rows_since_last_reply(agent_name: str, client_email: str,

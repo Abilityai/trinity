@@ -21,6 +21,12 @@
     main: Continue · Where it stands · Work on it · Metrics · My chats
     side: Steward · Health · Needs you · Members · Agents & rooms
 
+  trinity-enterprise#1233: a goal written as milestones gets one row per
+  milestone ABOVE that grid, under the goal, with the latest health update
+  above the list (ProjectMilestones). A row opens the Tasks tab filtered to
+  it. A project without milestones shows exactly the Overview above; a person
+  who can change the goal gets "Add milestones" beside Edit.
+
   trinity-enterprise#896: the Overview leads with Continue (my newest linked
   chat, or Start with the first agent, the others one click away — the first
   focusable control after the tabs), one dismissable line says how a project
@@ -133,6 +139,7 @@
             <option v-for="m in PROJECT_MODES" :key="m" :value="m">Mode: {{ modeLabel(m) }}</option>
           </BaseSelect>
           <BaseButton v-if="p.can?.edit && !p.archived_at" variant="ghost" data-testid="project-edit" @click="editOpen = true">Edit</BaseButton>
+          <BaseButton v-if="!guest && p.can?.edit && !p.archived_at && !milestones.length" variant="ghost" data-testid="project-milestones-start" @click="editMilestone(null)">Add milestones</BaseButton>
           <BaseButton v-if="!guest" variant="secondary" data-testid="project-members-open" @click="membersOpen = true">Members &amp; access</BaseButton>
           <BaseButton
             v-if="p.can?.archive"
@@ -161,7 +168,17 @@
         <OverflowTabs :tabs="TABS" :model-value="tab" data-testid="project-tabs" @update:model-value="tab = $event" />
       </div>
 
-      <ProjectTasks v-if="!guest && tab === 'tasks'" :project="p" :project-id="p.id" @open-thread="(t) => $emit('open-thread', t)" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" :members="p.members || []" :is-creator="p.my_role === 'creator'" />
+      <!-- ent#1233: the goal's milestones, directly under the goal on the Overview. -->
+      <ProjectMilestones
+        v-if="!guest && milestones.length"
+        v-show="tab === 'overview'"
+        :project="p"
+        :my-email="myEmail"
+        @open-milestone="openMilestone"
+        @edit-milestone="editMilestone"
+      />
+
+      <ProjectTasks v-if="!guest && tab === 'tasks'" v-model:milestone-filter="taskMilestone" :project="p" :project-id="p.id" @open-thread="(t) => $emit('open-thread', t)" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" :members="p.members || []" :is-creator="p.my_role === 'creator'" />
       <ProjectLog v-if="!guest && tab === 'log'" :project="p" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
       <ProjectMaterial v-if="!guest && tab === 'material'" :project="p" :my-email="myEmail" :agents="usableAgents" />
       <ProjectRuns v-if="!guest && tab === 'runs'" :project-id="p.id" :agents="p.agents || []" />
@@ -329,6 +346,13 @@
       :my-email="myEmail"
       :agents="rosterAgents"
     />
+    <ProjectMilestoneModal
+      v-if="page.data && p.can?.edit"
+      v-model="milestoneModal.open"
+      :project-id="p.id"
+      :milestone="milestoneModal.milestone"
+      :count="milestones.length"
+    />
     <ConfirmDialog
       v-model:visible="archiveConfirm"
       title="Archive this project?"
@@ -374,6 +398,8 @@ import ProjectMetricsCard from './ProjectMetricsCard.vue'
 import ProjectNeedsYouCard from './ProjectNeedsYouCard.vue'
 import ProjectStewardCard from './ProjectStewardCard.vue'
 import ProjectRunsWaiting from './ProjectRunsWaiting.vue'
+import ProjectMilestones from './ProjectMilestones.vue'
+import ProjectMilestoneModal from './ProjectMilestoneModal.vue'
 import OverflowTabs from '@/components/OverflowTabs.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { useClientPortalStore } from '@/stores/clientPortal'
@@ -406,6 +432,8 @@ const TABS = [
   { id: 'runs', label: 'Runs' },
 ]
 const tab = ref('overview')
+// ent#1233: the Tasks tab's milestone filter ('' all · 'none' · a milestone id).
+const taskMilestone = ref('')
 const archiveConfirm = ref(false)
 const stopConfirm = ref(false)
 const lifecycleBusy = ref(false)
@@ -426,6 +454,14 @@ const lifecycle = computed(() => lifecycleActions(p.value))
 const mode = computed(() => projectMode(p.value))
 const canSetMode = computed(() => !guest.value && p.value.can?.edit === true && !p.value.archived_at)
 const modeLine = computed(() => modeHint(mode.value))
+// trinity-enterprise#1233: the goal's milestones, and the one dialog that edits them.
+const milestones = computed(() => (guest.value ? [] : p.value.milestones || []))
+const milestoneModal = ref({ open: false, milestone: null })
+function editMilestone(m) { milestoneModal.value = { open: true, milestone: m || null } }
+function openMilestone(id) {
+  taskMilestone.value = id
+  tab.value = 'tasks'
+}
 // trinity-enterprise#1132 part 2: Ask to join.
 const join = computed(() => joinRequestState(p.value))
 const joining = ref(false)

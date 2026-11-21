@@ -38,9 +38,12 @@ export class PersonProjectClient {
     return this.get(this.path(projectId));
   }
 
-  async listProjectTasks(projectId: string, status = "open", _turn?: string, view?: string): Promise<Row[]> {
+  async listProjectTasks(projectId: string, status = "open", _turn?: string, view?: string,
+                         milestone?: string): Promise<Row[]> {
     const viewQuery = view ? `&view=${encodeURIComponent(view)}` : "";
-    const res = await this.get<{ tasks: Row[] }>(this.path(projectId, `/tasks?status=${encodeURIComponent(status)}${viewQuery}`));
+    const milestoneQuery = milestone ? `&milestone=${encodeURIComponent(milestone)}` : "";
+    const res = await this.get<{ tasks: Row[] }>(
+      this.path(projectId, `/tasks?status=${encodeURIComponent(status)}${viewQuery}${milestoneQuery}`));
     return res.tasks;
   }
 

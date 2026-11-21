@@ -9566,6 +9566,39 @@
       "description": "Setup with an email (password form and emailed-link form) allow-lists the admin's address, so an email-code request mints a code and dispatches a send; another address still creates nothing; boot backfill and the admin's email change are wired."
     },
     {
+      "file": "unit/test_ent594_thread_cursor.py",
+      "feature": "trinity-enterprise#594",
+      "added": "2026-11-21",
+      "categories": [
+        "backend",
+        "unit",
+        "workspace"
+      ],
+      "description": "Workspace thread history pages with a `before` cursor: pages are strictly older and concatenate to the whole thread; a shared boundary stamp loses or repeats nothing; a ceiling-cut call continues on the next page; has_earlier is true for >100 typed turns without a ceiling cut; the route names a malformed cursor or cursor+limit as 422 invalid_cursor."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalThreadPages.spec.js",
+      "feature": "trinity-enterprise#594",
+      "added": "2026-11-21",
+      "categories": [
+        "frontend",
+        "unit",
+        "workspace"
+      ],
+      "description": "prependEarlier/mergeWindow keep pages ordered and deduped, re-pair a reply with a question on the other page, fold a voice call split across pages into one block; holdPosition keeps the reader's distance from the bottom through a prepend and late growth and lets go on a real scroll, a pin or an arrival."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalThreadEarlier.mount.spec.js",
+      "feature": "trinity-enterprise#594",
+      "added": "2026-11-21",
+      "categories": [
+        "frontend",
+        "unit",
+        "workspace"
+      ],
+      "description": "Mounted PortalConversation: Show earlier prepends the older window and keeps newer rows, restores scrollTop, ends at 'Start of this chat', shows a failed state that retries, is disabled while sending, survives a post-call reload, resets on a thread switch (dropping a stale page), and settles an in-flight turn's failure on the right row; the store maps has_earlier/next_before and sends before."
+    },
+    {
       "file": "unit/test_4603_login_code_limit_signal.py",
       "feature": "#4603",
       "added": "2026-11-21",

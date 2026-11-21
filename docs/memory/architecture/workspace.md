@@ -420,7 +420,10 @@ since trinity#2694 the history window is counted in **typed turns** (the newest 
 spoken rows of the calls among them riding along, under a row ceiling that reports
 `truncated`), so a call can no longer push the typed turns before it off the screen; the
 reply poll reads `?limit=N` (row semantics) and finds the reply by identity, never by
-count. The agent's next typed turn is told what was said: a resumed turn is prefixed with
+count. Since trinity-enterprise#594 the window pages: `?before=<created_at>|<id>` (a read's
+`next_before`) returns the next OLDER window, compared as stored strings against the read's own
+ORDER BY, and `has_earlier` (a probe below the oldest row, not the ceiling flag) drives "Show
+earlier", prepended under `useStickToBottom.holdPosition`; `before` never combines with `limit`. The agent's next typed turn is told what was said: a resumed turn is prefixed with
 the platform-written rows since its last typed reply (`get_platform_rows_since_last_reply`
 → `_format_voice_delta`), the cold replay carries the same rows in the same form under one
 24k spoken-char budget, and the two are mutually exclusive — a call is refused (409) while a
