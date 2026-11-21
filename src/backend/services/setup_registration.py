@@ -28,12 +28,15 @@ report it onward.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
+import weakref
 from typing import Any, Optional, Protocol
 
 from database import db
+from services import reserved_settings
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -45,6 +48,9 @@ REFUSAL_CODES = frozenset({REQUIRED, CHANGED, UNAVAILABLE})
 
 SETTING_ACCEPTANCE = "registration_terms_acceptance"
 CACHE_TTL_S = 60.0
+# The unavailable answer is cached this long, so a failing provider is asked
+# at most once per window however many callers the open route sees.
+NEGATIVE_TTL_S = 10.0
 IP_MAX_CHARS = 64
 VERSION_MAX_CHARS = 100
 TITLE_MAX_CHARS = 200
@@ -76,22 +82,44 @@ class RegistrationTermsError(Exception):
 
 _provider: Optional[RegistrationTermsProvider] = None
 _cache: Optional[tuple] = None  # (fetched_at, terms)
+_failed_at: Optional[float] = None  # when the provider last could not answer
+# One fetch at a time per event loop (single-flight): concurrent cold callers
+# wait for the one in flight and read its answer. Keyed by loop because an
+# asyncio.Lock is bound to the loop it is first contended on.
+_locks: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
 
 def _now() -> float:
     return time.monotonic()
 
 
+_MANAGED_BY = "first-run setup (POST /api/setup/admin-password)"
+
+
 def register_provider(p: RegistrationTermsProvider) -> None:
-    global _provider, _cache
+    global _provider, _cache, _failed_at
     _provider = p
     _cache = None
+    _failed_at = None
+    # Only the setup seam writes the acceptance the provider's module reports
+    # onward; the generic settings routes may not rewrite or delete it.
+    reserved_settings.register_reserved_setting(SETTING_ACCEPTANCE, _MANAGED_BY)
 
 
 def clear_provider() -> None:
-    global _provider, _cache
+    global _provider, _cache, _failed_at
     _provider = None
     _cache = None
+    _failed_at = None
+    reserved_settings.unregister_reserved_setting(SETTING_ACCEPTANCE)
+
+
+def _lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _locks.get(loop)
+    if lock is None:
+        lock = _locks[loop] = asyncio.Lock()
+    return lock
 
 
 def provider() -> Optional[RegistrationTermsProvider]:
@@ -130,22 +158,41 @@ def _validate(raw: Any) -> dict:
 
 
 async def current_terms(*, fresh: bool = False) -> dict:
-    """The provider's current terms. Cached ``CACHE_TTL_S``; ``fresh`` bypasses
-    (and refreshes) the cache — the submit re-check uses it. Raises
+    """The provider's current terms. Cached ``CACHE_TTL_S``; an unavailable
+    answer is cached ``NEGATIVE_TTL_S``; concurrent fetches are single-flight.
+    ``fresh`` bypasses both caches (and refreshes them) — the submit re-check
+    uses it, so it always asks the provider. Raises
     ``RegistrationTermsError`` (503) when no answer can be had."""
-    global _cache
+    global _cache, _failed_at
     p = _provider
     if p is None:
         raise RuntimeError("no registration terms provider is registered")
-    if not fresh and _cache is not None and _now() - _cache[0] < CACHE_TTL_S:
-        return dict(_cache[1])
-    try:
-        terms = _validate(await p.current_terms())
-    except Exception as e:  # noqa: BLE001 — any provider fault is "unavailable"
-        logger.warning("[setup] registration terms unavailable: %s", type(e).__name__)
-        raise _unavailable() from None
-    _cache = (_now(), terms)
-    return dict(terms)
+
+    def _cached() -> Optional[dict]:
+        if fresh:
+            return None
+        if _cache is not None and _now() - _cache[0] < CACHE_TTL_S:
+            return dict(_cache[1])
+        if _failed_at is not None and _now() - _failed_at < NEGATIVE_TTL_S:
+            raise _unavailable()
+        return None
+
+    hit = _cached()
+    if hit is not None:
+        return hit
+    async with _lock():
+        hit = _cached()  # the fetch we waited on may have answered
+        if hit is not None:
+            return hit
+        try:
+            terms = _validate(await p.current_terms())
+        except Exception as e:  # noqa: BLE001 — any provider fault is "unavailable"
+            logger.warning("[setup] registration terms unavailable: %s", type(e).__name__)
+            _failed_at = _now()
+            raise _unavailable() from None
+        _cache = (_now(), terms)
+        _failed_at = None
+        return dict(terms)
 
 
 async def check_accepted(given_version: Optional[str]) -> str:

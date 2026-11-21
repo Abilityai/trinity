@@ -299,7 +299,9 @@ async def get_registration_terms():
     terms is registered; otherwise 404, so a self-installed instance has no
     such route in effect. The handler takes nothing from the caller: it never
     reads, and so can never forward, a claim code. The provider's answer is
-    cached for 60 s.
+    cached for 60 s, an unavailable answer for 10 s, and concurrent cold
+    calls share one provider fetch, so provider load does not grow with the
+    number of callers.
 
     200 ``{"version", "title", "text", "url"}``; 503
     ``{"code": "registration_terms_unavailable", "retryable": true, ...}``.
@@ -453,22 +455,6 @@ async def set_admin_password(
         _EMAIL_BOUND_PREFIX
     )
     try:
-        # trinity-enterprise#1329: the acceptance is kept before the admin is
-        # written, so a setup that completes always has it; a failed write
-        # puts the claim back and completes nothing.
-        if registration_version is not None:
-            try:
-                setup_registration.record_acceptance(
-                    registration_version, _get_client_ip(request)
-                )
-            except Exception as e:
-                logger.warning("Setup could not keep the registration acceptance: %s",
-                               type(e).__name__)
-                raise HTTPException(
-                    status_code=503,
-                    detail="Setup could not be saved, and nothing was changed. Please try again.",
-                ) from None
-
         # Hash the password and update admin user.
         hashed_password = hash_password(data.password)
 
@@ -486,6 +472,23 @@ async def set_admin_password(
                 # One transaction, so nothing was written: a plain retryable
                 # error, not the claim refusal, and no failed attempt recorded.
                 logger.warning("Setup could not store the admin account: %s", type(e).__name__)
+                raise HTTPException(
+                    status_code=503,
+                    detail="Setup could not be saved, and nothing was changed. Please try again.",
+                ) from None
+
+        # trinity-enterprise#1329: the acceptance is kept right after the admin
+        # is written and before setup is marked complete, so a setup that
+        # completes always has it, and a failed admin write leaves no
+        # acceptance behind. A failed acceptance write puts the claim back.
+        if registration_version is not None:
+            try:
+                setup_registration.record_acceptance(
+                    registration_version, _get_client_ip(request)
+                )
+            except Exception as e:
+                logger.warning("Setup could not keep the registration acceptance: %s",
+                               type(e).__name__)
                 raise HTTPException(
                     status_code=503,
                     detail="Setup could not be saved, and nothing was changed. Please try again.",

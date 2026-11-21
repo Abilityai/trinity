@@ -360,3 +360,139 @@ def test_a_later_instance_terms_version_asks_the_admin_again(env):
     _post(version=V1)
     e.db.settings[terms_service.SETTING_VERSION] = "2027-01-01T00:00:00Z"
     assert terms_service.decision(SimpleNamespace(id=1, email=EMAIL))["required"] is True
+
+
+# --------------------------------------------------------------------------
+# provider load: single-flight + negative cache (review of #4698)
+# --------------------------------------------------------------------------
+
+class SlowProvider(FakeProvider):
+    """Yields to the loop inside the fetch, so concurrent callers overlap."""
+
+    async def current_terms(self):
+        self.calls.append(())
+        await asyncio.sleep(0.02)
+        if self.down:
+            raise ConnectionError("unreachable")
+        return {"version": self.version, "title": None, "text": None, "url": None}
+
+
+def _gather(n, fn):
+    async def _run():
+        return await asyncio.gather(*(fn() for _ in range(n)), return_exceptions=True)
+    return asyncio.run(_run())
+
+
+def test_concurrent_cold_calls_make_one_provider_call(env):
+    p = SlowProvider()
+    env(provider=p)
+    setup = _setup()
+    results = _gather(50, setup.get_registration_terms)
+    assert all(isinstance(r, dict) and r["version"] == V1 for r in results)
+    assert len(p.calls) == 1, f"50 concurrent cold calls made {len(p.calls)} provider calls"
+
+
+def test_concurrent_cold_calls_on_a_down_provider_make_one_call(env):
+    p = SlowProvider()
+    p.down = True
+    env(provider=p)
+    results = _gather(20, _setup().get_registration_terms)
+    assert all(isinstance(r, HTTPException) and r.status_code == 503 for r in results)
+    assert len(p.calls) == 1
+
+
+def test_a_down_provider_is_asked_at_most_once_per_negative_window(env, monkeypatch):
+    p = FakeProvider()
+    p.down = True
+    env(provider=p)
+    seam = _seam()
+    assert 5 <= seam.NEGATIVE_TTL_S <= 10
+    now = [1000.0]
+    monkeypatch.setattr(seam, "_now", lambda: now[0])
+    for _ in range(20):
+        with pytest.raises(HTTPException) as ei:
+            _get_terms()
+        assert ei.value.status_code == 503
+        assert ei.value.detail["code"] == "registration_terms_unavailable"
+        assert ei.value.detail["retryable"] is True
+    assert len(p.calls) == 1, "the unavailable answer is cached for the negative window"
+    now[0] += seam.NEGATIVE_TTL_S + 0.1
+    p.down = False
+    assert _get_terms()["version"] == V1
+    assert len(p.calls) == 2
+
+
+def test_submit_fresh_read_bypasses_the_negative_cache(env, monkeypatch):
+    p = FakeProvider()
+    p.down = True
+    e = env(provider=p)
+    seam = _seam()
+    monkeypatch.setattr(seam, "_now", lambda: 1000.0)
+    with pytest.raises(HTTPException):
+        _get_terms()  # negative-cached
+    p.down = False
+    _post(version=V1)  # the submit re-read asks the provider anyway
+    assert e.db.settings["setup_completed"] == "true"
+    assert len(p.calls) == 2
+
+
+def test_submit_fresh_read_bypasses_a_warm_cache(env, monkeypatch):
+    p = FakeProvider()
+    env(provider=p)
+    seam = _seam()
+    monkeypatch.setattr(seam, "_now", lambda: 1000.0)
+    _get_terms(); _get_terms()
+    assert len(p.calls) == 1
+    asyncio.run(seam.check_accepted(V1))
+    assert len(p.calls) == 2, "fresh=True always asks the provider"
+
+
+# --------------------------------------------------------------------------
+# review warnings
+# --------------------------------------------------------------------------
+
+def test_p2_failure_never_fails_setup(env, monkeypatch):
+    from services import terms_service
+    e = env(provider=FakeProvider())
+
+    async def _boom(*a, **k):
+        raise terms_service.TermsError(409, "terms_version_stale", "stale")
+
+    monkeypatch.setattr(terms_service, "accept", _boom)
+    _post(version=V1)
+    assert e.db.settings["setup_completed"] == "true"
+    assert json.loads(e.db.settings["registration_terms_acceptance"])["version"] == V1
+
+
+def test_p2_db_error_never_fails_setup(env, monkeypatch):
+    from services import terms_service
+    e = env(provider=FakeProvider())
+
+    async def _boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(terms_service, "accept", _boom)
+    _post(version=V1)
+    assert e.db.settings["setup_completed"] == "true"
+
+
+def test_acceptance_setting_is_reserved_while_a_provider_is_registered(env):
+    from services import reserved_settings
+    env(provider=FakeProvider())
+    assert reserved_settings.managed_by("registration_terms_acceptance") is not None
+    _seam().clear_provider()
+    assert reserved_settings.managed_by("registration_terms_acceptance") is None
+
+
+def test_failed_admin_write_leaves_no_acceptance_row(env):
+    e = env(provider=FakeProvider())
+
+    def _fail(*a, **k):
+        raise RuntimeError("db down")
+
+    e.db.update_user_password = _fail
+    with pytest.raises(HTTPException) as ei:
+        _post(version=V1)
+    assert ei.value.status_code == 503
+    assert "registration_terms_acceptance" not in e.db.settings, "nothing was changed"
+    assert e.claim_file.read_text() == f"email-bound:{SECRET}\n"
