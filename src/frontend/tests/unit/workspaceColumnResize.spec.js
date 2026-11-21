@@ -122,7 +122,7 @@ describe('ent#492 — clamps', () => {
     // render byte-identically to before.
     expect(SIDEBAR_DEFAULT).toBe(288)
     expect(RAIL_DEFAULT).toBe(384)
-    expect(RAIL_COLLAPSED).toBe(48)
+    expect(RAIL_COLLAPSED).toBe(64)   // #4347: widened from 48px to carry tab labels
   })
 
   it('caps the message column wider than the max-w-4xl it replaced', () => {
@@ -235,7 +235,7 @@ describe('ent#492 — the layout is driven by variables', () => {
     expect(SIDEBAR).toMatch(/sm:w-full/)          // the grid cell owns the width
     expect(SIDEBAR).toMatch(/w-72/)               // ...but the mobile drawer keeps its own
     expect(RAIL).toMatch(/open: 'w-\[var\(--ws-rail,24rem\)\]/)
-    expect(RAIL).toMatch(/collapsed: 'w-12/)      // the strip stays fixed
+    expect(RAIL).toMatch(/collapsed: 'w-16/)      // the strip stays fixed
   })
 
   it('every message column follows ONE cap, the skeleton included', () => {

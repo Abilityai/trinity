@@ -387,6 +387,32 @@ export const NEW_CHAT_TAB_LABEL = 'New chat'
 // #4346: "Ongoing", not "Main" — a person-facing name, printed from here only.
 export const MAIN_TAB_LABEL = 'Ongoing'
 
+// #4347: the composer teaches its two typeahead triggers ONCE, in a hint a
+// person can dismiss, instead of in the placeholder on every visit. `@` is
+// taught only with the capability (the #2128 rule the placeholder used).
+// Remembered per browser — a convenience, so a storage that refuses simply
+// shows the hint again next load.
+export const COMPOSER_HINT_KEY = 'trinity-workspace-composer-hint'
+export function composerHintText({ multiAgent = false } = {}) {
+  return multiAgent ? 'Type / to pick a skill, @ to bring in another agent' : 'Type / to pick a skill'
+}
+export function loadComposerHintDismissed(storage) {
+  try {
+    return !!storage && typeof storage.getItem === 'function' && storage.getItem(COMPOSER_HINT_KEY) === 'dismissed'
+  } catch {
+    return false
+  }
+}
+export function saveComposerHintDismissed(storage) {
+  try {
+    if (!storage || typeof storage.setItem !== 'function') return false
+    storage.setItem(COMPOSER_HINT_KEY, 'dismissed')
+    return true
+  } catch {
+    return false
+  }
+}
+
 // trinity-enterprise#657: `draftKeys` is the drafts store's key set. A tab
 // whose thread holds unsent text carries `hasDraft` (keyed on the TAB id, not
 // the thread row — the born-here provisional tab has no row yet), and an

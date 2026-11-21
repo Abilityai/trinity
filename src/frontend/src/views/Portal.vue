@@ -179,6 +179,7 @@
       <div class="hidden sm:flex shrink-0 min-w-0 overflow-hidden sm:w-[var(--ws-sidebar,18rem)]">
         <PortalSidebar
           ref="sidebarRef"
+          :inbox-active="isInboxRoute"
           :roster="orderedRoster"
           :active-agent-name="activeAgentName"
           :threads="sidebarThreads"
@@ -696,7 +697,7 @@
            (`railVisibleFor`); collapsed by default. Below `sm` the column is
            replaced by the strip above the composer + the sheet below. -->
       <!-- AC 1: present only while there is a column to its right to resize.
-           A collapsed rail is a fixed 48px strip, not a resizable column, so
+           A collapsed rail is a fixed 64px strip, not a resizable column, so
            the handle goes with the width it would drag. Agent details takes the
            rail's place (ent#523) and is the same column, so it gets the same
            handle rather than a second one. -->
@@ -759,14 +760,14 @@
            #2676: the rail column is a WIDTH, so it moves with the canvas
            instead of stepping. It used to be a bare `v-if` on a `shrink-0` flex
            sibling carrying no width transition, so it appeared at its full size
-           in one frame — 48px collapsed, 384px open, or whatever `--ws-rail`
+           in one frame — 64px collapsed, 384px open, or whatever `--ws-rail`
            was dragged to, which on a wide rail is a bigger jump than the 211px
            snap #2640 removed.
 
            The width lives on a WRAPPER this view owns, not on `PortalRail`'s
            own `<aside>` — the same shape the sidebar column three columns to
            the left already has (`shrink-0 overflow-hidden` + an explicit
-           `--ws-` width). `--ws-rail` is the RENDERED width (48px collapsed,
+           `--ws-` width). `--ws-rail` is the RENDERED width (64px collapsed,
            the dragged width open), so one binding covers both states and the
            inner aside's own width agrees with it at rest.
 
@@ -820,7 +821,7 @@
         :open="railState.open"
         :signals="railSignals"
         :participants="railParticipants"
-        :key-tips="!keyTipsDismissed"
+        :key-tips="keyTipsEarned && !keyTipsDismissed"
         @update:open="setRailOpen"
         @update:active-tab="setRailTab"
         @see-hints="seeHints"
@@ -1091,7 +1092,7 @@ import {
 import {
   resolveWorkspaceKey, workspaceChord, keymapSuppressed, hasModalOpen, nextAgent, recordLastOpen, forgetLastOpen,
   nextRailTab, keyListRows, hostPlatform, WORKSPACE_KEYMAP,
-  loadKeyTipsDismissed, saveKeyTipsDismissed,
+  loadKeyTipsDismissed, saveKeyTipsDismissed, loadKeyTipsEarned, saveKeyTipsEarned,
 } from '@/components/portal/portalKeymap'
 // ent#557: the tab title's unread half. The router owns the label; this pushes
 // the count. See `utils/tabTitle.js` for why neither writes `document.title`.
@@ -1405,7 +1406,7 @@ function onVoiceCall(sig) {
 // fit all three.
 const columns = useColumnResize({
   // #3060: sized open while the column is RESERVED too, not only once the rail
-  // is visible — otherwise a rail left open reserves 48px and then jumps to its
+  // is visible — otherwise a rail left open reserves 64px and then jumps to its
   // open width when the stage lands (`railSizedOpen`).
   // ent#610 round 3: the Inbox's placeholder rail is an OPEN column too (its
   // width is the one the Inbox counted), so it counts as visible here.
@@ -1528,7 +1529,7 @@ const inboxCanvases = computed(() => inboxCanvasCount({
 // trinity-enterprise#610 §3g A4: the Inbox decides split / stacked by its OWN
 // width. While the rail is not yet a column — nothing selected, so no rail — its
 // width is counted in advance (the width it will render at: the open width or
-// the 48px strip), so a preview that brings the rail in cannot flip the layout
+// the 64px strip), so a preview that brings the rail in cannot flip the layout
 // it was chosen in. 0 once the column (or its reservation) is really there.
 // Round 3: the allowance is what the column has NOT grown into yet — it enters
 // from 0 over RAIL_MOTION, and counting 0 from its first frame flipped the
@@ -2881,11 +2882,21 @@ function dismissKeyTips() {
   keyTipsDismissed.value = true
   saveKeyTipsDismissed(safeStorage(), true)
 }
+// #4347: hidden until EARNED — the person used a shortcut (`onGlobalKeydown`)
+// or opened the list (the watch on `keyListOpen` below, which covers the
+// sidebar footer button, the rail's and ⌥/). Remembered for this browser.
+const keyTipsEarned = ref(loadKeyTipsEarned(safeStorage()))
+function earnKeyTips() {
+  if (keyTipsEarned.value) return
+  keyTipsEarned.value = true
+  saveKeyTipsEarned(safeStorage())
+}
 
 // ⌥/ — the key list. It toggles rather than only opening, because the chord
 // that showed you the list is the chord your hand is already on; `key-list` is
 // the one action allowed to see through its own dialog (`MODAL_IGNORE`).
 const keyListOpen = ref(false)
+watch(keyListOpen, (open) => { if (open) earnKeyTips() })
 const keyPlatform = hostPlatform()
 // Rendered FROM the map, with the live answer to "is there a rail on this
 // page" — a rail row that silently disappears where there is no rail is the
@@ -2996,6 +3007,7 @@ function onGlobalKeydown(e, { resumed = false } = {}) {
   e.preventDefault()
   heldKey = action
   run()
+  earnKeyTips()
   if (STAGE_KEYS.includes(action)) nextTick(focusConversationComposer)
 }
 

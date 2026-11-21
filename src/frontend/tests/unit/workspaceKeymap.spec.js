@@ -27,6 +27,7 @@ import {
   keymapSuppressed, cycleIndex, nextAgent, recordLastOpen, nextRailTab,
   chordLabel, ariaKeyshortcuts, keyListRows,
   KEY_TIPS, keyTipRows, keyHint, keyHintCompact, KEY_TIPS_STORAGE_KEY, loadKeyTipsDismissed, saveKeyTipsDismissed,
+  KEY_TIPS_EARNED_KEY, loadKeyTipsEarned, saveKeyTipsEarned,
 } from '../../src/components/portal/portalKeymap'
 import { isNewChatHotkey, newChatHotkeyLabel } from '../../src/components/portal/portalUtils'
 
@@ -498,5 +499,28 @@ describe('ent#621 — the search key and the tips panel (follow-up)', () => {
     expect(loadKeyTipsDismissed(broken)).toBe(false)
     expect(saveKeyTipsDismissed(broken, true)).toBe(false)
     expect(loadKeyTipsDismissed(null)).toBe(false)
+  })
+
+  // #4347: the tips are EARNED — hidden until the person uses a shortcut or
+  // opens the list, and that is remembered per browser on its own key, so a
+  // dismissal and an earn never overwrite each other.
+  it('remembers that the tips were earned, apart from a dismissal', () => {
+    const mem = new Map()
+    const storage = {
+      getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+      setItem: (k, v) => mem.set(k, String(v)),
+      removeItem: (k) => mem.delete(k),
+    }
+    expect(loadKeyTipsEarned(storage)).toBe(false)
+    expect(saveKeyTipsEarned(storage)).toBe(true)
+    expect(mem.has(KEY_TIPS_EARNED_KEY)).toBe(true)
+    expect(KEY_TIPS_EARNED_KEY).not.toBe(KEY_TIPS_STORAGE_KEY)
+    expect(loadKeyTipsEarned(storage)).toBe(true)
+    saveKeyTipsDismissed(storage, true)
+    expect(loadKeyTipsEarned(storage)).toBe(true)
+    const broken = { getItem() { throw new Error('denied') }, setItem() { throw new Error('denied') } }
+    expect(loadKeyTipsEarned(broken)).toBe(false)
+    expect(saveKeyTipsEarned(broken)).toBe(false)
+    expect(loadKeyTipsEarned(null)).toBe(false)
   })
 })

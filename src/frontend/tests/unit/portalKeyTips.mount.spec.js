@@ -113,7 +113,7 @@ describe('ent#621 (follow-up) — the tips panel in the open rail', () => {
 describe('ent#621 (follow-up) — the other two rail forms', () => {
   it('collapsed: one icon at the foot of the strip opens the list', async () => {
     const w = mountRail({ open: false })
-    expect(panel(w).exists()).toBe(false)          // 48px holds no panel
+    expect(panel(w).exists()).toBe(false)          // the strip holds no panel
     const btn = w.find('[data-testid="portal-rail-keys"]')
     expect(btn.exists()).toBe(true)
     expect(btn.attributes('title')).toContain(keyHint('key-list', P))
@@ -122,9 +122,14 @@ describe('ent#621 (follow-up) — the other two rail forms', () => {
     w.unmount()
   })
 
-  it('collapsed and dismissed: the icon goes with the panel', () => {
+  // #4347: the icon is how a person FINDS the tips, so it keeps its place
+  // whether the panel is not yet shown or was dismissed (it used to go too).
+  it('collapsed, with the panel hidden or dismissed: the icon keeps its place', async () => {
     const w = mountRail({ open: false, keyTips: false })
-    expect(w.find('[data-testid="portal-rail-keys"]').exists()).toBe(false)
+    const btn = w.find('[data-testid="portal-rail-keys"]')
+    expect(btn.exists()).toBe(true)
+    await btn.trigger('click')
+    expect(w.emitted('open-keys')).toHaveLength(1)
     w.unmount()
   })
 

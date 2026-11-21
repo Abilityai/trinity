@@ -249,8 +249,8 @@ describe('#2617 — driving useColumnResize', () => {
     // The finding: `sidebarMax` read `effectiveRail`, which carries no
     // `railOpen` term, so a closed rail was charged at its full open width.
     const { columns } = await drive({ viewport: LAPTOP, railOpen: false })
-    expect(columns.railWidth.value).toBe(48)
-    expect(columns.sidebarMax.value).toBe(LAPTOP - 48 - CONVERSATION_MIN) // 752
+    expect(columns.railWidth.value).toBe(64)   // #4347: the labelled strip
+    expect(columns.sidebarMax.value).toBe(LAPTOP - 64 - CONVERSATION_MIN) // 736
   })
 
   it('does not regress the narrow window below the constant it replaces', async () => {

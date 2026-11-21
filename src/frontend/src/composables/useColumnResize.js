@@ -20,8 +20,9 @@ import { safeStorage } from '@/utils/safeStorage'
 // renders byte-identically to before: `w-72` sidebar, `w-96` rail.
 export const SIDEBAR_DEFAULT = 288
 export const RAIL_DEFAULT = 384
-// The collapsed rail is a fixed strip, not a resizable column (ent#474's 48px).
-export const RAIL_COLLAPSED = 48
+// The collapsed rail is a fixed strip, not a resizable column (ent#474's 48px,
+// widened to 64px by #4347 so each tab's label fits under its icon).
+export const RAIL_COLLAPSED = 64
 
 // Clamps. The minima are where a column stops being able to do its job: a
 // sidebar narrower than this truncates every agent name to nothing, and a rail

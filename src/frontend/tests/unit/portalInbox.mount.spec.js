@@ -194,12 +194,14 @@ describe('honest state — loading ≠ empty ≠ failed (principle 15)', () => {
     expect(has(w, 'inbox-row-ask:a1')).toBe(true)
   })
 
-  it("a platform session's empty Action points at Operations (A9); a client's does not", async () => {
+  // #4347: a client's empty Action is never a blank pane either — it names
+  // the one thing a client can always do.
+  it("a platform session's empty Action points at Operations (A9); a client's at a new chat", async () => {
     store.asksLoaded = true
     const w = await mountInbox({ isPlatform: true }, { query: { tab: 'action' } })
-    expect(has(w, 'inbox-empty-link')).toBe(true)
+    expect(w.find('[data-testid="inbox-empty-link"]').text()).toBe('Open Operations')
     await w.setProps({ isPlatform: false })
-    expect(has(w, 'inbox-empty-link')).toBe(false)
+    expect(w.find('[data-testid="inbox-empty-link"]').text()).toBe('Start a chat')
   })
 })
 
@@ -828,10 +830,11 @@ describe('answer, then next: the reader\'s own answer crosses its row off (the o
     await router.replace({ path: '/workspace/inbox', query: { tab: 'action' } })
     await flushPromises()
     expect(w.find('[data-testid="inbox-empty"]').text()).toContain('Nothing needs your answer')
-    expect(has(w, 'inbox-empty-link')).toBe(false)
+    // #4347: still pointed at what came back — the link no longer waits for "caught up".
+    expect(w.find('[data-testid="inbox-empty-link"]').text()).toBe('See what came back')
   })
 
-  it('the last ask: a client with nothing unread gets no link; a platform session keeps Operations', async () => {
+  it('the last ask: a client with nothing unread is offered a new chat; a platform session keeps Operations', async () => {
     store.asks = [ask('q1')]
     store.asksLoaded = true
     store.answerAsk = answering()
@@ -839,7 +842,7 @@ describe('answer, then next: the reader\'s own answer crosses its row off (the o
     await send(w, 'q1')
     await settle()
     expect(w.find('[data-testid="inbox-empty"]').text()).toContain('All caught up')
-    expect(has(w, 'inbox-empty-link')).toBe(false)
+    expect(w.find('[data-testid="inbox-empty-link"]').text()).toBe('Start a chat')   // #4347
     await w.setProps({ isPlatform: true })
     expect(w.find('[data-testid="inbox-empty-link"]').text()).toBe('Open Operations')
     // A click on the active tab is a new visit: the plain empty copy again.

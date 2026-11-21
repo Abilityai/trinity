@@ -135,6 +135,37 @@ export function defaultInboxTab({ needs = 0, came = 0 } = {}) {
   return 'all'
 }
 
+// #4347: the tab a bare Inbox URL should be rewritten to state — the chosen
+// landing tab, only when the URL names none. A named tab is never rewritten
+// (that would be the redirect loop the landing rule must not become).
+export function landingTabToWrite(queryTab, chosen) {
+  if (normalizeInboxTab(queryTab)) return null
+  return normalizeInboxTab(chosen)
+}
+
+// #4347: while the Inbox is open, the sidebar's chat groups fold behind one
+// toggle so All's rows are not on screen twice. Opening them is the person's
+// call and is remembered for this browser (a convenience; a storage that
+// refuses just folds them again next load).
+export const INBOX_SIDEBAR_CHATS_KEY = 'trinity-workspace-inbox-sidebar-chats'
+export function loadInboxSidebarChatsOpen(storage) {
+  try {
+    return !!storage && typeof storage.getItem === 'function' && storage.getItem(INBOX_SIDEBAR_CHATS_KEY) === 'open'
+  } catch {
+    return false
+  }
+}
+export function saveInboxSidebarChatsOpen(storage, open) {
+  try {
+    if (!storage || typeof storage.setItem !== 'function') return false
+    if (open) storage.setItem(INBOX_SIDEBAR_CHATS_KEY, 'open')
+    else storage.removeItem(INBOX_SIDEBAR_CHATS_KEY)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function askItem(a) {
   return {
     key: itemKey('ask', a.id),

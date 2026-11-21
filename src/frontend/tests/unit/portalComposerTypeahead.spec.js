@@ -52,6 +52,7 @@ import {
   EMPTY_REASON_NO_PEERS,
   EMPTY_REASON_NO_MENTIONABLE_PEERS,
   EMPTY_REASON_NO_ROOM_PEERS,
+  composerHintText,
 } from '@/components/portal/portalUtils'
 
 const CONV = fileURLToPath(new URL('../../src/components/portal/PortalConversation.vue', import.meta.url))
@@ -721,10 +722,12 @@ describe('PortalConversation wiring', () => {
     expect(src).toMatch(/<textarea[\s\S]{0,400}class="[^"]*\bw-full\b/)
   })
 
-  it('advertises both triggers in the placeholder, and @ only with the capability', () => {
-    const src = convSource()
-    expect(src).toMatch(/for skills/)        // trinity-enterprise#754: "skills" on agent surfaces
-    expect(src).toMatch(/multiAgentChatAvailable[\s\S]{0,120}@ to add an agent/)
+  // #4347: the triggers moved out of the placeholder into a first-visit hint
+  // (`portalComposerHint.mount.spec.js` mounts it); the rule is the same —
+  // "skills" on agent surfaces (trinity-enterprise#754), @ only with the capability.
+  it('teaches both triggers in the hint, and @ only with the capability', () => {
+    expect(composerHintText({ multiAgent: false })).toBe('Type / to pick a skill')
+    expect(composerHintText({ multiAgent: true })).toBe('Type / to pick a skill, @ to bring in another agent')
   })
 })
 

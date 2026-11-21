@@ -797,9 +797,37 @@ describe('ent#621 (follow-up) — ⌘/ puts the cursor in the sidebar search', (
 describe('ent#621 (follow-up) — the rail\'s shortcut tips', () => {
   const railOf = (w) => w.findComponent({ name: 'PortalRail' })
 
-  it('are on until dismissed, and a dismissal is remembered across a reload', async () => {
+  // #4347: hidden by default — a first-time person is not handed a keyboard
+  // card. They appear once the person has used a shortcut, or asked for the
+  // list; that is remembered per browser, and so is a dismissal.
+  it('are hidden by default', async () => {
     viewport(true)
     const { w } = await boot('/workspace/c/s-main')
+    expect(railOf(w).props('keyTips')).toBe(false)
+  })
+
+  it('appear after the person uses a shortcut, and stay across a reload', async () => {
+    viewport(true)
+    const { w } = await boot('/workspace/c/s-main')
+    await press(w, { key: '/', meta: true })
+    expect(railOf(w).props('keyTips')).toBe(true)
+    const again = await boot('/workspace/c/s-main')
+    expect(railOf(again.w).props('keyTips')).toBe(true)
+  })
+
+  it('appear after the person opens the shortcuts list from a button', async () => {
+    viewport(true)
+    const { w } = await boot('/workspace/c/s-main')
+    railOf(w).vm.$emit('open-keys')
+    await flushPromises()
+    expect(railOf(w).props('keyTips')).toBe(true)
+  })
+
+  it('a dismissal is remembered across a reload, even after another shortcut', async () => {
+    viewport(true)
+    const { w } = await boot('/workspace/c/s-main')
+    railOf(w).vm.$emit('open-keys')
+    await flushPromises()
     expect(railOf(w).props('keyTips')).toBe(true)
 
     railOf(w).vm.$emit('dismiss-key-tips')
@@ -808,6 +836,8 @@ describe('ent#621 (follow-up) — the rail\'s shortcut tips', () => {
 
     // A fresh shell — the reload — reads the same browser's storage.
     const again = await boot('/workspace/c/s-main')
+    expect(railOf(again.w).props('keyTips')).toBe(false)
+    await press(again.w, { key: '/', meta: true })
     expect(railOf(again.w).props('keyTips')).toBe(false)
   })
 
