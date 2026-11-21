@@ -1,6 +1,27 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4672_list_query_counts.py",
+      "feature": "#4672",
+      "added": "2026-11-20",
+      "categories": [
+        "backend",
+        "performance"
+      ],
+      "description": "#4672: the Workspace roster's canvas flag, the operator queue's gate cards, the loops list, autonomy-status, the Work feed, the schedules list and the evaluations operator check each run the same number of queries at two sizes, and each answer equals the unbatched per-item answer."
+    },
+    {
+      "file": "unit/test_4672_fleet_reads.py",
+      "feature": "#4672",
+      "added": "2026-11-20",
+      "categories": [
+        "backend",
+        "performance",
+        "ops"
+      ],
+      "description": "#4672: /api/ops/fleet/status reads agents concurrently under a per-agent bound (one wedged agent cannot hold the response) with one owners read; context-stats caches past the 15 s poll and per caller for non-admins, always filtered to current access."
+    },
+    {
       "file": "unit/test_4671_asks_query_count.py",
       "feature": "#4671",
       "added": "2026-11-20",
