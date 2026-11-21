@@ -9597,6 +9597,18 @@
         "workspace"
       ],
       "description": "Mounted PortalConversation: Show earlier prepends the older window and keeps newer rows, restores scrollTop, ends at 'Start of this chat', shows a failed state that retries, is disabled while sending, survives a post-call reload, resets on a thread switch (dropping a stale page), and settles an in-flight turn's failure on the right row; the store maps has_earlier/next_before and sends before."
+    },
+    {
+      "file": "unit/test_4603_login_code_limit_signal.py",
+      "feature": "#4603",
+      "added": "2026-11-21",
+      "categories": [
+        "backend",
+        "unit",
+        "auth",
+        "security"
+      ],
+      "description": "The web code door answers 429 with the channel doors' sentence when the shared per-address budget refuses, identically for members and outsiders; the code-row gate stays byte-identical to the success and not-allow-listed answers."
     }
   ]
 }
