@@ -7,6 +7,8 @@ Covers REQ-11.5: Email-Based Authentication.
 FAST TESTS - No agent creation required.
 """
 
+import uuid
+
 import pytest
 
 # Mark all tests in this module as smoke tests (fast, no agent needed)
@@ -103,13 +105,14 @@ class TestEmailLoginRequest:
         # (even if the email is not whitelisted)
         response = unauthenticated_client.post(
             "/api/auth/email/request",
-            json={"email": "unknown-user@example.com"},
+            # #4603: a fresh address per run — the shared per-address budget
+            # (3 / 10 min) now answers 429 on a repeat, alike for every address.
+            json={"email": f"unknown-user-{uuid.uuid4().hex[:10]}@example.com"},
             auth=False
         )
 
-        # #186: an unknown (non-whitelisted) email always returns the generic 200
-        # body — never a 429 — so a repeat-request status can't be used as a
-        # membership oracle. (The old dead 429 branch is removed.)
+        # #186: an unknown (non-whitelisted) email returns the generic 200
+        # body, byte-identical to a whitelisted one — no membership oracle.
         assert_status(response, 200)
         data = response.json()
         assert "success" in data or "message" in data
