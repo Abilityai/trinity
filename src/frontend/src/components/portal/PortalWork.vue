@@ -218,7 +218,10 @@ function elapsedOf(item) {
 // check re-runs on the tab's own tick; a line the agent stopped renewing
 // drops out rather than sticking.
 function stepOf(item) {
-  return resolveActivityText({ live: true, activity: store.activityFor(item), nowMs: nowMs.value })
+  return resolveActivityText({
+    live: true, activity: store.activityFor(item), nowMs: nowMs.value,
+    technical: portal.isPlatformSession,
+  })
 }
 function childrenOf(item) {
   return childrenForChat(store.now, item.chat_id, item.id)

@@ -1580,6 +1580,7 @@ const liveStepLine = computed(() => {
     streamActivity: streaming.value ? liveStreamActivity.value : null,
     activity: workStore.activityFor(liveCardItem.value),
     nowMs: Date.now(),
+    technical: store.isPlatformSession,
   })
 })
 // Delegated work this turn handed on — found by the CHAT, not the agent.

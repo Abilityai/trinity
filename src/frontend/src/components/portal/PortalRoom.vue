@@ -659,7 +659,10 @@ function elapsedOf(it) { return liveElapsedSeconds(it, { fetchedAtMs: workStore.
 // trinity-enterprise#620: a room's cards carry the activity line too — the
 // room has no stream of its own, so every card reads the heartbeat feed.
 function stepOf(it) {
-  return resolveActivityText({ live: true, activity: workStore.activityFor(it), nowMs: clockMs.value })
+  return resolveActivityText({
+    live: true, activity: workStore.activityFor(it), nowMs: clockMs.value,
+    technical: store.isPlatformSession,
+  })
 }
 
 // #2795 — stopping a room turn.

@@ -41,16 +41,34 @@ const MONO_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'
 const NO_OBJECT = new Set(['...', '', null, undefined])
 
 /**
+ * #4345 — what a non-technical audience reads for a MONO tool: the verb in
+ * plain words, never the path, command or pattern the object carries.
+ */
+const PLAIN_LINES = Object.freeze({
+  Read: 'Reading a file',
+  Edit: 'Editing a file',
+  Write: 'Editing a file',
+  MultiEdit: 'Editing a file',
+  NotebookEdit: 'Editing a file',
+  Glob: 'Finding files',
+  Grep: 'Searching files',
+  Bash: 'Running a command',
+})
+
+/**
  * @typedef {{ text: string, object: string|null, mono: boolean }} ActivityLine
  */
 
 /**
  * Compose the line. Returns null when there is nothing honest to say
  * (no facts at all) — the card then shows nothing rather than a guess.
+ * `technical: false` (#4345) is the Workspace client: a MONO tool reads as a
+ * plain line with no object. Operator surfaces keep the default.
  * @param {{tool?: string|null, summary?: string|null}|null|undefined} activity
+ * @param {{ technical?: boolean }} [options]
  * @returns {ActivityLine|null}
  */
-export function activityLine(activity) {
+export function activityLine(activity, { technical = true } = {}) {
   if (!activity || typeof activity !== 'object') return null
   const tool = typeof activity.tool === 'string' ? activity.tool.trim() : ''
   const summary = typeof activity.summary === 'string' ? activity.summary.trim() : ''
@@ -75,6 +93,7 @@ export function activityLine(activity) {
   if (tool === 'AskUserQuestion') return line('Asking a question', null, false)
   if (tool === 'TodoWrite') return line('Planning the next steps', null, false)
 
+  if (!technical && MONO_TOOLS.has(tool)) return line(PLAIN_LINES[tool], null, false)
   const verb = VERBS[tool]
   if (verb) {
     if (!object) return line(`${verb}…`, null, false)
@@ -267,14 +286,14 @@ export function createActivityLineQueue({ minDisplayMs = ACTIVITY_MIN_DISPLAY_MS
  * The line an item should show, given both feeds (AC #3): the stream's line
  * for the chat's own turn while it streams, else the Work read's activity —
  * both through `activityLine`. `null` = say nothing (no live signal).
- * @param {{ live: boolean, streamActivity?: object|null, activity?: object|null, ageSeconds?: number|null }} args
+ * @param {{ live: boolean, streamActivity?: object|null, activity?: object|null, ageSeconds?: number|null, technical?: boolean }} args
  */
-export function resolveActivityText({ live, streamActivity = null, activity = null, nowMs = Date.now() }) {
+export function resolveActivityText({ live, streamActivity = null, activity = null, nowMs = Date.now(), technical = true }) {
   if (!live) return null
-  if (streamActivity) return activityLine(streamActivity)?.text ?? null
+  if (streamActivity) return activityLine(streamActivity, { technical })?.text ?? null
   if (activity) {
     if (activityAgeSeconds(activity, nowMs) > ACTIVITY_MAX_AGE_S) return null
-    return activityLine(activity)?.text ?? null
+    return activityLine(activity, { technical })?.text ?? null
   }
   return null
 }

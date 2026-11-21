@@ -68,6 +68,72 @@ describe('activityLine — one vocabulary', () => {
 })
 
 // ---------------------------------------------------------------------------
+// #4345 — the audience: a client never reads a shell command or a repo path
+// ---------------------------------------------------------------------------
+describe('activityLine — audience (#4345)', () => {
+  const CLIENT = { technical: false }
+  const PLAIN = {
+    Read: 'Reading a file',
+    Edit: 'Editing a file',
+    Write: 'Editing a file',
+    MultiEdit: 'Editing a file',
+    NotebookEdit: 'Editing a file',
+    Glob: 'Finding files',
+    Grep: 'Searching files',
+    Bash: 'Running a command',
+  }
+
+  it('each mono tool drops its object for a client, with or without one', () => {
+    for (const [tool, text] of Object.entries(PLAIN)) {
+      expect(activityLine({ tool, summary: 'git status --porcelain | head -50' }, CLIENT)).toEqual({ text, object: null, mono: false })
+      expect(activityLine({ tool, summary: '...' }, CLIENT)).toEqual({ text, object: null, mono: false })
+    }
+  })
+
+  it('each mono tool keeps its object for the technical audience, and that is the default', () => {
+    for (const tool of Object.keys(PLAIN)) {
+      const a = activityLine({ tool, summary: '.../a/b.py' }, { technical: true })
+      expect(a.object).toBe('.../a/b.py')
+      expect(a.mono).toBe(true)
+      expect(a).toEqual(activityLine({ tool, summary: '.../a/b.py' }))
+    }
+    expect(activityLine({ tool: 'Read', summary: '...' }, { technical: true }).text).toBe('Reading…')
+  })
+
+  it('WebSearch and WebFetch keep their object in both audiences', () => {
+    for (const opts of [CLIENT, { technical: true }]) {
+      expect(activityLine({ tool: 'WebSearch', summary: 'vue transition' }, opts).text).toBe('Searching for vue transition')
+      expect(activityLine({ tool: 'WebFetch', summary: 'docs.example.com' }, opts).text).toBe('Fetching docs.example.com')
+    }
+  })
+
+  it('mcp, Task, Reply and Thinking read the same for a client', () => {
+    for (const a of [
+      { tool: 'mcp:github', summary: 'repo: a/b' },
+      { tool: 'mcp:trinity', summary: 'agent_name: sidekick' },
+      { tool: 'Task:explore', summary: 'Map the Work card' },
+      { tool: 'Task', summary: null },
+      { tool: 'Reply' },
+      { tool: null },
+    ]) {
+      expect(activityLine(a, CLIENT)).toEqual(activityLine(a))
+    }
+  })
+
+  it('resolveActivityText passes the audience through both feeds', () => {
+    expect(resolveActivityText({ live: true, streamActivity: { tool: 'Bash', summary: 'ls -la' }, technical: false })).toBe('Running a command')
+    expect(resolveActivityText({ live: true, activity: { tool: 'Read', summary: 'src/x.py' }, technical: false })).toBe('Reading a file')
+    expect(resolveActivityText({ live: true, activity: { tool: 'Read', summary: 'src/x.py' } })).toBe('Reading src/x.py')
+  })
+
+  it('two different commands read the same for a client, so the queue does not re-key', () => {
+    const q = createActivityLineQueue({ minDisplayMs: 0, now: () => 0 })
+    const first = q.offer(activityLine({ tool: 'Bash', summary: 'ls' }, CLIENT).text)
+    expect(q.offer(activityLine({ tool: 'Bash', summary: 'git status' }, CLIENT).text)).toBe(first)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // The stream feed — the REAL frame shape
 // ---------------------------------------------------------------------------
 describe('activityFromStreamEvent — reads the raw stream-json shape', () => {
@@ -260,6 +326,10 @@ describe('placement (source guards)', () => {
     expect(ROOM).toContain(':live-step="stepOf(it)"')
     expect(WORK).toContain('store.activityFor(item)')
     expect(ROOM).toContain('workStore.activityFor(it)')
+    // #4345: every Workspace caller states the audience; a client reads plain lines.
+    expect(CONV).toContain('technical: store.isPlatformSession')
+    expect(WORK).toContain('technical: portal.isPlatformSession')
+    expect(ROOM).toContain('technical: store.isPlatformSession')
   })
 
   it('the store polls the cheap read only while live and clears it when nothing is', () => {
