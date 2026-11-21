@@ -5091,6 +5091,10 @@ class SetAdminPasswordRequest(BaseModel):
     # link (trinity-enterprise#1312), checked only when
     # ADMIN_PASSWORD_SOURCE=instance-id and ignored otherwise.
     claim_code: Optional[str] = Field(None, max_length=64)
+    # trinity-enterprise#1329: the registration-terms version the person
+    # accepted on the setup page. Read only when a provider of registration
+    # terms is registered and the claim is an emailed link; ignored otherwise.
+    registration_terms_version: Optional[str] = Field(None, max_length=100)
     # Optional operator profile — all skippable; setup completes without them.
     company: Optional[str] = Field(None, max_length=200)
     name: Optional[str] = Field(None, max_length=200)
