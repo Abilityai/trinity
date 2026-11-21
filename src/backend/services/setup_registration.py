@@ -18,6 +18,19 @@ Protocol (what a provider implements)::
             # setup then refuses with the retryable
             # ``registration_terms_unavailable`` and never completes.
 
+        def applies(self) -> bool:  # OPTIONAL
+            # Whether the terms apply on this instance right now. Asked on
+            # every request, in every worker, so it must be cheap and local
+            # (no network). False — or an exception — reads as "no provider":
+            # the route is 404 and setup is unchanged. A provider without
+            # this method always applies.
+
+A module may register its provider unconditionally and let ``applies()``
+decide, so eligibility that changes after the process started (another process
+writing a setting) is seen by every worker without re-registering.
+``SUPPORTS_APPLIES`` tells a module this platform asks ``applies()``; an older
+platform does not, and a module must then register only when eligible.
+
 The provider is called with NOTHING from the caller: no claim code, no email,
 no address. A malformed answer is treated as unavailable.
 
@@ -80,6 +93,8 @@ class RegistrationTermsError(Exception):
                 "version": self.version, "retryable": self.retryable}
 
 
+SUPPORTS_APPLIES = True
+
 _provider: Optional[RegistrationTermsProvider] = None
 _cache: Optional[tuple] = None  # (fetched_at, terms)
 _failed_at: Optional[float] = None  # when the provider last could not answer
@@ -124,6 +139,24 @@ def _lock() -> asyncio.Lock:
 
 def provider() -> Optional[RegistrationTermsProvider]:
     return _provider
+
+
+def active_provider() -> Optional[RegistrationTermsProvider]:
+    """The registered provider when it applies right now, else None. A
+    provider without ``applies()`` always applies; one whose ``applies()``
+    raises does not (logged), so a fault never opens the route."""
+    p = _provider
+    if p is None:
+        return None
+    applies = getattr(p, "applies", None)
+    if applies is None:
+        return p
+    try:
+        return p if applies() else None
+    except Exception as e:  # noqa: BLE001 — a fault reads as "does not apply"
+        logger.warning("[setup] registration terms provider could not say whether it applies: %s",
+                       type(e).__name__)
+        return None
 
 
 def _unavailable() -> RegistrationTermsError:

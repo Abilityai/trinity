@@ -296,8 +296,9 @@ async def get_registration_terms():
     """The registration terms the first admin accepts at setup (trinity-enterprise#1329).
 
     No auth. Answers only while setup is open AND a provider of registration
-    terms is registered; otherwise 404, so a self-installed instance has no
-    such route in effect. The handler takes nothing from the caller: it never
+    terms is registered and applies (asked per request, so a change after the
+    process started is seen in every worker); otherwise 404, so a
+    self-installed instance has no such route in effect. The handler takes nothing from the caller: it never
     reads, and so can never forward, a claim code. The provider's answer is
     cached for 60 s, an unavailable answer for 10 s, and concurrent cold
     calls share one provider fetch, so provider load does not grow with the
@@ -306,8 +307,8 @@ async def get_registration_terms():
     200 ``{"version", "title", "text", "url"}``; 503
     ``{"code": "registration_terms_unavailable", "retryable": true, ...}``.
     """
-    if setup_registration.provider() is None or \
-            db.get_setting_value('setup_completed', 'false') == 'true':
+    if db.get_setting_value('setup_completed', 'false') == 'true' or \
+            setup_registration.active_provider() is None:
         raise HTTPException(status_code=404, detail="Not found")
     try:
         return await setup_registration.current_terms()
@@ -437,7 +438,7 @@ async def set_admin_password(
     registration_version = None
     if (
         claim_mode
-        and setup_registration.provider() is not None
+        and setup_registration.active_provider() is not None
         and _read_claim_file(_SETUP_CLAIM_PATH).strip().startswith(_EMAIL_BOUND_PREFIX)
     ):
         try:
