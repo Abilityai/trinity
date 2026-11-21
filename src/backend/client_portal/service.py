@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 
+from utils import request_memo
 from utils.helpers import parse_iso_timestamp, utc_now_iso
 from services.chat_title import (
     chat_title_problem,
@@ -1209,6 +1210,7 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     model_context = _model_context()
     # ent#1172: once per roster load, like `tts_ready` and `model_context`.
     member_names = _member_agent_names()
+    managers = canvas_managers(names, email, is_platform=include_owned)
     cards = [
         _row_to_card(r, tts_ready, default_voice,
                      availability=availability.get(r["agent_name"], "unknown"),
@@ -1226,8 +1228,9 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
                      # couple of indexed lookups per agent on a load that already
                      # makes a Docker call; if it ever matters, memoize INSIDE
                      # the predicate so both callers benefit.
-                     can_manage_canvases=may_manage_canvases(
-                         r["agent_name"], email, is_platform=include_owned))
+                     # #4672: still that predicate, asked once per agent inside
+                     # one memo scope (`canvas_managers`) rather than inline.
+                     can_manage_canvases=r["agent_name"] in managers)
         for r in rows
     ]
     # #2163: the briefing is DEFERRED, not dropped. Saying so on the card is
@@ -2014,8 +2017,35 @@ def may_manage_canvases(agent_name: str, email: str | None, *,
     return bool(core_db.can_user_share_agent(user["username"], agent_name))
 
 
+def canvas_managers(agent_names, email: str | None, *, is_platform: bool) -> set[str]:
+    """Which of ``agent_names`` this caller may manage canvases on (#4672).
+
+    `may_manage_canvases` asked per agent, exactly as before — it is still the
+    one predicate — but inside one `request_memo.scope()` with the owners read
+    in one query first, so a roster of N agents costs the same three reads as
+    a roster of one instead of re-reading the caller's own user row and one
+    owner row per agent on every Workspace load.
+    """
+    from database import db as core_db
+
+    names = list(agent_names or [])
+    if not is_platform or not email or not names:
+        return set()
+    with request_memo.scope():
+        try:
+            core_db.get_agent_owners(names)
+        except Exception:  # noqa: BLE001 — a failed warm-up falls back to per-agent reads
+            logger.warning("canvas_managers: owner prefetch failed", exc_info=True)
+        return {name for name in names if may_manage_canvases(name, email, is_platform=is_platform)}
+
+
+@request_memo.memoized
 def roster_agent_names(email: str | None, include_owned: bool) -> set[str]:
     """The set of agent names on the caller's roster — THE access boundary.
+
+    Memoized inside a `request_memo.scope()` (#4671): a read that re-checks
+    the roster once per agent asks the same two queries each time, so the
+    scope answers them once. Treat the returned set as read-only.
 
     #2198: extracted so the per-agent gate above and the cross-agent batch read
     (`list_all_sessions`) resolve membership through one implementation rather

@@ -460,6 +460,9 @@
           </form>
 
           <form v-else-if="store.account.step === 'code'" class="space-y-3" @submit.prevent="store.verifyAccount(code, accepted)">
+            <p v-if="store.account.stale" class="text-[12.5px] text-gray-600 dark:text-gray-300" data-testid="assistant-terms-changed">
+              The terms have changed since you last accepted them. Read the current terms and accept them to continue.
+            </p>
             <p class="text-gray-900 dark:text-gray-100">
               Enter the 6-digit code sent to <span class="font-medium">{{ store.account.email }}</span>.
             </p>
@@ -528,6 +531,13 @@
         </div>
 
         <!-- Composer -->
+        <!-- The status is being read again before the terms are offered (trinity-enterprise#1330) -->
+        <p
+          v-if="store.settling && !store.agreed"
+          class="mx-3 mb-1 mt-3 text-[12.5px] text-gray-500 dark:text-gray-400 animate-pulse motion-reduce:animate-none shrink-0"
+          aria-live="polite"
+          data-testid="assistant-finishing"
+        >Finishing setup…</p>
         <!-- Before the first message, once per instance: one button, no email -->
         <div
           v-if="needsAgreement"
@@ -736,7 +746,9 @@ function helpWith(step) {
 }
 
 // Nothing leaves this instance until someone here has agreed to the trial's terms.
-const needsAgreement = computed(() => Boolean(store.status) && !store.agreed)
+// While the status is still being settled (trinity-enterprise#1330) the box waits:
+// the next read may say the terms were already accepted.
+const needsAgreement = computed(() => Boolean(store.status) && !store.agreed && !store.settling)
 
 const termsOpen = ref(false)
 function toggleTerms() {
@@ -871,7 +883,9 @@ function send(text) {
   const message = String(text || '').trim()
   if (!message || store.sending) return
   draft.value = ''
-  if (needsAgreement.value) return store.hold(message)     // kept until they agree; one click sends it
+  // Kept until they agree; one click sends it. While the status is still being read
+  // again (trinity-enterprise#1330) it is held too: nobody has agreed yet.
+  if (needsAgreement.value || (store.settling && !store.agreed)) return store.hold(message)
   store.send(message, route)
 }
 
@@ -915,6 +929,15 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', onWindowResize)
   window.removeEventListener('keydown', onKey)
   store.setOpen(false)
+  store.stopSettling()
+})
+
+// The re-read settled and the terms were already accepted: what was held goes now.
+watch(() => store.settling, (on, was) => {
+  if (!was || on || !store.agreed || !store.waiting) return
+  const held = store.waiting
+  store.waiting = ''
+  store.send(held, route)
 })
 
 // What the assistant just did may have ticked a step: read them again when a turn ends.
@@ -929,6 +952,8 @@ watch(() => route.path, () => store.recheck())
 watch(() => store.account.step, (step) => {
   code.value = ''
   if (step !== 'code') accepted.value = false
+  // A code that could not be sent to a known address leaves that address filled in.
+  if (step === 'email' && store.account.email) email.value = store.account.email
 })
 
 watch(

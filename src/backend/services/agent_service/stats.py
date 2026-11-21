@@ -26,18 +26,35 @@ from .helpers import get_accessible_agents
 
 logger = logging.getLogger(__name__)
 
-# PERF-269: In-memory cache for context stats (15s TTL)
+# PERF-269: In-memory cache for context stats
 _context_stats_cache = {
     "data": None,
     "timestamp": 0,
-    "ttl": 15  # seconds
+    # #4672: LONGER than the dashboard's 15 s poll. At 15 the entry had always
+    # just expired when the next poll arrived, so every poll re-ran the fan-out
+    # to every running agent and the cache answered nothing.
+    "ttl": 20  # seconds
 }
+
+
+# #4672: per-caller entries for callers who do not see the whole fleet —
+# `{caller key: (monotonic time, their stats)}`. Keyed on the PRINCIPAL, not the
+# user: an agent-scoped or connector key resolves to its owner but reaches fewer
+# agents, and must not be handed the owner's wider subset. Stale entries are
+# dropped on write, so the map is bounded by the callers active inside one TTL.
+_context_stats_by_caller: dict = {}
+
+
+def _caller_key(current_user: User) -> tuple:
+    return (current_user.username, getattr(current_user, "agent_name", None),
+            getattr(current_user, "connector_agent", None), getattr(current_user, "mcp_scope", None))
 
 
 def invalidate_context_stats_cache():
     """Invalidate the context stats cache (call on agent start/stop)."""
     _context_stats_cache["data"] = None
     _context_stats_cache["timestamp"] = 0
+    _context_stats_by_caller.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -220,13 +237,24 @@ async def get_agents_context_stats_logic(
     Returns: List of agent stats with context usage and active/idle/offline state
     """
     now = time.monotonic()
+    ttl = _context_stats_cache["ttl"]
 
-    # Check cache (PERF-269)
+    # Check cache (PERF-269): the fleet-wide entry first, then — #4672 — the
+    # caller's own. A non-admin never writes the fleet entry (below), so before
+    # this a non-admin's poll fanned out to their agents every single time.
+    # Either way the cached rows are filtered to what THIS caller can reach
+    # NOW: a cache hit never widens access, and a share revoked since the
+    # entry was written is gone from the answer.
+    cached = None
     if (_context_stats_cache["data"] is not None
-            and (now - _context_stats_cache["timestamp"]) < _context_stats_cache["ttl"]):
-        # Return cached data, filtered to accessible agents for this user
-        accessible_names = {a["name"] for a in get_accessible_agents(current_user)}
+            and (now - _context_stats_cache["timestamp"]) < ttl):
         cached = _context_stats_cache["data"]
+    else:
+        own = _context_stats_by_caller.get(_caller_key(current_user))
+        if own is not None and (now - own[0]) < ttl:
+            cached = own[1]
+    if cached is not None:
+        accessible_names = {a["name"] for a in get_accessible_agents(current_user)}
         filtered = [s for s in cached if s["name"] in accessible_names]
         return {"agents": filtered}
 
@@ -294,6 +322,11 @@ async def get_agents_context_stats_logic(
     if is_fleet_admin(current_user):
         _context_stats_cache["data"] = all_stats
         _context_stats_cache["timestamp"] = now
+    else:
+        # #4672: a narrower caller keeps their OWN subset, under their own key.
+        for key in [k for k, (at, _) in _context_stats_by_caller.items() if (now - at) >= ttl]:
+            _context_stats_by_caller.pop(key, None)
+        _context_stats_by_caller[_caller_key(current_user)] = (now, all_stats)
 
     return {"agents": all_stats}
 

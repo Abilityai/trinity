@@ -22,7 +22,7 @@ const loginWithCredentials = vi.fn()
 let claimRequired = null
 
 vi.mock('axios', () => ({ default: { post: (...a) => post(...a), get: (...a) => get(...a) } }))
-vi.mock('vue-router', () => ({ useRouter: () => ({ push }) }))
+vi.mock('vue-router', () => ({ useRoute: () => ({ query: {}, hash: '' }), useRouter: () => ({ push, replace: vi.fn() }) }))
 vi.mock('../../src/router', () => ({
   clearSetupCache: vi.fn(),
   getSetupClaimRequired: () => claimRequired,

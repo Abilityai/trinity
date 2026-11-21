@@ -16,15 +16,18 @@ let status
 let turns        // answers to /turn and /turn/continue, in order
 let scheduleOn
 let verifyFails
+let startFails       // /account/start answers 502
+let refuseSubscribe  // /subscription/start answers 409 sign_in_first, and the terms move on
 let jobs         // answers to the job's status, in order
 let runs = []    // answers to a run's status, in order
 let afterAgreeing = null   // the line Trinity opens with once someone has agreed
 let checklist = {}       // what the getting-started endpoint answers
+let statusReads = []     // answers to /status, in order, before falling back to `status`
 
 vi.mock('@/api', () => {
   const respond = (method, url, body) => {
     calls.push({ method, url, body })
-    if (url === '/api/enterprise/assistant/status') return { ...status }
+    if (url === '/api/enterprise/assistant/status') return statusReads.length ? statusReads.shift() : { ...status }
     if (url === '/api/enterprise/assistant/turn' || url === '/api/enterprise/assistant/turn/continue') {
       return turns.shift() || { status: 'final', conversation_id: 'c1', text: 'Done.', cards: [], allowance: ALLOWANCE }
     }
@@ -43,10 +46,18 @@ vi.mock('@/api', () => {
     if (url === '/api/enterprise/assistant/feedback') return { ok: true }
     if (url === '/api/enterprise/assistant/opened') return { ok: true }
     if (url === '/api/enterprise/onboarding/checklist') return checklist
+    if (url === '/api/enterprise/assistant/account/start' && startFails) {
+      throw { response: { status: 502, data: { detail: { code: 'mail_failed', message: "The code couldn't be sent right now." } } } }
+    }
     if (url === '/api/enterprise/assistant/account/start') return { email: body.email, dev_code: '424242', terms: { version: 't1', url: '' } }
     if (url === '/api/enterprise/assistant/account/verify') {
       if (verifyFails) throw { response: { status: 400, data: { detail: { code: 'wrong_code', message: "That code didn't match." } } } }
       return { plan: 'free', email: body.email, terms_accepted: 't1' }
+    }
+    if (url === '/api/enterprise/assistant/subscription/start' && refuseSubscribe) {
+      refuseSubscribe = false
+      status = { ...status, terms_accepted: 't0', terms: { version: 't1', url: '' } }
+      throw { response: { status: 409, data: { detail: { code: 'sign_in_first', message: 'Accept the current terms first.' } } } }
     }
     if (url === '/api/enterprise/assistant/subscription/start') return { plan: 'pro', billing: 'unbilled', checkout_url: null, email: 'ada@example.com' }
     if (url === '/api/agents') return [{ name: 'trinity-system', status: 'running', is_system: true }, { name: 'issue-digest', status: 'running' }]
@@ -92,10 +103,13 @@ describe('assistant panel', () => {
     turns = []
     scheduleOn = false
     verifyFails = false
+    startFails = false
+    refuseSubscribe = false
     jobs = []
     runs = []
     afterAgreeing = null
     checklist = {}
+    statusReads = []
     status = { available: true, contacted: true, reachable: true, plan: 'free', email: null, allowance: null, trial_terms: { version: 't0', url: '', accepted: 't0' }, profile_known: true }
     localStorage.clear()
     sessionStorage.clear()
@@ -181,6 +195,155 @@ describe('assistant panel', () => {
       await flushPromises()
       expect(wrapper.findAll('.bubble').map((b) => b.text())).toEqual(["You don't have an agent yet. Tell me one task you'd hand off."])
       expect(sent(TURN)).toEqual([])
+    })
+  })
+
+  // trinity-enterprise#1330: the first status after setup can arrive before the
+  // instance's account report has landed. While the status says that report is
+  // still pending, the terms box is not offered; the status is read again with
+  // backoff and only then is the box decided.
+  describe('while the account report is still pending', () => {
+    const NOT_AGREED = { available: true, contacted: false, reachable: null, plan: null, email: null, allowance: null, trial_terms: { version: 't0', url: '', accepted: null } }
+    const PENDING = { ...NOT_AGREED, bind: { state: 'pending' } }
+    const AGREED = { ...NOT_AGREED, contacted: true, reachable: true, plan: 'free', trial_terms: { version: 't0', url: '', accepted: 't0' } }
+    const box = () => wrapper.find('[data-testid="assistant-terms-first"]')
+    const reads = () => sent('/api/enterprise/assistant/status').length
+    const load = async () => {
+      await flushPromises()
+      calls.length = 0      // the panel's own read on mount is not one of these
+      const { useAssistantStore } = await import('@/stores/assistant')
+      await useAssistantStore().loadStatus()
+      await openPanel()
+    }
+    const signedIn = async (on) => {
+      const { useAuthStore } = await import('@/stores/auth')
+      useAuthStore().isAuthenticated = on
+    }
+
+    beforeEach(async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout'] })
+      await signedIn(true)
+    })
+    afterEach(() => { vi.useRealTimers() })
+
+    it('pending, then accepted: the terms box is never shown and nothing is accepted', async () => {
+      statusReads = [{ ...PENDING }, { ...AGREED }]
+      status = { ...AGREED }
+      await load()
+      expect(box().exists()).toBe(false)
+      expect(wrapper.find('[data-testid="assistant-finishing"]').exists()).toBe(true)
+      for (const ms of [500, 1000, 2000, 4000]) {
+        await vi.advanceTimersByTimeAsync(ms)
+        await flushPromises()
+        expect(box().exists()).toBe(false)
+      }
+      expect(reads()).toBe(2)
+      expect(wrapper.find('[data-testid="assistant-finishing"]').exists()).toBe(false)
+      expect(sent('/api/enterprise/assistant/terms/accept')).toEqual([])
+    })
+
+    it('pending, then not accepted: the box appears after the re-read', async () => {
+      statusReads = [{ ...PENDING }, { ...NOT_AGREED }]
+      status = { ...NOT_AGREED }
+      await load()
+      expect(box().exists()).toBe(false)
+      await vi.advanceTimersByTimeAsync(500)
+      await flushPromises()
+      expect(reads()).toBe(2)
+      expect(box().exists()).toBe(true)
+      expect(sent('/api/enterprise/assistant/terms/accept')).toEqual([])
+    })
+
+    it('still pending after every re-read: it gives up and offers the box as before', async () => {
+      statusReads = [{ ...PENDING }, { ...PENDING }, { ...PENDING }, { ...PENDING }, { ...PENDING }]
+      status = { ...PENDING }
+      await load()
+      await vi.advanceTimersByTimeAsync(500 + 1000 + 2000)
+      await flushPromises()
+      expect(box().exists()).toBe(false)
+      await vi.advanceTimersByTimeAsync(4000)
+      await flushPromises()
+      expect(reads()).toBe(5)
+      expect(box().exists()).toBe(true)
+      await vi.advanceTimersByTimeAsync(60000)
+      await flushPromises()
+      expect(reads()).toBe(5)
+    })
+
+    it('a message or a starter sent while it is being read again is held, never sent', async () => {
+      statusReads = [{ ...PENDING }, { ...PENDING }]
+      status = { ...NOT_AGREED }
+      await load()
+      await say('how are my agents?')
+      expect(sent(TURN)).toEqual([])
+      const starter = wrapper.findAll('[data-testid="assistant-starters"] button')[0]
+      expect(starter).toBeTruthy()
+      await starter.trigger('click')
+      await flushPromises()
+      expect(sent(TURN)).toEqual([])
+    })
+
+    it('pending, then accepted: a message held meanwhile goes once the read settles', async () => {
+      statusReads = [{ ...PENDING }, { ...AGREED }]
+      status = { ...AGREED }
+      await load()
+      await say('how are my agents?')
+      expect(sent(TURN)).toEqual([])
+      await vi.advanceTimersByTimeAsync(500)
+      await flushPromises()
+      expect(sent(TURN).map((c) => c.body.message)).toEqual(['how are my agents?'])
+      expect(sent('/api/enterprise/assistant/terms/accept')).toEqual([])
+    })
+
+    it('pending, then not accepted: the box shows with the message still held', async () => {
+      statusReads = [{ ...PENDING }, { ...NOT_AGREED }]
+      status = { ...NOT_AGREED }
+      await load()
+      await say('how are my agents?')
+      await vi.advanceTimersByTimeAsync(500)
+      await flushPromises()
+      expect(box().exists()).toBe(true)
+      expect(wrapper.get('[data-testid="assistant-waiting"]').text()).toContain('how are my agents?')
+      expect(sent(TURN)).toEqual([])
+      expect(sent('/api/enterprise/assistant/terms/accept')).toEqual([])
+    })
+
+    it('stops reading again once the person signs out', async () => {
+      statusReads = [{ ...PENDING }, { ...PENDING }, { ...PENDING }, { ...PENDING }, { ...PENDING }]
+      status = { ...PENDING }
+      await load()
+      await vi.advanceTimersByTimeAsync(500)
+      await flushPromises()
+      expect(reads()).toBe(2)
+      await signedIn(false)
+      await vi.advanceTimersByTimeAsync(60000)
+      await flushPromises()
+      expect(reads()).toBe(2)
+      const { useAssistantStore } = await import('@/stores/assistant')
+      expect(useAssistantStore().settling).toBe(false)
+    })
+
+    it('stops reading again once the panel is torn down', async () => {
+      statusReads = [{ ...PENDING }, { ...PENDING }, { ...PENDING }, { ...PENDING }, { ...PENDING }]
+      status = { ...PENDING }
+      await load()
+      await vi.advanceTimersByTimeAsync(500)
+      await flushPromises()
+      expect(reads()).toBe(2)
+      wrapper.unmount()
+      wrapper = { unmount() {} }
+      await vi.advanceTimersByTimeAsync(60000)
+      await flushPromises()
+      expect(reads()).toBe(2)
+    })
+
+    it('no pending marker: the box is offered at once and the status is read once', async () => {
+      status = { ...NOT_AGREED }
+      await load()
+      expect(box().exists()).toBe(true)
+      await vi.advanceTimersByTimeAsync(10000)
+      await flushPromises()
+      expect(reads()).toBe(1)
     })
   })
 
@@ -894,5 +1057,96 @@ describe('assistant panel', () => {
     await flushPromises()
     expect(sent('/api/enterprise/assistant/account/start')).toHaveLength(0)
     expect(wrapper.get('[data-testid="assistant-account"]').text()).toContain('full email address')
+  })
+
+  describe('subscribing with an account already known', () => {
+    const NOTICE = 'The terms have changed since you last accepted them.'
+    const START = '/api/enterprise/assistant/account/start'
+    const SUBSCRIBE = '/api/enterprise/assistant/subscription/start'
+    const offerUpgrade = async () => {
+      turns = [final('Subscribe?', [{ action: 'upgrade' }])]
+      await openPanel()
+      await say('I want more')
+      await button('Continue').trigger('click')
+      await flushPromises()
+    }
+    const account = () => wrapper.get('[data-testid="assistant-account"]')
+    const known = async (fields) => {
+      status = { ...status, ...fields }
+      const { useAssistantStore } = await import('@/stores/assistant')
+      await useAssistantStore().loadStatus()
+    }
+
+    it('asks a known account whose terms are out of date to accept the current ones before subscribing', async () => {
+      await known({ email: 'ada@example.com', terms_accepted: 't0', terms: { version: 't1', url: '' } })
+      turns = [{ status: 'limit', conversation_id: 'c1', text: '', cards: [],
+        allowance: { ...ALLOWANCE, messages_left: 0, reached: 'messages', resets_at: null } }]
+      await openPanel()
+      await say('one more thing')
+      await wrapper.get('[data-testid="assistant-upgrade"]').trigger('click')
+      await flushPromises()
+
+      expect(sent(START).map((c) => c.body)).toEqual([{ email: 'ada@example.com' }])
+      expect(account().text()).toContain(NOTICE)
+      expect(account().text()).toContain('version t1')
+      expect(wrapper.find('[data-testid="assistant-terms"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="assistant-subscribe"]').exists()).toBe(false)
+
+      await wrapper.get('[data-testid="assistant-code"]').setValue('424242')
+      await account().find('form').trigger('submit')
+      await flushPromises()
+      expect(account().text()).toContain('Accept the terms to continue.')
+      expect(sent('/api/enterprise/assistant/account/verify')).toHaveLength(0)
+
+      await wrapper.get('[data-testid="assistant-terms"]').setValue(true)
+      await account().find('form').trigger('submit')
+      await flushPromises()
+      expect(sent('/api/enterprise/assistant/account/verify')[0].body).toMatchObject({ email: 'ada@example.com', accept_terms: true, terms_version: 't1' })
+
+      await wrapper.get('[data-testid="assistant-subscribe"]').trigger('click')
+      await flushPromises()
+      expect(sent(SUBSCRIBE)).toHaveLength(1)
+    })
+
+    it('goes straight to subscribing when the accepted terms are the current ones', async () => {
+      await known({ email: 'ada@example.com', terms_accepted: 't1', terms: { version: 't1', url: '' } })
+      await offerUpgrade()
+      expect(wrapper.find('[data-testid="assistant-subscribe"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="assistant-terms"]').exists()).toBe(false)
+      expect(account().text()).not.toContain(NOTICE)
+      expect(sent(START)).toHaveLength(0)
+    })
+
+    it('asks for an email, and sends nothing, when no account is known', async () => {
+      await known({ email: null, terms_accepted: null, terms: { version: 't1', url: '' } })
+      await offerUpgrade()
+      expect(wrapper.find('[data-testid="assistant-email"]').exists()).toBe(true)
+      expect(sent(START)).toHaveLength(0)
+    })
+
+    it('turns a refusal over changed terms into the accept step, not a dead end', async () => {
+      await known({ email: 'ada@example.com', terms_accepted: 't1', terms: { version: 't1', url: '' } })
+      refuseSubscribe = true
+      await offerUpgrade()
+      await wrapper.get('[data-testid="assistant-subscribe"]').trigger('click')
+      await flushPromises()
+
+      expect(sent(SUBSCRIBE)).toHaveLength(1)
+      expect(account().text()).not.toContain('Accept the current terms first.')
+      expect(account().text()).toContain(NOTICE)
+      expect(wrapper.find('[data-testid="assistant-terms"]').exists()).toBe(true)
+      expect(sent(START).map((c) => c.body)).toEqual([{ email: 'ada@example.com' }])
+    })
+
+    it('keeps the address and says why when the code cannot be sent', async () => {
+      await known({ email: 'ada@example.com', terms_accepted: 't0', terms: { version: 't1', url: '' } })
+      startFails = true
+      await offerUpgrade()
+
+      expect(sent(START)).toHaveLength(1)
+      expect(account().text()).toContain("The code couldn't be sent right now.")
+      expect(wrapper.get('[data-testid="assistant-email"]').element.value).toBe('ada@example.com')
+      expect(wrapper.find('[data-testid="assistant-subscribe"]').exists()).toBe(false)
+    })
   })
 })

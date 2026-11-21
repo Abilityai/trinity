@@ -23,6 +23,7 @@ import { useOnboardingStore } from './onboarding'
 import { buildContext, buildFleet, describePage } from '../utils/assistantContext'
 import { acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, validBuild, webLink } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
+import { useAuthStore } from './auth'
 
 export const FEATURE_ID = 'assistant'
 
@@ -45,11 +46,19 @@ const neverOpened = () => {
   }
 }
 const JOB_POLL_LIMIT = 450 // 30 minutes
+// trinity-enterprise#1330: right after setup the status can be read before the
+// instance's account report has landed, and says so with `bind.state: 'pending'`.
+// It is read again after each of these waits; after the last one the panel
+// carries on with what it has, exactly as a status without the marker does.
+const SETTLE_DELAYS_MS = [500, 1000, 2000, 4000]
+const reportPending = (status) => status?.bind?.state === 'pending'
+let settleRun = 0   // bumped by stopSettling(): a loop from an earlier run reads nothing more
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 let nextId = 1
 const newId = () => `m${nextId++}`
+let statusFlight = null
 
 const detail = (error) => error?.response?.data?.detail
 const words = (error, fallback) => {
@@ -63,7 +72,8 @@ const KEEP_KEY = 'trinity-assistant-conversation'
 const KEEP_MS = 24 * 3600 * 1000
 const KEEP_MESSAGES = 80
 
-const closedAccount = () => ({ step: null, email: '', devCode: '', terms: null, busy: false, error: '' })
+// `stale`: the account is known but the terms it accepted are no longer the current ones.
+const closedAccount = () => ({ step: null, email: '', devCode: '', terms: null, busy: false, error: '', stale: false })
 
 
 const LOW_MESSAGES = 5
@@ -105,6 +115,7 @@ export const useAssistantStore = defineStore('assistant', {
     absent: false,       // 404/403 seen: no assistant on this build
     status: null,        // GET /status; null until first read
     statusError: '',
+    settling: false,     // the status said the account report is still pending: it is being read again
     conversationId: null,
     messages: [],        // { id, role: 'user' | 'assistant' | 'note', content, cards? }
     sending: false,
@@ -137,6 +148,13 @@ export const useAssistantStore = defineStore('assistant', {
   getters: {
     available: (state) => !state.absent && Boolean(state.status?.available),
     subscribed: (state) => state.status?.plan === 'pro',
+    // False only when the account is known and the terms it accepted are not the
+    // current version. No current version to compare with: let Trinity decide.
+    termsCurrent: (state) => {
+      const s = state.status
+      if (!s?.email || !s.terms?.version) return true
+      return s.terms_accepted === s.terms.version
+    },
     /** Someone at this instance has agreed to the trial's terms. Nothing is sent before that. */
     agreed: (state) => Boolean(state.status?.trial_terms?.accepted),
     /** How many builds and runs are being followed right now. */
@@ -159,7 +177,14 @@ export const useAssistantStore = defineStore('assistant', {
   },
 
   actions: {
-    async loadStatus() {
+    // One read at a time: App.vue's watch and the terms page's re-read after
+    // acceptance (trinity-enterprise#1327) both ask, and must join one request.
+    loadStatus() {
+      if (!statusFlight) statusFlight = this._readStatus().finally(() => { statusFlight = null })
+      return statusFlight
+    },
+
+    async _readStatus() {
       try {
         const { data } = await api.get(`${BASE}/status`)
         this.status = data
@@ -167,6 +192,7 @@ export const useAssistantStore = defineStore('assistant', {
         this.checkedAt = Date.now()
         this.greet(data?.nudge)
         this.dropStale()
+        if (reportPending(data) && !this.settling) this._settle()     // not awaited: the panel says it is finishing meanwhile
         // Nobody here has started with the assistant yet: it says hello once per
         // browser session until someone does, whatever this browser saw before.
         if (data?.available && !this.agreed && !this.panelOpen && !helloGiven()) {
@@ -181,6 +207,34 @@ export const useAssistantStore = defineStore('assistant', {
         }
         this.statusError = "Couldn't load the assistant. Check your connection and try again."
       }
+    },
+
+    /**
+     * The account report was still pending when the status was read, so what it
+     * says about the terms may be out of date. Read it again with backoff until
+     * the marker is gone, or give up after the last wait and keep what was read.
+     * A status without the marker never starts this (older backends included).
+     */
+    async _settle() {
+      const run = ++settleRun
+      this.settling = true
+      try {
+        for (const ms of SETTLE_DELAYS_MS) {
+          await wait(ms)
+          // Signed out, or the panel was torn down: no read without a credential.
+          if (run !== settleRun || !useAuthStore().isAuthenticated) return
+          await this.loadStatus()
+          if (!reportPending(this.status)) return
+        }
+      } finally {
+        if (run === settleRun) this.settling = false
+      }
+    },
+
+    /** The panel is going away: the re-read loop, if one runs, stops before its next read. */
+    stopSettling() {
+      settleRun++
+      this.settling = false
     },
 
     /**
@@ -702,7 +756,13 @@ export const useAssistantStore = defineStore('assistant', {
 
     // -- signing in and subscribing ---------------------------------------
     openAccount() {
-      this.account = { ...closedAccount(), step: this.status?.email ? 'subscribe' : 'email' }
+      const email = this.status?.email
+      if (email && !this.termsCurrent) {
+        // The current terms are accepted with a code, as at any sign-in.
+        this.account = { ...closedAccount(), step: 'email', email, stale: true }
+        return this.startAccount(email)
+      }
+      this.account = { ...closedAccount(), step: email ? 'subscribe' : 'email' }
     },
 
     closeAccount() {
@@ -780,6 +840,10 @@ export const useAssistantStore = defineStore('assistant', {
         if (held) await this.send(`${done} Now answer what they asked just before, which the limit stopped: "${held}"`, route, { shown: false })
         else if (this.conversationId) await this.send(done, route, { shown: false })
       } catch (error) {
+        if (detail(error)?.code === 'sign_in_first') {   // the terms changed since the status was read
+          await this.loadStatus()
+          if (this.status?.email && !this.termsCurrent) return await this.openAccount()
+        }
         this.account.error = words(error, "Couldn't start the subscription. Try again.")
       } finally {
         this.account.busy = false

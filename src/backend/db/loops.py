@@ -443,6 +443,24 @@ class LoopOperations:
         with get_engine().connect() as conn:
             return [_run_row_to_dict(r) for r in conn.execute(stmt).mappings()]
 
+    def list_runs_for_loops(self, loop_ids) -> dict:
+        """`{loop id: its runs, oldest first}` in ONE query (#4672) — the batch
+        form of `list_runs`, for a list of loops."""
+        ids = [i for i in dict.fromkeys(loop_ids or []) if i]
+        out = {i: [] for i in ids}
+        if not ids:
+            return out
+        stmt = (
+            select(agent_loop_runs)
+            .where(agent_loop_runs.c.loop_id.in_(ids))
+            .order_by(agent_loop_runs.c.loop_id, agent_loop_runs.c.run_number.asc())
+        )
+        with get_engine().connect() as conn:
+            for r in conn.execute(stmt).mappings():
+                run = _run_row_to_dict(r)
+                out.setdefault(run["loop_id"], []).append(run)
+        return out
+
     def get_run_by_execution(self, execution_id: str) -> Optional[dict]:
         """The loop-run row an execution belongs to, or None (#2523).
 

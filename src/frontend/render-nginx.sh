@@ -73,5 +73,19 @@ if switched_off "${BUG_REPORTING_ENABLED:-true}"; then
 fi
 mv -f "${HEADERS_OUTPUT}.tmp" "$HEADERS_OUTPUT"
 
+# --- the setup page's headers (trinity-enterprise#1312) ------------------------
+# The /setup location sends `Referrer-Policy: no-referrer` itself, so it needs
+# the served headers WITHOUT their own Referrer-Policy line (two policies would
+# be resolved differently by different browsers). Derived from the rendered copy
+# above, so the vendor-host switches apply here too. Written beside it, in
+# /etc/nginx/generated/security-headers-noreferrer.conf by default.
+NOREFERRER_OUTPUT="${TRINITY_HEADERS_NOREFERRER_OUTPUT:-$(dirname "$HEADERS_OUTPUT")/security-headers-noreferrer.conf}"
+if [ "$(grep -c '^[[:space:]]*add_header Referrer-Policy ' "$HEADERS_OUTPUT")" != "1" ]; then
+    echo "render-nginx: ${HEADERS_SOURCE} must set exactly one Referrer-Policy" >&2
+    exit 1
+fi
+grep -v '^[[:space:]]*add_header Referrer-Policy ' "$HEADERS_OUTPUT" > "${NOREFERRER_OUTPUT}.tmp"
+mv -f "${NOREFERRER_OUTPUT}.tmp" "$NOREFERRER_OUTPUT"
+
 [ "$#" -gt 0 ] || set -- nginx -g "daemon off;"
 exec "$@"

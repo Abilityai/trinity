@@ -108,6 +108,7 @@ def _make_db_schema(conn: sqlite3.Connection) -> None:
             duration_ms INTEGER,
             cost REAL,
             context_used INTEGER,
+            context_max INTEGER,
             tool_calls TEXT,
             triggered_by TEXT NOT NULL DEFAULT 'manual',
             message TEXT NOT NULL DEFAULT ''
@@ -170,6 +171,7 @@ def _seed(
     status: str = "success",
     duration_ms: int | None = 1000,
     context_used: int | None = None,
+    context_max: int | None = None,
     triggered_by: str = "manual",
     exec_id: str | None = None,
 ) -> str:
@@ -183,11 +185,11 @@ def _seed(
         """
         INSERT INTO schedule_executions
             (id, schedule_id, agent_name, status, started_at,
-             duration_ms, context_used, triggered_by, message)
-        VALUES (?, 'sid', ?, ?, ?, ?, ?, ?, '')
+             duration_ms, context_used, context_max, triggered_by, message)
+        VALUES (?, 'sid', ?, ?, ?, ?, ?, ?, ?, '')
         """,
         (exec_id, agent_name, status, started_at,
-         duration_ms, context_used, triggered_by),
+         duration_ms, context_used, context_max, triggered_by),
     )
     conn.commit()
     conn.close()
@@ -296,6 +298,33 @@ class TestContextAvgNullSkipping:
         # (1000 + 3000) / 2 = 2000, not /3
         assert out["context_avg"] == 2000
 
+    def test_context_pct_is_share_of_each_runs_own_window(self, tmp_db, ops):
+        # trinity-enterprise#1317: the Overview's "Context used" tile is a
+        # percentage, and tokens alone cannot give one — the window size is
+        # per run. 50% and 10% average to 30, not (100k+100k)/(200k+1M).
+        started_at = _iso_ago(hours=1)
+        _seed(tmp_db, started_at=started_at, context_used=100_000, context_max=200_000)
+        _seed(tmp_db, started_at=started_at, context_used=100_000, context_max=1_000_000)
+        out = ops.get_agent_analytics("agent-1", 24)
+        assert out["context_pct_avg"] == 30
+        day = next(p for p in out["timeline"] if p["date"] == started_at[:10])
+        assert day["context_pct_avg"] == 30
+
+    def test_context_pct_skips_runs_with_no_known_window(self, tmp_db, ops):
+        # A run with tokens but no (or a zero) window has no percentage: it
+        # is skipped, never read as 0% and never a division by zero.
+        _seed(tmp_db, context_used=50_000, context_max=200_000)
+        _seed(tmp_db, context_used=50_000, context_max=None)
+        _seed(tmp_db, context_used=50_000, context_max=0)
+        out = ops.get_agent_analytics("agent-1", 24)
+        assert out["context_pct_avg"] == 25
+
+    def test_context_pct_none_when_nothing_measured(self, tmp_db, ops):
+        _seed(tmp_db, context_used=None)
+        out = ops.get_agent_analytics("agent-1", 24)
+        assert out["context_pct_avg"] is None
+        assert all(p["context_pct_avg"] is None for p in out["timeline"])
+
     def test_no_context_rows_yields_none(self, tmp_db, ops):
         _seed(tmp_db, context_used=None)
         out = ops.get_agent_analytics("agent-1", 24)
@@ -344,7 +373,8 @@ class TestTimelineGapFill:
         for p in out["timeline"]:
             assert set(p.keys()) == {
                 "date", "total", "success", "failed",
-                "success_rate", "duration_avg_ms", "context_avg", "by_type",
+                "success_rate", "duration_avg_ms", "context_avg",
+                "context_pct_avg", "by_type",
             }
 
     def test_day_stacks_present_in_by_type(self, tmp_db, ops):
