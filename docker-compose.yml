@@ -53,6 +53,7 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # For platform image generation (IMG-001)
       # Gemini model overrides (#1130) — non-empty defaults so an unset var doesn't inject "" (#1076)
       - GEMINI_TEXT_MODEL=${GEMINI_TEXT_MODEL:-gemini-3.5-flash}              # image-gen prompt refinement
+      - GEMINI_IMAGE_MODEL=${GEMINI_IMAGE_MODEL:-gemini-nano-banana-2.1}              # image-gen model
       - GEMINI_TRANSCRIPTION_MODEL=${GEMINI_TRANSCRIPTION_MODEL:-gemini-3.5-flash}  # Telegram voice transcription
       - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.8-live}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)

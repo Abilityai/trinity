@@ -243,7 +243,7 @@ The avatar generation uses the shared image generation service (IMG-001).
 
 **Models** (lines 29-30):
 - Text model (prompt refinement): `GEMINI_TEXT_MODEL` (default `gemini-3.5-flash`, env-overridable — #1130)
-- Image model (image generation): `gemini-3.1-flash-image-preview` (latest image model)
+- Image model (image generation): `gemini-nano-banana-2.1` (latest image model)
 
 **Generate flow** (`generate_image()`, line 71):
 1. **Prompt Refinement** (lines 122-128): Gemini 2.0 Flash rewrites the raw identity prompt using avatar-specific best practices
