@@ -875,3 +875,61 @@ describe("ent#1233 — a task's milestone", () => {
     assert.deepEqual(Object.keys(tools).filter((n) => n.includes("milestone")), []);
   });
 });
+
+describe("trinity-enterprise#1234 — the steward proposes the kickoff plan; a person approves it once", () => {
+  const PLAN = {
+    milestones: [{ key: "beta", name: "Beta live", targets: [{ agent: "scout", metric: "partners", target: 10, direction: "up" }] }],
+    tasks: [
+      { key: "recruit", title: "Recruit design partners", milestone: "beta" },
+      { key: "onboard", title: "Onboard them", milestone: "beta", blocked_by: ["recruit"] },
+    ],
+  };
+
+  it("propose_project_plan passes the plan and note through, without the project id", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      proposeProjectPlan: async (projectId: string, body: Record<string, unknown>) => {
+        calls.push([projectId, body]);
+        return { proposal_id: "ppr_9", state: "pending", waiting_on: "primary" };
+      },
+    } as Partial<TrinityClient>);
+    const out = JSON.parse(await tools.propose_project_plan.execute({ project_id: PROJECT.id, plan: PLAN, note: "From the goal." }));
+    assert.equal(out.success, true);
+    assert.equal(out.waiting_on, "primary");
+    assert.deepEqual(calls, [[PROJECT.id, { plan: PLAN, note: "From the goal." }]]);
+  });
+
+  it("the backend's refusals come back by name", async () => {
+    for (const [status, code] of [
+      [403, "not_the_steward"], [409, "proposal_pending"], [422, "blocker_cycle"],
+      [422, "plan_too_many_tasks"], [422, "primary_cannot_apply"], [422, "plan_needs_goal"],
+    ] as const) {
+      const tools = makeTools({
+        proposeProjectPlan: async () => { throw apiError(status, { code, message: "refused" }); },
+      } as Partial<TrinityClient>);
+      const out = JSON.parse(await tools.propose_project_plan.execute({ project_id: PROJECT.id, plan: PLAN }));
+      assert.equal(out.success, false);
+      assert.equal(out.code, code);
+    }
+  });
+
+  it("bounds the plan as the backend does (12 milestones, 60 tasks)", () => {
+    const shape = makeTools({} as Partial<TrinityClient>).propose_project_plan.parameters;
+    const tasks = (n: number) => Array.from({ length: n }, (_, i) => ({ key: `t${i}`, title: `T${i}` }));
+    const ms = (n: number) => Array.from({ length: n }, (_, i) => ({ key: `m${i}`, name: `M${i}` }));
+    assert.equal(shape.safeParse({ project_id: PROJECT.id, plan: { tasks: tasks(60) } }).success, true);
+    assert.equal(shape.safeParse({ project_id: PROJECT.id, plan: { tasks: tasks(61) } }).success, false);
+    assert.equal(shape.safeParse({ project_id: PROJECT.id, plan: { milestones: ms(13) } }).success, false);
+  });
+
+  it("the steward-facing descriptions say the kickoff plan is proposed and approved", () => {
+    const t = makeTools({} as Partial<TrinityClient>);
+    const d = t.propose_project_plan.description;
+    assert.ok(d.length <= 2048, `${d.length} chars`);
+    assert.match(d, /Nothing in the plan exists on the project until/);
+    assert.match(d, /last_proposal/);
+    // ent#1322: create_project_task is listed to user keys, so it names no agent-only tool.
+    assert.doesNotMatch(t.create_project_task.description, /propose_project_plan/);
+    assert.match(t.create_project_task.description, /proposes the whole plan/);
+  });
+});

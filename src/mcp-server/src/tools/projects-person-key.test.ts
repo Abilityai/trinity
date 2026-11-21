@@ -510,3 +510,18 @@ describe("trinity-enterprise#1322 the steward-proposal pointer", () => {
     assert.deepEqual(out.proposal, { ask_id: "oq-1", summary: "add bob" });
   });
 });
+
+describe("trinity-enterprise#1234 propose_project_plan", () => {
+  it("an agent key posts the plan to the agent route; a user key is refused with no request", async () => {
+    const plan = { tasks: [{ key: "a", title: "A" }] };
+    const agent = JSON.parse(await tools().propose_project_plan.execute({ project_id: "prj_1", plan }, as("agent")));
+    assert.notEqual(agent.success, false, JSON.stringify(agent));
+    assert.deepEqual(sent.map((s) => `${s.method} ${s.path}`), [`POST ${P}/agent/projects/prj_1/plan-proposals`]);
+    assert.deepEqual(sent[0].body, { plan });
+    sent = [];
+    const user = JSON.parse(await tools().propose_project_plan.execute({ project_id: "prj_1", plan }, as("user")));
+    assert.equal(user.success, false);
+    assert.match(user.error, /for an agent's own key/);
+    assert.deepEqual(sent, []);
+  });
+});
