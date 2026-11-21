@@ -445,7 +445,77 @@
             <BaseButton variant="ghost" size="sm" :disabled="store.account.busy" @click="store.closeAccount()">Cancel</BaseButton>
           </div>
 
-          <form v-if="store.account.step === 'email'" class="space-y-3" @submit.prevent="store.startAccount(email)">
+          <!-- Subscribing by code (trinity-enterprise#1331): the terms, then the code sent to the registered admin -->
+          <form
+            v-if="store.account.step === 'sub-terms'"
+            class="space-y-3"
+            data-testid="assistant-sub-terms"
+            @submit.prevent="store.sendSubscriptionCode()"
+          >
+            <p v-if="store.account.busy && !store.account.subTerms" class="text-[12.5px] text-gray-500 dark:text-gray-400 animate-pulse motion-reduce:animate-none">Loading the subscription terms…</p>
+            <InlineError v-if="store.account.error" :message="store.account.error" />
+            <template v-if="store.account.subTerms && !store.account.stuck">
+              <p class="font-medium text-gray-900 dark:text-gray-100">
+                {{ store.account.subTerms.title || 'Subscription terms' }}
+                <span v-if="store.account.subTerms.version" class="font-normal text-gray-500 dark:text-gray-400">(version {{ store.account.subTerms.version }})</span>
+              </p>
+              <div
+                v-if="store.account.subTerms.text"
+                class="max-h-48 overflow-y-auto rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 prose prose-sm dark:prose-invert max-w-none prose-headings:my-2 prose-p:my-1.5 prose-ul:my-1.5 prose-li:my-0 text-[12.5px]"
+                tabindex="0"
+                aria-label="Subscription terms"
+                data-testid="assistant-sub-terms-text"
+                v-html="renderMarkdown(store.account.subTerms.text)"
+              ></div>
+              <a
+                v-if="webLink(store.account.subTerms.url)"
+                :href="webLink(store.account.subTerms.url)"
+                target="_blank"
+                rel="noopener"
+                class="inline-block underline text-action-primary-700 dark:text-action-primary-300"
+                data-testid="assistant-sub-terms-link"
+              >Read the subscription terms</a>
+              <label class="flex items-start gap-2 text-gray-900 dark:text-gray-100">
+                <input v-model="store.account.ticked" type="checkbox" class="mt-0.5 rounded" data-testid="assistant-sub-terms-tick" />
+                <span>I accept the subscription terms.</span>
+              </label>
+              <p class="text-[12.5px] text-gray-600 dark:text-gray-300" data-testid="assistant-sub-address">
+                The code goes to
+                <span v-if="subAddress" class="font-medium">{{ subAddress }}</span>
+                <template v-else>the email of this instance's registered admin</template>.
+              </p>
+              <BaseButton type="submit" size="sm" :loading="store.account.busy" loading-label="Sending…" data-testid="assistant-sub-send">Send code</BaseButton>
+            </template>
+          </form>
+
+          <form
+            v-else-if="store.account.step === 'sub-code'"
+            class="space-y-3"
+            @submit.prevent="store.confirmSubscription(code, route)"
+          >
+            <p class="text-gray-900 dark:text-gray-100" data-testid="assistant-sub-sent">
+              <template v-if="store.account.resent">A new code is on its way to</template>
+              <template v-else>Enter the code sent to</template>
+              <span class="font-medium">{{ store.account.sentTo || subAddress || "this instance's registered admin" }}</span>.
+              <span v-if="subMinutes" class="text-gray-500 dark:text-gray-400">It works for {{ subMinutes }} minutes.</span>
+            </p>
+            <BaseInput
+              v-model="code"
+              label="Code"
+              placeholder="123456"
+              inputmode="numeric"
+              autocomplete="one-time-code"
+              maxlength="12"
+              :error="store.account.error"
+              data-testid="assistant-sub-code"
+            />
+            <div class="flex flex-wrap gap-2">
+              <BaseButton type="submit" size="sm" :loading="store.account.busy" loading-label="Checking…" data-testid="assistant-sub-confirm">Confirm</BaseButton>
+              <BaseButton variant="ghost" size="sm" :disabled="store.account.busy" data-testid="assistant-sub-resend" @click="store.sendSubscriptionCode({ resend: true })">Send a new code</BaseButton>
+            </div>
+          </form>
+
+          <form v-else-if="store.account.step === 'email'" class="space-y-3" @submit.prevent="store.startAccount(email)">
             <BaseInput
               v-model="email"
               type="email"
@@ -621,7 +691,7 @@ import BaseTextarea from '../base/BaseTextarea.vue'
 import InlineError from '../InlineError.vue'
 import ChatBubble from '../chat/ChatBubble.vue'
 import HelpChatWidget from '../HelpChatWidget.vue'
-import { useAssistantStore } from '../../stores/assistant'
+import { maskAddress, useAssistantStore } from '../../stores/assistant'
 import { useOnboardingStore } from '../../stores/onboarding'
 import { useFirstRunStore } from '../../stores/firstRun'
 import { irreversibleTool, toolWords, webLink } from '../../utils/assistantCards'
@@ -757,6 +827,12 @@ function toggleTerms() {
 }
 
 const fullTermsOpen = ref(false)
+// Subscribing by code: the address is only ever shown masked, and the code's life in minutes.
+const subAddress = computed(() => maskAddress(store.status?.email))
+const subMinutes = computed(() => {
+  const seconds = Number(store.account.expiresIn)
+  return seconds > 0 ? Math.round(seconds / 60) : 0
+})
 function toggleFullTerms() {
   fullTermsOpen.value = !fullTermsOpen.value
   if (fullTermsOpen.value) store.readFullTerms()

@@ -75,6 +75,41 @@ const KEEP_MESSAGES = 80
 // `stale`: the account is known but the terms it accepted are no longer the current ones.
 const closedAccount = () => ({ step: null, email: '', devCode: '', terms: null, busy: false, error: '', stale: false })
 
+// trinity-enterprise#1331: subscribing by code. The code goes to the instance's
+// registered admin, whose address the panel only ever shows masked. Each named
+// refusal is a sentence that says what to do next; the gateway's own words are
+// the fallback for a code this list does not know.
+const TOO_MANY_CODES = 'Too many codes have been sent for now. Wait a few minutes, then send a new code.'
+const BY_CODE_REFUSALS = Object.freeze({
+  wrong_code: "That code isn't right. Check the email and type it again, or send a new code.",
+  code_expired: 'That code has expired. Send a new code and use that one.',
+  too_many_attempts: 'Too many tries with that code. Send a new code to try again.',
+  code_required: 'Enter the code from the email.',
+  terms_required: 'Tick the subscription terms to continue.',
+  terms_changed: 'The subscription terms changed while you were reading. Read the current terms below and tick them again.',
+  register_first: "This instance is not registered with Trinity yet. Finish registering it (Settings → Trinity account), then subscribe.",
+  code_limit: TOO_MANY_CODES,
+  address_limit: TOO_MANY_CODES,
+  email_limit: TOO_MANY_CODES,
+  email_off: "Trinity can't send email right now, so no code was sent. Try again later.",
+  email_failed: "The code couldn't be sent. Try again in a moment.",
+})
+const byCodeWords = (error, fallback) => {
+  const d = detail(error)
+  if (d?.code === 'subscription_admin_only') {
+    return d.admin ? `Only this instance's admin (${d.admin}) can subscribe. Ask them to sign in and subscribe.` : words(error, fallback)
+  }
+  return BY_CODE_REFUSALS[d?.code] || words(error, fallback)
+}
+/** The address as the panel may show it: first letter and domain. Empty when there is none. */
+export function maskAddress(value) {
+  const [local, domain] = String(value || '').trim().split('@')
+  return local && domain ? `${local[0]}•••@${domain}` : ''
+}
+const byCodeAccount = (fields = {}) => ({
+  ...closedAccount(), byCode: true, subTerms: null, ticked: false, sentTo: '', expiresIn: null, resent: false, stuck: false, ...fields,
+})
+
 
 const LOW_MESSAGES = 5
 
@@ -142,6 +177,7 @@ export const useAssistantStore = defineStore('assistant', {
     sendError: '',
     limit: null,         // the allowance, when the last answer was "limit"
     account: closedAccount(),
+    byCode: null,        // the module offers subscribing by code: null until Subscribe is first pressed (trinity-enterprise#1331)
     fleet: [],
   }),
 
@@ -755,7 +791,88 @@ export const useAssistantStore = defineStore('assistant', {
     },
 
     // -- signing in and subscribing ---------------------------------------
-    openAccount() {
+    /**
+     * Subscribe was pressed. A module with the by-code routes (trinity-enterprise#1331)
+     * shows the subscription terms first; one without them answers 404 and the
+     * panel signs in by email exactly as before.
+     */
+    async openAccount() {
+      if (this.byCode !== false) {
+        this.account = byCodeAccount({ step: 'sub-terms', busy: true })
+        try {
+          const { data } = await api.get(`${BASE}/subscription/terms`)
+          this.byCode = true
+          this.account = byCodeAccount({ step: 'sub-terms', subTerms: data || null })
+          return
+        } catch (error) {
+          if (error?.response?.status !== 404) {
+            this.byCode = true
+            // Refused outright (only the admin may subscribe): nothing to send from here.
+            const stuck = detail(error)?.code === 'subscription_admin_only'
+            this.account = byCodeAccount({ step: 'sub-terms', stuck, error: byCodeWords(error, "The subscription terms couldn't be loaded. Try again in a moment.") })
+            return
+          }
+          this.byCode = false
+        }
+      }
+      this.openSignIn()
+    },
+
+    /** Read the subscription terms again: the tick is the person's, for the version they now see. */
+    async reloadSubscriptionTerms(notice = '') {
+      try {
+        const { data } = await api.get(`${BASE}/subscription/terms`)
+        this.account = { ...this.account, step: 'sub-terms', subTerms: data || null, ticked: false, sentTo: '', error: notice }
+      } catch (error) {
+        this.account = { ...this.account, step: 'sub-terms', ticked: false, sentTo: '', error: byCodeWords(error, "The subscription terms couldn't be loaded. Try again in a moment.") }
+      }
+    },
+
+    /** Send the code to the registered admin, or a new one. No address goes with it. */
+    async sendSubscriptionCode({ resend = false } = {}) {
+      if (!this.account.ticked) {
+        this.account.error = BY_CODE_REFUSALS.terms_required
+        return
+      }
+      this.account.busy = true
+      this.account.error = ''
+      try {
+        const { data } = await api.post(`${BASE}/subscription/${resend ? 'code/resend' : 'code'}`, {})
+        this.account = { ...this.account, step: 'sub-code', sentTo: data?.email || '', expiresIn: data?.expires_in ?? null, resent: resend }
+      } catch (error) {
+        if (detail(error)?.code === 'terms_changed') return await this.reloadSubscriptionTerms(BY_CODE_REFUSALS.terms_changed)
+        this.account.error = byCodeWords(error, "The code couldn't be sent. Try again in a moment.")
+      } finally {
+        this.account.busy = false
+      }
+    },
+
+    /** The person typed the code, having ticked the terms themselves: start the subscription. */
+    async confirmSubscription(code, route) {
+      const digits = String(code || '').trim()
+      if (!digits) {
+        this.account.error = BY_CODE_REFUSALS.code_required
+        return
+      }
+      this.account.busy = true
+      this.account.error = ''
+      let data
+      try {
+        ({ data } = await api.post(`${BASE}/subscription/confirm`, {
+          code: digits, accept: this.account.ticked === true, version: this.account.subTerms?.version || '',
+        }))
+      } catch (error) {
+        if (detail(error)?.code === 'terms_changed') await this.reloadSubscriptionTerms(BY_CODE_REFUSALS.terms_changed)
+        else this.account.error = byCodeWords(error, "Couldn't start the subscription. Try again.")
+        return
+      } finally {
+        this.account.busy = false
+      }
+      await this.finishSubscribing(data, route)
+    },
+
+    /** The old sign-in-by-email path, for a module without the by-code routes. */
+    openSignIn() {
       const email = this.status?.email
       if (email && !this.termsCurrent) {
         // The current terms are accepted with a code, as at any sign-in.
@@ -823,31 +940,36 @@ export const useAssistantStore = defineStore('assistant', {
       this.account.error = ''
       try {
         const { data } = await api.post(`${BASE}/subscription/start`, {})
-        this.status = { ...this.status, ...data }
-        const checkout = webLink(data.checkout_url)
-        if (checkout) {
-          window.open(checkout, '_blank', 'noopener')
-          this.account.step = 'checkout'
-          return
-        }
-        this.account = closedAccount()
-        this.limit = null
-        // What they asked when the allowance ran out was never answered: answer
-        // it now, with the subscription said in the same breath.
-        const held = this.held
-        this.held = ''
-        const done = outcomeLine('done', 'Subscribe to Trinity Pro')
-        if (held) await this.send(`${done} Now answer what they asked just before, which the limit stopped: "${held}"`, route, { shown: false })
-        else if (this.conversationId) await this.send(done, route, { shown: false })
+        await this.finishSubscribing(data, route)
       } catch (error) {
         if (detail(error)?.code === 'sign_in_first') {   // the terms changed since the status was read
           await this.loadStatus()
-          if (this.status?.email && !this.termsCurrent) return await this.openAccount()
+          if (this.status?.email && !this.termsCurrent) return await this.openSignIn()
         }
         this.account.error = words(error, "Couldn't start the subscription. Try again.")
       } finally {
         this.account.busy = false
       }
+    },
+
+    /** The subscription started, by either path: open the checkout, or say so and answer what was held. */
+    async finishSubscribing(data, route) {
+      this.status = { ...this.status, ...data }
+      const checkout = webLink(data?.checkout_url)
+      if (checkout) {
+        window.open(checkout, '_blank', 'noopener')
+        this.account.step = 'checkout'
+        return
+      }
+      this.account = closedAccount()
+      this.limit = null
+      // What they asked when the allowance ran out was never answered: answer
+      // it now, with the subscription said in the same breath.
+      const held = this.held
+      this.held = ''
+      const done = outcomeLine('done', 'Subscribe to Trinity Pro')
+      if (held) await this.send(`${done} Now answer what they asked just before, which the limit stopped: "${held}"`, route, { shown: false })
+      else if (this.conversationId) await this.send(done, route, { shown: false })
     },
 
     backToEmail() {
