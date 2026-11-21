@@ -434,9 +434,9 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "(person_task_has_agent, person_task_needs_owner), it is never started as an agent run, and " +
         "only a person marks it done. Only the project's steward may give a task to a person " +
         "(only_the_steward_assigns_people); anyone else asks the steward. When every " +
-        "task it waits on is done, its owner is told once. At kickoff a steward proposes the " +
-        "whole plan with propose_project_plan for a person to approve once, rather than adding " +
-        "tasks one by one." + REFS_RULE,
+        "task it waits on is done, its owner is told once. At kickoff the project's steward " +
+        "proposes the whole plan at once for a person to approve, rather than adding tasks one " +
+        "by one." + REFS_RULE,
       parameters: createTaskParams,
       execute: async (p: Record<string, unknown> & { project_id: string } & { agent_name?: string; assignee?: string }, context?: { session?: McpAuthContext }) => {
         const { project_id, assignee, agent_name: _actAs, ...rest } = declared(createTaskParams, p) as typeof p;

@@ -928,6 +928,8 @@ describe("trinity-enterprise#1234 — the steward proposes the kickoff plan; a p
     assert.ok(d.length <= 2048, `${d.length} chars`);
     assert.match(d, /Nothing in the plan exists on the project until/);
     assert.match(d, /last_proposal/);
-    assert.match(t.create_project_task.description, /propose_project_plan/);
+    // ent#1322: create_project_task is listed to user keys, so it names no agent-only tool.
+    assert.doesNotMatch(t.create_project_task.description, /propose_project_plan/);
+    assert.match(t.create_project_task.description, /proposes the whole plan/);
   });
 });
