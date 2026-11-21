@@ -519,4 +519,12 @@ defineExpose({
   font-family: inherit;
   word-break: break-word;
 }
+
+/* The global touch-screen rule in style.css puts the textarea at 16px; the
+   overlay must follow or the ghost completion drifts off the typed text. */
+@media (pointer: coarse) {
+  .ghost-overlay {
+    font-size: 1rem;
+  }
+}
 </style>
