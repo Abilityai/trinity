@@ -432,7 +432,7 @@ def test_portal_history_budget_adds_the_allowance(monkeypatch, pilot):
     _timeouts(monkeypatch, TURN)
     db = MagicMock()
     db.get_latest_portal_session_id.return_value = "s1"
-    db.get_portal_thread_window.return_value = SimpleNamespace(rows=[], truncated=False)
+    db.get_portal_thread_window.return_value = SimpleNamespace(rows=[], truncated=False, has_earlier=False, next_before=None)
     monkeypatch.setattr(service, "db", db)
     monkeypatch.setattr(service, "agent_on_roster", lambda *a: True)
     monkeypatch.setattr(service, "_attach_own_ratings", lambda *a, **k: None)
