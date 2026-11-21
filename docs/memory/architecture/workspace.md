@@ -181,8 +181,9 @@ resolves to its owner carrying the owner's role — can no longer traverse the W
 as `is_platform=True` (it could previously read the owner's threads with agents the
 calling agent holds no `agent_permissions` edge to, and this route would have made that
 one call). User-scoped keys, `scope='system'` and portal session tokens are unaffected;
-there is no legitimate agent caller of this surface (no MCP tool targets it, no agent
-image calls it). Since trinity-enterprise#611 `scope='system'` keeps that read breadth but is
+there is no legitimate agent caller of this surface. No agent image calls it, and its
+one MCP caller, the project tools (`tools/projects.ts`), reaches it only with a person's
+own user-scoped key, which resolves here to that person. An agent key is refused. Since trinity-enterprise#611 `scope='system'` keeps that read breadth but is
 not a person: `PortalPrincipal.is_person` is False and the ask answer refuses it (403
 `person_required`), as the operator respond route does.
 
