@@ -434,7 +434,9 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "(person_task_has_agent, person_task_needs_owner), it is never started as an agent run, and " +
         "only a person marks it done. Only the project's steward may give a task to a person " +
         "(only_the_steward_assigns_people); anyone else asks the steward. When every " +
-        "task it waits on is done, its owner is told once." + REFS_RULE,
+        "task it waits on is done, its owner is told once. At kickoff a steward proposes the " +
+        "whole plan with propose_project_plan for a person to approve once, rather than adding " +
+        "tasks one by one." + REFS_RULE,
       parameters: createTaskParams,
       execute: async (p: Record<string, unknown> & { project_id: string } & { agent_name?: string; assignee?: string }, context?: { session?: McpAuthContext }) => {
         const { project_id, assignee, agent_name: _actAs, ...rest } = declared(createTaskParams, p) as typeof p;
@@ -716,6 +718,70 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
           const { project_id, agent_name: _actAs, ...rest } = p;
           const body = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined));
           return ok(await clientFor(context, p.agent_name).proposeProjectChanges(project_id, body, turnOf(context)));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ============================================================== ent#1234
+    propose_project_plan: {
+      name: "propose_project_plan",
+      canAccess: agentKeyToolAccess,
+      description:
+        "As a project's steward, propose its plan at kickoff: milestones (what reached means, and " +
+        "metric targets on metrics agents on the project declare) and tasks under them, with which " +
+        "tasks block which. Name each milestone and task by a key you choose (m1, setup); a task's " +
+        "`milestone`, `parent` and `blocked_by` name those keys — or, in a later add-only plan, an " +
+        "existing milestone id (ms_…) or task id (T-NNN). Nothing in the plan exists on the project until " +
+        "a person approves it: it goes to your primary contact who can change the project, as ONE " +
+        "Inbox decision showing the whole plan. Approve creates exactly that plan, once, in one change " +
+        "(or nothing, if it no longer fits); Decline creates nothing, and the reason reaches you as " +
+        "last_proposal on get_project, where last_proposal.created maps your keys to the new ids. " +
+        "The whole plan is checked first and refused by name with nothing asked: blocker_cycle (with " +
+        "its path), plan_unknown_key, parent_is_subtask, metric_not_declared, agent_not_on_project, " +
+        "owner_not_on_project, plan_too_large / plan_too_many_milestones (12) / plan_too_many_tasks " +
+        "(60), plan_needs_goal. Only the steward proposes (not_the_steward); one request waits per " +
+        "project (already_pending, proposal_pending); primary_cannot_apply means your primary contact " +
+        "can't change the project — relay it to a person. Nothing re-plans on its own: after approval " +
+        "the plan changes only by a person's edit or another plan they approve.",
+      parameters: z.object({
+        agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
+        project_id: projectId,
+        plan: z.object({
+          milestones: z.array(z.object({
+            key: z.string().min(1).max(40),
+            name: z.string().min(1).max(200),
+            reached_means: z.string().max(1000).optional(),
+            targets: z.array(z.object({
+              agent: z.string().min(1).max(128),
+              metric: z.string().min(1).max(128),
+              target: z.number(),
+              direction: z.enum(["up", "down", "hold"]).optional(),
+              tolerance: z.number().min(0).optional(),
+            })).max(5).optional(),
+          })).max(12).optional(),
+          tasks: z.array(z.object({
+            key: z.string().min(1).max(40),
+            title: z.string().min(1).max(200),
+            objective: z.string().max(4000).optional(),
+            done_definition: z.string().max(4000).optional(),
+            milestone: z.string().max(40).optional().describe("A milestone key in this plan, or an existing ms_… id."),
+            parent: z.string().max(40).optional().describe("A task key in this plan, or an existing T-NNN; one level deep."),
+            blocked_by: z.array(z.string().min(1).max(40)).max(20).optional()
+              .describe("Task keys in this plan (or existing T-NNN) this task waits on."),
+            agent: z.string().max(128).optional().describe("The agent on the project you expect to run it."),
+            owner: z.string().max(320).optional().describe("A person on the project (work email) or role:<id>."),
+            for_person: z.boolean().optional().describe("A person's task: needs an owner, no agent."),
+          })).max(60).optional(),
+        }),
+        note: z.string().max(500).optional().describe("One or two lines on the plan, shown to whoever decides."),
+      }),
+      execute: async (p: { project_id: string; agent_name?: string; plan: Record<string, unknown>; note?: string }, context?: { session?: McpAuthContext }) => {
+        try {
+          const body: Record<string, unknown> = { plan: p.plan };
+          if (p.note !== undefined) body.note = p.note;
+          return ok(await clientFor(context, p.agent_name).proposeProjectPlan(p.project_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }

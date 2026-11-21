@@ -117,6 +117,11 @@ export const useProjectsStore = defineStore('projects', () => {
     })
   // ent#1235: a person starts and stops the project (P11); the mode is a PATCH.
   const startProject = (id) => _write(id, () => portalHttp.post(url(id, '/start'), {}, { headers: headers() }))
+  // ent#1234: answer an agent's request waiting on me (the kickoff plan) through
+  // the one Workspace ask endpoint the Inbox uses, then re-read the project — an
+  // approved plan's milestones and tasks are the server's, never built here.
+  const answerProposal = (id, askId, response, reason = null) =>
+    _write(id, () => useClientPortalStore().answerAsk(askId, { response, responseText: reason }))
   const stopProject = (id) => _write(id, () => portalHttp.post(url(id, '/stop'), {}, { headers: headers() }))
   const setMode = (id, mode) => update(id, { mode })
   const setArchived = (id, archived) =>
@@ -456,7 +461,7 @@ export const useProjectsStore = defineStore('projects', () => {
   return {
     list, listLoaded, listLoading, listError, stewardOutcomes,
     fetchList, pageState, fetchProject, forLink, fetchForLink,
-    create, update, setArchived, startProject, stopProject, setMode, fetchRunsWaiting, decideRuns, addMember, removeMember, addAgent, removeAgent, link, unlink,
+    create, update, setArchived, startProject, stopProject, answerProposal, setMode, fetchRunsWaiting, decideRuns, addMember, removeMember, addAgent, removeAgent, link, unlink,
     tasks, logs, fetchTasks, fetchTask, createTask, updateTask, moveTask, addTaskNote, fetchLog, addLogEntry,
     addTaskRefs, removeTaskRef,
     addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject, importEpic,

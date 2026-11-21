@@ -898,6 +898,7 @@ describe("trinity-enterprise#1322 project tools are listed to exactly the keys t
     ...Object.fromEntries(SHARED.map((t) => [t, ["agent", "user"]])),
     start_project_task: ["agent"],
     propose_project_changes: ["agent"],
+    propose_project_plan: ["agent"],
     // A person's acts: a person's own user key only (CP-P4).
     set_project_lifecycle: ["user"],
     update_project_settings: ["user"],

@@ -139,7 +139,7 @@
             <option v-for="m in PROJECT_MODES" :key="m" :value="m">Mode: {{ modeLabel(m) }}</option>
           </BaseSelect>
           <BaseButton v-if="p.can?.edit && !p.archived_at" variant="ghost" data-testid="project-edit" @click="editOpen = true">Edit</BaseButton>
-          <BaseButton v-if="!guest && p.can?.edit && !p.archived_at && !milestones.length" variant="ghost" data-testid="project-milestones-start" @click="editMilestone(null)">Add milestones</BaseButton>
+          <BaseButton v-if="!guest && p.can?.edit && !p.archived_at && !milestones.length && p.steward?.kind !== 'agent'" variant="ghost" data-testid="project-milestones-start" @click="editMilestone(null)">Add milestones</BaseButton>
           <BaseButton v-if="!guest" variant="secondary" data-testid="project-members-open" @click="membersOpen = true">Members &amp; access</BaseButton>
           <BaseButton
             v-if="p.can?.archive"
@@ -167,6 +167,16 @@
       <div v-if="!guest" class="w-full min-w-0">
         <OverflowTabs :tabs="TABS" :model-value="tab" data-testid="project-tabs" @update:model-value="tab = $event" />
       </div>
+
+      <!-- ent#1234: the steward's kickoff plan waiting on a person, previewed whole;
+           with an agent steward and no plan yet, how to get one. -->
+      <ProjectPlanProposal
+        v-if="!guest"
+        v-show="tab === 'overview'"
+        :project="p"
+        :my-email="myEmail"
+        @write-plan="editMilestone(null)"
+      />
 
       <!-- ent#1233: the goal's milestones, directly under the goal on the Overview. -->
       <ProjectMilestones
@@ -397,6 +407,7 @@ import ProjectRollupCard from './ProjectRollupCard.vue'
 import ProjectMetricsCard from './ProjectMetricsCard.vue'
 import ProjectNeedsYouCard from './ProjectNeedsYouCard.vue'
 import ProjectStewardCard from './ProjectStewardCard.vue'
+import ProjectPlanProposal from './ProjectPlanProposal.vue'
 import ProjectRunsWaiting from './ProjectRunsWaiting.vue'
 import ProjectMilestones from './ProjectMilestones.vue'
 import ProjectMilestoneModal from './ProjectMilestoneModal.vue'

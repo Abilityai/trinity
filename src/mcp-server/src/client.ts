@@ -4528,6 +4528,11 @@ export class TrinityClient {
     return this.projectRequest("POST", this.projectPath(projectId, "/proposals"), turn, body);
   }
 
+  /** trinity-enterprise#1234: the steward's kickoff plan, for a person to approve once. */
+  async proposeProjectPlan(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/plan-proposals"), turn, body);
+  }
+
   // --- Role assignments (trinity-enterprise#500) ----------------------------
 
   /**
