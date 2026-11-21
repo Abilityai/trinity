@@ -24,8 +24,9 @@
 import { z } from "zod";
 import { TrinityClient, ApiError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
-import { resolveActingAgent } from "../access.js";
+import { agentKeyToolAccess, HUMAN_ONLY_KEYS_NOT_SHOWN, humanOnlyToolAccess, projectToolAccess, resolveActingAgent } from "../access.js";
 import { deriveMcpIdempotencyKey } from "./chat.js";
+import { PersonProjectClient } from "./projects_person_client.js";
 
 /**
  * The project tools cannot be driven by an admin's user key acting for an agent
@@ -34,16 +35,78 @@ import { deriveMcpIdempotencyKey } from "./chat.js";
  * (and the user-key wording below) in the same change.
  */
 const PROJECT_AGENT_NAME_DESCRIPTION =
-  "Not usable with a user key: the project tools refuse an admin's user key acting for an agent. " +
-  "Call them with the agent's own key, which always acts as itself — omit this.";
+  "Omit this. A person's own key acts as the person, and an agent's key acts as itself; " +
+  "the project tools don't act for another agent.";
 const AGENT_KEY_ONLY_MESSAGE =
-  "These tools act as an agent; call them from an agent context (an agent-scoped key), from the agent itself. " +
-  "A user key, including an admin's, is refused.";
+  "This tool is for an agent's own key: it acts as that agent. A person's key, including an admin's, can't call it.";
 
 /** trinity-enterprise#1024: the tool refused to act for the named agent itself. */
 class ActAsRefusal extends Error {}
 
+/** trinity-enterprise#1322: the key's scope has no project route, or a person's key named an agent. */
+class ScopeRefusal extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+  }
+}
+const ACT_AS_NOT_OFFERED =
+  "The project tools don't act for an agent. Omit agent_name and the call acts as you, with your own Workspace permissions.";
+const OFFSET_NOT_OFFERED =
+  "A person's own key reads a brief from its start; omit offset. Paging a brief by offset is an agent key's.";
+/** trinity-enterprise#1322: the steward-proposal pointer a person's key reads on get_project. */
+const PROPOSAL_DECIDED_BY =
+  "Pass proposal.ask_id as item_id to respond_to_operator_queue. Only the proposing agent's primary contacts can decide it.";
+const KEY_NOT_SUPPORTED = "Project tools take a person's own user key or an agent's own key.";
+/**
+ * trinity-enterprise#1322: the caller line of a person-only project tool. The
+ * backend route takes a person (a signed-in session or their own user key) and
+ * applies their Workspace permissions on the project.
+ */
+const PROJECT_PERSON_WHO_MAY_CALL =
+  " WHO MAY CALL: a person, as themself — their own user-scoped key, with their Workspace permissions on the project. " +
+  HUMAN_ONLY_KEYS_NOT_SHOWN.person;
+/** What an agent's key is told when it calls a person's act anyway (keyless only: it is not listed to agent keys). */
+const personsAct = (act: string, agentPath: string) =>
+  `${act} is a person's act; an agent's key can't do it. ${agentPath}`;
+const ASK_A_PERSON = "Ask a person on the project with ask_operator.";
+const PROPOSE_IT = "Propose it with propose_project_changes; your primary contact decides.";
+const MEMBER_BATCH_CAP = 20;
+/**
+ * trinity-enterprise#1322: one id of a runs/approve|decline answer. The backend
+ * answers HTTP 200 with `{id, outcome}` per id — the run's state when the
+ * decision was applied, a refusal code otherwise (`run_not_found`,
+ * `already_decided`, `not_permitted`, …).
+ */
+const RUN_APPLIED: Record<"approve" | "decline", ReadonlySet<string>> = {
+  approve: new Set(["started", "ended"]),
+  decline: new Set(["declined"]),
+};
+const RUN_REFUSED_WHY: Record<string, string> = {
+  run_not_found: "This project has no waiting run with this id.",
+  already_decided: "This proposal was already decided.",
+  not_permitted: "Only someone who works on this project gives a task its go.",
+  mode_track: "In Track a person starts each task's run.",
+  dispatch_failed: "The run couldn't be started right now. Try again.",
+};
+function runDecision(decision: "approve" | "decline", r: Record<string, unknown>): Record<string, unknown> {
+  const outcome = String(r.outcome ?? "");
+  if (RUN_APPLIED[decision].has(outcome)) return { id: r.id, outcome, applied: true };
+  return { id: r.id, outcome, applied: false, why: RUN_REFUSED_WHY[outcome] ?? `Not applied (${outcome || "no outcome"}).` };
+}
+const IMPORT_NEEDS_AGENT = "Name the agent whose folder project this is in `agent`; the import reads that agent's files.";
+
+/** The write methods both doors answer, by the same name and body. */
+type ProjectWriter = Pick<TrinityClient, "createProjectTask" | "updateProjectTask" | "addProjectTaskNote" | "addProjectLogEntry" | "linkToProject" | "setProjectHealth">;
+
+/** The read methods both doors answer, by the same name and shape. */
+type ProjectReader = Pick<TrinityClient, "getMyProject" | "listProjectTasks" | "getProjectLog" | "readProjectContext" | "getStewardDigest" | "listProjectExecutions"> & {
+  listMyProjects(turn?: string, includeArchived?: boolean): Promise<Array<Record<string, unknown>>>;
+};
+
 function parseError(error: unknown): { status?: number; code?: string; message: string; detailIsString: boolean } {
+  if (error instanceof ScopeRefusal) {
+    return { code: error.code, message: error.message, detailIsString: false };
+  }
   if (error instanceof ActAsRefusal) {
     return { code: "act_as_refused", message: error.message, detailIsString: false };
   }
@@ -71,7 +134,7 @@ function parseError(error: unknown): { status?: number; code?: string; message: 
   return { status, code, message, detailIsString };
 }
 
-function explain(status: number | undefined, code: string | undefined, detailIsString: boolean): string {
+function explain(status: number | undefined, code: string | undefined, detailIsString: boolean, message = ""): string {
   if (status === 403 && code === "agent_key_required") {
     return AGENT_KEY_ONLY_MESSAGE;
   }
@@ -81,7 +144,9 @@ function explain(status: number | undefined, code: string | undefined, detailIsS
   if (status === 403 && code === "turn_unknown") {
     return "Project tools answer only inside a turn the platform can identify.";
   }
-  if (status === 403 && detailIsString) return "Projects are not licensed for this instance.";
+  // Only the entitlement gate's own 403 reads as unlicensed; every other
+  // string 403 (account_has_no_email, a Workspace permission) passes through.
+  if (status === 403 && detailIsString) return /is not licensed/.test(message) ? "Projects are not licensed for this instance." : message;
   if (status === 404) return "Projects are not available on this platform.";
   return "Projects could not be reached.";
 }
@@ -123,6 +188,42 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     return session?.scope === "user" ? base.asAgent(agent) : base;
   };
 
+  /**
+   * trinity-enterprise#1322: the door a project tool calls, picked by the key's
+   * scope from an allow-list. `agent` keeps today's request (and its refusal of
+   * a named other agent); `user` acts as the person on the Workspace routes;
+   * no key (keyless dev mode: no session, or one without a scope, which a keyed
+   * session never is — authenticate maps a scope-less key to `user`) is today's
+   * path; any other scope is refused.
+   */
+  type Door = { kind: "agent"; client: TrinityClient } | { kind: "person"; client: PersonProjectClient };
+  const doorFor = (context: { session?: McpAuthContext } | undefined, requested?: string): Door => {
+    const session = context?.session;
+    if ((session?.scope === undefined && !requireApiKey) || session?.scope === "agent") return { kind: "agent", client: clientFor(context, requested) };
+    if (session?.scope === "user") {
+      if (typeof requested === "string" && requested.trim() !== "") throw new ScopeRefusal("act_as_not_offered", ACT_AS_NOT_OFFERED);
+      return { kind: "person", client: new PersonProjectClient(getClient(session)) };
+    }
+    throw new ScopeRefusal("key_not_supported", KEY_NOT_SUPPORTED);
+  };
+  const readerFor = (context: { session?: McpAuthContext } | undefined, requested?: string): ProjectReader =>
+    doorFor(context, requested).client;
+  const writerFor = (context: { session?: McpAuthContext } | undefined, requested?: string): ProjectWriter =>
+    doorFor(context, requested).client;
+
+  /**
+   * trinity-enterprise#1322: the person door for a person-only act. Only a
+   * person's own user key (or keyless dev mode) gets it; an agent's key is told
+   * the act is a person's, naming the path it does have; any other scope is
+   * refused. None of these tools is listed to a key that is refused here.
+   */
+  const personFor = (context: { session?: McpAuthContext } | undefined, act: string, agentPath: string): PersonProjectClient => {
+    const scope = context?.session?.scope;
+    if (scope === "agent") throw new ScopeRefusal("persons_act", personsAct(act, agentPath));
+    if (scope === undefined ? requireApiKey : scope !== "user") throw new ScopeRefusal("key_not_supported", KEY_NOT_SUPPORTED);
+    return new PersonProjectClient(getClient(context?.session));
+  };
+
   /** A write or read refusal as a structured result — never a throw. */
   const fail = (e: unknown): string => {
     const { status, code, message, detailIsString } = parseError(e);
@@ -130,7 +231,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     return JSON.stringify(
       {
         success: false,
-        error: known ? "No project with this id that you are working on." : (code && !(status === 403 && code === "agent_key_required") ? message : explain(status, code, detailIsString)),
+        error: known ? "No project with this id that you are working on." : (code && !(status === 403 && code === "agent_key_required") ? message : explain(status, code, detailIsString, message)),
         ...(code ? { code } : {}),
         ...(known ? { not_found: true } : {}),
       },
@@ -199,21 +300,25 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     list_projects: {
       name: "list_projects",
+      canAccess: projectToolAccess,
       description:
         "List the Workspace projects you are working on: each project's id, name, goal, status, " +
-        "steward and tracker link. Only projects your owner approved you for are listed. When a " +
+        "steward and tracker link. An agent's key lists the projects its owner approved it for; a person's " +
+        "own key lists the projects they work on. When a " +
         "conversation starts with a '[Project]' line, it names one of these projects by id.",
       parameters: z.object({
         agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
+        include_archived: z.boolean().optional().describe("A person's own user key only: also list archived projects. An agent key's list is unchanged."),
       }),
-      execute: async (params: { agent_name?: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (params: { agent_name?: string; include_archived?: boolean }, context?: { session?: McpAuthContext }) => {
         try {
-          const projects = await clientFor(context, params.agent_name).listMyProjects(turnOf(context));
+          const projects = await readerFor(context, params.agent_name).listMyProjects(turnOf(context), params.include_archived === true);
           return JSON.stringify({ enabled: true, count: projects.length, projects }, null, 2);
         } catch (e) {
+          if (e instanceof ScopeRefusal) return fail(e);
           const { status, code, message, detailIsString } = parseError(e);
           return JSON.stringify(
-            { enabled: false, count: 0, projects: [], message: explain(status, code, detailIsString), detail: message },
+            { enabled: false, count: 0, projects: [], message: explain(status, code, detailIsString, message), detail: message },
             null,
             2,
           );
@@ -224,22 +329,31 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     get_project: {
       name: "get_project",
+      canAccess: projectToolAccess,
       description:
         "Read one Workspace project you are working on, by id: its goal, status, steward, tracker " +
         "link, members, the other agents on it, and how many chats and rooms are linked. `context` " +
         "lists the briefs people prepared for agents (id, filename, size_bytes, task_id — a task's " +
         "own brief carries its id); read one with read_project_context before working that task. Other " +
         "people's chats are private, so they appear only as a count. Use the id from the " +
-        "'[Project]' line at the top of the conversation, or from list_projects.",
+        "'[Project]' line at the top of the conversation, or from list_projects. With a person's own " +
+        "key, a change an agent proposed that is still waiting is `proposal`, and its `how_to_decide` " +
+        "says how its deciders answer it.",
       parameters: z.object({
         agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         project_id: z.string().min(1).max(64).describe("The project id, e.g. prj_0123456789abcdef."),
       }),
       execute: async (params: { project_id: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const project = await clientFor(context, params.agent_name).getMyProject(params.project_id, turnOf(context));
-          return JSON.stringify({ success: true, ...(project as object) }, null, 2);
+          const door = doorFor(context, params.agent_name);
+          const project = (await door.client.getMyProject(params.project_id, turnOf(context))) as Record<string, unknown>;
+          const proposal = project?.proposal as Record<string, unknown> | null | undefined;
+          if (door.kind === "person" && proposal && typeof proposal.ask_id === "string") {
+            project.proposal = { ...proposal, how_to_decide: PROPOSAL_DECIDED_BY };
+          }
+          return JSON.stringify({ success: true, ...project }, null, 2);
         } catch (e) {
+          if (e instanceof ScopeRefusal) return fail(e);
           const { status, code, message, detailIsString } = parseError(e);
           const flags: Record<string, unknown> = {};
           if (status === 404 && code === "project_not_found") {
@@ -251,7 +365,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
             );
           }
           return JSON.stringify(
-            { success: false, error: explain(status, code, detailIsString), detail: message },
+            { success: false, error: explain(status, code, detailIsString, message), detail: message },
             null,
             2,
           );
@@ -262,6 +376,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     list_project_tasks: {
       name: "list_project_tasks",
+      canAccess: projectToolAccess,
       description:
         "List a project's tasks. By default only open ones (not done, not awaiting verification); " +
         "pass status 'all', 'done' or a single status to see others. Each task has an id like T-003, " +
@@ -284,7 +399,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       }),
       execute: async (p: { project_id: string; status?: string; view?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const tasks = await clientFor(context, p.agent_name).listProjectTasks(
+          const tasks = await readerFor(context, p.agent_name).listProjectTasks(
             p.project_id, p.status || "open", turnOf(context), p.view);
           return ok({ count: tasks.length, tasks });
         } catch (e) {
@@ -296,6 +411,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     create_project_task: {
       name: "create_project_task",
+      canAccess: projectToolAccess,
       description:
         "Add a task to a project you are working on. Give it a short title, and where you can an " +
         "objective and a definition of done (a checklist). It gets the next id (T-NNN) and starts as " +
@@ -308,14 +424,14 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "makes it a person's task: it needs an owner who is on the project and no agent " +
         "(person_task_has_agent, person_task_needs_owner), it is never started as an agent run, and " +
         "only a person marks it done. Only the project's steward may give a task to a person " +
-        "(only_the_steward_assigns_people); otherwise ask with propose_project_changes. When every " +
+        "(only_the_steward_assigns_people); anyone else asks the steward. When every " +
         "task it waits on is done, its owner is told once." + REFS_RULE,
       parameters: createTaskParams,
       execute: async (p: Record<string, unknown> & { project_id: string } & { agent_name?: string; assignee?: string }, context?: { session?: McpAuthContext }) => {
         const { project_id, assignee, agent_name: _actAs, ...rest } = declared(createTaskParams, p) as typeof p;
         const body = assignee ? { ...rest, agent: assignee } : rest;
         try {
-          return ok(await clientFor(context, p.agent_name).createProjectTask(project_id, body, turnOf(context)));
+          return ok(await writerFor(context, p.agent_name).createProjectTask(project_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -325,6 +441,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     update_project_task: {
       name: "update_project_task",
+      canAccess: projectToolAccess,
       description:
         "Update a project task. To claim a task is finished, set status 'pending-verification' and put " +
         "your evidence in 'note' (it is logged as your done claim); a person or the project's steward " +
@@ -343,7 +460,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         const { project_id, task_id, assignee, agent_name: _actAs, ...rest } = declared(updateTaskParams, p) as typeof p;
         const body = assignee ? { ...rest, agent: assignee } : rest;
         try {
-          return ok(await clientFor(context, p.agent_name).updateProjectTask(project_id, task_id, body, turnOf(context)));
+          return ok(await writerFor(context, p.agent_name).updateProjectTask(project_id, task_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -353,11 +470,12 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     add_project_task_note: {
       name: "add_project_task_note",
+      canAccess: projectToolAccess,
       description: "Append a note to a task's log (progress, a waiting-on, a hand-off). The log is append-only.",
       parameters: z.object({ agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION), project_id: projectId, task_id: taskId, body: z.string().min(1).max(4000) }),
       execute: async (p: { project_id: string; task_id: string; body: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          return ok(await clientFor(context, p.agent_name).addProjectTaskNote(p.project_id, p.task_id, p.body, turnOf(context)));
+          return ok(await writerFor(context, p.agent_name).addProjectTaskNote(p.project_id, p.task_id, p.body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -367,20 +485,24 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     read_project_context: {
       name: "read_project_context",
+      canAccess: projectToolAccess,
       description:
         "Read a brief people prepared for this project's agents (a transcript, background, their " +
-        "view) — an item from the `context` list of get_project. Returns its text, at most 200 KB " +
-        "per call. When `truncated` is true the brief is longer: call again with offset = " +
-        "`next_offset` until `truncated` is false. Read a task's brief before working the task.",
+        "view) — an item from the `context` list of get_project. Read a task's brief before working the task. " +
+        "With an agent's own key it returns at most 200 KB per call; when `truncated` is true, call again " +
+        "with offset = `next_offset` until it is false. A person's own key reads the brief from its start " +
+        "and takes no `offset` (refused: offset_not_offered).",
       parameters: z.object({
         agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         project_id: projectId,
         item_id: z.string().min(1).max(64).describe("The context item's id, from get_project's `context`."),
-        offset: z.number().int().min(0).optional().describe("Byte offset to read from: 0, then `next_offset`."),
+        offset: z.number().int().min(0).optional().describe("An agent's own key only: byte offset to read from, 0, then `next_offset`."),
       }),
       execute: async (p: { project_id: string; item_id: string; offset?: number } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const part = await clientFor(context, p.agent_name).readProjectContext(p.project_id, p.item_id, p.offset ?? 0, turnOf(context));
+          const door = doorFor(context, p.agent_name);
+          if (door.kind === "person" && p.offset !== undefined) throw new ScopeRefusal("offset_not_offered", OFFSET_NOT_OFFERED);
+          const part = await door.client.readProjectContext(p.project_id, p.item_id, p.offset ?? 0, turnOf(context));
           return ok(part);
         } catch (e) {
           return fail(e);
@@ -391,6 +513,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     get_project_log: {
       name: "get_project_log",
+      canAccess: projectToolAccess,
       description:
         "Read a project's log: the decisions, deliverables, task changes, blockers and hand-offs that " +
         "people and agents recorded, oldest first within the page. get_project already includes the " +
@@ -398,7 +521,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       parameters: z.object({ agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION), project_id: projectId, limit: z.number().int().min(1).max(200).optional() }),
       execute: async (p: { project_id: string; limit?: number } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const entries = await clientFor(context, p.agent_name).getProjectLog(p.project_id, p.limit ?? 50, turnOf(context));
+          const entries = await readerFor(context, p.agent_name).getProjectLog(p.project_id, p.limit ?? 50, turnOf(context));
           return ok({ count: entries.length, entries });
         } catch (e) {
           return fail(e);
@@ -409,6 +532,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     add_project_log_entry: {
       name: "add_project_log_entry",
+      canAccess: projectToolAccess,
       description:
         "Record one meaningful outcome in the project log, which every person and agent on the project " +
         "reads first. Write ONE entry per outcome — a decision made, a deliverable finished, a blocker, a " +
@@ -423,7 +547,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       execute: async (p: { project_id: string; kind: string; body: string; task_id?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         const { project_id, agent_name: _actAs, ...body } = p;
         try {
-          return ok(await clientFor(context, p.agent_name).addProjectLogEntry(project_id, body, turnOf(context)));
+          return ok(await writerFor(context, p.agent_name).addProjectLogEntry(project_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -433,11 +557,12 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     link_to_project: {
       name: "link_to_project",
+      canAccess: projectToolAccess,
       description:
-        "Put something you produced on a project so its members can find it: a file you shared, a " +
-        "report you wrote, a decision you recorded, or an open ask you raised (an ask raised in a " +
-        "chat that is already on the project is found without this). Only your own items, and only on " +
-        "a project you are working on. Sharing with outside clients is a person's decision, not yours.",
+        "Put something of yours on a project so its members can find it: a file, a report, a decision, " +
+        "or an open ask (an ask raised in a chat that is already on the project is found without this). " +
+        "Only items that are yours, and only on a project you are working on. It never shares the " +
+        "project with outside clients.",
       parameters: z.object({
         agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         project_id: projectId,
@@ -446,7 +571,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       }),
       execute: async (p: { project_id: string; kind: string; target_id: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          return ok(await clientFor(context, p.agent_name).linkToProject(p.project_id, { kind: p.kind, target_id: p.target_id }, turnOf(context)));
+          return ok(await writerFor(context, p.agent_name).linkToProject(p.project_id, { kind: p.kind, target_id: p.target_id }, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -456,18 +581,19 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ======================================================================== v3
     get_steward_digest: {
       name: "get_steward_digest",
+      canAccess: projectToolAccess,
       description:
         "What needs you on the projects you steward: for each, its health and whether an update is " +
         "due, tasks awaiting verification (verify or reopen them), tasks blocked or waiting on a " +
         "decision, tasks untouched for a week, open asks, and whether it has gone quiet. Each task " +
-        "names its owner and when they were last reached. Start a stewarding run here, then record " +
+        "names its owner and when they were last reached. Start here when you steward, then record " +
         "health with set_project_health.",
       parameters: z.object({
         agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
       }),
       execute: async (params: { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const projects = await clientFor(context, params.agent_name).getStewardDigest(turnOf(context));
+          const projects = await readerFor(context, params.agent_name).getStewardDigest(turnOf(context));
           return JSON.stringify({ success: true, count: projects.length, projects }, null, 2);
         } catch (e) {
           return fail(e);
@@ -478,14 +604,15 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ================================================================ ent#588
     create_project: {
       name: "create_project",
+      canAccess: projectToolAccess,
       description:
-        "Start a Workspace project for your owner (/project-init on Trinity): a name and the goal in " +
-        "a sentence or two. Your owner becomes its creator and first member, you become its steward " +
-        "and the agent on it, and only its members can see it — adding people or changing who can " +
-        "see it stays your owner's. Needs the project-management permission an instance admin grants; " +
-        "without it the call is refused with `project_management_not_permitted` and nothing is created. " +
-        "You are its steward; to hand that to another agent, ask with propose_project_changes " +
-        "(its `steward` field) — your primary contact approves it. Returns the project; work on it " +
+        "Start a Workspace project (/project-init on Trinity): a name and the goal in a sentence or " +
+        "two. With a person's own user key, you become its creator and first member, with your " +
+        "Workspace permissions. With an agent's key, the agent's owner becomes its creator and first " +
+        "member, the agent becomes its steward and the agent on it, and handing the steward role to " +
+        "another agent needs the owner's approval. Only its members can see it. Needs the " +
+        "project-management permission an instance admin grants; without it the call is refused with " +
+        "`project_management_not_permitted` and nothing is created. Returns the project; work on it " +
         "with the task and log tools.",
       parameters: z.object({
         agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
@@ -497,7 +624,9 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         try {
           const body: Record<string, unknown> = { name: p.name, goal: p.goal };
           if (p.tracker_url) body.tracker_url = p.tracker_url;
-          return ok({ project: await clientFor(context, p.agent_name).createProjectAsAgent(body, turnOf(context)) });
+          const door = doorFor(context, p.agent_name);
+          const project = door.kind === "person" ? await door.client.createProject(body) : await door.client.createProjectAsAgent(body, turnOf(context));
+          return ok({ project });
         } catch (e) {
           return fail(e);
         }
@@ -507,21 +636,26 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     import_project: {
       name: "import_project",
+      canAccess: projectToolAccess,
       description:
-        "Bring one of your own folder projects onto the platform, once (/project-init adopt on " +
-        "Trinity): `project_files/<slug>` or `<canon>/projects/<slug>` with its project.md, task " +
-        "files, log and decisions. Afterwards the platform is its home and nothing syncs back; a " +
-        "second import of the same folder is refused. Needs the project-management permission; " +
-        "your owner becomes the project's creator. The steward is the agent its project.md names as " +
-        "`owner` when your owner can use it, else your owner; to hand it to another agent afterwards, " +
-        "ask with propose_project_changes — your primary contact approves it.",
+        "Bring an agent's folder project onto the platform, once (/project-init adopt on Trinity): " +
+        "`project_files/<slug>` or `<canon>/projects/<slug>` with its project.md, task files, log and " +
+        "decisions. Afterwards the platform is its home and nothing syncs back; a second import of the " +
+        "same folder is refused. Needs the project-management permission. An agent's key imports its " +
+        "own folder and its owner becomes the creator; a person's own user key names the agent in " +
+        "`agent` and becomes the creator. The steward is the agent its project.md names as `owner` " +
+        "when the creator can use it, else the creator.",
       parameters: z.object({
         agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
-        path: z.string().min(1).max(300).describe("The project folder in your files, e.g. 'project_files/q4-launch'."),
+        path: z.string().min(1).max(300).describe("The project folder in the agent's files, e.g. 'project_files/q4-launch'."),
+        agent: z.string().min(1).max(128).optional().describe("A person's own user key: the agent whose folder it is (one you can use). An agent key imports its own folder; leave it out."),
       }),
-      execute: async (p: { path: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (p: { path: string; agent?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          return ok({ project: await clientFor(context, p.agent_name).importProjectAsAgent(p.path, turnOf(context)) });
+          const door = doorFor(context, p.agent_name);
+          if (door.kind === "agent") return ok({ project: await door.client.importProjectAsAgent(p.path, turnOf(context)) });
+          if (!p.agent || p.agent.trim() === "") throw new ScopeRefusal("agent_required", IMPORT_NEEDS_AGENT);
+          return ok({ project: await door.client.importProject(p.agent, p.path) });
         } catch (e) {
           return fail(e);
         }
@@ -531,6 +665,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ================================================================ ent#980
     propose_project_changes: {
       name: "propose_project_changes",
+      canAccess: agentKeyToolAccess,
       description:
         "Request the people part of a project you are on but can't change yourself: members to add " +
         "or remove, agents to add or remove (yourself included), a new steward, who can open it, and an " +
@@ -581,6 +716,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     list_project_executions: {
       name: "list_project_executions",
+      canAccess: projectToolAccess,
       description:
         "List a project's runs (executions), newest first: the chats, tasks, delegations and steward " +
         "work attributed to the project. Each row has the agent, status, model, cost, queued/started/" +
@@ -611,7 +747,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       ) => {
         try {
           const { project_id, agent_name: _actAs, ...filters } = p;
-          return ok(await clientFor(context, p.agent_name).listProjectExecutions(project_id, filters, turnOf(context)));
+          return ok(await readerFor(context, p.agent_name).listProjectExecutions(project_id, filters, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -621,6 +757,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     start_project_task: {
       name: "start_project_task",
+      canAccess: agentKeyToolAccess,
       description:
         "As a project's steward, start one task's run on an agent you name (trinity-enterprise#1235). " +
         "The platform never picks the task or the agent. What happens depends on the project's mode, " +
@@ -660,10 +797,12 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     // ========================================================================
     set_project_health: {
       name: "set_project_health",
+      canAccess: projectToolAccess,
       description:
-        "As a project's steward, record how it is going: on-track, at-risk or off-track, with one " +
-        "line saying why. It shows on the project and in the list, and is added to the project log. " +
-        "Update it at least every two weeks, and whenever it changes.",
+        "Record how a project is going: on-track, at-risk or off-track, with one line saying why. " +
+        "It shows on the project and in the list, and is added to the project log. A project's steward " +
+        "updates it at least every two weeks, and whenever it changes; the project's own rules decide " +
+        "who else may (refused by name otherwise).",
       parameters: z.object({
         agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         project_id: projectId,
@@ -672,8 +811,228 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       }),
       execute: async (p: { project_id: string; state: string; note?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          return ok(await clientFor(context, p.agent_name).setProjectHealth(
+          return ok(await writerFor(context, p.agent_name).setProjectHealth(
             p.project_id, { state: p.state, note: p.note ?? "" }, turnOf(context)));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ============================================ trinity-enterprise#1322 (person)
+    set_project_lifecycle: {
+      name: "set_project_lifecycle",
+      canAccess: humanOnlyToolAccess("person"),
+      description:
+        "Start, stop, finish, archive or restore a project, as the person you are. start also restarts " +
+        "a stopped or finished project; stop lets runs under way finish; finish marks it done; archive " +
+        "hides it from lists (list_projects with include_archived finds it) and restore brings it back. " +
+        "A `note` is written to the project log on start and stop only (`note_recorded` says whether " +
+        "it was). Needs edit rights on the project; the backend's refusal is passed through by name." +
+        PROJECT_PERSON_WHO_MAY_CALL,
+      parameters: z.object({
+        project_id: projectId,
+        action: z.enum(["start", "stop", "finish", "archive", "restore"]),
+        note: z.string().max(500).optional().describe("One line for the project log (start and stop)."),
+      }),
+      execute: async (p: { project_id: string; action: "start" | "stop" | "finish" | "archive" | "restore"; note?: string }, context?: { session?: McpAuthContext }) => {
+        try {
+          const person = personFor(context, "Starting, stopping or archiving a project", ASK_A_PERSON);
+          const project = await person.lifecycle(p.project_id, p.action, p.note);
+          return ok({ action: p.action, note_recorded: Boolean(p.note) && (p.action === "start" || p.action === "stop"), project });
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    update_project_settings: {
+      name: "update_project_settings",
+      canAccess: humanOnlyToolAccess("person"),
+      description:
+        "Change a project's settings as the person you are: its name, goal and tracker link; its " +
+        "steward (kind 'agent' with an agent name from list_agents, or kind 'person' with a work " +
+        "email); who can open it (visibility: members or company); and its mode (track: a person " +
+        "starts every run; propose: runs wait for a person's go; auto: the steward starts them). Each " +
+        "concern is its own request — the fields, then steward, visibility, mode — and `results` " +
+        "reports each one, so a refusal of one never hides whether the others applied. A new agent " +
+        "steward is given the project-management skills when it can be (`steward_skills`)." +
+        PROJECT_PERSON_WHO_MAY_CALL,
+      parameters: z.object({
+        project_id: projectId,
+        name: z.string().min(1).max(200).optional(),
+        goal: z.string().min(1).max(2000).optional().describe("What done looks like, in a sentence or two."),
+        tracker_url: z.string().max(2000).optional(),
+        steward: z.object({ kind: z.enum(["person", "agent"]), ref: z.string().min(1).max(320) }).optional()
+          .describe("A person's work email, or an agent name."),
+        visibility: z.enum(["members", "company"]).optional(),
+        mode: z.enum(["track", "propose", "auto"]).optional(),
+      }),
+      execute: async (p: { project_id: string; name?: string; goal?: string; tracker_url?: string; steward?: { kind: string; ref: string }; visibility?: string; mode?: string }, context?: { session?: McpAuthContext }) => {
+        try {
+          const person = personFor(context, "Changing a project's settings", "Propose a steward or visibility change with propose_project_changes; your primary contact decides. The mode is set by a person: ask one with ask_operator.");
+          const fields = Object.fromEntries(
+            (["name", "goal", "tracker_url"] as const).filter((k) => p[k] !== undefined).map((k) => [k, p[k]]));
+          const concerns: Array<[string, Record<string, unknown>]> = [];
+          if (Object.keys(fields).length) concerns.push(["fields", fields]);
+          for (const k of ["steward", "visibility", "mode"] as const) if (p[k] !== undefined) concerns.push([k, { [k]: p[k] }]);
+          if (!concerns.length) throw new ScopeRefusal("nothing_to_change", "Name at least one setting to change.");
+          const results: Array<Record<string, unknown>> = [];
+          let project: unknown;
+          for (const [concern, body] of concerns) {
+            try {
+              project = await person.updateProject(p.project_id, body);
+              const skills = (project as { steward_skills?: unknown } | undefined)?.steward_skills;
+              results.push({ concern, ok: true, ...(concern === "steward" && skills !== undefined ? { steward_skills: skills } : {}) });
+            } catch (e) {
+              const r = JSON.parse(fail(e)) as { error: string; code?: string };
+              results.push({ concern, ok: false, ...(r.code ? { code: r.code } : {}), error: r.error });
+            }
+          }
+          const refused = results.filter((r) => !r.ok).map((r) => r.concern);
+          return JSON.stringify({
+            success: refused.length === 0,
+            ...(refused.length ? { error: `Not applied: ${refused.join(", ")}. The rest applied; see results.` } : {}),
+            results,
+            ...(project ? { project } : {}),
+          }, null, 2);
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    set_steward_waking: {
+      name: "set_steward_waking",
+      canAccess: humanOnlyToolAccess("person"),
+      description:
+        "Start (on: true) or pause (on: false) the platform waking a project's agent steward. It is " +
+        "off until a person starts it; pausing stops new wakes, and a run under way finishes." +
+        PROJECT_PERSON_WHO_MAY_CALL,
+      parameters: z.object({ project_id: projectId, on: z.boolean() }),
+      execute: async (p: { project_id: string; on: boolean }, context?: { session?: McpAuthContext }) => {
+        try {
+          const person = personFor(context, "Starting or pausing the steward's wakes", ASK_A_PERSON);
+          return ok(await person.setStewardWaking(p.project_id, p.on));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    manage_project_members: {
+      name: "manage_project_members",
+      canAccess: humanOnlyToolAccess("person"),
+      description:
+        "Add or remove a project's people (work emails) and agents (agent names), as the person you " +
+        "are, with your Workspace permissions. Each item is its own request, in the order members to " +
+        "add, members to remove, agents to add, agents to remove, and `results` has one entry per item " +
+        "(ok, or the backend's code and reason). At most 20 items per call. A project you can't see " +
+        "stops the batch and the rest read not_attempted. Adding an agent someone else owns still " +
+        "needs its owner's yes." + PROJECT_PERSON_WHO_MAY_CALL,
+      parameters: z.object({
+        project_id: projectId,
+        add_members: z.array(z.string().min(3).max(320)).max(MEMBER_BATCH_CAP).optional(),
+        remove_members: z.array(z.string().min(3).max(320)).max(MEMBER_BATCH_CAP).optional(),
+        add_agents: z.array(z.string().min(1).max(128)).max(MEMBER_BATCH_CAP).optional(),
+        remove_agents: z.array(z.string().min(1).max(128)).max(MEMBER_BATCH_CAP).optional(),
+      }),
+      execute: async (p: { project_id: string; add_members?: string[]; remove_members?: string[]; add_agents?: string[]; remove_agents?: string[] }, context?: { session?: McpAuthContext }) => {
+        try {
+          const person = personFor(context, "Adding or removing a project's people and agents", PROPOSE_IT);
+          const plan: Array<[string, string, () => Promise<unknown>]> = [
+            ...(p.add_members ?? []).map((m) => ["add_member", m, () => person.addMember(p.project_id, m)] as [string, string, () => Promise<unknown>]),
+            ...(p.remove_members ?? []).map((m) => ["remove_member", m, () => person.removeMember(p.project_id, m)] as [string, string, () => Promise<unknown>]),
+            ...(p.add_agents ?? []).map((a) => ["add_agent", a, () => person.addAgent(p.project_id, a)] as [string, string, () => Promise<unknown>]),
+            ...(p.remove_agents ?? []).map((a) => ["remove_agent", a, () => person.removeAgent(p.project_id, a)] as [string, string, () => Promise<unknown>]),
+          ];
+          if (!plan.length) throw new ScopeRefusal("nothing_to_change", "Name at least one member or agent to add or remove.");
+          if (plan.length > MEMBER_BATCH_CAP) throw new ScopeRefusal("too_many_items", `At most ${MEMBER_BATCH_CAP} items per call; send the rest in another call.`);
+          const lower = (xs?: string[]) => new Set((xs ?? []).map((x) => x.toLowerCase()));
+          const clash = [...lower(p.add_members)].filter((m) => lower(p.remove_members).has(m))
+            .concat([...lower(p.add_agents)].filter((a) => lower(p.remove_agents).has(a)));
+          if (clash.length) throw new ScopeRefusal("item_in_both", `Both added and removed: ${clash.join(", ")}. Pick one.`);
+          const results: Array<Record<string, unknown>> = [];
+          let stopped = false;
+          for (const [action, item, call] of plan) {
+            if (stopped) {
+              results.push({ action, item, ok: false, code: "not_attempted" });
+              continue;
+            }
+            try {
+              await call();
+              results.push({ action, item, ok: true });
+            } catch (e) {
+              const r = JSON.parse(fail(e)) as { error: string; code?: string };
+              results.push({ action, item, ok: false, ...(r.code ? { code: r.code } : {}), error: r.error });
+              if (r.code === "project_not_found") stopped = true;
+            }
+          }
+          const failed = results.filter((r) => !r.ok).length;
+          return JSON.stringify({ success: failed === 0, ...(failed ? { error: `${failed} of ${results.length} not applied; see results.` } : {}), results }, null, 2);
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    decide_project_runs: {
+      name: "decide_project_runs",
+      canAccess: humanOnlyToolAccess("person"),
+      description:
+        "The runs a project's steward proposed that wait for a person's go (Propose mode, or a task " +
+        "held for a person). With no ids, lists them (`runs`, each with its id). With `approve` and/or " +
+        "`decline` ids, decides each on its own and reports each id (`approved`, `declined`: `applied`, " +
+        "the backend's `outcome`, and `why` when not applied); `success` only when every id was applied. " +
+        "A `note` goes with a decline. An id in both lists is refused." +
+        PROJECT_PERSON_WHO_MAY_CALL,
+      parameters: z.object({
+        project_id: projectId,
+        approve: z.array(z.string().min(1).max(64)).max(100).optional(),
+        decline: z.array(z.string().min(1).max(64)).max(100).optional(),
+        note: z.string().max(500).optional().describe("Why, for a decline."),
+      }),
+      execute: async (p: { project_id: string; approve?: string[]; decline?: string[]; note?: string }, context?: { session?: McpAuthContext }) => {
+        try {
+          const person = personFor(context, "Approving or declining a proposed run", ASK_A_PERSON);
+          const approve = p.approve ?? [];
+          const decline = p.decline ?? [];
+          if (!approve.length && !decline.length) {
+            const runs = await person.waitingRuns(p.project_id);
+            return ok({ count: runs.length, runs });
+          }
+          const both = approve.filter((id) => decline.includes(id));
+          if (both.length) throw new ScopeRefusal("id_in_both", `In both approve and decline: ${both.join(", ")}. Pick one.`);
+          // Each request is its own outcome: an approve that went through stays
+          // reported when the decline request after it fails.
+          const decide = async (decision: "approve" | "decline", ids: string[]) => {
+            if (!ids.length) return { rows: [] as Array<Record<string, unknown>>, failed: false };
+            try {
+              const results = await person.decideRuns(p.project_id, decision, ids, decision === "decline" ? p.note : undefined);
+              return { rows: results.map((r) => runDecision(decision, r)), failed: false };
+            } catch (e) {
+              const r = JSON.parse(fail(e)) as { error: string; code?: string };
+              return { rows: ids.map((id) => ({ id, applied: false, ...(r.code ? { outcome: r.code } : {}), why: r.error })), failed: true };
+            }
+          };
+          const a = await decide("approve", approve);
+          const d = await decide("decline", decline);
+          const rows = [...a.rows, ...d.rows];
+          const notApplied = rows.filter((r) => !r.applied).length;
+          // "The approvals were applied" only when every approve id was, not
+          // merely when the approve request succeeded.
+          const approvedCount = a.rows.filter((r) => r.applied).length;
+          const error = !notApplied ? undefined
+            : d.failed && approve.length && !a.failed
+              ? approvedCount === approve.length
+                ? `The approvals were applied; the declines were not (${d.rows[0]?.why}).`
+                : `${approvedCount} of ${approve.length} approvals applied; the declines were not (${d.rows[0]?.why}).`
+            : `${notApplied} of ${rows.length} not applied; see approved and declined.`;
+          return JSON.stringify({ success: notApplied === 0, ...(error ? { error } : {}), approved: a.rows, declined: d.rows }, null, 2);
         } catch (e) {
           return fail(e);
         }

@@ -131,6 +131,7 @@ async def _deliver(agent_name: str, email: str, username: str) -> bool:
             "You'll request a one-time code there to complete sign-in.",
         ],
         cta=("Open the Workspace", url) if url else None,
+        relay=("agent_invite", {"agent": agent_name, "inviter": _inviter_label(username), "url": url}),
     )
     try:
         return bool(await asyncio.wait_for(send, timeout=SEND_TIMEOUT_SECONDS))

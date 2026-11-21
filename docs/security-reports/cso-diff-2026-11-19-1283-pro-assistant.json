@@ -1,0 +1,132 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-19",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/pro-assistant",
+  "merge_base": "00b1e5ae911a409907a5d457b123867e95b7e516",
+  "issue": "abilityai/trinity-enterprise#1283",
+  "counts_as_full_run": false,
+  "docker_available": true,
+  "docker_note": "Diff run: no image, compose, dependency or workflow file changed, so no image-internal pass was needed.",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    12,
+    13,
+    14
+  ],
+  "phases_skipped_no_overlap": [
+    10,
+    11
+  ],
+  "attack_surface": {
+    "new_public_endpoints": 0,
+    "changed_authenticated_endpoints": 1,
+    "new_seams": [
+      "email relay registration (services/email_service.py)"
+    ],
+    "new_frontend_surfaces": [
+      "assistant panel (admin, entitlement-gated)",
+      "system views dropdown"
+    ],
+    "note": "The module behind the panel lives in the private submodule and is audited there."
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "MEDIUM",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "secret-in-log",
+      "owasp_2025": "A09",
+      "phase": "P2",
+      "file": "src/backend/services/email_service.py",
+      "title": "A sign-in code was written to the log when a registered mail relay refused",
+      "exploit": "Relay returns failure -> the code was printed through the console sender -> platform log -> anyone or any agent that reads the aggregated logs can sign in as that user.",
+      "resolution": "FIXED on this branch (a3e717636): the failure path logs that nothing was sent and nothing else; pinned by tests/unit/test_email_relay.py."
+    },
+    {
+      "id": 2,
+      "severity": "LOW",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "identity-minted-on-read",
+      "owasp_2025": "A06",
+      "phase": "P9",
+      "file": "src/backend/services/onboarding_service.py",
+      "title": "GET /api/onboarding/first-run called a get_or_create accessor (the #2669 class)",
+      "exploit": "Any authenticated GET mints the durable installation id as a side effect of looking.",
+      "resolution": "FIXED on this branch (fcfd3aa0e): reads with get_installation_id(); test_2669_minting_accessor_callers.py green."
+    },
+    {
+      "id": 3,
+      "severity": "LOW",
+      "confidence": 7,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "unvalidated-link",
+      "owasp_2025": "A05",
+      "llm": "LLM05",
+      "phase": "P7",
+      "file": "src/frontend/src/utils/assistantCards.js",
+      "title": "Links supplied by a remote service were bound to href / window.open without a scheme check",
+      "exploit": "A javascript: address in a terms or checkout link runs in the admin's session on click.",
+      "resolution": "FIXED on this branch (fcfd3aa0e): webLink() admits http(s) only; pinned by assistantCards.spec.js."
+    }
+  ],
+  "hypotheses": [
+    {
+      "title": "The relay seam hands a sign-in code to whatever module registered",
+      "note": "By design: a registered relay receives the code in order to send it. Whether a deployment accepts that trust is an operator decision recorded with the private module's review."
+    }
+  ],
+  "coverage_gaps": [
+    "Route-census and real-app guards (test_2996_*, test_3180_*, test_ent719_*, and others that import main) could not run locally: the host Python lacks opentelemetry.exporter. They run in CI and must be green there before merge.",
+    "No dependency scanner ran: the diff changes no lockfile, requirements file or Dockerfile.",
+    "Public-repo copy in the gated assistant panel names the paid tier in user-facing text; the enterprise-docs guard pattern does not match it. Left for the owner to judge."
+  ],
+  "supply_chain_summary": {
+    "scanner": "none (no dependency change in diff)",
+    "lockfiles_changed": false
+  },
+  "guard_tests": {
+    "ran": [
+      "test_293_admin_gate_rejects_agent_keys",
+      "test_1310_auth_wiring",
+      "test_ent435_settings_sink_guard",
+      "test_agent_auth_header_guard",
+      "test_186_enumeration_uniformity",
+      "test_292_cmdline_credential_leak",
+      "test_models_centralized",
+      "test_2669_minting_accessor_callers",
+      "test_ent614_source_agent_attribution"
+    ],
+    "result": "257 passed"
+  },
+  "active_verification": {
+    "independent_verifier": "two fresh-context reviewers over the public seam and the private module; one over the hosted service",
+    "secrets_scan": "0 known-prefix hits in added lines",
+    "invisible_unicode": "0 files",
+    "v_html": "4 sites, all through utils/markdown.js (DOMPurify)",
+    "enterprise_docs_guard": "0 hits on added doc and seam lines"
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 1,
+    "low": 2,
+    "all_fixed_on_branch": true
+  },
+  "trend": "diff run; not compared"
+}
