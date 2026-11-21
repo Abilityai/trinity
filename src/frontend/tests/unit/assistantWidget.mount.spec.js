@@ -26,6 +26,8 @@ let statusReads = []     // answers to /status, in order, before falling back to
 let byCode = false       // the module offers the subscribe-by-code routes; off: they answer 404 (an older module)
 let subTerms             // what GET /subscription/terms answers
 let refusals = {}        // url → [{ status, detail }], thrown in order by the by-code routes
+let confirmEmail         // the `email` /subscription/confirm answers: masked or null at the door
+let codeVersion          // the terms version /subscription/code names; undefined: the one served
 
 vi.mock('@/api', () => {
   const respond = (method, url, body) => {
@@ -36,9 +38,9 @@ vi.mock('@/api', () => {
       if (refusal) throw { response: { status: refusal.status, data: { detail: refusal.detail } } }
       if (url.endsWith('/subscription/terms')) return { ...subTerms }
       if (url.endsWith('/subscription/code') || url.endsWith('/subscription/code/resend')) {
-        return { email: 'a•••@example.com', expires_in: 900, terms: { version: subTerms.version, url: subTerms.url } }
+        return { email: 'a•••@example.com', expires_in: 900, terms: { version: codeVersion === undefined ? subTerms.version : codeVersion, url: subTerms.url } }
       }
-      if (url.endsWith('/subscription/confirm')) return { plan: 'pro', billing: 'unbilled', checkout_url: null }
+      if (url.endsWith('/subscription/confirm')) return { plan: 'pro', billing: 'unbilled', checkout_url: null, email: confirmEmail }
     }
     if (url === '/api/enterprise/assistant/status') return statusReads.length ? statusReads.shift() : { ...status }
     if (url === '/api/enterprise/assistant/turn' || url === '/api/enterprise/assistant/turn/continue') {
@@ -125,6 +127,8 @@ describe('assistant panel', () => {
     statusReads = []
     byCode = false
     refusals = {}
+    confirmEmail = 'a•••@example.com'
+    codeVersion = undefined
     subTerms = { version: 's1', title: 'Subscription terms', url: '', text: '# Subscription terms\n\nYou pay monthly.' }
     status = { available: true, contacted: true, reachable: true, plan: 'free', email: null, allowance: null, trial_terms: { version: 't0', url: '', accepted: 't0' }, profile_known: true }
     localStorage.clear()
@@ -1285,7 +1289,96 @@ describe('assistant panel', () => {
     })
 
     it.each([
-      ['register_first', 409, 'not registered with Trinity yet'],
+      ['a masked', 'a•••@example.com'],
+      ['a null', null],
+    ])('keeps the address it holds when the confirm answers %s email', async (_, answered) => {
+      confirmEmail = answered
+      status = { ...status, email: 'ada@example.com' }
+      const { useAssistantStore } = await import('@/stores/assistant')
+      const store = useAssistantStore()
+      await store.loadStatus()
+      await atLimit()
+      await tickAndSend()
+      await confirmWith('424242')
+      expect(sent(`${BYCODE}/confirm`)).toHaveLength(1)
+      expect(wrapper.find('[data-testid="assistant-account"]').exists()).toBe(false)
+      expect(store.status.email).toBe('ada@example.com')
+    })
+
+    it.each([
+      ['unknown_instance', 401, "Trinity doesn't recognise this instance"],
+      ['register_first', 409, 'This instance is not registered yet'],
+      ['workspace_only', 403, "Ask this instance's admin to sign in and subscribe."],
+      ['subscription_key_refused', 403, 'Subscribing needs a person signed in, not a key.'],
+    ])('a %s refusal at confirm is a dead end: no new code, no second press', async (code, http, line) => {
+      await atLimit()
+      await tickAndSend()
+      refuse('/confirm', http, code)
+      await confirmWith('424242')
+      expect(account().text()).toContain(line)
+      expect(account().text()).not.toContain("the gateway's words")
+      expect(wrapper.find('[data-testid="assistant-sub-resend"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="assistant-sub-confirm"]').exists()).toBe(false)
+      expect(account().text()).not.toMatch(/send a new code/i)
+    })
+
+    it.each([
+      ['invalid_ip', 'where this request came from'],
+      ['invalid_who', 'who accepted the terms'],
+    ])('a %s refusal at confirm says so and lets the person press Confirm again', async (code, line) => {
+      await atLimit()
+      await tickAndSend()
+      refuse('/confirm', 422, code)
+      await confirmWith('424242')
+      expect(account().text()).toContain(line)
+      expect(account().text()).not.toContain("the gateway's words")
+      expect(wrapper.get('[data-testid="assistant-sub-code"]').text()).not.toMatch(/send a new code/i)
+      await confirmWith('424242')
+      expect(sent(`${BYCODE}/confirm`)).toHaveLength(2)
+    })
+
+    it.each([
+      ['gateway_unreachable', 502],
+      ['workspace_only', 403],
+      ['subscription_key_refused', 403],
+    ])('a %s refusal reading the terms offers Try again, which reads them again', async (code, http) => {
+      refuse('/terms', http, code)
+      await atLimit()
+      expect(wrapper.find('[data-testid="assistant-sub-terms-tick"]').exists()).toBe(false)
+      await wrapper.get('[data-testid="assistant-sub-terms-retry"]').trigger('click')
+      await flushPromises()
+      expect(sent(`${BYCODE}/terms`)).toHaveLength(2)
+      expect(wrapper.find('[data-testid="assistant-sub-terms-retry"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="assistant-sub-terms-text"]').text()).toContain('You pay monthly.')
+    })
+
+    it('reloads the terms and clears the tick at once when the code names another version', async () => {
+      await atLimit()
+      codeVersion = 's7'
+      subTerms = { ...subTerms, version: 's7', text: '# Subscription terms\n\nMoved on.' }
+      await tickAndSend()
+      expect(sent(`${BYCODE}/terms`)).toHaveLength(2)
+      expect(wrapper.find('[data-testid="assistant-sub-code"]').exists()).toBe(false)
+      expect(account().text()).toContain('The subscription terms changed')
+      expect(wrapper.get('[data-testid="assistant-sub-terms-text"]').text()).toContain('Moved on.')
+      expect(wrapper.get('[data-testid="assistant-sub-terms-tick"]').element.checked).toBe(false)
+      await tickAndSend()
+      await confirmWith('424242')
+      expect(sent(`${BYCODE}/confirm`).at(-1).body).toEqual({ code: '424242', accept: true, version: 's7' })
+    })
+
+    it('confirms terms that name no version with an empty version', async () => {
+      subTerms = { ...subTerms, version: null }
+      await atLimit()
+      expect(account().text()).not.toContain('(version')
+      await tickAndSend()
+      expect(wrapper.find('[data-testid="assistant-sub-code"]').exists()).toBe(true)
+      await confirmWith('424242')
+      expect(sent(`${BYCODE}/confirm`).map((c) => c.body)).toEqual([{ code: '424242', accept: true, version: '' }])
+    })
+
+    it.each([
+      ['register_first', 409, 'This instance is not registered yet'],
       ['email_limit', 429, 'Too many codes have been sent'],
       ['code_limit', 429, 'Too many codes have been sent'],
       ['address_limit', 429, 'Too many codes have been sent'],
@@ -1304,6 +1397,7 @@ describe('assistant panel', () => {
       refuse('/terms', 403, 'subscription_admin_only', { admin: 'admin' })
       await atLimit()
       expect(account().text()).toContain("Only this instance's admin (admin) can subscribe.")
+      expect(wrapper.find('[data-testid="assistant-sub-terms-retry"]').exists()).toBe(false)
       expect(wrapper.find('[data-testid="assistant-sub-send"]').exists()).toBe(false)
       expect(sent(`${BYCODE}/code`)).toHaveLength(0)
     })
@@ -1314,6 +1408,18 @@ describe('assistant panel', () => {
       expect(sent(`${BYCODE}/terms`)).toHaveLength(1)
       expect(wrapper.find('[data-testid="assistant-email"]').exists()).toBe(true)
       expect(wrapper.find('[data-testid="assistant-sub-terms-tick"]').exists()).toBe(false)
+    })
+
+    it('asks for the by-code terms only once after falling back', async () => {
+      byCode = false
+      await atLimit()
+      await button('Cancel').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[data-testid="assistant-account"]').exists()).toBe(false)
+      await wrapper.get('[data-testid="assistant-upgrade"]').trigger('click')
+      await flushPromises()
+      expect(sent(`${BYCODE}/terms`)).toHaveLength(1)
+      expect(wrapper.find('[data-testid="assistant-email"]').exists()).toBe(true)
     })
   })
 })

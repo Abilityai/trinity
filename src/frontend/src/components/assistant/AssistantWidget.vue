@@ -454,6 +454,14 @@
           >
             <p v-if="store.account.busy && !store.account.subTerms" class="text-[12.5px] text-gray-500 dark:text-gray-400 animate-pulse motion-reduce:animate-none">Loading the subscription terms…</p>
             <InlineError v-if="store.account.error" :message="store.account.error" />
+            <BaseButton
+              v-if="!store.account.subTerms && store.account.error && !store.account.stuck && !store.account.busy"
+              type="button"
+              variant="secondary"
+              size="sm"
+              data-testid="assistant-sub-terms-retry"
+              @click="store.reloadSubscriptionTerms()"
+            >Try again</BaseButton>
             <template v-if="store.account.subTerms && !store.account.stuck">
               <p class="font-medium text-gray-900 dark:text-gray-100">
                 {{ store.account.subTerms.title || 'Subscription terms' }}
@@ -484,7 +492,7 @@
                 <span v-if="subAddress" class="font-medium">{{ subAddress }}</span>
                 <template v-else>the email of this instance's registered admin</template>.
               </p>
-              <BaseButton type="submit" size="sm" :loading="store.account.busy" loading-label="Sending…" data-testid="assistant-sub-send">Send code</BaseButton>
+              <BaseButton v-if="!store.account.blocked" type="submit" size="sm" :loading="store.account.busy" loading-label="Sending…" data-testid="assistant-sub-send">Send code</BaseButton>
             </template>
           </form>
 
@@ -509,7 +517,7 @@
               :error="store.account.error"
               data-testid="assistant-sub-code"
             />
-            <div class="flex flex-wrap gap-2">
+            <div v-if="!store.account.blocked" class="flex flex-wrap gap-2">
               <BaseButton type="submit" size="sm" :loading="store.account.busy" loading-label="Checking…" data-testid="assistant-sub-confirm">Confirm</BaseButton>
               <BaseButton variant="ghost" size="sm" :disabled="store.account.busy" data-testid="assistant-sub-resend" @click="store.sendSubscriptionCode({ resend: true })">Send a new code</BaseButton>
             </div>
