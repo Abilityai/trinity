@@ -259,6 +259,8 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
   // transport's zod pass, so the tool filters its own arguments (ent#1240).
   const declared = (schema: z.ZodObject, p: Record<string, unknown>) =>
     Object.fromEntries(Object.entries(p).filter(([k]) => k in schema.shape));
+  // trinity-enterprise#1233: a milestone id, as get_project's `milestones` gives it.
+  const milestoneId = z.string().min(1).max(40);
   const createTaskParams = z.object({
     agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
     project_id: projectId,
@@ -274,6 +276,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     blocked_by: blockerIds.optional().describe("Tasks on this project it waits on, e.g. ['T-003']. At most 20."),
     for_person: z.boolean().optional().describe("true: a person on the project does it (set owner, no assignee)."),
     refs: refList("Up to 10 GitHub issues or PRs: owner/repo#N, or https://github.com/owner/repo/issues/N or /pull/N. An item Trinity cannot read is refused (refs_refused)."),
+    milestone: milestoneId.optional().describe("The milestone it counts toward: an id (ms_…) from get_project's `milestones`. Not on this project: milestone_not_found."),
   });
   const updateTaskParams = z.object({
     agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
@@ -294,6 +297,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     for_person: z.boolean().optional().describe("true: a person does it (steward only); false: back to agent work."),
     refs_add: refList("Up to 10 GitHub issues or PRs to link (owner/repo#N or the URL). Refused on a done task."),
     refs_remove: refList("Up to 10 refs to unlink: a ref id (ref_…) or the same text used to link it."),
+    milestone: milestoneId.nullable().optional().describe("Move it under this milestone (ms_… from get_project); null takes it out of its milestone."),
   });
 
   return {
@@ -338,7 +342,11 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "people's chats are private, so they appear only as a count. Use the id from the " +
         "'[Project]' line at the top of the conversation, or from list_projects. With a person's own " +
         "key, a change an agent proposed that is still waiting is `proposal`, and its `how_to_decide` " +
-        "says how its deciders answer it.",
+        "says how its deciders answer it. `milestones` is the goal as ordered steps — the same values " +
+        "people see: each has a `state` (not_started, in_progress, reached), what `reached_means`, its " +
+        "`targets` (an agent's metric with `target`, `actual`, `gap` and `freshness`; a `stale` actual " +
+        "is not current), the `worst` target and its tasks done/total. Record an actual with " +
+        "record_metrics; only a person changes a milestone or marks one reached.",
       parameters: z.object({
         agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         project_id: z.string().min(1).max(64).describe("The project id, e.g. prj_0123456789abcdef."),
@@ -396,11 +404,12 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         project_id: projectId,
         status: z.string().max(32).optional().describe("open (default), all, or one task status."),
         view: z.enum(["next"]).optional().describe("'next': the tasks that can be worked now. Ignores status."),
+        milestone: milestoneId.optional().describe("Only this milestone's tasks (ms_… from get_project), or 'none' for tasks under no milestone."),
       }),
-      execute: async (p: { project_id: string; status?: string; view?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (p: { project_id: string; status?: string; view?: string; milestone?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
           const tasks = await readerFor(context, p.agent_name).listProjectTasks(
-            p.project_id, p.status || "open", turnOf(context), p.view);
+            p.project_id, p.status || "open", turnOf(context), p.view, p.milestone);
           return ok({ count: tasks.length, tasks });
         } catch (e) {
           return fail(e);
