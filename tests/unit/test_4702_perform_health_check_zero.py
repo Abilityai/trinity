@@ -77,7 +77,7 @@ def monitoring_service(monkeypatch):
         str(_BACKEND / "services" / "monitoring_service.py"),
     )
     module = importlib.util.module_from_spec(spec)
-    sys.modules["monitoring_service_under_test_4702"] = module
+    monkeypatch.setitem(sys.modules, "monitoring_service_under_test_4702", module)
     spec.loader.exec_module(module)
 
     from db_models import (
