@@ -53,7 +53,7 @@
         {{ waitsOnMe ? 'Waiting on you' : `Waiting on ${waitingOn}` }}
       </p>
       <p class="mt-1 text-sm text-gray-700 dark:text-gray-300">
-        {{ proposal.proposed_by }} proposed changes to this project {{ '' }}<span v-if="proposal.proposed_at" :title="absolute(proposal.proposed_at)">{{ relative(proposal.proposed_at) }}</span>.
+        {{ proposal.proposed_by }} {{ proposal.kind === 'plan' ? 'proposed a plan for' : 'proposed changes to' }} this project {{ '' }}<span v-if="proposal.proposed_at" :title="absolute(proposal.proposed_at)">{{ relative(proposal.proposed_at) }}</span>.
         {{ waitsOnMe ? 'Nothing changes until you approve it.' : 'Nothing changes until they approve it.' }}
       </p>
       <router-link

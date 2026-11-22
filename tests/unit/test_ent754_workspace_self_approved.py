@@ -128,7 +128,7 @@ def test_through_the_route_a_machine_viewer_sees_neither(thread):
     from client_portal.portal_auth import PortalPrincipal
 
     def paid(principal):
-        out = portal_router.portal_history(AGENT, session_id=THREAD, limit=None, principal=principal)
+        out = portal_router.portal_history(AGENT, session_id=THREAD, limit=None, before=None, principal=principal)
         m = next(m for m in out["messages"] if m["content"] == "Paid.")
         return m["gate_self_approved"], m["gate_self_approved_by_viewer"]
 

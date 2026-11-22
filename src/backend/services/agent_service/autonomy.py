@@ -18,6 +18,7 @@ from fastapi import HTTPException
 from models import User
 from database import db
 from dependencies import agent_may_reach
+from utils import request_memo
 from services.docker_service import get_agent_container
 
 logger = logging.getLogger(__name__)
@@ -175,15 +176,24 @@ async def get_all_autonomy_status_logic(
     # Get all autonomy statuses
     all_status = db.get_all_agents_autonomy_status()
 
-    # Filter to agents the user can access
+    # Filter to agents the user can access. #4672: the same two predicates per
+    # agent, inside one memo scope with the owners and the caller's shares read
+    # once — this is polled every 15 s and used to cost 2-5 queries per agent.
     result = {}
-    for agent_name, autonomy_enabled in all_status.items():
-        if (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
-            # Skip system agent
-            if db.is_system_agent(agent_name):
-                continue
-            result[agent_name] = {
-                "autonomy_enabled": autonomy_enabled
-            }
+    with request_memo.scope():
+        names = list(all_status)
+        try:
+            db.get_agent_owners(names)
+            db.agents_shared_with_user(names, current_user.username)
+        except Exception:  # noqa: BLE001 — a failed warm-up falls back to per-agent reads
+            logger.warning("autonomy-status: access prefetch failed", exc_info=True)
+        for agent_name, autonomy_enabled in all_status.items():
+            if (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
+                # Skip system agent
+                if db.is_system_agent(agent_name):
+                    continue
+                result[agent_name] = {
+                    "autonomy_enabled": autonomy_enabled
+                }
 
     return result

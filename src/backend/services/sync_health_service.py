@@ -53,6 +53,7 @@ from typing import Dict, Optional, Set, Tuple
 from database import db
 from redis_breaker_util import get_breaker_redis
 from services import git_service
+from services import loop_health
 from services import platform_alerts
 from services import sync_freeze_policy
 from services.sync_health_view import sync_view
@@ -483,7 +484,8 @@ class SyncHealthService:
     async def _poll_loop(self):
         while self._running:
             try:
-                await self._poll_cycle()
+                with loop_health.tick("sync_health"):
+                    await self._poll_cycle()
             except asyncio.CancelledError:
                 break
             except Exception:

@@ -48,6 +48,8 @@ services:
       - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}  # For Gemini-powered agents
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}  # OpenCode agents: OpenRouter key fallback (Settings takes precedence)
+      - OPENCODE_DEFAULT_PROVIDER_BASE_URL=${OPENCODE_DEFAULT_PROVIDER_BASE_URL:-}  # OpenCode agents: default provider (Ollama) root URL fallback
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # For platform image generation (IMG-001)
       # Gemini model overrides (#1130) — non-empty defaults so an unset var doesn't inject "" (#1076)
       - GEMINI_TEXT_MODEL=${GEMINI_TEXT_MODEL:-gemini-3.5-flash}              # image-gen prompt refinement
@@ -272,6 +274,13 @@ services:
       - TRINITY_ALLOW_SQLITE=${TRINITY_ALLOW_SQLITE:-}
       - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
       - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
+      # #4671 / #4674: the event-loop probe (services/loop_health.py). A loop
+      # blocked past the stall threshold is logged with the worker pid and the
+      # blocking stack; a background cycle slower than the tick threshold is
+      # named. Defaults are in the module.
+      - EVENT_LOOP_PROBE_ENABLED=${EVENT_LOOP_PROBE_ENABLED:-true}
+      - EVENT_LOOP_STALL_THRESHOLD_MS=${EVENT_LOOP_STALL_THRESHOLD_MS:-150}
+      - LOOP_TICK_WARN_MS=${LOOP_TICK_WARN_MS:-250}
       # Credential Encryption
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:-}
       - CREDENTIAL_ENCRYPTION_KEY_SECONDARY=${CREDENTIAL_ENCRYPTION_KEY_SECONDARY:-}  # #267 rotation fallback

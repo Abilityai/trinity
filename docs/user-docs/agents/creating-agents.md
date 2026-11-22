@@ -66,7 +66,7 @@ When you create an agent, Trinity performs these steps in order:
 
 ### Compatibility Validation
 
-Once an agent is running, Trinity validates its workspace against best-practice conventions and surfaces the results in the **Overview** tab on the Agent Detail page. This is advisory — it never blocks creation or deployment.
+Once an agent is running, Trinity validates its workspace against best-practice conventions and surfaces the results in **Settings › General** on the Agent Detail page (owners only). This is advisory — it never blocks creation or deployment.
 
 The check covers things like a present and valid `template.yaml`, a non-gitignored `.claude/` directory, defined playbooks, and accidentally committed secrets, grouped into findings ranked HARD / SOFT / INFO. Claude-specific checks (such as `CLAUDE.md` and `.claude/` skills) are skipped for Codex and Gemini agents.
 

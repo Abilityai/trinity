@@ -66,7 +66,8 @@
   <!-- Assistant message (markdown rendered) -->
   <div
     v-else
-    class="max-w-[85%] min-w-0 group relative"
+    class="min-w-0 group relative"
+    :class="boxed ? 'w-full' : 'max-w-[85%]'"
   >
     <button
       type="button"
@@ -106,6 +107,12 @@ const props = defineProps({
   content: {
     type: String,
     required: true
+  },
+  // A narrow panel (the assistant's): the reply takes the panel's full width
+  // instead of stopping at 85%. The panel gives it a ground to stand out on.
+  boxed: {
+    type: Boolean,
+    default: false
   },
   timestamp: {
     type: String,

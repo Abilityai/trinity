@@ -16,6 +16,7 @@ from sqlalchemy import select, delete
 from .engine import get_engine, make_insert
 from .tables import system_settings
 from db_models import SystemSetting
+from utils import request_memo
 from utils.helpers import utc_now_iso
 
 
@@ -52,6 +53,7 @@ class SettingsOperations:
                 return self._row_to_setting(row)
             return None
 
+    @request_memo.memoized_method
     def get_setting_value(self, key: str, default: str = None) -> Optional[str]:
         """
         Get just the value of a setting.

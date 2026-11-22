@@ -39,6 +39,7 @@ from db_models import User
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.operator_queue_choices import ReservedAnswerError, ResponseNotOfferedError
 from services import ask_service, operator_queue_service, skill_gate_service
+from utils import request_memo
 from services import credential_ask_policy, credential_destination, credential_sink
 
 logger = logging.getLogger(__name__)
@@ -177,24 +178,13 @@ _MACHINE_ROW_FIELDS = (
 
 def _for_principal(items: List[Dict[str, Any]], current_user: User) -> List[Dict[str, Any]]:
     if is_person_principal(current_user):
-        # #3242: whether the reserved "(something else)" answer applies — the
-        # sink's own predicate, so no operator surface offers a chip that 422s.
-        # A bare boolean; the machine view never needs it (it cannot answer).
-        # trinity-enterprise#755: `gate` is the gated-skill approval card's
-        # platform view (None for every other row) — who asked, who it waits
-        # on, whether THIS person may decide, how it ended.
-        return [{**item, "decided_by_options": ask_service.decided_by_options(item),
-                 "gate": skill_gate_service.card_view(
-                     item, viewer_email=current_user.email,
-                     run_viewer=current_user.username, name_approvers=True),
-                 # trinity-enterprise#901: which ending the agent authored
-                 # (replaced | withdrawn | None), derived once server-side.
-                 "agent_ending": ask_service.agent_ending_kind(item),
-                 # trinity-enterprise#980: a gate approval addressed to someone
-                 # else reads as theirs, with no controls — not as a refusal.
-                 "addressed": ask_service.addressed_view(
-                     item, ask_service.Actor(email=current_user.email or "", user=current_user))}
-                for item in items]
+        # #4672: this list is polled every 15 s and a gate approval used to cost
+        # 2-12 queries of its own (its record, each approver's name, the
+        # viewer's access to two agents). One scope, one read per kind.
+        with request_memo.scope():
+            skill_gate_service.prefetch_cards(
+                items, run_viewer=current_user.username, name_approvers=True)
+            return _person_rows(items, current_user)
     # #715: the platform's heads-ups ABOUT a person (a client's complaint, the
     # client addresses behind a shared inbox) are the operator's, not a machine's.
     return [
@@ -202,6 +192,27 @@ def _for_principal(items: List[Dict[str, Any]], current_user: User) -> List[Dict
         for item in items
         if not operator_queue_service.is_about_a_person(item)
     ]
+
+
+def _person_rows(items: List[Dict[str, Any]], current_user: User) -> List[Dict[str, Any]]:
+    # #3242: whether the reserved "(something else)" answer applies — the
+    # sink's own predicate, so no operator surface offers a chip that 422s.
+    # A bare boolean; the machine view never needs it (it cannot answer).
+    # trinity-enterprise#755: `gate` is the gated-skill approval card's
+    # platform view (None for every other row) — who asked, who it waits
+    # on, whether THIS person may decide, how it ended.
+    return [{**item, "decided_by_options": ask_service.decided_by_options(item),
+             "gate": skill_gate_service.card_view(
+                 item, viewer_email=current_user.email,
+                 run_viewer=current_user.username, name_approvers=True),
+             # trinity-enterprise#901: which ending the agent authored
+             # (replaced | withdrawn | None), derived once server-side.
+             "agent_ending": ask_service.agent_ending_kind(item),
+             # trinity-enterprise#980: a gate approval addressed to someone
+             # else reads as theirs, with no controls — not as a refusal.
+             "addressed": ask_service.addressed_view(
+                 item, ask_service.Actor(email=current_user.email or "", user=current_user))}
+            for item in items]
 
 
 # The agent's own readback (trinity-enterprise#611). An ALLOWLIST, so a column

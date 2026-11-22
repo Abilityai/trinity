@@ -148,9 +148,15 @@ class PollerCoreMixin:
 
     async def _poll_loop(self):
         """Main polling loop."""
+        # Imported here, not at module level: a submodule of this package may
+        # import nothing its `__init__` has not imported first (#3785), and
+        # `__init__` is at its line cap.
+        from services import loop_health
+
         while self._running:
             try:
-                await self._poll_cycle()
+                with loop_health.tick("operator_queue_sync"):
+                    await self._poll_cycle()
             except asyncio.CancelledError:
                 break
             except Exception as e:

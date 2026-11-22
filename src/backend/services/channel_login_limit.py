@@ -9,8 +9,9 @@ asks ``login_code_request_allowed``. Three caps, each over 10 minutes:
 * per address (3): one budget shared by the channels, the web login and MCP
   inline auth (``address_allowed``). Web and MCP charge it BEFORE their
   whitelist / known-address check, so it counts every address alike and its
-  refusal says nothing about membership; the web reply is uniform anyway and
-  the MCP send runs after the response.
+  refusal says nothing about membership. The web door therefore states it
+  (429 + ``OVER_LIMIT_REPLY``, #4603) as the channels do; the MCP send runs
+  after the response, so it has nothing to say it on.
 * per bot / WhatsApp binding / Slack workspace (20): new Telegram/WhatsApp
   accounts cost nothing, so the sender cap alone leaves volume unbounded.
 

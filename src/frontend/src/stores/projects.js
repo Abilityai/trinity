@@ -117,6 +117,11 @@ export const useProjectsStore = defineStore('projects', () => {
     })
   // ent#1235: a person starts and stops the project (P11); the mode is a PATCH.
   const startProject = (id) => _write(id, () => portalHttp.post(url(id, '/start'), {}, { headers: headers() }))
+  // ent#1234: answer an agent's request waiting on me (the kickoff plan) through
+  // the one Workspace ask endpoint the Inbox uses, then re-read the project — an
+  // approved plan's milestones and tasks are the server's, never built here.
+  const answerProposal = (id, askId, response, reason = null) =>
+    _write(id, () => useClientPortalStore().answerAsk(askId, { response, responseText: reason }))
   const stopProject = (id) => _write(id, () => portalHttp.post(url(id, '/stop'), {}, { headers: headers() }))
   const setMode = (id, mode) => update(id, { mode })
   const setArchived = (id, archived) =>
@@ -183,9 +188,16 @@ export const useProjectsStore = defineStore('projects', () => {
     return data
   }
 
+  // trinity-enterprise#1233: a task write moves its milestone's counts and state,
+  // so a page that shows milestones is re-read in the background (data kept).
+  function _refreshMilestones(id) {
+    if (pageState(id).data?.milestones?.length) void fetchProject(id)
+  }
+
   async function createTask(id, body) {
     const { data } = await portalHttp.post(url(id, '/tasks'), body, { headers: headers() })
     await Promise.all([fetchTasks(id), fetchLog(id)])
+    _refreshMilestones(id)
     return data
   }
 
@@ -193,6 +205,7 @@ export const useProjectsStore = defineStore('projects', () => {
     const { data } = await portalHttp.patch(url(id, `/tasks/${encodeURIComponent(taskId)}`), body, { headers: headers() })
     _mergeTask(id, data)
     await Promise.all([fetchTasks(id), fetchLog(id)])
+    _refreshMilestones(id)
     return data
   }
 
@@ -206,6 +219,7 @@ export const useProjectsStore = defineStore('projects', () => {
     const { data } = await portalHttp.patch(url(id, `/tasks/${encodeURIComponent(taskId)}`), body, { headers: headers() })
     _mergeTask(id, data)
     void Promise.all([fetchTasks(id), fetchLog(id)])
+    _refreshMilestones(id)
     return data
   }
 
@@ -369,10 +383,23 @@ export const useProjectsStore = defineStore('projects', () => {
     return data.results || []
   }
 
-  async function metricOptions(id) {
-    const { data } = await portalHttp.get(url(id, '/metric-options'), { headers: headers() })
+  // `all` (trinity-enterprise#1233): metrics already on the Metrics card too — a milestone target's picker.
+  async function metricOptions(id, { all = false } = {}) {
+    const { data } = await portalHttp.get(url(id, '/metric-options'),
+      all ? { headers: headers(), params: { all: true } } : { headers: headers() })
     return data.agents || []
   }
+
+  // --- trinity-enterprise#1233: the goal as milestones (a person with edit rights) ----
+  const milestoneUrl = (id, mid, tail = '') => url(id, `/milestones/${encodeURIComponent(mid)}${tail}`)
+  const createMilestone = (id, body) =>
+    _write(id, async () => (await portalHttp.post(url(id, '/milestones'), body, { headers: headers() })).data)
+  const updateMilestone = (id, mid, body) =>
+    _write(id, async () => (await portalHttp.patch(milestoneUrl(id, mid), body, { headers: headers() })).data)
+  const deleteMilestone = (id, mid) =>
+    _write(id, () => portalHttp.delete(milestoneUrl(id, mid), { headers: headers() }))
+  const setMilestoneTargets = (id, mid, targets) =>
+    _write(id, async () => (await portalHttp.put(milestoneUrl(id, mid, '/targets'), { targets }, { headers: headers() })).data)
 
   // trinity-enterprise#1155 — the person fields' scoped reads (one people search).
   async function fetchProjectPeople(id, q, purpose) {
@@ -434,11 +461,12 @@ export const useProjectsStore = defineStore('projects', () => {
   return {
     list, listLoaded, listLoading, listError, stewardOutcomes,
     fetchList, pageState, fetchProject, forLink, fetchForLink,
-    create, update, setArchived, startProject, stopProject, setMode, fetchRunsWaiting, decideRuns, addMember, removeMember, addAgent, removeAgent, link, unlink,
+    create, update, setArchived, startProject, stopProject, answerProposal, setMode, fetchRunsWaiting, decideRuns, addMember, removeMember, addAgent, removeAgent, link, unlink,
     tasks, logs, fetchTasks, fetchTask, createTask, updateTask, moveTask, addTaskNote, fetchLog, addLogEntry,
     addTaskRefs, removeTaskRef,
     addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject, importEpic,
     setHealth, linkMetric, unlinkMetric, metricOptions, stewarding, fetchStewarding,
+    createMilestone, updateMilestone, deleteMilestone, setMilestoneTargets,
     requestStewardAccess, grantStewardAccess, startStewardWake, pauseStewardWake, requestToJoin, requestAgent,
     startPreview, startTask,
     writeContext, readContext, updateContext, deleteContext, markItemForAgents,

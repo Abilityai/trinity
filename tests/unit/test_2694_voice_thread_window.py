@@ -346,5 +346,9 @@ def test_the_history_route_accepts_a_bounded_limit():
     bounds = {}
     for node in ast.walk(fn):
         if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Query":
-            bounds = {kw.arg: getattr(kw.value, "value", None) for kw in node.keywords}
+            kws = {kw.arg: getattr(kw.value, "value", None) for kw in node.keywords}
+            # ent#594 added a second Query (`before`, a cursor that only reads
+            # OLDER rows); the bounded one is `limit`'s.
+            if "ge" in kws:
+                bounds = kws
     assert bounds.get("ge") == 1 and bounds.get("le") == 50

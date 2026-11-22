@@ -54,6 +54,7 @@ from services.skill_gate_errors import (  # noqa: F401 — re-exported for entri
     SkillGateRefused,
 )
 from services.skill_packaging import SKILL_NAME_RE
+from utils import request_memo
 from utils.credential_sanitizer import sanitize_text
 from utils.helpers import to_utc_iso, utc_now
 from utils.skill_invocation import find_gated_invocations
@@ -2203,6 +2204,7 @@ def outcome_delivery(kind: Optional[str], *, agent_name: Optional[str] = None,
 SKILL_DESCRIPTION_MAX_CHARS = 300
 
 
+@request_memo.memoized
 def _skill_descriptions(agent_name: str) -> Dict[str, str]:
     """Each skill's description from the agent's last-known listing (Redis,
     display-only, fail-open): a card without one still names the skill."""
@@ -2243,6 +2245,54 @@ def _openable_run(viewer: Optional[str], agent_name: Optional[str],
         return None
 
 
+def _is_gate_approval(item: Mapping[str, Any]) -> bool:
+    return item.get("raised_by") == "gate" and item.get("type") == "approval"
+
+
+def _card_approvers(item: Mapping[str, Any]) -> List[str]:
+    """The people an approval was delivered to, casefolded and de-duplicated."""
+    resolved = item.get("resolved_to") or []
+    if isinstance(resolved, str):
+        try:
+            resolved = json.loads(resolved)
+        except ValueError:
+            resolved = []
+    return list(dict.fromkeys(str(p).strip().casefold() for p in resolved if str(p).strip()))
+
+
+def prefetch_cards(items, *, run_viewer: Optional[str] = None,
+                   name_approvers: bool = False) -> None:
+    """Read once what `card_view` would read per gate approval (#4671, #4672).
+
+    One query each for the gate records, the approvers' user rows
+    (`name_approvers`) and — when the viewer may get run links — the owners
+    of, and the viewer's shares on, the agents those runs are on. Call it
+    inside a `request_memo.scope()` before projecting a page: each batch read
+    answers the matching per-item read for the rest of the scope, so
+    `card_view`, `_openable_run` and `can_user_access_agent` are unchanged and
+    still decide everything.
+
+    Best-effort: a failure is logged and the per-card reads run as they always
+    did, with their own error handling.
+    """
+    try:
+        gates = [item for item in items or [] if _is_gate_approval(item)]
+        if not gates:
+            return
+        records = db.get_gate_requests([g.get("request_id") or "" for g in gates])
+        if name_approvers:
+            db.get_users_by_emails([p for g in gates for p in _card_approvers(g)])
+        if not run_viewer:
+            return
+        run_agents = [name for record in records.values() if isinstance(record, dict)
+                      for name in (record.get("agent_name"), record.get("source_agent"))]
+        if run_agents:
+            db.get_agent_owners(run_agents)
+            db.agents_shared_with_user(run_agents, run_viewer)
+    except Exception:  # noqa: BLE001 — see the docstring: fall back to per-card reads
+        logger.warning("[SkillGate] card prefetch failed; reading per card", exc_info=True)
+
+
 def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
               run_viewer: Optional[str] = None,
               name_approvers: bool = False) -> Optional[Dict[str, Any]]:
@@ -2261,20 +2311,14 @@ def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
     (the operator's queue, whose reader already sees `resolved_to`; a Workspace
     addressee is not told who else was asked). None when there is no such record.
     """
-    if not (item.get("raised_by") == "gate" and item.get("type") == "approval"):
+    if not _is_gate_approval(item):
         return None
     record = db.get_gate_request(item.get("request_id") or "")
     if not record or record.get("agent_name") != item.get("agent_name"):
         return None
-    resolved = item.get("resolved_to") or []
-    if isinstance(resolved, str):
-        try:
-            resolved = json.loads(resolved)
-        except ValueError:
-            resolved = []
-    people = list(dict.fromkeys(str(p).strip().casefold() for p in resolved if str(p).strip()))
-    # ponytail: one Redis read + one user lookup per approver, per gate ask in
-    # a listing; batch them if a queue ever holds hundreds of gate asks.
+    people = _card_approvers(item)
+    # A listing calls `prefetch_cards` first (#4672), which reads the records,
+    # the approvers and the run agents' access once for the whole page.
     described = _skill_descriptions(record["agent_name"])
     proposal = item.get("proposal") if isinstance(item.get("proposal"), Mapping) else {}
     return {

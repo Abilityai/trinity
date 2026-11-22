@@ -173,7 +173,7 @@
 
 | Flow | Document | Description |
 |------|----------|-------------|
-| Overview Tab | [agent-overview-dashboard.md](feature-flows/agent-overview-dashboard.md) | Default landing tab — multi-day trend charts + analytics endpoint (#1107) |
+| Overview Tab | [agent-overview-dashboard.md](feature-flows/agent-overview-dashboard.md) | Default landing tab — now / activity / measures / agent-reported metrics / schedules / health, one footprint per section in every state (#1107, rebuilt trinity-enterprise#1317) |
 | Tab Overflow (More ▾) | [agent-detail-tab-overflow.md](feature-flows/agent-detail-tab-overflow.md) | Reusable `OverflowTabs.vue` — tabs collapse into a "More" dropdown instead of horizontal scroll (#1114) |
 | Agent Settings home | [agent-settings-home.md](feature-flows/agent-settings-home.md) | One Settings tab with a pane rail (General, Guardrails, People, Storage, …), `?section=` deep links, one restart banner (trinity-enterprise#887/#888/#890/#891) |
 | Tasks Tab | [tasks-tab.md](feature-flows/tasks-tab.md) | Task execution UI with history |
@@ -240,6 +240,7 @@
 | Unified Channel Access Control | [unified-channel-access-control.md](feature-flows/unified-channel-access-control.md) | Cross-channel access gate keyed on verified email — policy, /login, access requests (#311) |
 | VoIP Telephony | [voip-telephony.md](feature-flows/voip-telephony.md) | Outbound phone calls over the Gemini Live bridge via Twilio Media Streams; per-agent voice binding, ticket-authed WS, post-call transcript processing. Flag-gated default OFF (VOIP-001, #1056) |
 | OpenAI Codex Runtime | [codex-runtime.md](feature-flows/codex-runtime.md) | Third agent runtime ("harness == runtime") — `codex exec` engine with full safety parity (system prompt, read-only sandbox, guardrails, sanitization), `RuntimeCapabilities`, Session-tab gate, MCP via config.toml. See also the [Harness Authoring Guide](harness-authoring-guide.md) (#1187) |
+| OpenCode Runtime | [opencode-runtime.md](feature-flows/opencode-runtime.md) | Fourth agent runtime (#2981) — `opencode run` over any `provider/model`: OpenRouter, a local Ollama, or any OpenAI-compatible endpoint configured by `OPENCODE_PROVIDER_<ID>_*`; per-turn config, env-delivered share/read-only controls, prompt on stdin |
 | Nevermined x402 Payments | [nevermined-payments.md](feature-flows/nevermined-payments.md) | Per-agent paid API via x402 payment protocol (NVM-001) |
 | WhatsApp Integration | [whatsapp-integration.md](feature-flows/whatsapp-integration.md) | Per-agent WhatsApp via Twilio (WHATSAPP-001) |
 

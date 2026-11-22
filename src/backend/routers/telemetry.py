@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from dependencies import get_current_user
 from models import User
+from services import loop_health
 from services.agent_service.helpers import visible_agent_names
 from services import docker_service
 from services.docker_service import list_all_agents_fast
@@ -131,6 +132,10 @@ async def get_host_stats(current_user: User = Depends(get_current_user)):
                 "used_gb": round(disk.used / (1024**3), 1),
                 "total_gb": round(disk.total / (1024**3), 1)
             },
+            # #4671 / #4674: the answering WORKER's event-loop lag and its
+            # background loops' tick times (numbers only; what blocked the loop
+            # is in that worker's log, keyed by the same pid).
+            "backend": loop_health.snapshot(),
             "timestamp": utc_now_iso()
         }
     except Exception as e:

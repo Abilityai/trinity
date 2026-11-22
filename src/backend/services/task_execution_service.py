@@ -197,6 +197,11 @@ def _default_model_for(agent_name: str) -> Optional[str]:
 
     ent#1202: a Claude Code agent's own ``default_model`` comes first when this
     instance can run it — one resolver, ``agent_model_service``, for every rung.
+
+    OpenCode (#2981) has its OWN platform default
+    (``platform_default_model_opencode``, a ``provider/model`` id) because the
+    fleet default is a bare Claude id it refuses with "missing a provider
+    prefix"; that rung lives in the same resolver.
     """
     from services.agent_model_service import resolve_default_model
 

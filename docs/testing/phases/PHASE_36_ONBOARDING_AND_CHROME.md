@@ -13,7 +13,7 @@
 - **NavBar** (`components/NavBar.vue`, links from `utils/navLinks.js`): logo, five links (Dashboard, Library, Operations, Settings, Workspace), a connection dot, a version chip, a Documentation link, a theme button and the user menu that owns "Sign out". Links that do not fit collapse into a counted "N more" menu; below 640 px the link row is not rendered at all.
 - **Theme** (`stores/theme.js`): `light` / `dark` / `system`, stored per browser in `localStorage['trinity-theme']`.
 - **Tab titles** (`router/index.js`): `Trinity — <route title>`; a redirect takes the title of where it lands. Unknown paths redirect to `/`.
-- **"Getting started" checklist** (`components/onboarding/ActivationChecklist.vue`): not a header launcher — it is a section at the bottom of the Dashboard's left "Systems" sidebar. Its items and their done-state come from the server; only its expanded/collapsed state is local (`localStorage['trinity-checklist-expanded']`). It only exists on some instances and hides itself when every item is done.
+- **"Getting started" checklist** (`components/onboarding/ActivationChecklist.vue`): not a header launcher — it is a small card floating in the Dashboard's bottom-left corner (the "Systems" sidebar it used to live in is now a dropdown in the dashboard toolbar). On an instance that offers the docked assistant panel the same steps are shown at the top of that panel instead, and the card is absent. Its items and their done-state come from the server; only its expanded/collapsed state is local (`localStorage['trinity-checklist-expanded']`). It only exists on some instances and hides itself when every item is done.
 - **First-run overlay** (`components/onboarding/FirstRunOverlay.vue`): opens by itself on a fresh install; any admin can reopen it with `/?onboarding=1` or Settings → General → "Re-run setup". Closing it writes `localStorage['trinity_first_run_closed']`.
 
 ## Prerequisites
@@ -143,8 +143,8 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/users/me
 ## Test: "Getting started" checklist
 ### Step 9: Find the checklist
 **Action**:
-- On `/`, look at the left sidebar headed "Systems". If it is a narrow icon rail, click the button titled "Expand sidebar"
-- Look below the view list for a row reading "Getting started" with a count such as `2/4`
+- On `/`, look at the bottom-left corner of the dashboard for a card headed "Getting started" (or, where the assistant panel is docked on the left, at the strip under the panel's header)
+- The card's header row reads "Getting started" with a count such as `2/4`
 
 **Expected**:
 - [ ] If the "Getting started" section is not present on this instance, record `SKIPPED (not present)` for Steps 9–11 and continue at Step 12. (It is also absent once every item is done or after it was permanently dismissed.)
@@ -249,6 +249,6 @@ for (const [k, v] of Object.entries(restore)) v === null ? localStorage.removeIt
 
 - **No version chip**: it is hidden below 1280 px, and absent when `GET /api/version` failed.
 - **Theme button seems to do nothing on the third click**: `system` follows the OS; if the OS is dark it looks the same as `dark`. Trust the tooltip and `localStorage['trinity-theme']`.
-- **No "Getting started" section**: not present on this instance, already complete, dismissed, or the "Systems" sidebar is collapsed.
+- **No "Getting started" section**: not present on this instance, already complete, dismissed, or shown inside the docked assistant panel instead.
 - **Overlay does not open from "Re-run setup"**: it waits for the profile and settings reads to finish; allow ~5 s on `/?onboarding=1`.
 - **Dark stuck on after visiting `/m`**: that page adds the `dark` class and does not remove it; reload any other page.

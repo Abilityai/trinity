@@ -154,6 +154,37 @@ backend (routers/agent_brain_orb.py):
 - **Post-session processing runs as a standard execution (#102)** — NOT the hook's detached `claude -p` anymore. The detached fork was invisible to the platform (no execution row/cost/failure surface; a billing error became the "processed" note's content) and the agent-server's periodic cgroup orphan sweep (#817) SIGKILLs exactly that shape of unregistered process. The platform now owns the trigger: `dispatch_postprocess` reads the agent's `{enabled, prompt}` config (agent still owns semantics, Invariant #8) and runs the prompt via `execute_task(triggered_by="voice")` — registered in the process registry (sweep-safe), visible under Executions, cost-tracked, and a failure is a FAILED row. `process_transcript` (manual re-run) never reaches the hook either; it dispatches the same way. Every skip/failure is surfaced: orb toasts (saved / started / skipped+reason / failed), the response's `postprocess` field, and the audit row's `postprocess_dispatched`/`postprocess_execution_id`.
 - **Owner-only**: transcripts save only when the caller owns the agent (`ACTIONS.enabled` + `OwnedAgentByName`) — a shared user's session isn't persisted (no cross-user KB write).
 
+## Ambient mode — the watch-only screen (trinity-enterprise#1302)
+
+`M` (or the "ambient" row in the controls legend) turns the orb into a hands-off view for a wall screen or a demo: what the agent is doing now, the notes it used, live stats and a one-word mood. Any deliberate key, click or scroll leaves it; the orb comes back with its selection, scope and camera untouched.
+
+```
+orb.js  M / #ambientBtn → AMBIENT.enter()            (snapshot: quaternion, zoom, pinned selection, demo flag)
+ambient-mode.js  poll every 15s, paused while the tab is hidden — GET only, existing routes:
+    /api/agents/{name}                        status
+    /api/agents/{name}/executions?limit=40    running / last run, 24h runs · failures · cost, context
+    /api/agents/{name}/queue · /schedules     queued · next scheduled run (schedules every 5 min)
+    /api/agents/{name}/executions/{id}/stream running run → fetch + ReadableStream (EventSource cannot carry the Bearer)
+    /api/agents/{name}/executions/{id}/log    most recent finished run, fetched once per run id
+    /api/agents/{name}/brain-orb/data         note / link counts, every 15 min
+ambient-core.js  (DOM-free, unit-tested)
+    createClassifier → typed events {kind, state, label, notes}     createNoteMatcher → path → node id
+    runName → playbook / schedule name or "a chat turn" / "a task"   deriveMood → the ladder
+capture-phase keydown / pointerdown / wheel → AMBIENT.exit() → restore(snapshot)
+```
+
+- **No new backend surface.** Every read already exists and is already scoped to the viewer (a share holder's execution list and stream are their own turns, ent#875), so the mode can show nothing the viewer could not open elsewhere. A viewer whose runs are not visible gets graph + status and a line saying what is hidden.
+- **What is withheld** is decided in `ambient-core.js`, not in markup: prompt text, replies, reasoning, raw commands, search queries, web addresses and non-note file names never become an event label. A Bash step shows the agent-written `description`; a run is named only when its message is a playbook (`/name`) or it belongs to a named schedule.
+- **Path → note** is a suffix match of the tool's path against the rendered node ids at a `/` boundary (the vault root is not known to the platform). A name that fits two nodes is dropped. Notes a search reached are taken from its result text only when a full node id appears there. A note outside the rendered sample is not in the graph, so it shows as "a file".
+- **Mood** is one ladder, first match wins, with the deciding signal printed beside the word and the whole ladder in the tooltip: unknown (signals unreadable) → asleep (agent stopped) → struggling (last run failed, or 2 of the last 5) → strained (context ≥ 85%) → working → backed up (queue > 0) → digesting (wrote notes in the last 15 min) → neglected (no run in 7 days) → resting.
+- **Honest status.** `stopped`, `live feed lost` (two failed polls), `signed out` (a 401 — the JWT lives 7 days and dies on a backend restart) are words on the status line and stop the stream and the replay. Idle shows last run + next scheduled. The idle replay walks the last run's notes and is labelled "replaying the last run · not live". The scripted auto-demo (`P`) is switched off while the mode is on, and the mode never borrows the orb states that fake activity (`ingesting` ignites a random node).
+- **The exit seam** is registered first, in the capture phase, and consumes the event (plus the matching `pointerup`), so the click that leaves the mode never also picks a node and `Escape` never also clears the selection.
+- **Camera** uses `focusDir` directly, not `frameNodes()`: the latter stamps `lastZoom`, which freezes all motion for 20 s — on a watch-only screen that reads as a dead page.
+- **Longevity.** Events, ribbon ticks, labels, arcs, shock rings and the open-tool map are capped; arcs and rings dispose their geometry/material on expiry and on exit; one stream at a time behind an `AbortController`, its reader cancelled in `finally`; a reconnect skips the entries already played (the agent replays its buffer from the start).
+- **Cache tokens.** `ambient-mode.js` / `ambient-core.js` are imported with the same `?v=` date token as `orb.js`, and `orb-trinity.css` now carries one too — bump all of them together.
+
+Tests: `src/frontend/tests/unit/brainOrbAmbientCore.spec.js` (classifier, redaction, matcher, run names, mood ladder), `src/frontend/e2e/brain-orb-ambient.spec.js` (enter / leave restores the orb; a mocked running run, stopped agent and expired sign-in; GET-only).
+
 ## Why first-party + iframe (the CSP nuance, #979)
 
 The orb is a vanilla Three.js page with an inline ES-module, CDN deps, and a `localhost:8770` voice proxy. Prod CSP is `script-src 'self'; font-src 'self'; frame-ancestors 'self'` + `X-Frame-Options: SAMEORIGIN`. #979 only bit because it iframed **agent-origin** content with **inline** scripts. The resolution:
@@ -215,6 +246,7 @@ The data route uses standard `AuthorizedAgentByName` Bearer auth like every othe
 | Layer | Path |
 |-------|------|
 | Orb assets | `src/frontend/public/brain-orb/{index.html, orb.js, styles.css, orb-trinity.css, vendor/*}` |
+| Ambient mode (ent#1302) | `src/frontend/public/brain-orb/{ambient-mode.js, ambient-core.js}` + the `#ambientHud` block in `index.html` / `orb-trinity.css` |
 | Voice tile (Phase 3) | `src/frontend/public/brain-orb/voice/{orb.html, voice.js, mic-worklet.js}` |
 | Frontend host | `src/frontend/src/views/AgentBrainOrb.vue` (`allow="microphone"`, relays `voiceAvailable`) |
 | Route | `src/frontend/src/router/index.js` (`/agents/:name/brain`) |

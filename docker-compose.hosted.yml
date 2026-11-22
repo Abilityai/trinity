@@ -181,6 +181,8 @@ services:
       - NOTION_CLIENT_SECRET=${NOTION_CLIENT_SECRET}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}  # For Gemini-powered agents
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}  # OpenCode agents: OpenRouter key fallback (Settings takes precedence)
+      - OPENCODE_DEFAULT_PROVIDER_BASE_URL=${OPENCODE_DEFAULT_PROVIDER_BASE_URL:-}  # OpenCode agents: default provider (Ollama) root URL fallback
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # For platform image generation (IMG-001)
       # Gemini model overrides (#1130) — mirrors docker-compose.yml; without these
       # lines the env knobs are inert in prod (#1039 packaging-gap class). Non-empty
@@ -488,6 +490,13 @@ services:
       - TRINITY_ALLOW_SQLITE=${TRINITY_ALLOW_SQLITE:-}
       - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
       - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
+      # #4671 / #4674: the event-loop probe (services/loop_health.py). A loop
+      # blocked past the stall threshold is logged with the worker pid and the
+      # blocking stack; a background cycle slower than the tick threshold is
+      # named. Defaults are in the module.
+      - EVENT_LOOP_PROBE_ENABLED=${EVENT_LOOP_PROBE_ENABLED:-true}
+      - EVENT_LOOP_STALL_THRESHOLD_MS=${EVENT_LOOP_STALL_THRESHOLD_MS:-150}
+      - LOOP_TICK_WARN_MS=${LOOP_TICK_WARN_MS:-250}
       # Fire-and-forget dispatch (#1083). When true, eligible autonomous turns
       # ({schedule, webhook}) are dispatched 202 + finalized via callback so a
       # wedged turn holds zero backend coroutine/slot beyond its lease. Mirrors
@@ -626,7 +635,15 @@ services:
     # Production: no --reload flag
     # --no-proxy-headers (trinity-enterprise#873): uvicorn never rewrites the
     # client address itself; utils/client_ip.py does, from trusted proxies only.
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2 --timeout-worker-healthcheck 120 --no-proxy-headers
+    # BACKEND_WORKERS (#4674): the uvicorn worker count, default 2. What scales
+    # with it: every background loop in main.py starts in EVERY worker (the
+    # fleet-wide cycles hold a Redis leader lease, so they still run once; the
+    # unleased ones — capacity maintenance, heartbeat watch, the loop due-run
+    # sweep — run once per worker), and each worker opens its own PostgreSQL
+    # pool of up to DB_POOL_SIZE + DB_MAX_OVERFLOW connections, so keep
+    # workers x (pool + overflow) plus the scheduler under max_connections.
+    # Per-loop lease behaviour: docs/memory/architecture/background-services.md.
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers ${BACKEND_WORKERS:-2} --timeout-worker-healthcheck 120 --no-proxy-headers
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
