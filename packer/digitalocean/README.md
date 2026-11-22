@@ -170,6 +170,81 @@ reviewing it, so a release-day rebuild fails while an earlier submission is
 still queued. `mp-submit.sh` names this case in its error output, because the
 raw 400 reads like a bad token.
 
+## Self-serve snapshot (per commit)
+
+`trinity-selfserve.pkr.hcl` is a second variant for operators who create instances
+programmatically and hand each one to a person to claim (trinity-enterprise#1347).
+Each instance boots from the snapshot rather than running an install. The Marketplace
+template above, its first boot and its output are unchanged.
+
+| | Marketplace 1-Click | Self-serve |
+|---|---|---|
+| Input | a release tag | one commit; images `sha-<short7>` |
+| Enterprise module | none | checked out at the commit's pin |
+| First admin | the first browser visitor, or a user-data password | setup by claim only; the claim is written over SSH after boot |
+| Public address | the droplet's IP | a name from user-data; Caddy's on-demand certificate |
+| Install source | `do-marketplace` | `script` |
+
+### Build
+
+```bash
+export DIGITALOCEAN_TOKEN=... TRINITY_SSH_KEY_ID=<id> TRINITY_SSH_KEY_FILE=~/.ssh/id_ed25519
+export TRINITY_ENTERPRISE_TOKEN=...   # read-only, for the enterprise repository; build time only
+git fetch origin <commit>             # the baked packer files must match the commit
+bash scripts/selfserve-build.sh <commit>          # last stdout line: the snapshot ID
+bash scripts/selfserve-boot-check.sh <snapshot-id> <commit>
+```
+
+`selfserve-build.sh` creates nothing until it has checked two things: the commit's five
+`sha-<short7>` images can be pulled anonymously from GHCR (exit 7 otherwise; dispatch
+`publish-images.yml` for the commit), and the files it bakes match the commit. It builds
+in `TRINITY_BUILD_REGION` (default `sfo2`). Create instances in that region, or transfer
+the snapshot there first.
+
+The token is passed in the environment of the checkout step only, and that step fails
+the build if the token appears anywhere in either repository. The snapshot itself holds
+the private module, so keep it private to the account that built it.
+
+### What the snapshot does and does not contain
+
+The last build step, `selfserve/95-assert-clean.sh`, only reads. It fails the build if
+the snapshot holds any of these: a `.env`, a git credential or token, an SSH host key, a
+non-empty `/etc/machine-id`, a Docker container or volume, anything in the data
+directory, or a setup claim. It also fails the build unless the checkout, the enterprise
+pin and every image match the commit.
+
+### Creating an instance
+
+User-data must be `#cloud-config`, because per-instance scripts run before user-data
+scripts:
+
+```yaml
+#cloud-config
+write_files:
+  - path: /etc/trinity/public-name
+    content: "instance-name.example.com\n"
+```
+
+On first boot, before the first start, `selfserve/firstboot.sh` writes these keys to
+`.env`: `ADMIN_PASSWORD=`, `ADMIN_PASSWORD_SOURCE=instance-id`,
+`PUBLIC_CHAT_URL=https://<name>` and `MCP_EXTERNAL_ACCESS=true`. It then runs
+`start.sh --provision --cloud digitalocean --site-only --provenance script --hosted
+--unattended`, which generates this instance's secrets, and recreates the backend with
+the enterprise overlay. Without a valid public name of 2 to 6 labels it stops before
+starting anything.
+
+User-data never supplies a claim or an admin password, because any process on the
+droplet can read user-data back. First boot deletes any such file it finds. Until the
+creator writes `/data/setup-claim` over SSH, `/setup` refuses everyone.
+
+The creator also does the following, outside this image:
+
+- points a DNS record for the name at the droplet;
+- makes one HTTPS request to the name. Caddy then gets the certificate, because
+  `/api/public/tls-allowed` authorises exactly the host in `PUBLIC_CHAT_URL`. The box
+  holds no DNS credential;
+- writes the claim over SSH.
+
 ## Design notes
 
 **Admin account — claimed in the browser (ent#580).** DigitalOcean 1-Clicks have

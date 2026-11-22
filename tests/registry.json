@@ -9609,6 +9609,16 @@
         "security"
       ],
       "description": "The web code door answers 429 with the channel doors' sentence when the shared per-address budget refuses, identically for members and outsiders; the code-row gate stays byte-identical to the success and not-allow-listed answers."
+    },
+    {
+      "file": "unit/test_ent1347_selfserve_image.py",
+      "feature": "abilityai/trinity-enterprise#1347",
+      "added": "2026-11-22",
+      "categories": [
+        "infrastructure",
+        "packer"
+      ],
+      "description": "trinity-enterprise#1347: the per-commit DigitalOcean self-serve snapshot. First boot runs against a scratch box with start.sh and docker stubbed: it requires a public name, sets claim mode before the first start, sets provenance script and mounts the enterprise module, and drops any claim or password that came in through user-data. The checkout runs against local repos and must take the commit plus the enterprise pin while leaving no token behind. The clean check fails on each kind of contamination. Also checked: the marketplace clone is unchanged, the template step order, and packer validate when packer is installed."
     }
   ]
 }

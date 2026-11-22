@@ -56,8 +56,21 @@ apt-get -y -q \
   full-upgrade
 
 apt-get install -y -q ca-certificates curl git debian-goodies
-git clone --depth 1 --branch "${TRINITY_IMAGE_TAG}" \
-  https://github.com/abilityai/trinity.git /opt/trinity
+# --- checkout ---
+# The self-serve build (trinity-selfserve.pkr.hcl, trinity-enterprise#1347)
+# bakes one commit rather than a release tag, and an earlier step has already
+# checked it out with the enterprise module at its pin. Only that template sets
+# this switch; the Marketplace builds never do, and clone exactly as before.
+if [ "${TRINITY_CHECKOUT_READY:-}" = "1" ]; then
+  if [ ! -d /opt/trinity/.git ]; then
+    echo "FATAL: TRINITY_CHECKOUT_READY=1 but /opt/trinity holds no checkout." >&2
+    exit 1
+  fi
+else
+  git clone --depth 1 --branch "${TRINITY_IMAGE_TAG}" \
+    https://github.com/abilityai/trinity.git /opt/trinity
+fi
+# --- end checkout ---
 cd /opt/trinity
 
 # A tag cut before AWS support (#3004) has a start.sh that refuses --cloud aws.
