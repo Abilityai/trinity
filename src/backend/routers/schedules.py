@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, s
 from typing import List, Optional
 from datetime import datetime
 from types import SimpleNamespace
+import asyncio
 import json
 import os
 import logging
@@ -968,7 +969,8 @@ async def take_over_schedule(
     person's Workspace (`schedule_delivers_to_another_person`). The webhook is
     revoked. A caller who already is the creator gets the schedule unchanged.
     """
-    schedule = db.get_schedule(schedule_id)
+    # #4674: a new async route reads the db off the event loop.
+    schedule = await asyncio.to_thread(db.get_schedule, schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
     try:
@@ -1004,7 +1006,7 @@ async def take_over_schedule(
             },
         )
 
-    fresh = db.get_schedule(schedule_id)
+    fresh = await asyncio.to_thread(db.get_schedule, schedule_id)
     if fresh is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
     return _schedule_response(fresh, name, current_user)
