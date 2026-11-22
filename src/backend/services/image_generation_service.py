@@ -4,7 +4,7 @@ Platform-level image generation service (IMG-001).
 Two-step pipeline:
 1. Prompt refinement — the configured Gemini text model (GEMINI_TEXT_MODEL) rewrites
    the raw prompt using best practices
-2. Image generation — Gemini 3.1 Flash Image Preview produces the actual image
+2. Image generation — the configured Gemini image model (GEMINI_IMAGE_MODEL) produces the actual image
 
 Other code (routers, services, MCP tools, agents) calls:
     await image_generation_service.generate_image("a red apple", use_case="thumbnail")
@@ -17,7 +17,7 @@ from typing import Optional
 
 import httpx
 
-from config import GEMINI_TEXT_MODEL
+from config import GEMINI_IMAGE_MODEL, GEMINI_TEXT_MODEL
 from services.image_generation_prompts import (
     USE_CASE_PROMPTS,
     VALID_ASPECT_RATIOS,
@@ -34,8 +34,7 @@ def _gemini_key() -> str:
     from services.settings_service import get_gemini_api_key
     return get_gemini_api_key()
 
-# Gemini API configuration (text model lives in config.py — env-overridable, #1130)
-GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image-preview"
+# Gemini API configuration (text and image models live in config.py — env-overridable, #1130)
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 # Timeouts
