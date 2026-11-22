@@ -1,7 +1,7 @@
 # Feature: Platform Image Generation (IMG-001)
 
 ## Overview
-Platform-level image generation service using Google Gemini models with a two-step pipeline: prompt refinement via Gemini 2.0 Flash text model, then image generation via Gemini 3.1 Flash Image Preview model. Supports use-case-specific best practices (general, thumbnail, diagram, social, avatar), configurable aspect ratios, and image-to-image variation generation from a reference image.
+Platform-level image generation service using Google Gemini models with a two-step pipeline: prompt refinement via Gemini 2.0 Flash text model, then image generation via the `GEMINI_IMAGE_MODEL` model (default `gemini-nano-banana-2.1`, #4717). Supports use-case-specific best practices (general, thumbnail, diagram, social, avatar), configurable aspect ratios, and image-to-image variation generation from a reference image.
 
 ## User Story
 As a platform user (or internal service), I want to generate high-quality images from text descriptions so that agents and platform features can produce visual content without managing their own image generation infrastructure.
@@ -246,10 +246,12 @@ Used by `avatar.py:_generate_emotions_background()` to build emotion-specific pr
 **File**: `src/backend/config.py`
 - `GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")`
 - `GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL") or "gemini-3.5-flash"` -- prompt-refinement model, env-overridable (#1130; `or`-coalesce per #1076 so an empty var can't shadow the default)
+- `GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL") or "gemini-nano-banana-2.1"` -- image-generation model, env-overridable (#4717; same coalesce)
 
 **Files**: `docker-compose.yml` + `docker-compose.prod.yml`
 - `GEMINI_API_KEY=${GEMINI_API_KEY:-}` -- Passed through from host `.env` to backend container
 - `GEMINI_TEXT_MODEL=${GEMINI_TEXT_MODEL:-gemini-3.5-flash}` -- non-empty default (#1130)
+- `GEMINI_IMAGE_MODEL=${GEMINI_IMAGE_MODEL:-gemini-nano-banana-2.1}` -- non-empty default (#4717)
 
 ---
 
