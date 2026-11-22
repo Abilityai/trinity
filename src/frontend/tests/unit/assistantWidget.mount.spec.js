@@ -834,7 +834,7 @@ describe('assistant panel', () => {
     await openPanel()
     await say('make me a review summariser')
     expect(wrapper.get('[data-testid="assistant-card"]').text()).toContain('Being made')
-    await wrapper.get('[data-testid="assistant-auto-create"]').setValue(false)     // look first
+    expect(wrapper.get('[data-testid="assistant-auto-create"]').element.checked).toBe(false)   // waits for Build by default (ent#1343)
     await vi.advanceTimersByTimeAsync(4100)
     await flushPromises()
     expect(wrapper.get('[data-testid="assistant-job"]').text()).toContain('Writing the playbook summarise (step 2 of 3)')
@@ -935,7 +935,26 @@ describe('assistant panel', () => {
     expect(sent(TURN)[0].body.message).toBe('What runs on a schedule?')
   })
 
-  it('creates the agents as soon as a build is ready, unless the person asked to look first', async () => {
+  it('a proposed build waits for the click on Build: create-when-ready is not ticked (ent#1343)', async () => {
+    vi.useFakeTimers()
+    const design = { title: 'Review summary', summary: 'Summarises reviews.', to_do_after: [],
+      agents: [{ name: 'velofix-reviews', job: 'Summarise the reviews.', credentials: [], schedule: null, calls: [] }] }
+    jobs = [{ status: 'done', steps_done: 3, steps: 3, card: { action: 'build', design_id: DESIGN_ID, design } }]
+    turns = [final('It is being made.', [{ action: 'job', job_id: DESIGN_ID, title: 'Review summary' }]), final('It is ready.'), final('velofix-reviews exists now.')]
+    await openPanel()
+    await say('make me a review summariser')
+    expect(wrapper.get('[data-testid="assistant-auto-create"]').element.checked).toBe(false)
+    await vi.advanceTimersByTimeAsync(4100)
+    await flushPromises()
+    expect(sent(`/api/enterprise/assistant/designs/${DESIGN_ID}/build`)).toHaveLength(0)    // nothing built without the click
+    expect(sent(TURN)[1].body.message).toContain('waits for their click')
+    await button('Build').trigger('click')
+    await flushPromises()
+    expect(sent(`/api/enterprise/assistant/designs/${DESIGN_ID}/build`)).toHaveLength(1)
+    vi.useRealTimers()
+  })
+
+  it('creates the agents as soon as a build is ready when the person ticks create-when-ready', async () => {
     vi.useFakeTimers()
     const design = { title: 'Review summary', summary: 'Summarises reviews.', to_do_after: [],
       agents: [{ name: 'velofix-reviews', job: 'Summarise the reviews.', credentials: [], schedule: null, calls: [] }] }
@@ -943,7 +962,7 @@ describe('assistant panel', () => {
     turns = [final('It is being made.', [{ action: 'job', job_id: DESIGN_ID, title: 'Review summary' }]), final('shop-desk exists now.')]
     await openPanel()
     await say('make me a review summariser')
-    expect(wrapper.get('[data-testid="assistant-auto-create"]').element.checked).toBe(true)
+    await wrapper.get('[data-testid="assistant-auto-create"]').setValue(true)
     await vi.advanceTimersByTimeAsync(4100)
     await flushPromises()
     expect(sent(`/api/enterprise/assistant/designs/${DESIGN_ID}/build`)).toHaveLength(1)
