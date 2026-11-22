@@ -453,7 +453,7 @@ export const useAssistantStore = defineStore('assistant', {
             id: newId(), card, label: cardLabel(card, after), note: cardNote(card),
             state: FOLLOWED.includes(card.action) ? 'making' : 'open', reason: '', progress: '', picked: '',
             since: Date.now(), fraction: null,
-            auto: card.action === 'job',       // create the agents as soon as they are ready; the person can untick it
+            auto: false,       // a proposed build waits for the owner's click on Build; they can tick create-when-ready (ent#1343)
           })),
         }
         this.messages.push(reply)
@@ -515,11 +515,11 @@ export const useAssistantStore = defineStore('assistant', {
         entry.note = cardNote(design)
         entry.state = 'open'
         if (entry.auto) {
-          // They asked for these agents and left "create when ready" ticked: no second click.
+          // They ticked "create when ready" themselves: no second click.
           for (let i = 0; this.sending && i < 300; i++) await wait(1000)
           return this.answerCard(messageId, cardId, true, route)
         }
-        line = `The design "${design.design.title}" is made and passed the standard's check. The person chose to look first: they now see it with a Build button.`
+        line = `The design "${design.design.title}" is made and passed the standard's check. They now see it with a Build button; nothing is created until they click it, so it waits for their click.`
       } else {
         entry.state = 'refused'
         entry.reason = seen?.status === 'failed' ? 'It did not pass the check.' : 'It took too long.'

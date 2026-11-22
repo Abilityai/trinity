@@ -356,7 +356,7 @@
                   <span>{{ c.progress || 'Starting' }}…</span>
                   <span class="tabular-nums flex-none">{{ elapsed(c.since) }}</span>
                 </p>
-                <!-- Their agents, their instance: on by default so nothing waits on a second click -->
+                <!-- Off by default: a proposed build waits for the owner's click on Build (ent#1343) -->
                 <label v-if="c.card.action === 'job'" class="flex items-center gap-2 text-[12.5px] text-gray-900 dark:text-gray-100">
                   <input v-model="c.auto" type="checkbox" class="rounded" data-testid="assistant-auto-create" />
                   Create them here as soon as they're ready
