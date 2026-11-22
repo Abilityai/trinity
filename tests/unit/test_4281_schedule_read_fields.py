@@ -371,8 +371,9 @@ def test_the_memo_and_the_bulk_reads_answer_as_the_database_does(world):
         for username in names:
             assert memo.can_user_share_agent(username, agent) == bool(db.can_user_share_agent(username, agent)), (
                 agent, username)
-    assert db.get_agent_owners(agents) == {a: db.get_agent_owner(a) for a in agents if db.get_agent_owner(a)}
-    assert db.get_agent_owner(orphan) is None and orphan not in db.get_agent_owners(agents)
+    # #4671's batch form maps every name asked for; no owner on record is None.
+    assert db.get_agent_owners(agents) == {a: db.get_agent_owner(a) for a in agents}
+    assert db.get_agent_owner(orphan) is None and db.get_agent_owners(agents)[orphan] is None
     ids = [p.id for p in people] + [987654320]
     assert db.get_users_by_ids(ids) == {i: db.get_user_by_id(i) for i in ids if db.get_user_by_id(i)}
     assert db.get_users_by_ids([]) == {} and db.get_agent_owners([]) == {}

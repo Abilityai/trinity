@@ -24,6 +24,7 @@ import httpx
 
 from database import db
 from redis_breaker_util import get_breaker_redis
+from services import loop_health
 from services.agent_auth import agent_httpx_client
 from services.model_context import DEFAULT_CONTEXT_WINDOW
 from db_models import (
@@ -1067,7 +1068,8 @@ class MonitoringService:
                 self._is_leader = leader
 
                 if leader:
-                    await self._run_check_cycle()
+                    with loop_health.tick("monitoring"):
+                        await self._run_check_cycle()
             except Exception as e:
                 print(f"Monitoring check cycle failed: {e}")
 

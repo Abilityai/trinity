@@ -1125,6 +1125,11 @@ class DatabaseManager:
     def get_user_by_email(self, email: str):
         return self._user_ops.get_user_by_email(email)
 
+    def get_users_by_emails(self, emails):
+        # #4671: the batch form — one query, and it answers the per-email read
+        # for the rest of a `request_memo.scope()`.
+        return self._user_ops.get_users_by_emails(emails)
+
     def create_user(self, user_data: UserCreate):
         return self._user_ops.create_user(user_data)
 
@@ -1217,6 +1222,7 @@ class DatabaseManager:
         return self._agent_ops.get_agent_owner(agent_name)
 
     def get_agent_owners(self, agent_names):
+        # #4671: the batch form of `get_agent_owner`.
         return self._agent_ops.get_agent_owners(agent_names)
 
     def get_agents_by_owner(self, owner_username: str):
@@ -1345,6 +1351,10 @@ class DatabaseManager:
 
     def is_agent_shared_with_user(self, agent_name: str, username: str):
         return self._agent_ops.is_agent_shared_with_user(agent_name, username)
+
+    def agents_shared_with_user(self, agent_names, username: str):
+        # #4671: the batch form of `is_agent_shared_with_user`.
+        return self._agent_ops.agents_shared_with_user(agent_names, username)
 
     def can_user_share_agent(self, username: str, agent_name: str):
         return self._agent_ops.can_user_share_agent(username, agent_name)
@@ -1627,6 +1637,10 @@ class DatabaseManager:
 
     def get_execution_timeout(self, agent_name: str) -> int:
         return self._agent_ops.get_execution_timeout(agent_name)
+
+    def get_execution_timeouts(self, agent_names) -> dict:
+        # #4672: the batch form of `get_execution_timeout`.
+        return self._agent_ops.get_execution_timeouts(agent_names)
 
     def get_all_execution_timeouts(self) -> dict:
         return self._agent_ops.get_all_execution_timeouts()
@@ -2112,6 +2126,10 @@ class DatabaseManager:
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
 
+    def get_executions_by_ids(self, execution_ids):
+        # #4672: the batch form of `get_execution`.
+        return self._schedule_ops.get_executions_by_ids(execution_ids)
+
     def get_turn_attribution(self, execution_id: str):
         """One execution's rating columns and status (trinity-enterprise#1225)."""
         return self._schedule_ops.get_turn_attribution(execution_id)
@@ -2543,6 +2561,10 @@ class DatabaseManager:
 
     def get_gate_request(self, request_id: str):
         return self._skill_gate_request_ops.get_gate_request(request_id)
+
+    def get_gate_requests(self, request_ids):
+        # #4671: the batch form of `get_gate_request`.
+        return self._skill_gate_request_ops.get_gate_requests(request_ids)
 
     def get_gate_request_by_dispatched_execution(self, execution_id: str):
         return self._skill_gate_request_ops.get_gate_request_by_dispatched_execution(execution_id)
@@ -4278,6 +4300,10 @@ class DatabaseManager:
     def get_operator_queue_item(self, item_id):
         return self._operator_queue_ops.get_item(item_id)
 
+    def get_operator_queue_items_by_ids(self, item_ids):
+        # #4671: the batch form of `get_operator_queue_item`.
+        return self._operator_queue_ops.get_items(item_ids)
+
     def get_operator_queue_item_for_agent_by_request_id(self, agent_name, request_id):
         # trinity-enterprise#611: the agent's own readback — ignores Clear All.
         return self._operator_queue_ops.get_item_for_agent_by_request_id(agent_name, request_id)
@@ -4878,6 +4904,10 @@ class DatabaseManager:
 
     def list_loop_runs(self, loop_id: str):
         return self._loop_ops.list_runs(loop_id)
+
+    def list_loop_runs_for_loops(self, loop_ids):
+        # #4672: the batch form of `list_loop_runs`.
+        return self._loop_ops.list_runs_for_loops(loop_ids)
 
     # ---- Terminal-driven advance (#2523) -----------------------------------
 

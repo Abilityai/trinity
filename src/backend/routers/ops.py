@@ -10,6 +10,7 @@ Provides endpoints for platform-wide operations:
 
 These endpoints are admin-only and intended for platform operations.
 """
+import asyncio
 import os
 import logging
 import concurrent.futures
@@ -52,6 +53,14 @@ logger = logging.getLogger(__name__)
 # Fleet Status & Health
 # ============================================================================
 
+# #4672: `/fleet/status` asks every running agent for its session. Each ask is
+# bounded and they run side by side, so the response takes about as long as the
+# slowest answer that arrives in time — never the sum, and never longer than
+# the bound because of one wedged agent.
+FLEET_STATUS_AGENT_TIMEOUT_S = 3.0
+FLEET_STATUS_CONCURRENCY = 10
+
+
 @router.get("/fleet/status")
 async def get_fleet_status(
     request: Request,
@@ -74,28 +83,39 @@ async def get_fleet_status(
     fleet_status = []
     context_stats = {}
 
-    # Try to get context stats for running agents using AgentClient
+    # Context stats for the running agents. #4672: read CONCURRENTLY, each
+    # under its own bound — awaited one after another, one slow agent held the
+    # whole response (and the mobile admin polls this every 15 s). An agent
+    # that does not answer in time simply has no context in this response,
+    # exactly as one that errors.
     running_agents = [a for a in agents if a.status == "running"]
-    for agent in running_agents:
-        agent_name = agent.name
+    gate = asyncio.Semaphore(FLEET_STATUS_CONCURRENCY)
+
+    async def _context(agent_name: str):
         try:
-            client = get_agent_client(agent_name)
-            session_info = await client.get_session()
-            if session_info:
-                context_stats[agent_name] = {
-                    "context_tokens": session_info.context_tokens,
-                    "context_window": session_info.context_window,
-                    "context_percent": session_info.context_percent
-                }
-        except Exception:
-            pass  # Agent not responding, skip context
+            async with gate:
+                session_info = await asyncio.wait_for(
+                    get_agent_client(agent_name).get_session(), FLEET_STATUS_AGENT_TIMEOUT_S)
+        except Exception:  # noqa: BLE001 — not responding / too slow: skip its context
+            return
+        if session_info:
+            context_stats[agent_name] = {
+                "context_tokens": session_info.context_tokens,
+                "context_window": session_info.context_window,
+                "context_percent": session_info.context_percent
+            }
+
+    await asyncio.gather(*(_context(a.name) for a in running_agents))
+
+    # #4672: every agent's owner row in one query, not one per agent.
+    owners = db.get_agent_owners([a.name for a in agents])
 
     # Get last activity for each agent
     for agent in agents:
         agent_name = agent.name
 
         # Get owner info
-        owner = db.get_agent_owner(agent_name)
+        owner = owners.get(agent_name)
         is_system = owner.get("is_system", False) if owner else False
 
         # Get last activity from database

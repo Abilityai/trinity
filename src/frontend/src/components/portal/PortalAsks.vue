@@ -126,6 +126,15 @@
            the same one Operations draws (one object, two windows). -->
       <GatedSkillRequest v-if="isGateCard(ask)" :item="ask" class="mt-2" />
       <QueueProposal v-else-if="ask.proposal" :proposal="ask.proposal" class="mt-2" />
+      <!-- trinity-enterprise#1234: a steward's kickoff plan is too big for these
+           rows; the platform attached its project, where the whole plan is. -->
+      <router-link
+        v-if="ask.project?.event === 'plan_proposal' && ask.project?.id"
+        :to="{ name: 'WorkspaceProject', params: { projectId: ask.project.id } }"
+        :class="INBOX_LINK_CLASS"
+        class="mt-1 text-sm font-medium"
+        :data-testid="`${tid.prefix}-plan-${ask.id}`"
+      >Open the whole plan</router-link>
       <!-- ent#610 §3g L6 (E2 seam): the agent's brief — Why now, then what it
            recommends — after the proposal and before the options. Kept on an
            ended ask, like the proposal: it says what the decision was about. -->
@@ -413,7 +422,7 @@ import PortalCredentialField from './PortalCredentialField.vue'
 import { agentLabels } from './portalInbox'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
-  expiredLabel, askThreadLink, answerConfirmation, ANSWER_CONFIRMATION_MS,
+  expiredLabel, askThreadLink, answerConfirmation, ANSWER_CONFIRMATION_MS, INBOX_LINK_CLASS,
 } from './portalUtils'
 import { queueResponseKind, buildQueueResponse, queueTypeLabel } from '@/utils/operatorQueue'
 // #2915: the same home; a second line so the #2375 import pin above stays byte-exact.

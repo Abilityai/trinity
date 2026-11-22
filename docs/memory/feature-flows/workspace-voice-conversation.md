@@ -230,6 +230,33 @@ resend-dedup read (`limit=1`) and the voice prompt's own opening context keep
 row semantics — the latter trims oldest-first at 3 000 chars and would have
 lost the newest turns under a wider window.
 
+**Past the window — "Show earlier" (trinity-enterprise#594).** The window
+read takes a `before` cursor: `GET …/history?before=<created_at>|<id>` (the
+previous read's `next_before`) reads the same window shape strictly OLDER than
+that row — the cursor joins the base predicate, so the threshold and the range
+both page, and it is compared as the stored strings against the same
+`created_at DESC, id DESC` order (never parsed), so a page boundary inside a
+run of equal stamps loses and repeats nothing. `PortalHistory.has_earlier` is
+one `LIMIT 1` probe below the oldest row returned — it covers the ceiling cut
+AND a thread of more than 100 typed turns, whose head `truncated` never
+reported — and `next_before` is that oldest row's cursor (None on the last
+page). A malformed cursor, or one sent with `limit`, is a named 422
+`invalid_cursor`; an older page carries no in-flight or last-outcome state;
+the cold replay (20 typed turns) is never cursored. `truncated` stays one
+release for tabs on the old client. In `PortalConversation.vue` the notice is
+now a control above the first row (one fixed-height row: "Show earlier", a
+failed page's "Couldn't load earlier messages" with the same control retrying,
+"Start of this chat" once paging reached the head). A page is prepended by
+`portalThreadPages.js::prependEarlier` (dedupe by id, turns re-paired across
+the seam by `executionId`), inside `useStickToBottom.holdPosition`, which
+restores the reader's distance from the bottom after the patch and re-applies
+it on late growth until their own scroll, a pin or an arrival. A same-thread
+reload (a call ended) merges the newest window under the loaded pages
+(`mergeWindow`); a thread switch drops them, and a page landing after the
+switch is ignored. A call cut by a page boundary folds into one block once the
+pages meet (`groupVoiceBlocks` is keyed on the call id across the whole array).
+Out of scope: a deep-link anchor to a message older than the window, and rooms.
+
 **The reply poll pays for none of it.** `awaitPersistedReply` polls history
 every 700 ms early in a turn; over the window that would be hundreds of KB per
 tick, and its count-based detector would break — between the baseline and a

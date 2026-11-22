@@ -74,6 +74,7 @@ import re
 import stat
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
@@ -82,6 +83,8 @@ from database import db
 from dependencies import hash_password
 from services.system_seed_service import ensure_first_run_seeded
 from services.operator_intake_service import submit_operator_intake
+from services.admin_email_allowlist import allow_list_admin_email, mark_backfill_done
+from services import setup_registration, terms_service
 from utils.password_validation import validate_password_strength, PASSWORD_REQUIREMENTS_MESSAGE
 from utils.admin_identity import admin_username, is_usable_password_hash
 from routers.auth import check_login_rate_limit, record_login_attempt
@@ -288,6 +291,31 @@ async def get_setup_status():
     }
 
 
+@router.get("/registration-terms")
+async def get_registration_terms():
+    """The registration terms the first admin accepts at setup (trinity-enterprise#1329).
+
+    No auth. Answers only while setup is open AND a provider of registration
+    terms is registered and applies (asked per request, so a change after the
+    process started is seen in every worker); otherwise 404, so a
+    self-installed instance has no such route in effect. The handler takes nothing from the caller: it never
+    reads, and so can never forward, a claim code. The provider's answer is
+    cached for 60 s, an unavailable answer for 10 s, and concurrent cold
+    calls share one provider fetch, so provider load does not grow with the
+    number of callers.
+
+    200 ``{"version", "title", "text", "url"}``; 503
+    ``{"code": "registration_terms_unavailable", "retryable": true, ...}``.
+    """
+    if db.get_setting_value('setup_completed', 'false') == 'true' or \
+            setup_registration.active_provider() is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        return await setup_registration.current_terms()
+    except setup_registration.RegistrationTermsError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail()) from None
+
+
 @router.post("/admin-password")
 async def set_admin_password(
     data: SetAdminPasswordRequest, request: Request, background_tasks: BackgroundTasks
@@ -401,6 +429,27 @@ async def set_admin_password(
     # #3004: take the claim only now, after every 400 above, so a rejected
     # password or email leaves it in place for the owner's retry. If the writes
     # below raise, it is put back for the same reason.
+    # trinity-enterprise#1329: on an emailed link, when a provider of
+    # registration terms is registered, the accepted version is re-checked
+    # against the provider's CURRENT version here, before the claim is taken:
+    # every refusal (missing, stale, provider unreachable) leaves the claim in
+    # place and writes nothing. Inert with no provider, and never on the
+    # instance-ID form (a self-installed path).
+    registration_version = None
+    if (
+        claim_mode
+        and setup_registration.provider() is not None
+        and _read_claim_file(_SETUP_CLAIM_PATH).strip().startswith(_EMAIL_BOUND_PREFIX)
+    ):
+        # A provider that could not say whether it applies refuses here
+        # (retryable 503) rather than letting setup past the terms.
+        try:
+            registration_version = await setup_registration.check_accepted_if_applies(
+                data.registration_terms_version
+            )
+        except setup_registration.RegistrationTermsError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.detail()) from None
+
     taken_claim = _take_claim(data.claim_code, data.email) if claim_mode else None
     # trinity-enterprise#1312: on the email-bound form the email is the admin's
     # only sign-in identity, so it is stored in the same write as the password
@@ -430,6 +479,23 @@ async def set_admin_password(
                     status_code=503,
                     detail="Setup could not be saved, and nothing was changed. Please try again.",
                 ) from None
+
+        # trinity-enterprise#1329: the acceptance is kept right after the admin
+        # is written and before setup is marked complete, so a setup that
+        # completes always has it, and a failed admin write leaves no
+        # acceptance behind. A failed acceptance write puts the claim back.
+        if registration_version is not None:
+            try:
+                setup_registration.record_acceptance(
+                    registration_version, _get_client_ip(request)
+                )
+            except Exception as e:
+                logger.warning("Setup could not keep the registration acceptance: %s",
+                               type(e).__name__)
+                raise HTTPException(
+                    status_code=503,
+                    detail="Setup could not be saved, and nothing was changed. Please try again.",
+                ) from None
     except BaseException:
         if taken_claim is not None:
             _restore_claim(taken_claim)
@@ -447,6 +513,33 @@ async def set_admin_password(
             email_registered = True
         except Exception as e:  # never block setup on a profile write
             logger.warning("Failed to register admin email at setup: %s", type(e).__name__)
+
+    # #4693: the email is a sign-in identity only once it is on the allow-list,
+    # which every email-code request and redeemer asks. Both forms land here.
+    if email_registered:
+        allow_list_admin_email(normalized_email)
+    mark_backfill_done()  # this install needs no boot backfill
+
+    # trinity-enterprise#1329 (P2): on the registration-terms path only, the
+    # setup admin has just accepted terms at the door, so they are recorded as
+    # having accepted the instance's own terms of use for the version in force
+    # now — they are not shown that page. A later version asks them again
+    # (acceptance is per version); people invited later are asked as before.
+    # Never fails setup.
+    if registration_version is not None:
+        try:
+            admin_row = db.get_user_by_username(admin_username()) or {}
+            if admin_row.get("id") is not None:
+                await terms_service.accept(
+                    SimpleNamespace(id=admin_row["id"], email=admin_row.get("email"),
+                                    username=admin_username()),
+                    terms_service.current_version(),
+                    actor_ip=_get_client_ip(request), door="setup",
+                    endpoint="/api/setup/admin-password",
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Setup could not record the admin's terms acceptance: %s",
+                           type(e).__name__)
 
     # Mark setup as completed.
     db.set_setting('setup_completed', 'true')

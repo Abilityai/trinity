@@ -1,6 +1,70 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4674_loop_health.py",
+      "feature": "#4674",
+      "added": "2026-11-20",
+      "categories": [
+        "backend",
+        "reliability",
+        "observability"
+      ],
+      "description": "#4671/#4674: services/loop_health.py — a blocked event loop is reported once with pid, duration and the blocking frame (a merely busy or awaiting loop is not); a captured stack belongs to its own stall; only code locations are logged; tick timing names slow background cycles; the six loops are wrapped with the sleep outside; BACKEND_WORKERS is configurable with default 2 in prod and hosted compose."
+    },
+    {
+      "file": "unit/test_4672_list_query_counts.py",
+      "feature": "#4672",
+      "added": "2026-11-20",
+      "categories": [
+        "backend",
+        "performance"
+      ],
+      "description": "#4672: the Workspace roster's canvas flag, the operator queue's gate cards, the loops list, autonomy-status, the Work feed, the schedules list and the evaluations operator check each run the same number of queries at two sizes, and each answer equals the unbatched per-item answer."
+    },
+    {
+      "file": "unit/test_4672_fleet_reads.py",
+      "feature": "#4672",
+      "added": "2026-11-20",
+      "categories": [
+        "backend",
+        "performance",
+        "ops"
+      ],
+      "description": "#4672: /api/ops/fleet/status reads agents concurrently under a per-agent bound (one wedged agent cannot hold the response) with one owners read; context-stats caches past the 15 s poll and per caller for non-admins, always filtered to current access."
+    },
+    {
+      "file": "unit/test_4671_asks_query_count.py",
+      "feature": "#4671",
+      "added": "2026-11-20",
+      "categories": [
+        "backend",
+        "workspace",
+        "performance"
+      ],
+      "description": "#4671: list_asks_page runs a fixed number of queries whatever it lists (was ~4 per row plus 2 per agent); visibility, the per-agent roster re-check and the 503 asks_unavailable contract are unchanged."
+    },
+    {
+      "file": "unit/test_4671_request_memo.py",
+      "feature": "#4671",
+      "added": "2026-11-20",
+      "categories": [
+        "backend",
+        "performance"
+      ],
+      "description": "#4671/#4672: utils/request_memo contract (no cache outside a scope, nothing outlives one, no cross-principal answer, failures not remembered) and the db batch readers match their per-item twins."
+    },
+    {
+      "file": "unit/test_ent1329_setup_registration_terms.py",
+      "feature": "trinity-enterprise#1329",
+      "added": "2026-11-21",
+      "categories": [
+        "backend",
+        "setup",
+        "terms"
+      ],
+      "description": "trinity-enterprise#1329: a registered provider of registration terms gates first-run setup from an emailed link (required/changed/unavailable, claim untouched), the terms route, the recorded acceptance, and the setup admin's instance-terms acceptance. Inert with no provider."
+    },
+    {
       "file": "unit/test_4564_capacity_db_bound.py",
       "feature": "#4564",
       "added": "2026-11-13",
@@ -8028,6 +8092,18 @@
       "description": "Self-test for scripts/ci/check_sqlite_upgrade_parity.py, the schema-parity CI step that builds an install with the PR's merge-base code, upgrades it with the checkout's lifecycle, and requires every schema.py table, column, index and trigger to arrive with migration_health at (n, n, None). Drives the comparison core over synthetic two-file backends (db/schema.py + db/migrations.py in tmp_path, no git, no backend deps): a registered migration passes; a migration written but not registered, and a schema.py column with no migration at all, are each a gap naming t.b (the existing-install shape no fresh-install comparison sees, because init_schema creates the table with the column on a fresh DB); a brand-new init_schema-only table is no false red; an unbuildable base fails closed (exit 2, never a pass). Also: a head lifecycle raising on the upgraded install (an index on a column no migration adds); an index, trigger or table a migration drops after init_schema; a registered migration left unrecorded, a renamed migration and a duplicate registration are gaps. The restated lifecycle is pinned (migrations before init_schema, the second pass, a sqlite3.Row connection as production opens it). A head that does not import, a usage error, no base/head, no repository and an unresolvable merge-base fail closed (exit 2); main() end to end over a throwaway git repository. A broken merge-base (a broken dev) is walked back over first-parent ancestors to the newest that builds, with a warning naming the skipped commit, so the PR that repairs dev passes; a gap over that longer range is still a gap; the walk is bounded by MAX_BASE_WALKBACK and exits 2 when exhausted, as does a broken root with no ancestor. A PR branched inside the broken range is told, on an exhausted walk, to merge the repaired base branch in, and passes once it has."
     },
     {
+      "file": "unit/test_4685_health_measured_zero.py",
+      "feature": "#4685",
+      "added": "2026-11-21",
+      "categories": [
+        "backend",
+        "unit",
+        "monitoring",
+        "api"
+      ],
+      "description": "GET /api/monitoring/agents/{name} reports a measured 0.0 uptime_percent_24h and 0.0 avg_latency_24h_ms as 0.0, not null (#4685); real DB via db_harness, handler called directly. An agent with only unreachable aggregate checks in the window reads uptime 0.0, a measured 0 ms network latency reads 0.0, and an agent with no checks in the 24h window still reads None for both."
+    },
+    {
       "file": "unit/test_3950_fleet_health_current.py",
       "feature": "#3950",
       "added": "2026-10-26",
@@ -9581,6 +9657,63 @@
         "setup"
       ],
       "description": "PROV-020 (real router): on a completed install a /setup visit carrying link values goes to /login?notice=setup-complete with nothing of the link forwarded, a plain /setup to a bare /login; scrub() redacts claim= in queries and fragments."
+    },
+    {
+      "file": "unit/test_4693_admin_email_code_login.py",
+      "feature": "#4693",
+      "added": "2026-11-20",
+      "categories": [
+        "backend",
+        "unit",
+        "auth",
+        "setup"
+      ],
+      "description": "Setup with an email (password form and emailed-link form) allow-lists the admin's address, so an email-code request mints a code and dispatches a send; another address still creates nothing; boot backfill and the admin's email change are wired."
+    },
+    {
+      "file": "unit/test_ent594_thread_cursor.py",
+      "feature": "trinity-enterprise#594",
+      "added": "2026-11-21",
+      "categories": [
+        "backend",
+        "unit",
+        "workspace"
+      ],
+      "description": "Workspace thread history pages with a `before` cursor: pages are strictly older and concatenate to the whole thread; a shared boundary stamp loses or repeats nothing; a ceiling-cut call continues on the next page; has_earlier is true for >100 typed turns without a ceiling cut; the route names a malformed cursor or cursor+limit as 422 invalid_cursor."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalThreadPages.spec.js",
+      "feature": "trinity-enterprise#594",
+      "added": "2026-11-21",
+      "categories": [
+        "frontend",
+        "unit",
+        "workspace"
+      ],
+      "description": "prependEarlier/mergeWindow keep pages ordered and deduped, re-pair a reply with a question on the other page, fold a voice call split across pages into one block; holdPosition keeps the reader's distance from the bottom through a prepend and late growth and lets go on a real scroll, a pin or an arrival."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalThreadEarlier.mount.spec.js",
+      "feature": "trinity-enterprise#594",
+      "added": "2026-11-21",
+      "categories": [
+        "frontend",
+        "unit",
+        "workspace"
+      ],
+      "description": "Mounted PortalConversation: Show earlier prepends the older window and keeps newer rows, restores scrollTop, ends at 'Start of this chat', shows a failed state that retries, is disabled while sending, survives a post-call reload, resets on a thread switch (dropping a stale page), and settles an in-flight turn's failure on the right row; the store maps has_earlier/next_before and sends before."
+    },
+    {
+      "file": "unit/test_4603_login_code_limit_signal.py",
+      "feature": "#4603",
+      "added": "2026-11-21",
+      "categories": [
+        "backend",
+        "unit",
+        "auth",
+        "security"
+      ],
+      "description": "The web code door answers 429 with the channel doors' sentence when the shared per-address budget refuses, identically for members and outsiders; the code-row gate stays byte-identical to the success and not-allow-listed answers."
     }
   ]
 }
