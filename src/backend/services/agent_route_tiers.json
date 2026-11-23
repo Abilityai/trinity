@@ -1495,6 +1495,12 @@
   "reason": "ent#875: the schedule's creator or the agent's owner (can_manage_webhook)",
   "tier": "resource"
  },
+ "schedules.py::take_over_schedule": {
+  "method": "POST",
+  "path": "/api/agents/{name}/schedules/{schedule_id}/take-over",
+  "standing_work": true,
+  "tier": "owner"
+ },
  "schedules.py::trigger_schedule": {
   "method": "POST",
   "path": "/api/agents/{name}/schedules/{schedule_id}/trigger",
