@@ -175,6 +175,7 @@ import { shouldCancelOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from 
 import ModelSelector from './ModelSelector.vue'
 import { apiErrorMessage } from '../utils/apiError'
 import { isGateRefusal, pendingApprovalMessage, storedChatMessage } from '../utils/skillGate'
+import { mergeSessionMessages, panelMessage } from '../utils/chatSessionMerge'
 import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } from '../utils/execution-status'
 
 const props = defineProps({
@@ -374,13 +375,7 @@ const selectSession = async (session, closeDropdown = true) => {
     })
 
     // Load messages from session (already ordered ASC by backend)
-    messages.value = (response.data.messages || []).map(storedChatMessage).map(msg => ({
-      role: msg.role,
-      content: msg.content,
-      timestamp: msg.timestamp,
-      source: msg.source || 'text',
-      held: msg.held,
-    }))
+    messages.value = (response.data.messages || []).map(storedChatMessage).map(panelMessage)
   } catch (err) {
     console.error('Failed to load session:', err)
     error.value = 'Failed to load conversation history'
@@ -851,30 +846,40 @@ watch(() => skillsStore.changedAt[props.agentName], (tick, prev) => {
 })
 
 // #4537 — a reply was written into this agent's chat outside a turn this panel
-// is waiting on (a wake reporting back on a delegation). Refetch the session
-// on screen, in place: no loading state, and only when it grew, so nothing a
-// person is reading moves. A turn in flight reloads on its own when it ends.
+// is waiting on (a wake reporting back on a delegation). Re-read the session on
+// screen, in place: no loading state, and the list changes only when the server
+// holds a message the screen does not show (`mergeSessionMessages`), so nothing
+// a person is reading moves.
+//
+// While a turn is in flight (or a session is loading) the re-read waits for it:
+// a turn's end pushes its own reply locally and never refetches the messages,
+// so a reply that landed meanwhile would otherwise not appear until a reload.
+let refreshWaitingFor = null
 const refreshOpenSession = async (sessionId) => {
-  if (!sessionId || sessionId !== currentSessionId.value || loading.value) return
+  if (!sessionId || sessionId !== currentSessionId.value) return
+  if (loading.value) { refreshWaitingFor = sessionId; return }
   try {
     const response = await axios.get(`/api/agents/${props.agentName}/chat/sessions/${sessionId}`, {
       headers: authStore.authHeader
     })
-    const fresh = (response.data.messages || []).map(storedChatMessage).map(msg => ({
-      role: msg.role,
-      content: msg.content,
-      timestamp: msg.timestamp,
-      source: msg.source || 'text',
-      held: msg.held,
-    }))
-    if (sessionId !== currentSessionId.value || loading.value) return
-    if (fresh.length > messages.value.length) messages.value = fresh
+    const fresh = (response.data.messages || []).map(storedChatMessage).map(panelMessage)
+    if (sessionId !== currentSessionId.value) return
+    // A turn began while this read was out: it is read again when that ends.
+    if (loading.value) { refreshWaitingFor = sessionId; return }
+    const merged = mergeSessionMessages(messages.value, fresh)
+    if (merged) messages.value = merged
   } catch (err) {
     console.error('Failed to refresh session:', err)
   }
 }
 watch(() => agentsStore.chatReplyAt[props.agentName], (tick, prev) => {
   if (tick && tick.at !== prev?.at) refreshOpenSession(tick.sessionId)
+})
+watch(loading, (busy) => {
+  if (busy || !refreshWaitingFor) return
+  const sessionId = refreshWaitingFor
+  refreshWaitingFor = null
+  refreshOpenSession(sessionId)
 })
 
 onUnmounted(() => {
