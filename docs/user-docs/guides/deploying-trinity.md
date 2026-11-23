@@ -219,7 +219,7 @@ It checks Docker, the six core containers, the HTTP health endpoints, the base a
 | Frontend | `curl -s -o /dev/null -w '%{http_code}' http://localhost` | `200` |
 | Redis | `docker exec trinity-redis redis-cli ping` | `PONG` |
 | MCP Server | `curl -s http://localhost:8080/health` | HTTP 200 |
-| Vector | `docker exec trinity-vector wget -q -O - http://localhost:8686/health` | Non-empty response |
+| Vector | `docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health` | Non-empty response |
 
 > The scheduler's port 8001 is not published to the host by any compose file, so probe it from inside its container: `docker exec trinity-scheduler curl -sf http://localhost:8001/health`. `verify-platform.sh` treats a failed scheduler probe as a warning for this reason.
 

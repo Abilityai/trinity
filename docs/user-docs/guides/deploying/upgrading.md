@@ -205,7 +205,7 @@ curl -s http://localhost:8080/health
 # Expected: 200 OK
 
 # 6. Vector (log aggregation)
-docker exec trinity-vector wget -q -O - http://localhost:8686/health
+docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health
 # Expected: non-empty response
 ```
 
