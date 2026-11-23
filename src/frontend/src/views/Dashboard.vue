@@ -7,6 +7,10 @@
            (ent#261) — this column does NOT scroll (panes scroll internally),
            so absolutely-positioned chrome here never scrolls away. -->
       <div class="relative flex flex-col flex-1 overflow-hidden">
+        <!-- trinity-enterprise#1355: the example agents, kept off the first screen, on request -->
+        <div v-if="networkStore.hiddenExamples.length" class="absolute right-3 bottom-3 z-20" data-testid="dashboard-examples-hidden">
+          <BaseButton variant="secondary" size="sm" @click="showExamples">Show the example agents Trinity came with</BaseButton>
+        </div>
         <!-- Getting started, where there is no assistant to hold it (ent#238).
              Floating in the corner, out of the page flow: the entitlement
              answer lands a round-trip after paint, and here it moves nothing. -->
@@ -529,6 +533,7 @@ import ReplayTimeline from '@/components/ReplayTimeline.vue'
 import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import SystemViewsMenu from '@/components/SystemViewsMenu.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
+import BaseButton from '@/components/base/BaseButton.vue'
 import ActivationChecklist from '@/components/onboarding/ActivationChecklist.vue'
 import { useAssistantStore } from '@/stores/assistant'
 import { useOnboardingStore } from '@/stores/onboarding'
@@ -538,6 +543,8 @@ import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useNetworkStore } from '@/stores/network'
+import { useFirstRunStore } from '@/stores/firstRun'
+import { SHOW_EXAMPLES_KEY, examplesToHide } from '@/utils/firstSession'
 import { useAuthStore } from '@/stores/auth'
 import { useSystemViewsStore } from '@/stores/systemViews'
 import { storeToRefs } from 'pinia'
@@ -552,6 +559,32 @@ const networkStore = useNetworkStore()
 const systemViewsStore = useSystemViewsStore()
 const assistantStore = useAssistantStore()
 const onboardingStore = useOnboardingStore()
+// trinity-enterprise#1355: where the assistant leads the first session, the
+// agents the install came with stay off this screen until the person has an
+// agent of their own, or asks to see them.
+const firstRunStore = useFirstRunStore()
+const examplesShown = ref(readExamplesShown())
+function readExamplesShown() {
+  try {
+    return localStorage.getItem(SHOW_EXAMPLES_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+function showExamples() {
+  examplesShown.value = true
+  try {
+    localStorage.setItem(SHOW_EXAMPLES_KEY, 'true')
+  } catch { /* shown for this visit */ }
+}
+const ownAgentCount = computed(() => networkStore.agents
+  .filter((a) => !a.is_system && !(firstRunStore.seededAgents || []).includes(a.name)).length)
+watch(
+  () => examplesToHide(assistantStore.status, firstRunStore.seededAgents, ownAgentCount.value, examplesShown.value),
+  (names) => networkStore.setHiddenExamples(names),
+  { immediate: true },
+)
+onUnmounted(() => networkStore.setHiddenExamples([]))
 // The checklist fetches its own steps once mounted; it is mounted only once there are some to show.
 watch(() => assistantStore.corner, (c) => { if (c === 'help') onboardingStore.fetchChecklist() }, { immediate: true })
 const route = useRoute()

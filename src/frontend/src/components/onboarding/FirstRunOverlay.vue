@@ -144,6 +144,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../../stores/auth'
 import { useSessionsStore } from '../../stores/sessions'
 import { useFirstRunStore } from '../../stores/firstRun'
+import { useAssistantStore } from '../../stores/assistant'
 import { useProductTelemetryStore } from '../../stores/productTelemetry'
 import BaseButton from '../base/BaseButton.vue'
 import ConfirmDialog from '../ConfirmDialog.vue'
@@ -184,6 +185,7 @@ const open = defineModel('open', { type: Boolean, default: false })
 
 const route = useRoute()
 const router = useRouter()
+const assistant = useAssistantStore()
 const auth = useAuthStore()
 const sessions = useSessionsStore()
 const firstRun = useFirstRunStore()
@@ -231,6 +233,10 @@ const ctx = computed(() => ({
   telemetryFirstValue: sessions.telemetrySharingFirstValue,
   firstRun: firstRun.firstRun,
   demoAgent: firstRun.demoAgent,
+  // trinity-enterprise#1355: the instance says the assistant leads its first
+  // session; the corner must be decided before this dialog may open by itself.
+  assistantDecided: assistant.corner !== 'undecided',
+  assistantLeads: assistant.corner === 'assistant' && !!assistant.status?.leads_setup,
   forced: forced.value,
   closed: closed.value,
   skipped: skipped.value,

@@ -28,6 +28,9 @@ let subTerms             // what GET /subscription/terms answers
 let refusals = {}        // url → [{ status, detail }], thrown in order by the by-code routes
 let confirmEmail         // the `email` /subscription/confirm answers: masked or null at the door
 let codeVersion          // the terms version /subscription/code names; undefined: the one served
+let agentsList = null    // what /api/agents answers when set (ent#1355: an instance with no agent of the person's own)
+let credentialAnswer     // what POST /credential answers (ent#1355: the instance's save, count and check)
+let agentsWait = null    // when set, /api/agents answers only once this settles (a slow agent list)
 
 vi.mock('@/api', () => {
   const respond = (method, url, body) => {
@@ -42,7 +45,11 @@ vi.mock('@/api', () => {
       }
       if (url.endsWith('/subscription/confirm')) return { plan: 'pro', billing: 'unbilled', checkout_url: null, email: confirmEmail }
     }
-    if (url === '/api/enterprise/assistant/status') return statusReads.length ? statusReads.shift() : { ...status }
+    if (url === '/api/enterprise/assistant/status') {
+      const read = statusReads.length ? statusReads.shift() : { ...status }
+      if (read.fails) throw { response: { status: 500, data: { detail: 'The assistant is not answering.' } } }
+      return read
+    }
     if (url === '/api/enterprise/assistant/turn' || url === '/api/enterprise/assistant/turn/continue') {
       return turns.shift() || { status: 'final', conversation_id: 'c1', text: 'Done.', cards: [], allowance: ALLOWANCE }
     }
@@ -58,6 +65,8 @@ vi.mock('@/api', () => {
       status = { ...status, contacted: true, reachable: true, plan: 'free', allowance: ALLOWANCE, trial_terms: { version: 't0', url: '', accepted: 't0' }, nudge: afterAgreeing }
       return { plan: 'free', email: null, allowance: ALLOWANCE, trial_terms: { version: 't0', url: '', accepted: 't0' } }
     }
+    if (url === '/api/enterprise/assistant/credential' && method === 'get') return { set: false }
+    if (url === '/api/enterprise/assistant/credential') return credentialAnswer
     if (url === '/api/enterprise/assistant/feedback') return { ok: true }
     if (url === '/api/enterprise/assistant/opened') return { ok: true }
     if (url === '/api/enterprise/onboarding/checklist') return checklist
@@ -75,6 +84,7 @@ vi.mock('@/api', () => {
       throw { response: { status: 409, data: { detail: { code: 'sign_in_first', message: 'Accept the current terms first.' } } } }
     }
     if (url === '/api/enterprise/assistant/subscription/start') return { plan: 'pro', billing: 'unbilled', checkout_url: null, email: 'ada@example.com' }
+    if (url === '/api/agents' && agentsList) return agentsList
     if (url === '/api/agents') return [{ name: 'trinity-system', status: 'running', is_system: true }, { name: 'issue-digest', status: 'running' }]
     if (url === '/api/agents/autonomy-status') return { 'issue-digest': { autonomy_enabled: false } }
     if (url === '/api/ops/schedules') return { schedules: [{ id: 's1', agent_name: 'issue-digest', name: 'Mondays', enabled: scheduleOn }] }
@@ -83,14 +93,18 @@ vi.mock('@/api', () => {
     return {}
   }
   const client = {
-    get: vi.fn(async (url) => ({ data: respond('get', url) })),
+    get: vi.fn(async (url) => {
+      if (url === '/api/agents' && agentsWait) await agentsWait
+      return { data: respond('get', url) }
+    }),
     post: vi.fn(async (url, body) => ({ data: respond('post', url, body) })),
     put: vi.fn(async (url, body) => ({ data: respond('put', url, body) })),
     delete: vi.fn(async (url) => ({ data: respond('delete', url) })),
   }
   return { default: client }
 })
-vi.mock('vue-router', () => ({ useRoute: () => ({ path: '/', params: {}, query: {} }) }))
+const pushed = []
+vi.mock('vue-router', () => ({ useRoute: () => ({ path: '/', params: {}, query: {} }), useRouter: () => ({ push: async (to) => { pushed.push(to) } }) }))
 vi.mock('@/stores/agents', () => ({ useAgentsStore: () => ({ fetchAgents: async () => {} }) }))
 
 import AssistantWidget from '@/components/assistant/AssistantWidget.vue'
@@ -129,6 +143,10 @@ describe('assistant panel', () => {
     refusals = {}
     confirmEmail = 'a•••@example.com'
     codeVersion = undefined
+    agentsList = null
+    credentialAnswer = { provided: true, agent: null, name: 'ANTHROPIC_API_KEY', replaced: false, connected_agents: 2, working: true }
+    agentsWait = null
+    pushed.length = 0
     subTerms = { version: 's1', title: 'Subscription terms', url: '', text: '# Subscription terms\n\nYou pay monthly.' }
     status = { available: true, contacted: true, reachable: true, plan: 'free', email: null, allowance: null, trial_terms: { version: 't0', url: '', accepted: 't0' }, profile_known: true }
     localStorage.clear()
@@ -1440,6 +1458,173 @@ describe('assistant panel', () => {
     })
   })
 
+  // trinity-enterprise#1355: where the instance says the assistant leads the
+  // first session, the panel opens by itself with one question and two answers.
+  describe('the first session where the assistant leads', () => {
+    const leads = async () => {
+      agentsList = [{ name: 'trinity-system', status: 'running', is_system: true }]
+      status = { ...status, leads_setup: true, profile_known: false }
+      wrapper.unmount()
+      setActivePinia(createPinia())
+      wrapper = mount(AssistantWidget, {
+        attachTo: document.body,
+        global: { stubs: {
+          ChatBubble: { props: ['role', 'content'], template: '<div class="bubble" :data-role="role">{{ content }}</div>' },
+          HelpChatWidget: { props: ['embedded', 'askOnly'], template: '<div data-testid="ask-tab">ask</div>' },
+        } },
+      })
+      await flushPromises()
+      await flushPromises()
+    }
+
+    it('opens by itself, even where the screen is narrow, with one question and two answers', async () => {
+      await leads()
+      expect(wrapper.find('[data-testid="assistant-input"]').exists()).toBe(true)
+      const said = wrapper.findAll('.bubble').map((b) => b.text())
+      expect(said).toHaveLength(1)
+      expect(said[0]).toContain('Where are you starting from?')
+      const offered = wrapper.findAll('[data-testid="assistant-starters"]')
+      expect(offered).toHaveLength(1)
+      expect(offered[0].findAll('button').map((b) => b.text())).toEqual(['I already run agents in Claude Code', 'Start from scratch'])
+      expect(calls.filter((c) => c.method !== 'get')).toEqual([])
+    })
+
+    it('does not open by itself when the person closed it before', async () => {
+      localStorage.setItem('trinity-assistant-open', 'false')
+      await leads()
+      expect(wrapper.find('[data-testid="assistant-input"]').exists()).toBe(false)
+    })
+
+    it('Start from scratch goes to the assistant, which is told the question it answers', async () => {
+      await leads()
+      await button('Start from scratch').trigger('click')
+      await flushPromises()
+      expect(sent(TURN)[0].body.message).toBe('Start from scratch')
+      expect(sent(TURN)[0].body.context.said).toContain('Where are you starting from?')
+      expect(sent(TURN)[0].body.context.first_session).toBe(true)     // the assistant follows its first-session script
+    })
+
+    it('a typed answer goes to the assistant the same way', async () => {
+      await leads()
+      await say('I run a bakery, what can you do?')
+      expect(sent(TURN)[0].body.message).toBe('I run a bakery, what can you do?')
+      expect(sent(TURN)[0].body.context.said).toContain('Where are you starting from?')
+    })
+
+    it('agents already run elsewhere: a hand-off said on the page, nothing sent, the other path still open', async () => {
+      await leads()
+      await button('I already run agents in Claude Code').trigger('click')
+      await flushPromises()
+      expect(sent(TURN)).toEqual([])
+      const said = wrapper.findAll('.bubble').map((b) => b.text())
+      expect(said.at(-1)).toContain('coming soon')
+      expect(button('Start from scratch')).toBeTruthy()
+    })
+
+    it('raises no settings step in the first session: no getting-started list, no settings nudge', async () => {
+      checklist = { completed_count: 0, total_count: 2, complete: false, dismissed: false, items: [
+        { key: 'claude', title: 'Connect Claude in Settings', description: 'a', done: false, action_label: 'x', action_route: '/' },
+        { key: 'first_agent_created', title: 'Create your first agent', description: 'b', done: false, action_label: 'x', action_route: '/' },
+      ] }
+      await leads()
+      const { useAssistantStore } = await import('@/stores/assistant')
+      useAssistantStore().greet({ key: 'connect', text: 'One thing before your agents can run: connect a model in Settings.' })
+      await flushPromises()
+      expect(wrapper.text()).not.toContain('Connect Claude in Settings')
+      expect(wrapper.text()).not.toContain('connect a model in Settings')
+    })
+
+    it('an instance where the assistant does not lead keeps its usual hello', async () => {
+      agentsList = [{ name: 'trinity-system', status: 'running', is_system: true }]
+      status = { ...status, profile_known: false }
+      await openPanel()
+      expect(wrapper.text()).not.toContain('Where are you starting from?')
+      expect(button('Start from scratch')).toBeUndefined()
+      await say('hello')
+      expect(sent(TURN)[0].body.context.first_session).toBeUndefined()
+    })
+  })
+
+  // trinity-enterprise#1355 checkpoint 3: Claude is connected in the chat at the
+  // moment the first agent is about to run, and the first result opens by itself.
+  describe('the first run', () => {
+    const CLAUDE = { action: 'credential', name: 'ANTHROPIC_API_KEY', why: 'Your agent runs on Claude.' }
+    const save = async (value) => {
+      await wrapper.get('[data-testid="assistant-credential-input"]').setValue(value)
+      await wrapper.get('[data-testid="assistant-credential"]').trigger('submit')
+      await flushPromises()
+    }
+
+    it('connects Claude through the shared credential field; the key goes to this instance only', async () => {
+      turns = [final('One thing before it runs: connect Claude.', [CLAUDE]), final('Running it now.')]
+      await openPanel()
+      await say('run my agent')
+      expect(wrapper.findAll('[data-testid="assistant-credential"]')).toHaveLength(1)
+      expect(wrapper.get('[data-testid="assistant-credential-input"]').attributes('type')).toBe('password')
+      expect(wrapper.get('[data-testid="assistant-credential-help"] a').attributes('href')).toMatch(/^https:\/\/console\.anthropic\.com/)
+      await save('sk-ant-api03-SECRETVALUE')
+      const stored = calls.filter((c) => c.url === '/api/enterprise/assistant/credential' && c.method === 'post')
+      expect(stored.map((c) => c.body)).toEqual([{ agent: null, name: 'ANTHROPIC_API_KEY', value: 'sk-ant-api03-SECRETVALUE' }])
+      expect(calls.some((c) => c.url.startsWith('/api/settings/api-keys'))).toBe(false)     // the instance saves and checks it, not the page
+      expect(JSON.stringify(sent(TURN))).not.toContain('SECRETVALUE')
+      expect(sent(TURN)[1].body).toMatchObject({ counted: false, message: 'Provided: ANTHROPIC_API_KEY for this instance.' })
+      expect(wrapper.find('[data-testid="assistant-credential-input"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="assistant-credential-connected"]').text()).toContain('Connected 2 agents')
+      expect(wrapper.find('[data-testid="assistant-credential-check"]').exists()).toBe(false)
+    })
+
+    it('a key Anthropic rejects after the save is said on the card and to the assistant, never the key', async () => {
+      credentialAnswer = { provided: true, agent: null, name: 'ANTHROPIC_API_KEY', replaced: false, connected_agents: 0,
+        working: false, problem: 'Anthropic rejected this key.' }
+      turns = [final('Connect Claude first.', [CLAUDE]), final('That key was not accepted.')]
+      await openPanel()
+      await say('run my agent')
+      await save('sk-ant-api03-SECRETVALUE')
+      expect(sent(TURN)[1].body.message).toBe(
+        'Provided: ANTHROPIC_API_KEY for this instance. Anthropic did not accept it, so agents cannot run on it yet.')
+      expect(wrapper.get('[data-testid="assistant-credential-check"]').text()).toContain('Anthropic rejected this key.')
+      expect(JSON.stringify(sent(TURN))).not.toContain('SECRETVALUE')
+    })
+
+    it('there is one credential card: the old connect-claude card is not shown', async () => {
+      turns = [final('Connect Claude.', [{ action: 'connect-claude' }])]
+      await openPanel()
+      await say('run my agent')
+      expect(wrapper.find('[data-testid="assistant-claude"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="assistant-claude-key"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="assistant-credential"]').exists()).toBe(false)
+      expect(wrapper.findAll('.bubble').at(-1).text()).toContain('Connect Claude.')
+    })
+
+    it('opens the first result in front of the person where the assistant leads, once', async () => {
+      vi.useFakeTimers()
+      const { useAssistantStore } = await import('@/stores/assistant')
+      runs = [{ status: 'success', ended: true, ok: true, error: '' }]
+      turns = [final("It's running.", [{ action: 'run', agent: 'issue-digest', execution_id: 'exec-12345', title: 'First run' }]), final('Here is what it produced.')]
+      await openPanel()
+      useAssistantStore().status = { ...useAssistantStore().status, leads_setup: true }
+      await say('run it')
+      await vi.advanceTimersByTimeAsync(1600)
+      await flushPromises()
+      expect(pushed).toEqual(['/agents/issue-digest/executions/exec-12345'])
+      expect(wrapper.get('[data-testid="assistant-result"]').attributes('href')).toContain('/agents/issue-digest/executions/exec-12345')
+      vi.useRealTimers()
+    })
+
+    it('elsewhere the result is a link, not a jump', async () => {
+      vi.useFakeTimers()
+      runs = [{ status: 'success', ended: true, ok: true, error: '' }]
+      turns = [final("It's running.", [{ action: 'run', agent: 'issue-digest', execution_id: 'exec-12345', title: 'A run' }]), final('Done.')]
+      await openPanel()
+      await say('run it')
+      await vi.advanceTimersByTimeAsync(1600)
+      await flushPromises()
+      expect(pushed).toEqual([])
+      expect(wrapper.find('[data-testid="assistant-result"]').exists()).toBe(true)
+      vi.useRealTimers()
+    })
+  })
+
   // trinity-enterprise#1356: on a newly set-up instance the first status is read
   // while the account report is still pending, so it carries nothing to say.
   // The panel used to write its own hello at once, and the settled re-read a
@@ -1521,6 +1706,123 @@ describe('assistant panel', () => {
       sessionStorage.clear()
       await load()
       expect(distinct()).toEqual(shown)
+    })
+
+    // trinity-enterprise#1355 + #1356: the first-session question is an opening
+    // like any other, so it waits on the same gate. Decided on the early status
+    // (no account report yet, so no `leads_setup`) the panel wrote its own hello,
+    // and the question never came once the settled status said the assistant leads.
+    it('the first-session question waits for the settled status, and is the only opening', async () => {
+      agentsList = [{ name: 'trinity-system', status: 'running', is_system: true }]
+      statusReads = [{ ...PENDING }]
+      status = { ...SETTLED, leads_setup: true }
+      await load()
+      expect(distinct()).toHaveLength(1)
+      expect(distinct()[0]).toContain('Where are you starting from?')
+      expect(wrapper.findAll('.bubble')).toHaveLength(1)
+    })
+
+    // Until the agent list is in, an empty fleet looks like a first session. A
+    // person who already has an agent of their own must never be asked it.
+    it('waits for the agent list: someone with an agent of their own gets the hello, never the question', async () => {
+      agentsList = [{ name: 'trinity-system', status: 'running', is_system: true }, { name: 'issue-digest', status: 'running' }]
+      let release
+      agentsWait = new Promise((r) => { release = r })
+      status = { ...SETTLED, leads_setup: true }
+      await load()
+      expect(seen).toEqual([])                                  // nothing decided while the list is out
+      expect(wrapper.find('[data-testid="assistant-opening-pending"]').exists()).toBe(true)
+      release()
+      await flushPromises()
+      look()
+      expect(distinct()).toHaveLength(1)
+      expect(distinct()[0]).toContain("I'm Trinity's assistant")
+      expect(distinct()[0]).not.toContain('Where are you starting from?')
+    })
+
+    // The settle re-read can fail with the status already on screen. The error
+    // line only shows before there is a status, so the placeholder must stay:
+    // otherwise the conversation is blank until the next re-read.
+    it('a failed re-read while settling keeps the placeholder: never a blank conversation', async () => {
+      statusReads = [{ ...PENDING }, { fails: true }]
+      status = { ...SETTLED }
+      const blanks = []
+      wrapper.unmount()
+      setActivePinia(createPinia())
+      const { useAuthStore } = await import('@/stores/auth')
+      useAuthStore().isAuthenticated = true
+      wrapper = mount(AssistantWidget, { attachTo: document.body, global: { stubs: {
+        ChatBubble: { props: ['role', 'content'], template: '<div class="bubble" :data-role="role">{{ content }}</div>' },
+        HelpChatWidget: { template: '<div />' } } } })
+      await wrapper.get('[data-testid="assistant-launcher"]').trigger('click')
+      let failedSeen = false
+      for (const ms of [0, 0, 250, 250, 250, 250, 500, 500, 1000, 2000, 4000]) {
+        await vi.advanceTimersByTimeAsync(ms)
+        await flushPromises()
+        const { useAssistantStore } = await import('@/stores/assistant')
+        if (useAssistantStore().statusError) failedSeen = true
+        const shows = opening() || wrapper.find('[data-testid="assistant-opening-pending"]').exists()
+        if (wrapper.find('[data-testid="assistant-input"]').exists() && !shows) blanks.push(ms)
+      }
+      expect(failedSeen).toBe(true)
+      expect(blanks).toEqual([])
+    })
+
+    // The other side of that (validation XsCeM4B5n3JEwNbhNhJF_A on #4736): when
+    // the read fails and the retry error is what the panel says, nothing pulses
+    // under it as if the assistant were still loading.
+    it('a failed first read shows the retry error alone: no loading placeholder pulses under it', async () => {
+      statusReads = [{ fails: true }, { fails: true }, { fails: true }, { fails: true }, { fails: true }, { fails: true }]
+      status = { ...SETTLED }
+      const both = []
+      let errorSeen = false
+      wrapper.unmount()
+      setActivePinia(createPinia())
+      const { useAuthStore } = await import('@/stores/auth')
+      useAuthStore().isAuthenticated = true
+      wrapper = mount(AssistantWidget, { attachTo: document.body, global: { stubs: {
+        ChatBubble: { props: ['role', 'content'], template: '<div class="bubble" :data-role="role">{{ content }}</div>' },
+        HelpChatWidget: { template: '<div />' } } } })
+      await wrapper.get('[data-testid="assistant-launcher"]').trigger('click')
+      for (const ms of [0, 0, 250, 500, 1000, 2000, 4000]) {
+        await vi.advanceTimersByTimeAsync(ms)
+        await flushPromises()
+        const error = document.body.textContent.includes("Couldn't load the assistant")
+        if (error) errorSeen = true
+        const pulsing = wrapper.findAll('[aria-busy="true"]').length > 0
+        if (error && pulsing) both.push(ms)
+      }
+      expect(errorSeen).toBe(true)
+      expect(both).toEqual([])
+
+      // And with the status on screen (re-validation Zqjq3aKcBH1mjog-KtmXmA on #4736):
+      // a re-read that fails while the opening settles sets statusError, but the
+      // retry error belongs to the no-status branch only. It must never render
+      // beside the conversation, where it would sit over a working panel.
+      statusReads = [{ ...PENDING }, { fails: true }, { fails: true }, { fails: true }]
+      status = { ...SETTLED }
+      const beside = []
+      let failedWithStatus = false
+      wrapper.unmount()
+      setActivePinia(createPinia())
+      const auth = await import('@/stores/auth')
+      auth.useAuthStore().isAuthenticated = true
+      wrapper = mount(AssistantWidget, { attachTo: document.body, global: { stubs: {
+        ChatBubble: { props: ['role', 'content'], template: '<div class="bubble" :data-role="role">{{ content }}</div>' },
+        HelpChatWidget: { template: '<div />' } } } })
+      await wrapper.get('[data-testid="assistant-launcher"]').trigger('click')
+      for (const ms of [0, 0, 250, 250, 250, 250, 500, 500, 1000, 2000, 4000]) {
+        await vi.advanceTimersByTimeAsync(ms)
+        await flushPromises()
+        const { useAssistantStore } = await import('@/stores/assistant')
+        const store = useAssistantStore()
+        if (store.status && store.statusError) failedWithStatus = true
+        const conversation = wrapper.find('[data-testid="assistant-input"]').exists()
+        const error = document.body.textContent.includes("Couldn't load the assistant")
+        if (conversation && error) beside.push(ms)
+      }
+      expect(failedWithStatus).toBe(true)
+      expect(beside).toEqual([])
     })
 
     it('someone it already knows, with nothing to say: its own words, and nothing replaces them', async () => {

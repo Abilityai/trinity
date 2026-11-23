@@ -243,8 +243,10 @@ export function validCredential(raw, fleet) {
 export const credentialWhere = (card) => (card.agent ? `the agent ${card.agent}` : 'this instance')
 
 /** The only thing the assistant is told about a credential field: provided or not. */
-export function credentialLine(card, provided) {
-  return `${provided ? 'Provided' : 'Not provided'}: ${card.name} for ${credentialWhere(card)}.`
+export function credentialLine(card, provided, { working = null } = {}) {
+  const line = `${provided ? 'Provided' : 'Not provided'}: ${card.name} for ${credentialWhere(card)}.`
+  // ent#1355: the instance checked its own Claude key after the save; a rejection is said, the value never.
+  return provided && working === false ? `${line} Anthropic did not accept it, so agents cannot run on it yet.` : line
 }
 
 const TOOL_NAME = /^[a-z0-9_]{2,80}$/
