@@ -187,32 +187,30 @@ describe("#1024 every family takes agent_name the same way", () => {
   }
 });
 
-describe("#1024 the project tools take agent_name too", () => {
-  it("create_project with an admin's user key goes out as that agent", async () => {
+describe("#1024 / trinity-enterprise#1322 the project tools don't act for an agent", () => {
+  it("create_project with a user key naming an agent is refused act_as_not_offered, and nothing is sent", async () => {
     const calls: Call[] = [];
     const tools = createProjectTools(fakeClient(calls), false);
-    await run(tools.create_project, { name: "Q4", goal: "ship", agent_name: "worker" }, ctx("user"));
-    assert.equal(calls[0].method, "createProjectAsAgent");
-    assert.equal(calls[0].actAs, "worker");
+    const out = await run(tools.create_project, { name: "Q4", goal: "ship", agent_name: "worker" }, ctx("user"));
+    assert.equal(calls.length, 0);
+    assert.equal(out.code, "act_as_not_offered");
   });
 
-  it("a task body never carries agent_name (the tool spreads its arguments)", async () => {
+  it("create_project_task with a user key naming an agent never sends the act-as header", async () => {
     const calls: Call[] = [];
     const tools = createProjectTools(fakeClient(calls), false);
-    await run(tools.create_project_task,
+    const out = await run(tools.create_project_task,
       { project_id: "prj_1", title: "Do it", agent_name: "worker" }, ctx("user"));
-    assert.equal(calls[0].actAs, "worker");
-    assert.equal(JSON.stringify(calls[0].body).includes("agent_name"), false);
+    assert.equal(calls.length, 0);
+    assert.equal(out.code, "act_as_not_offered");
   });
 
-  it("a user key without agent_name is told to use an agent's key, and nothing is sent", async () => {
+  it("a user key without agent_name is never told to use an agent's key", async () => {
     const calls: Call[] = [];
     const out = await run(createProjectTools(fakeClient(calls), false).create_project,
       { name: "Q4", goal: "ship" }, ctx("user"));
-    assert.equal(calls.length, 0);
-    assert.equal(out.success, false);
-    assert.match(out.error, /agent-scoped key/);
-    assert.doesNotMatch(out.error, /pass agent_name/);
+    assert.equal(calls.length, 0, "the agent door is not used");
+    assert.doesNotMatch(JSON.stringify(out), /agent-scoped key/);
   });
 
   it("an agent key naming another agent is refused; naming none is unchanged", async () => {

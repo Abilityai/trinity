@@ -33,6 +33,8 @@ import logging
 import time
 from typing import Dict, List, Optional, Tuple
 
+from services import loop_health
+
 logger = logging.getLogger(__name__)
 
 # Redis TTL on the heartbeat value. Three missed 5s beats before expiry.
@@ -399,8 +401,9 @@ async def run_heartbeat_watch_loop(interval_seconds: int = HEARTBEAT_WATCH_INTER
     await asyncio.sleep(interval_seconds)
     while True:
         try:
-            for name, kind in process_watch_tick():
-                await _emit_heartbeat_alert(name, kind)
+            with loop_health.tick("heartbeat_watch"):
+                for name, kind in process_watch_tick():
+                    await _emit_heartbeat_alert(name, kind)
         except Exception:  # noqa: BLE001 — loop must never die
             logger.exception("heartbeat watch tick raised unexpectedly")
         await asyncio.sleep(interval_seconds)

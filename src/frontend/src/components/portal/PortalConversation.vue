@@ -297,14 +297,35 @@
           :all-done="progressData.all_done"
           :active="progressData.active"
         />
-        <!-- #2694: the window is counted in typed turns under a row ceiling.
-             When the ceiling cut the OLD end, say so — a thread that silently
-             starts mid-call is the very symptom the window fix removes. -->
-        <p
-          v-if="historyTruncated"
-          :class="PLATFORM_LINE_CLASS"
-          data-testid="portal-history-truncated"
-        >Earlier messages in this chat aren't shown</p>
+        <!-- trinity-enterprise#594: the read is a window (#2694); older rows
+             are one click away. One fixed-height row for every state — the
+             control, a failed page (the same control retries), and "Start of
+             this chat" once paging reached the head — so nothing below it
+             shifts when the state changes. Nothing for a thread that never had
+             earlier rows. -->
+        <div
+          v-if="hasEarlier || pagedOnce"
+          class="h-8 flex items-center justify-center gap-2 text-xs"
+          data-testid="portal-history-earlier-row"
+        >
+          <template v-if="hasEarlier">
+            <span
+              v-if="earlierFailed"
+              :class="META_INK_CLASS"
+              data-testid="portal-history-earlier-failed"
+            >Couldn't load earlier messages</span>
+            <BaseButton
+              variant="ghost"
+              size="sm"
+              :loading="loadingEarlier"
+              loading-label="Loading…"
+              :disabled="earlierBlocked"
+              data-testid="portal-history-earlier"
+              @click="showEarlier"
+            >Show earlier</BaseButton>
+          </template>
+          <span v-else :class="META_INK_CLASS" data-testid="portal-history-start">Start of this chat</span>
+        </div>
         <template v-for="(item, k) in threadRows" :key="rowKey(item)">
         <!-- trinity-enterprise#610 (the 09-30 ruling, amended) × ent#734: an
              ask this chat's own turn raised is a row of the thread, placed by
@@ -999,6 +1020,7 @@ import PortalAttachmentChip from './PortalAttachmentChip.vue'
 import PortalMessageAttachments from './PortalMessageAttachments.vue'
 import { sentAttachments, attachmentsForRequest } from './portalMessageAttachments'
 import { useStickToBottom } from '@/composables/useStickToBottom'
+import { prependEarlier, mergeWindow } from './portalThreadPages'
 import { useConversationAnchor } from '@/composables/useConversationAnchor'
 import { useRoute, useRouter } from 'vue-router'
 import { useComposerDraft } from '@/composables/useComposerDraft'
@@ -1205,9 +1227,26 @@ const loadingHistory = ref(false)
 // condition). Never goes false again on this instance, so the adoption-path
 // refetch swaps messages in place with no beam; `convKey` remounts re-derive it.
 const historyLoaded = ref(!(props.sessionId && !props.newChat))
-// #2694: the history window is counted in typed turns and bounded by a row
-// ceiling; true when the ceiling cut rows off the OLD end of this thread.
-const historyTruncated = ref(false)
+// trinity-enterprise#594: the history read is a WINDOW (#2694 — typed turns
+// under a row ceiling); "Show earlier" pages past it with the server's cursor.
+// The page state belongs to ONE thread (`pageSid`); a load of any other thread
+// starts it over, and `pageGen` drops a page that lands after the switch.
+const hasEarlier = ref(false)
+const earlierCursor = ref(null)
+const loadingEarlier = ref(false)
+const earlierFailed = ref(false)
+const pagedOnce = ref(false)
+let pageSid = null
+let pageGen = 0
+function resetPages(sid = null) {
+  pageGen += 1
+  pageSid = sid
+  hasEarlier.value = false
+  earlierCursor.value = null
+  loadingEarlier.value = false
+  earlierFailed.value = false
+  pagedOnce.value = false
+}
 // The platform speaking ABOUT the thread — one look for the ent#523 system
 // line and the #2694 window notice: centred, muted, no avatar, so neither is
 // read as something the agent said. Dark meta text stops at gray-400 (the
@@ -1684,6 +1723,7 @@ const {
   scrollToLatest,
   reset: resetFollowing,
   detach: detachFollowing,
+  holdPosition,
 } = useStickToBottom(scrollEl, {
   // An empty chat is not a transcript: it reads from the top, and a section that
   // arrives late (the suggestions) grows downward without moving the hints or
@@ -1722,7 +1762,10 @@ function historyRow(m) {
       : { role: m.role, content: m.content, id: m.id, myRating: m.my_rating || null,
           source: m.source || null, voiceCallId: m.voice_call_id || null,
           // #3265: what the turn carried, stored on its row.
-          attachments: m.attachments || null }),
+          attachments: m.attachments || null,
+          // trinity-enterprise#594: the turn id, so a reply on the other side
+          // of a page boundary pairs with it once both pages are on screen.
+          executionId: m.execution_id || null }),
     at: m.created_at || null,
   }
 }
@@ -1730,18 +1773,23 @@ function historyRow(m) {
 // ---- Load history when the thread/agent changes -------------------------------
 async function loadThread(sessionId) {
   loadingHistory.value = true
-  messages.value = []
-  historyTruncated.value = false
   terminalOutcome.value = null
+  // trinity-enterprise#594: a reload of the thread whose earlier pages are on
+  // screen (a call ended, a turn settled) MERGES the newest window under them —
+  // replacing would throw away every page the reader asked for.
+  const keepPages = !!sessionId && sessionId === pageSid && pagedOnce.value
+  if (!keepPages) {
+    resetPages(sessionId || null)
+    messages.value = []
+  }
   let inFlight = null
   let inFlightBudget = null
   let budgetReadAt = null
   let outcome = null
   try {
     const { sessionId: resolved, messages: msgs, inFlightExecutionId, inFlightWaitBudgetSeconds,
-            lastTurnOutcome, truncated } =
+            lastTurnOutcome, hasEarlier: more, nextBefore } =
       await store.fetchHistory(props.agent.name, sessionId || null)
-    historyTruncated.value = truncated === true
     // #2214: the budget is the marker's REMAINING TTL, honest only from the
     // instant it was measured — stamp that instant beside the fetch, not when
     // the (possibly long) reattached stream later ends.
@@ -1755,7 +1803,17 @@ async function loadThread(sessionId) {
     // trinity-enterprise#610: `at` is the row's persisted time, which is what
     // places a chat-turn ask among the messages (`threadRows`).
     // #3166: each reply under its own question, when two turns overlapped.
-    messages.value = pairRepliesWithQuestions(msgs).map(historyRow)
+    const rows = pairRepliesWithQuestions(msgs).map(historyRow)
+    const merged = keepPages ? mergeWindow(messages.value, rows) : null
+    messages.value = merged ? merged.rows : rows
+    if (!merged || merged.reset) {
+      // A fresh window (or one that could not be placed under the pages):
+      // its own cursor is the page state.
+      if (merged) resetPages(sessionId)
+      pageSid = currentSessionId.value
+      hasEarlier.value = more === true
+      earlierCursor.value = nextBefore || null
+    }
     // trinity-enterprise#1010: the history now on screen is read, up to its
     // newest row. The open's own read covers only what the chat state held, so
     // without this an arrival that landed between that read and this load would
@@ -1797,6 +1855,44 @@ async function loadThread(sessionId) {
   // the client that happened to be watching.
   if (outcome) markLastUserTurnFailed(outcome)
   if (outcome) rememberVerdict(outcome)
+}
+
+// trinity-enterprise#594: blocked while anything holds an index into
+// `messages` across an await or rewrites the thread wholesale — a turn
+// sending, a history load, a call (whose end reloads the thread).
+const earlierBlocked = computed(() => sending.value || loadingHistory.value || anyCallActive.value)
+
+// Read the next OLDER window and put it above the rows on screen, holding the
+// reader's place (`holdPosition`: the distance from the bottom is what a
+// prepend leaves unchanged). A failure keeps everything on screen and turns the
+// same control into the retry.
+async function showEarlier() {
+  const sid = currentSessionId.value
+  const cursor = earlierCursor.value
+  if (!sid || !cursor || loadingEarlier.value || earlierBlocked.value) return
+  const gen = pageGen
+  loadingEarlier.value = true
+  earlierFailed.value = false
+  let page
+  try {
+    page = await store.fetchHistory(props.agent.name, sid, { before: cursor })
+  } catch {
+    if (gen === pageGen) {
+      earlierFailed.value = true
+      loadingEarlier.value = false
+    }
+    return
+  }
+  // A thread switch (or a reload that could not keep the pages) started over.
+  if (gen !== pageGen || currentSessionId.value !== sid) return
+  const older = pairRepliesWithQuestions(page.messages || []).map(historyRow)
+  await holdPosition(() => {
+    messages.value = prependEarlier(messages.value, older)
+    hasEarlier.value = page.hasEarlier === true
+    earlierCursor.value = page.nextBefore || null
+    pagedOnce.value = true
+  })
+  loadingEarlier.value = false
 }
 
 // Apply a server verdict to the most recent user message. Used by the two
@@ -1923,9 +2019,9 @@ watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
   // which the backend answers with the most-recent thread — so New chat with an
   // agent you had spoken to before resumed it, while New chat with the agent
   // you were already on correctly started fresh. The asymmetry was the tell.
-  if (props.newChat && !sid) { messages.value = []; currentSessionId.value = null; return }
+  if (props.newChat && !sid) { resetPages(); messages.value = []; currentSessionId.value = null; return }
   if (props.agent.name !== oldName || sid) await loadThread(sid)
-  else { messages.value = []; currentSessionId.value = null }   // brand-new chat
+  else { resetPages(); messages.value = []; currentSessionId.value = null }   // brand-new chat
 })
 
 watch(() => props.prefill, (v) => {
@@ -3000,6 +3096,8 @@ async function submitUserText(text, { spoken = false, replyId = null, replyExcer
     // clock taking part (`placeAsksInThread`); the reload brings the server's time.
     local: true,
   }) - 1
+  // Taken before any await: a page landing above it moves its index.
+  const sentRow = messages.value[index]
   // #2624: sending is an explicit intent to follow the bottom — it pins and
   // re-arms whatever the prior scroll position, so the reader is never handed
   // an unread badge for their own message.
@@ -3008,7 +3106,7 @@ async function submitUserText(text, { spoken = false, replyId = null, replyExcer
   // A stale "couldn't stop the turn" must not outlive the turn it described.
   cancelError.value = ''
   const res = await deliver(text, { replyId, attachments: carried, tags })
-  return settleDelivery(index, text, res)
+  return settleDelivery(indexOfRow(sentRow, index), text, res)
 }
 
 // trinity-enterprise#620 AC #5: when the person's OWN send starts work, the
@@ -3122,7 +3220,16 @@ async function retry(i) {
   const res = await deliver(content, { replyId: msg.replyTo?.messageId || null,
                                        attachments: msg.attachments || null,
                                        tags: msg.tagEmails || null })
-  settleDelivery(i, content, res)
+  settleDelivery(indexOfRow(msg, i), content, res)
+}
+
+// trinity-enterprise#594: where a row held across an await sits NOW — a page
+// of earlier messages can land above it while its turn runs, so `send` and
+// `retry` settle it by identity, falling back to the index it had (whose
+// content check in `markFailed` still guards it).
+function indexOfRow(row, fallback) {
+  const at = row ? messages.value.indexOf(row) : -1
+  return at === -1 ? fallback : at
 }
 
 // ---- Voice: speak replies (TTS) + dictate (STT) — carried over from #78 -------
@@ -3532,7 +3639,7 @@ const threadItems = computed(() => groupVoiceBlocks(messages.value, { liveCallId
 const chatTurnNoticeList = computed(() => (
   chatRead.value.sid === currentSessionId.value ? chatTurnNotices(chatRead.value.rows, currentSessionId.value) : []
 ))
-const threadRows = computed(() => placeAsksInThread(threadItems.value, [...chatTurnAskList.value, ...chatTurnNoticeList.value], { truncated: historyTruncated.value, sessionId: currentSessionId.value }).map((row) => (
+const threadRows = computed(() => placeAsksInThread(threadItems.value, [...chatTurnAskList.value, ...chatTurnNoticeList.value], { truncated: hasEarlier.value, sessionId: currentSessionId.value }).map((row) => (
   row.kind === 'ask-notice' ? { ...row, line: askNoticeLine(row.notice) }
   : row.kind !== 'ask' ? row
     // trinity-enterprise#748: a dismissal inside its Undo window keeps the card,
@@ -3563,8 +3670,11 @@ async function announceEnded(ask) {
 function refreshAsksAfterTurn() {
   store.fetchAsks().catch(() => {})
 }
+// trinity-enterprise#594: a message keys on its id, so prepending a page does
+// not re-patch every bubble below it; the index only for a local unsent row.
 const rowKey = (item) => (
-  item.kind === 'ask' ? `ask-${item.ask.id}` : item.kind === 'ask-notice' ? `ask-notice-${item.notice.id}` : item.kind === 'voice-call' ? `call-${item.callId}` : `m-${item.index}`
+  item.kind === 'ask' ? `ask-${item.ask.id}` : item.kind === 'ask-notice' ? `ask-notice-${item.notice.id}` : item.kind === 'voice-call' ? `call-${item.callId}`
+    : item.message?.id ? `mid-${item.message.id}` : `m-${item.index}`
 )
 
 // The shell reads these to swap the rail for the canvas column and to refuse

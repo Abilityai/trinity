@@ -222,9 +222,10 @@ An agent's Claude Code marketplace-plugin selection is a first-class, **committe
 ### Agent Compatibility Validation (#668)
 
 Advisory, non-blocking server-side validation of a **running** agent's workspace
-against 89 best-practice checks (12 categories, #2137) — surfaced in the Agent Detail
-Overview tab (`components/CompatibilityPanel.vue`, reusing the "needs attention"
-idiom), via `GET /api/agents/{name}/compatibility`, and the MCP tool
+against 89 best-practice checks (12 categories, #2137) — surfaced in Agent Detail →
+Settings › General (`components/CompatibilityPanel.vue`; it left the Overview tab in
+trinity-enterprise#1317, so the stored report now refreshes on deploy or when that
+pane is opened), via `GET /api/agents/{name}/compatibility`, and the MCP tool
 `get_agent_compatibility_report`. The canonical check list is
 `docs/agent-validation-spec.md` (single source of truth, sync-tested against
 `spec.py`).

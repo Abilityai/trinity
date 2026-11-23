@@ -4404,10 +4404,13 @@ export class TrinityClient {
     return this.projectRequest("GET", this.projectPath(projectId), turn);
   }
 
-  async listProjectTasks(projectId: string, status = "open", turn?: string, view?: string): Promise<Array<Record<string, unknown>>> {
+  async listProjectTasks(projectId: string, status = "open", turn?: string, view?: string,
+                         milestone?: string): Promise<Array<Record<string, unknown>>> {
     const viewQuery = view ? `&view=${encodeURIComponent(view)}` : "";
+    // trinity-enterprise#1233: one milestone's tasks (`none`: under no milestone); sent only when set.
+    const milestoneQuery = milestone ? `&milestone=${encodeURIComponent(milestone)}` : "";
     const res = await this.projectRequest<{ tasks: Array<Record<string, unknown>> }>(
-      "GET", this.projectPath(projectId, `/tasks?status=${encodeURIComponent(status)}${viewQuery}`), turn);
+      "GET", this.projectPath(projectId, `/tasks?status=${encodeURIComponent(status)}${viewQuery}${milestoneQuery}`), turn);
     return res.tasks;
   }
 
@@ -4523,6 +4526,11 @@ export class TrinityClient {
   /** trinity-enterprise#980: the steward proposes people and owners; the creator approves once. */
   async proposeProjectChanges(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
     return this.projectRequest("POST", this.projectPath(projectId, "/proposals"), turn, body);
+  }
+
+  /** trinity-enterprise#1234: the steward's kickoff plan, for a person to approve once. */
+  async proposeProjectPlan(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/plan-proposals"), turn, body);
   }
 
   // --- Role assignments (trinity-enterprise#500) ----------------------------

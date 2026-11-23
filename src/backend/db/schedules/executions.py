@@ -23,6 +23,7 @@ from utils.helpers import (
     utc_now_iso,
 )
 from ._common import _norm_ts
+from utils import request_memo
 
 logger = logging.getLogger(__name__)
 
@@ -878,6 +879,7 @@ class ScheduleExecutionsMixin:
         with get_engine().connect() as conn:
             return int(conn.execute(stmt).scalar() or 0)
 
+    @request_memo.memoized_method
     def get_execution(self, execution_id: str) -> Optional[ScheduleExecution]:
         """Get a specific execution by ID."""
         stmt = select(schedule_executions).where(
@@ -886,6 +888,22 @@ class ScheduleExecutionsMixin:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_schedule_execution(row) if row else None
+
+    def get_executions_by_ids(self, execution_ids) -> Dict[str, Optional[ScheduleExecution]]:
+        """`{id: execution or None}` in ONE query (#4672) — the batch form of
+        `get_execution`. Inside a `request_memo.scope()` it also answers the
+        per-id read for the rest of the scope."""
+        ids = [i for i in dict.fromkeys(str(i) for i in (execution_ids or []) if i)]
+        found: Dict[str, ScheduleExecution] = {}
+        if ids:
+            stmt = select(schedule_executions).where(schedule_executions.c.id.in_(ids))
+            with get_engine().connect() as conn:
+                for row in conn.execute(stmt).mappings():
+                    found[str(row["id"])] = self._row_to_schedule_execution(row)
+        out = {i: found.get(i) for i in ids}
+        for execution_id, execution in out.items():
+            self.get_execution.prime(execution_id, value=execution)
+        return out
 
     def get_turn_attribution(self, execution_id: str) -> Optional[Dict]:
         """One execution's rating columns (`turn_tier_service.LEDGER_COLUMNS`)

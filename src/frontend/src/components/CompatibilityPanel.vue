@@ -1,8 +1,9 @@
 <script setup>
 /**
- * Agent compatibility section (#668) — rendered inside the Overview tab.
+ * Agent compatibility section (#668) — rendered in Settings › General
+ * (moved off the Overview tab in trinity-enterprise#1317).
  *
- * Reuses the Overview "needs attention" idiom: a compact summary line (hidden
+ * A compact summary line (hidden
  * when clean unless expanded) that opens to the full checklist grouped by
  * category. STATIC checks are fetched first for instant paint; AI checks load
  * asynchronously (cache-backed by the results table, so they show on every

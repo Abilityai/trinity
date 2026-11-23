@@ -274,6 +274,13 @@ services:
       - TRINITY_ALLOW_SQLITE=${TRINITY_ALLOW_SQLITE:-}
       - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
       - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
+      # #4671 / #4674: the event-loop probe (services/loop_health.py). A loop
+      # blocked past the stall threshold is logged with the worker pid and the
+      # blocking stack; a background cycle slower than the tick threshold is
+      # named. Defaults are in the module.
+      - EVENT_LOOP_PROBE_ENABLED=${EVENT_LOOP_PROBE_ENABLED:-true}
+      - EVENT_LOOP_STALL_THRESHOLD_MS=${EVENT_LOOP_STALL_THRESHOLD_MS:-150}
+      - LOOP_TICK_WARN_MS=${LOOP_TICK_WARN_MS:-250}
       # Credential Encryption
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:-}
       - CREDENTIAL_ENCRYPTION_KEY_SECONDARY=${CREDENTIAL_ENCRYPTION_KEY_SECONDARY:-}  # #267 rotation fallback

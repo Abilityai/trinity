@@ -3,16 +3,23 @@
     <NavBar />
 
     <main class="flex-1 flex overflow-hidden">
-      <!-- System Views Sidebar -->
-      <SystemViewsSidebar
-        @create="openCreateModal"
-        @edit="openEditModal"
-      />
-
       <!-- relative: anchor for the type-to-filter pill + query-empty overlay
            (ent#261) — this column does NOT scroll (panes scroll internally),
            so absolutely-positioned chrome here never scrolls away. -->
       <div class="relative flex flex-col flex-1 overflow-hidden">
+        <!-- Getting started, where there is no assistant to hold it (ent#238).
+             Floating in the corner, out of the page flow: the entitlement
+             answer lands a round-trip after paint, and here it moves nothing. -->
+        <div
+          v-if="assistantStore.corner === 'help' && onboardingStore.visible"
+          class="absolute left-3 bottom-3 z-20 w-60 max-h-[60vh] overflow-y-auto shadow-lg rounded-lg"
+          data-testid="dashboard-checklist"
+        >
+          <BaseCard flush class="py-1 [&>div]:mt-0 [&>div]:border-t-0">
+            <ActivationChecklist />
+          </BaseCard>
+        </div>
+
         <!-- Compact Header -->
         <div class="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-4 py-2">
           <!-- #2197 — `flex-wrap` + `gap-y-2`: the last resort when the #1830
@@ -66,6 +73,9 @@
                  line after the first. Single-row rendering above ~1024px is
                  unchanged: flex only wraps once it must. -->
             <div class="flex flex-wrap items-center gap-2 min-w-0">
+              <!-- Which agents are shown: all, or one system's. -->
+              <SystemViewsMenu @create="openCreateModal" @edit="openEditModal" />
+
               <!-- Create Agent (trinity-enterprise#260) — chassis-level so agent
                    creation is reachable from every mode, not just the List tab.
                    The label degrades to icon-only below `md` (pre-decided in the
@@ -361,7 +371,7 @@
           </button>
         </div>
       </div>
-      <FleetGrid v-else ref="fleetGridRef" :agents="visibleAgents" :org-agents="ownerFilteredAgents" />
+      <FleetGrid v-else ref="fleetGridRef" :agents="visibleAgents" :org-agents="ownerFilteredAgents" :arrivals="arrivals" />
     </div>
 
     <!-- List View (trinity-enterprise#260) — the Agents page consolidated into
@@ -413,6 +423,7 @@
         v-else
         ref="listPanelRef"
         :agents="visibleAgents"
+        :arrivals="arrivals"
         :available-tags="availableTags"
         @tags-changed="fetchAvailableTags"
         @clear-chassis-filters="clearChassisFilters"
@@ -516,7 +527,11 @@ import NavBar from '@/components/NavBar.vue'
 import HostTelemetry from '@/components/HostTelemetry.vue'
 import ReplayTimeline from '@/components/ReplayTimeline.vue'
 import SkeletonLoader from '@/components/SkeletonLoader.vue'
-import SystemViewsSidebar from '@/components/SystemViewsSidebar.vue'
+import SystemViewsMenu from '@/components/SystemViewsMenu.vue'
+import BaseCard from '@/components/base/BaseCard.vue'
+import ActivationChecklist from '@/components/onboarding/ActivationChecklist.vue'
+import { useAssistantStore } from '@/stores/assistant'
+import { useOnboardingStore } from '@/stores/onboarding'
 import SystemViewEditor from '@/components/SystemViewEditor.vue'
 import FirstRunOverlay from '@/components/onboarding/FirstRunOverlay.vue'
 import axios from 'axios'
@@ -535,6 +550,10 @@ import { useNotification } from '@/composables/useNotification'
 
 const networkStore = useNetworkStore()
 const systemViewsStore = useSystemViewsStore()
+const assistantStore = useAssistantStore()
+const onboardingStore = useOnboardingStore()
+// The checklist fetches its own steps once mounted; it is mounted only once there are some to show.
+watch(() => assistantStore.corner, (c) => { if (c === 'help') onboardingStore.fetchChecklist() }, { immediate: true })
 const route = useRoute()
 const router = useRouter()
 
@@ -626,7 +645,8 @@ const {
   playbackPosition,
   timelineStart,
   timelineEnd,
-  currentTime
+  currentTime,
+  arrivals
 } = storeToRefs(networkStore)
 
 // Persisted state: Time range (default 24h, persisted to localStorage)

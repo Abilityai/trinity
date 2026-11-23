@@ -2197,10 +2197,13 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // when the row ceiling cut the old end). `limit` (≤ 50) → the newest N rows
     // whatever their source — the reply poll's narrow read, which runs every
     // few hundred milliseconds and only needs the newest reply.
-    async fetchHistory(agentName, sessionId = null, { limit = null } = {}) {
+    // trinity-enterprise#594: `before` (a previous read's `nextBefore`) reads
+    // the next OLDER window; never combined with `limit` (the server refuses).
+    async fetchHistory(agentName, sessionId = null, { limit = null, before = null } = {}) {
       const params = {}
       if (sessionId) params.session_id = sessionId
       if (limit) params.limit = limit
+      if (before) params.before = before
       const { data } = await joinedGet(
         `/api/enterprise/client-portal/agents/${agentName}/history`,
         { headers: this.authHeader, params }
@@ -2209,6 +2212,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
         sessionId: data.session_id || null,
         messages: data.messages || [],
         truncated: data.truncated === true,
+        // trinity-enterprise#594: older rows exist, and the cursor that reads
+        // them. No cursor (an older backend) → nothing a client can page to.
+        hasEarlier: data.has_earlier === true && !!data.next_before,
+        nextBefore: data.next_before || null,
         // ent#286: non-null when a turn is running on this thread right now —
         // what a client that reloaded mid-turn resubscribes to.
         inFlightExecutionId: data.in_flight_execution_id || null,

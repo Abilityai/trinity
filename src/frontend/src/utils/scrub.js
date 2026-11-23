@@ -22,7 +22,7 @@ const RULES = [
   [/AIza[0-9A-Za-z_-]{35}/g, REDACTED],
   [/AKIA[0-9A-Z]{16}/g, REDACTED],
   [/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, REDACTED],
-  [/([?&](?:sig|token|access_token|api_key|apikey|key|password|secret|auth)=)[^&\s"'<>]+/gi, `$1${REDACTED}`],
+  [/([?&#](?:sig|token|access_token|api_key|apikey|key|password|secret|auth|claim)=)[^&\s"'<>]+/gi, `$1${REDACTED}`],
   [/(https?:\/\/)[^/\s:@]+:[^/\s:@]+@/gi, `$1${REDACTED}@`],
   [/((?:password|passwd|secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key|credential)["']?\s*[:=]\s*["']?)[^\s"',&}{]+/gi, `$1${REDACTED}`],
   [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, EMAIL_MASK],
