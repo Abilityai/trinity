@@ -898,6 +898,7 @@ describe("trinity-enterprise#1322 project tools are listed to exactly the keys t
     ...Object.fromEntries(SHARED.map((t) => [t, ["agent", "user"]])),
     start_project_task: ["agent"],
     propose_project_changes: ["agent"],
+    propose_project_plan: ["agent"],
     // A person's acts: a person's own user key only (CP-P4).
     set_project_lifecycle: ["user"],
     update_project_settings: ["user"],
@@ -977,8 +978,8 @@ describe("trinity-enterprise#1322 project tools are listed to exactly the keys t
       });
       assert.deepEqual(srv.requests, [], `a ${key} key's refused calls reached the backend: ${srv.requests.join(", ")}`);
     }
-    // 5 person tools for the agent key; 2 agent-only tools for the user key; all 22 for the system and ops keys.
-    assert.equal(refused, 5 + 2 + 22 + 22);
+    // 5 person tools for the agent key; 3 agent-only tools for the user key; all 23 for the system and ops keys.
+    assert.equal(refused, 5 + 3 + 23 + 23);
   });
 
   // Text built from a backend answer: get_project's waiting-proposal pointer,

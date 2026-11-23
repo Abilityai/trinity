@@ -227,3 +227,11 @@ describe('a link supplied by Trinity\'s side', () => {
     }
   })
 })
+
+describe('assistant cards: the upgrade card (trinity-enterprise#1329)', () => {
+  it('says the code goes to the registered address, not that you type an email', () => {
+    const note = cardNote({ action: 'upgrade' })
+    expect(note).toBe("A larger allowance and bigger teams. We email a code to this instance's registered address to confirm.")
+    expect(note).not.toMatch(/sign in with your email/i)
+  })
+})

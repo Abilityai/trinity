@@ -814,3 +814,122 @@ describe("ent#1240 — GitHub refs on create_/update_project_task", () => {
     }
   });
 });
+
+describe("ent#1233 — a task's milestone", () => {
+  it("create and update forward `milestone`; null takes a task out of its milestone", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      createProjectTask: async (pid: string, body: Record<string, unknown>) => {
+        calls.push(["create", pid, body]);
+        return { id: "T-005", milestone: body.milestone };
+      },
+      updateProjectTask: async (pid: string, tid: string, body: Record<string, unknown>) => {
+        calls.push(["update", pid, tid, body]);
+        return { id: tid };
+      },
+    } as Partial<TrinityClient>);
+    await tools.create_project_task.execute({ project_id: "prj_1", title: "Invite", milestone: "ms_abc" } as never, {});
+    await tools.update_project_task.execute({ project_id: "prj_1", task_id: "T-005", milestone: null } as never, {});
+    assert.deepEqual(calls, [
+      ["create", "prj_1", { title: "Invite", milestone: "ms_abc" }],
+      ["update", "prj_1", "T-005", { milestone: null }],
+    ]);
+    assert.equal(tools.update_project_task.parameters.parse(
+      { project_id: "p", task_id: "T-001", milestone: null }).milestone, null);
+    assert.equal(tools.create_project_task.parameters.safeParse(
+      { project_id: "p", title: "x", milestone: "m".repeat(41) }).success, false);
+  });
+
+  it("list_project_tasks forwards `milestone`, and the client sends it as its own query parameter", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      listProjectTasks: (async (pid: string, status: string, _turn?: string, view?: string, milestone?: string) => {
+        calls.push([pid, status, view, milestone]);
+        return [];
+      }) as never,
+    });
+    await tools.list_project_tasks.execute({ project_id: "prj_1", milestone: "ms_abc" }, {});
+    await tools.list_project_tasks.execute({ project_id: "prj_1" }, {});
+    assert.deepEqual(calls, [["prj_1", "open", undefined, "ms_abc"], ["prj_1", "open", undefined, undefined]]);
+
+    const client = new RealClient("http://localhost:8000");
+    const seen: unknown[] = [];
+    (client as unknown as { request: unknown }).request = async (...args: unknown[]) => {
+      seen.push(args[1]);
+      return { tasks: [] };
+    };
+    await client.listProjectTasks("prj_1", "all", undefined, undefined, "none");
+    await client.listProjectTasks("prj_1", "open");
+    assert.deepEqual(seen, [
+      "/api/enterprise/projects/agent/projects/prj_1/tasks?status=all&milestone=none",
+      "/api/enterprise/projects/agent/projects/prj_1/tasks?status=open",
+    ]);
+  });
+
+  it("get_project passes the milestones through and offers no milestone write tool", async () => {
+    const milestones = [{ id: "ms_abc", name: "Beta", state: "in_progress", targets: [] }];
+    const tools = makeTools({ getMyProject: async () => ({ ...PROJECT, milestones }) }) as Record<string, unknown>;
+    const out = JSON.parse(await (tools.get_project as { execute: (p: unknown, c: unknown) => Promise<string> })
+      .execute({ project_id: PROJECT.id }, {}));
+    assert.deepEqual(out.milestones, milestones);
+    assert.deepEqual(Object.keys(tools).filter((n) => n.includes("milestone")), []);
+  });
+});
+
+describe("trinity-enterprise#1234 — the steward proposes the kickoff plan; a person approves it once", () => {
+  const PLAN = {
+    milestones: [{ key: "beta", name: "Beta live", targets: [{ agent: "scout", metric: "partners", target: 10, direction: "up" }] }],
+    tasks: [
+      { key: "recruit", title: "Recruit design partners", milestone: "beta" },
+      { key: "onboard", title: "Onboard them", milestone: "beta", blocked_by: ["recruit"] },
+    ],
+  };
+
+  it("propose_project_plan passes the plan and note through, without the project id", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      proposeProjectPlan: async (projectId: string, body: Record<string, unknown>) => {
+        calls.push([projectId, body]);
+        return { proposal_id: "ppr_9", state: "pending", waiting_on: "primary" };
+      },
+    } as Partial<TrinityClient>);
+    const out = JSON.parse(await tools.propose_project_plan.execute({ project_id: PROJECT.id, plan: PLAN, note: "From the goal." }));
+    assert.equal(out.success, true);
+    assert.equal(out.waiting_on, "primary");
+    assert.deepEqual(calls, [[PROJECT.id, { plan: PLAN, note: "From the goal." }]]);
+  });
+
+  it("the backend's refusals come back by name", async () => {
+    for (const [status, code] of [
+      [403, "not_the_steward"], [409, "proposal_pending"], [422, "blocker_cycle"],
+      [422, "plan_too_many_tasks"], [422, "primary_cannot_apply"], [422, "plan_needs_goal"],
+    ] as const) {
+      const tools = makeTools({
+        proposeProjectPlan: async () => { throw apiError(status, { code, message: "refused" }); },
+      } as Partial<TrinityClient>);
+      const out = JSON.parse(await tools.propose_project_plan.execute({ project_id: PROJECT.id, plan: PLAN }));
+      assert.equal(out.success, false);
+      assert.equal(out.code, code);
+    }
+  });
+
+  it("bounds the plan as the backend does (12 milestones, 60 tasks)", () => {
+    const shape = makeTools({} as Partial<TrinityClient>).propose_project_plan.parameters;
+    const tasks = (n: number) => Array.from({ length: n }, (_, i) => ({ key: `t${i}`, title: `T${i}` }));
+    const ms = (n: number) => Array.from({ length: n }, (_, i) => ({ key: `m${i}`, name: `M${i}` }));
+    assert.equal(shape.safeParse({ project_id: PROJECT.id, plan: { tasks: tasks(60) } }).success, true);
+    assert.equal(shape.safeParse({ project_id: PROJECT.id, plan: { tasks: tasks(61) } }).success, false);
+    assert.equal(shape.safeParse({ project_id: PROJECT.id, plan: { milestones: ms(13) } }).success, false);
+  });
+
+  it("the steward-facing descriptions say the kickoff plan is proposed and approved", () => {
+    const t = makeTools({} as Partial<TrinityClient>);
+    const d = t.propose_project_plan.description;
+    assert.ok(d.length <= 2048, `${d.length} chars`);
+    assert.match(d, /Nothing in the plan exists on the project until/);
+    assert.match(d, /last_proposal/);
+    // ent#1322: create_project_task is listed to user keys, so it names no agent-only tool.
+    assert.doesNotMatch(t.create_project_task.description, /propose_project_plan/);
+    assert.match(t.create_project_task.description, /proposes the whole plan/);
+  });
+});
