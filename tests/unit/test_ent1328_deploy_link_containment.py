@@ -31,7 +31,7 @@ from test_2060_deploy_integrity import (  # noqa: E402,F401  (fixtures)
 
 pytestmark = pytest.mark.unit
 
-SECRET = "sk_live_LABFAKE_NOT_A_REAL_KEY"
+SECRET = "LABFAKE-not-a-real-key-ent1328"
 VICTIM_CONFIG = {"mcpServers": {"billing": {"command": "npx", "args": ["-y", "billing-mcp"],
                                              "env": {"BILLING_KEY": SECRET}}}}
 
