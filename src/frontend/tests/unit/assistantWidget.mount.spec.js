@@ -1512,6 +1512,19 @@ describe('assistant panel', () => {
       expect(button('Start from scratch')).toBeTruthy()
     })
 
+    it('raises no settings step in the first session: no getting-started list, no settings nudge', async () => {
+      checklist = { completed_count: 0, total_count: 2, complete: false, dismissed: false, items: [
+        { key: 'claude', title: 'Connect Claude in Settings', description: 'a', done: false, action_label: 'x', action_route: '/' },
+        { key: 'first_agent_created', title: 'Create your first agent', description: 'b', done: false, action_label: 'x', action_route: '/' },
+      ] }
+      await leads()
+      const { useAssistantStore } = await import('@/stores/assistant')
+      useAssistantStore().greet({ key: 'connect', text: 'One thing before your agents can run: connect a model in Settings.' })
+      await flushPromises()
+      expect(wrapper.text()).not.toContain('Connect Claude in Settings')
+      expect(wrapper.text()).not.toContain('connect a model in Settings')
+    })
+
     it('an instance where the assistant does not lead keeps its usual hello', async () => {
       agentsList = [{ name: 'trinity-system', status: 'running', is_system: true }]
       status = { ...status, profile_known: false }

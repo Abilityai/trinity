@@ -295,6 +295,8 @@ export const useAssistantStore = defineStore('assistant', {
     greet(nudge) {
       const text = typeof nudge?.text === 'string' ? nudge.text.trim().slice(0, 400) : ''
       if (!text || this.sending) return
+      // ent#1355: the first session follows its own path; a stage line (connect a model in Settings) waits until it is over.
+      if (inFirstSession(this.status, this.fleet, useFirstRunStore().seededAgents || [])) return
       this.messages = this.messages.filter((m) => !m.local)      // its own line takes the place of the page's hello
       this.messages.push({ id: newId(), role: 'assistant', content: text, opener: true })
       this.opening = text

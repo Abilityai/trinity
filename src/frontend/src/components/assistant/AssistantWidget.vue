@@ -168,7 +168,7 @@
       the person has said not to show it.
     -->
     <section
-      v-if="setup.visible"
+      v-if="setup.visible && !firstSessionOn"
       class="shrink-0 border-b border-action-primary-200 dark:border-action-primary-500/40 bg-action-primary-50 dark:bg-action-primary-500/16 text-action-primary-700 dark:text-action-primary-200"
       data-testid="assistant-setup"
     >
@@ -735,7 +735,7 @@ import { useFirstRunStore } from '../../stores/firstRun'
 import { irreversibleTool, toolWords, webLink } from '../../utils/assistantCards'
 import { describePage } from '../../utils/assistantContext'
 import { starterGroups } from '../../utils/assistantStarters'
-import { CLAUDE_SIGN_IN, OPENING, OPENING_GROUP, isFirstSession, localHandOff } from '../../utils/firstSession'
+import { CLAUDE_SIGN_IN, OPENING, OPENING_GROUP, inFirstSession, isFirstSession, localHandOff } from '../../utils/firstSession'
 import { CLAUDE_TAB_COPY } from '../onboarding/steps/credentialSteps'
 import { renderMarkdown } from '../../utils/markdown'
 
@@ -811,6 +811,8 @@ function hello() {
     : ''
   return `Hi, I'm Trinity's assistant 👋\n\nLet's get you **an agent of your own** working in a few minutes: tell me a little about your work, I'll suggest one, build it and run it once so you see what it produces.${shown}`
 }
+// trinity-enterprise#1355: while the first session runs, no settings steps are raised (checkpoint 4).
+const firstSessionOn = computed(() => inFirstSession(store.status, store.fleet, firstRun.seededAgents || []))
 // trinity-enterprise#1355: the instance says the assistant leads, and the person has no agent of their own yet.
 const firstSession = computed(() => isFirstSession(store.status, store.fleet, firstRun.seededAgents || []))
 function startTalking() {

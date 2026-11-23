@@ -106,3 +106,14 @@ export function inFirstSession(status, fleet = [], examples = []) {
  * `{ label, start() }`, and the card shows that button instead of the field.
  */
 export const CLAUDE_SIGN_IN = null
+
+/**
+ * The example agents kept off the first screen (checkpoint 4): only where the
+ * assistant leads, only until the person has an agent of their own, and never
+ * once they asked to see them.
+ */
+export function examplesToHide(status, seeded = [], ownAgentCount = 0, shownOnRequest = false) {
+  if (!status?.leads_setup || shownOnRequest || ownAgentCount > 0) return []
+  return Array.isArray(seeded) ? seeded.slice() : []
+}
+export const SHOW_EXAMPLES_KEY = 'trinity-show-example-agents'

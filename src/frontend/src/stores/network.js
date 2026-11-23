@@ -160,10 +160,21 @@ export const useNetworkStore = defineStore('network', () => {
   // invariant): node data enriches timeline rows (isSystemAgent → system-first
   // sort + purple treatment), so nodes must stay PRE-query — a query-filtered
   // rebuild followed by Esc would render degraded rows until the next rebuild.
+  // trinity-enterprise#1355: example agents kept off the first screen where the
+  // assistant leads the first session (set by the Dashboard; empty elsewhere).
+  // Applied here, before the owner filter, so every pane and the graph agree.
+  const hiddenExamples = ref([])
+  function setHiddenExamples(names) {
+    hiddenExamples.value = Array.isArray(names) ? names : []
+  }
+  const shownAgents = computed(() => hiddenExamples.value.length
+    ? agents.value.filter(a => !hiddenExamples.value.includes(a.name))
+    : agents.value)
+
   const ownerFilteredAgents = computed(() => {
-    if (!filterOwner.value) return agents.value
+    if (!filterOwner.value) return shownAgents.value
     const owner = filterOwner.value === '__unassigned__' ? null : filterOwner.value
-    return agents.value.filter(a => (a.owner || null) === owner)
+    return shownAgents.value.filter(a => (a.owner || null) === owner)
   })
 
   // ent#261 seam: the canonical "visible agents" set — pre-query fleet ∘ the
@@ -2039,6 +2050,8 @@ export const useNetworkStore = defineStore('network', () => {
     filterOwner,
     filterQuery, // ent#261 — type-to-filter query (never persisted)
     ownerFilteredAgents, // ent#261 — pre-query fleet (the "Y" in "X of Y match"; feeds nodes)
+    hiddenExamples,
+    setHiddenExamples,
     visibleAgents, // ent#261 seam — the canonical filtered fleet all three panes consume
     // View mode / Replay state
     viewMode,
