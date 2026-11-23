@@ -2048,7 +2048,7 @@ async def finalize_self_task(
     *,
     is_self_task,
     self_task_activity_id,
-    agent_name,
+    agent_name: str,
     request,
     result,
     execution_id,
@@ -2244,7 +2244,7 @@ async def process_task_file_uploads(*, request, name, container, current_user) -
 async def create_task_execution_and_activities(
     *,
     request,
-    name,
+    name: str,
     current_user,
     x_source_agent,
     triggered_by,

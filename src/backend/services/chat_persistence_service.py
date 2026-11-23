@@ -202,7 +202,7 @@ async def persist_chat_session(
 
 
 async def persist_and_broadcast_chat_session(
-    *, agent_name, request, result, execution_id, user_id, user_email,
+    *, agent_name: str, request, result, execution_id, user_id, user_email,
     subscription_id, execution_time_ms,
 ):
     """Post-task block 1 (THINK-001): persist the authenticated chat session and
