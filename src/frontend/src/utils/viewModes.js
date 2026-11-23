@@ -19,6 +19,24 @@
 export const VIEW_MODES = Object.freeze(['timeline', 'grid', 'list'])
 export const DEFAULT_VIEW_MODE = VIEW_MODES[0]
 
+/**
+ * The view a person who has never chosen one opens in (trinity-enterprise#1357).
+ * Someone new has one agent or none, and Grid shows what exists. This is NOT
+ * the degrade default above: a stored value that is no longer a mode (e.g.
+ * the retired 'graph') was a choice, and keeps landing on Timeline as before.
+ */
+export const FIRST_VIEW_MODE = 'grid'
+
+/**
+ * The view the dashboard opens in, from the stored choice (`localStorage`
+ * returns `null` when there is none). A stored known mode always wins; nothing
+ * stored → `FIRST_VIEW_MODE`; anything else → `DEFAULT_VIEW_MODE`.
+ */
+export function initialViewMode(saved) {
+  if (saved === null || saved === undefined) return FIRST_VIEW_MODE
+  return VIEW_MODES.includes(saved) ? saved : DEFAULT_VIEW_MODE
+}
+
 /** The mode after `mode` in cycle order; an unknown mode wraps to the default. */
 export function nextViewMode(mode) {
   const i = VIEW_MODES.indexOf(mode) // -1 for unknown → (-1 + 1) % 3 = 0
