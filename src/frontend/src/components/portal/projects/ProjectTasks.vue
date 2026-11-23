@@ -115,7 +115,7 @@
               :can-move="canConfirm"
               :can-confirm="canConfirm"
               :can-create="canConfirm"
-              :hints="boardHints"
+              :hints="lane === lanes[0] ? boardHints : {}"
               @open="openTask"
               @move="onBoardMove"
               @set-status="onSetStatus"

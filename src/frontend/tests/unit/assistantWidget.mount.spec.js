@@ -29,6 +29,7 @@ let refusals = {}        // url → [{ status, detail }], thrown in order by the
 let confirmEmail         // the `email` /subscription/confirm answers: masked or null at the door
 let codeVersion          // the terms version /subscription/code names; undefined: the one served
 let agentsList = null    // what /api/agents answers when set (ent#1355: an instance with no agent of the person's own)
+let agentsWait = null    // when set, /api/agents answers only once this settles (a slow agent list)
 
 vi.mock('@/api', () => {
   const respond = (method, url, body) => {
@@ -43,7 +44,11 @@ vi.mock('@/api', () => {
       }
       if (url.endsWith('/subscription/confirm')) return { plan: 'pro', billing: 'unbilled', checkout_url: null, email: confirmEmail }
     }
-    if (url === '/api/enterprise/assistant/status') return statusReads.length ? statusReads.shift() : { ...status }
+    if (url === '/api/enterprise/assistant/status') {
+      const read = statusReads.length ? statusReads.shift() : { ...status }
+      if (read.fails) throw { response: { status: 500, data: { detail: 'The assistant is not answering.' } } }
+      return read
+    }
     if (url === '/api/enterprise/assistant/turn' || url === '/api/enterprise/assistant/turn/continue') {
       return turns.shift() || { status: 'final', conversation_id: 'c1', text: 'Done.', cards: [], allowance: ALLOWANCE }
     }
@@ -87,7 +92,10 @@ vi.mock('@/api', () => {
     return {}
   }
   const client = {
-    get: vi.fn(async (url) => ({ data: respond('get', url) })),
+    get: vi.fn(async (url) => {
+      if (url === '/api/agents' && agentsWait) await agentsWait
+      return { data: respond('get', url) }
+    }),
     post: vi.fn(async (url, body) => ({ data: respond('post', url, body) })),
     put: vi.fn(async (url, body) => ({ data: respond('put', url, body) })),
     delete: vi.fn(async (url) => ({ data: respond('delete', url) })),
@@ -135,6 +143,7 @@ describe('assistant panel', () => {
     confirmEmail = 'a•••@example.com'
     codeVersion = undefined
     agentsList = null
+    agentsWait = null
     pushed.length = 0
     subTerms = { version: 's1', title: 'Subscription terms', url: '', text: '# Subscription terms\n\nYou pay monthly.' }
     status = { available: true, contacted: true, reachable: true, plan: 'free', email: null, allowance: null, trial_terms: { version: 't0', url: '', accepted: 't0' }, profile_known: true }
@@ -297,16 +306,14 @@ describe('assistant panel', () => {
       expect(reads()).toBe(5)
     })
 
-    it('a message or a starter sent while it is being read again is held, never sent', async () => {
+    it('a message sent while it is being read again is held, never sent; no starter is offered until the opening is decided', async () => {
       statusReads = [{ ...PENDING }, { ...PENDING }]
       status = { ...NOT_AGREED }
       await load()
+      // trinity-enterprise#1356: what the empty panel offers waits with the opening, so it cannot change under the person
+      expect(wrapper.find('[data-testid="assistant-starters"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="assistant-opening-pending"]').attributes('aria-busy')).toBe('true')
       await say('how are my agents?')
-      expect(sent(TURN)).toEqual([])
-      const starter = wrapper.findAll('[data-testid="assistant-starters"] button')[0]
-      expect(starter).toBeTruthy()
-      await starter.trigger('click')
-      await flushPromises()
       expect(sent(TURN)).toEqual([])
     })
 
@@ -1592,6 +1599,159 @@ describe('assistant panel', () => {
       expect(pushed).toEqual([])
       expect(wrapper.find('[data-testid="assistant-result"]').exists()).toBe(true)
       vi.useRealTimers()
+    })
+  })
+
+  // trinity-enterprise#1356: on a newly set-up instance the first status is read
+  // while the account report is still pending, so it carries nothing to say.
+  // The panel used to write its own hello at once, and the settled re-read a
+  // moment later brought Trinity's own opening, which took the hello's place:
+  // the first thing a new person read changed under them. The opening is now
+  // decided once the status has settled, and a line already shown is not shown
+  // again on a reload or a second sign-in.
+  describe('one opening, decided once', () => {
+    const NUDGE = { key: 'first-agent', text: "You don't have an agent yet. Tell me one task you'd hand off." }
+    const SETTLED = { available: true, contacted: true, reachable: true, plan: 'free', email: null, allowance: ALLOWANCE, trial_terms: { version: 't0', url: '', accepted: 't0' }, profile_known: false }
+    const PENDING = { available: true, contacted: false, reachable: null, plan: null, email: null, allowance: null, trial_terms: { version: 't0', url: '', accepted: null }, bind: { state: 'pending' } }
+    const seen = []
+    // What the panel shows as its opening right now: its own words when empty, else the messages.
+    const opening = () => {
+      const empty = wrapper.find('[data-testid="assistant-welcome"]')
+      if (empty.exists()) return `welcome: ${empty.text()}`
+      return wrapper.findAll('.bubble').map((b) => b.text()).join(' | ')
+    }
+    const look = () => { const now = opening(); if (now) seen.push(now) }
+    const distinct = () => [...new Set(seen)]
+    // A page load: a new script with this browser's storage, signed in.
+    const load = async () => {
+      wrapper.unmount()
+      setActivePinia(createPinia())
+      const { useAuthStore } = await import('@/stores/auth')
+      useAuthStore().isAuthenticated = true
+      wrapper = mount(AssistantWidget, { attachTo: document.body, global: { stubs: {
+        ChatBubble: { props: ['role', 'content'], template: '<div class="bubble" :data-role="role">{{ content }}</div>' },
+        HelpChatWidget: { template: '<div />' } } } })
+      look()
+      await wrapper.get('[data-testid="assistant-launcher"]').trigger('click')
+      look()
+      for (const ms of [0, 0, 500, 1000, 2000, 4000, 8000]) {
+        await vi.advanceTimersByTimeAsync(ms)
+        await flushPromises()
+        look()
+      }
+    }
+
+    beforeEach(() => {
+      seen.length = 0
+      vi.useFakeTimers({ toFake: ['setTimeout'] })
+    })
+    afterEach(() => { vi.useRealTimers() })
+
+    it("Trinity's opening: shown alone on first open, on reload and on a second sign-in", async () => {
+      statusReads = [{ ...PENDING }]
+      status = { ...SETTLED, nudge: { ...NUDGE } }
+      await load()
+      expect(distinct()).toEqual([NUDGE.text])
+      expect(wrapper.findAll('.bubble').length).toBe(1)
+
+      seen.length = 0
+      await load()                                   // a reload: Trinity says the same line again
+      expect(distinct()).toEqual([NUDGE.text])
+      expect(wrapper.findAll('.bubble').length).toBe(1)
+
+      seen.length = 0
+      sessionStorage.clear()                         // a second sign-in, in a new session
+      status = { ...SETTLED, nudge: null }           // Trinity was told it was seen: it does not say it again
+      await load()
+      expect(distinct()).toEqual([NUDGE.text])
+      expect(wrapper.findAll('.bubble').length).toBe(1)
+    })
+
+    it("the panel's own hello: shown alone on first open, on reload and on a second sign-in", async () => {
+      statusReads = [{ ...PENDING }]
+      status = { ...SETTLED }
+      await load()
+      const shown = distinct()
+      expect(shown.length).toBe(1)
+      expect(shown[0]).toContain("I'm Trinity's assistant")
+
+      seen.length = 0
+      await load()
+      expect(distinct()).toEqual(shown)
+
+      seen.length = 0
+      sessionStorage.clear()
+      await load()
+      expect(distinct()).toEqual(shown)
+    })
+
+    // trinity-enterprise#1355 + #1356: the first-session question is an opening
+    // like any other, so it waits on the same gate. Decided on the early status
+    // (no account report yet, so no `leads_setup`) the panel wrote its own hello,
+    // and the question never came once the settled status said the assistant leads.
+    it('the first-session question waits for the settled status, and is the only opening', async () => {
+      agentsList = [{ name: 'trinity-system', status: 'running', is_system: true }]
+      statusReads = [{ ...PENDING }]
+      status = { ...SETTLED, leads_setup: true }
+      await load()
+      expect(distinct()).toHaveLength(1)
+      expect(distinct()[0]).toContain('Where are you starting from?')
+      expect(wrapper.findAll('.bubble')).toHaveLength(1)
+    })
+
+    // Until the agent list is in, an empty fleet looks like a first session. A
+    // person who already has an agent of their own must never be asked it.
+    it('waits for the agent list: someone with an agent of their own gets the hello, never the question', async () => {
+      agentsList = [{ name: 'trinity-system', status: 'running', is_system: true }, { name: 'issue-digest', status: 'running' }]
+      let release
+      agentsWait = new Promise((r) => { release = r })
+      status = { ...SETTLED, leads_setup: true }
+      await load()
+      expect(seen).toEqual([])                                  // nothing decided while the list is out
+      expect(wrapper.find('[data-testid="assistant-opening-pending"]').exists()).toBe(true)
+      release()
+      await flushPromises()
+      look()
+      expect(distinct()).toHaveLength(1)
+      expect(distinct()[0]).toContain("I'm Trinity's assistant")
+      expect(distinct()[0]).not.toContain('Where are you starting from?')
+    })
+
+    // The settle re-read can fail with the status already on screen. The error
+    // line only shows before there is a status, so the placeholder must stay:
+    // otherwise the conversation is blank until the next re-read.
+    it('a failed re-read while settling keeps the placeholder: never a blank conversation', async () => {
+      statusReads = [{ ...PENDING }, { fails: true }]
+      status = { ...SETTLED }
+      const blanks = []
+      wrapper.unmount()
+      setActivePinia(createPinia())
+      const { useAuthStore } = await import('@/stores/auth')
+      useAuthStore().isAuthenticated = true
+      wrapper = mount(AssistantWidget, { attachTo: document.body, global: { stubs: {
+        ChatBubble: { props: ['role', 'content'], template: '<div class="bubble" :data-role="role">{{ content }}</div>' },
+        HelpChatWidget: { template: '<div />' } } } })
+      await wrapper.get('[data-testid="assistant-launcher"]').trigger('click')
+      let failedSeen = false
+      for (const ms of [0, 0, 250, 250, 250, 250, 500, 500, 1000, 2000, 4000]) {
+        await vi.advanceTimersByTimeAsync(ms)
+        await flushPromises()
+        const { useAssistantStore } = await import('@/stores/assistant')
+        if (useAssistantStore().statusError) failedSeen = true
+        const shows = opening() || wrapper.find('[data-testid="assistant-opening-pending"]').exists()
+        if (wrapper.find('[data-testid="assistant-input"]').exists() && !shows) blanks.push(ms)
+      }
+      expect(failedSeen).toBe(true)
+      expect(blanks).toEqual([])
+    })
+
+    it('someone it already knows, with nothing to say: its own words, and nothing replaces them', async () => {
+      statusReads = [{ ...PENDING }]
+      status = { ...SETTLED, profile_known: true }
+      await load()
+      const shown = distinct()
+      expect(shown.length).toBe(1)
+      expect(shown[0]).toContain('get agents working for you')
     })
   })
 })

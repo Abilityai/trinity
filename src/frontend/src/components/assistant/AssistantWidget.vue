@@ -262,7 +262,18 @@
         <!-- Conversation -->
         <!-- On the ground colour, so each reply (a surface) reads as its own box. -->
         <div ref="messagesEl" class="flex-1 min-h-0 overflow-y-auto p-4 space-y-3 text-sm bg-gray-50 dark:bg-gray-900" aria-live="polite">
-          <div v-if="store.messages.length === 0" class="space-y-3" data-testid="assistant-welcome">
+          <!-- The opening is not decided yet (trinity-enterprise#1356): nothing is shown that could be replaced a moment later -->
+          <div
+            v-if="store.messages.length === 0 && !openingDecided"
+            class="space-y-2 animate-pulse motion-reduce:animate-none"
+            aria-busy="true"
+            data-testid="assistant-opening-pending"
+          >
+            <span class="sr-only">Loading the assistant</span>
+            <div class="h-3 w-3/4 rounded bg-gray-100 dark:bg-gray-750" />
+            <div class="h-3 w-1/2 rounded bg-gray-100 dark:bg-gray-750" />
+          </div>
+          <div v-else-if="store.messages.length === 0 && openingDecided" class="space-y-3" data-testid="assistant-welcome">
             <p class="text-gray-900 dark:text-gray-100">
               I help you set Trinity up and get agents working for you: I build them with you, check on them and fix what I can.
             </p>
@@ -420,7 +431,7 @@
           </template>
 
           <!-- What it can do, offered until the person has said something: also under a line it opened with -->
-          <div v-if="fresh && !store.sending" class="space-y-3">
+          <div v-if="fresh && !store.sending && openingDecided" class="space-y-3">
             <div v-for="g in starters" :key="g.heading" class="space-y-1.5" data-testid="assistant-starters">
               <p class="font-mono text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">{{ g.heading }}</p>
               <div class="flex flex-wrap gap-2">
@@ -815,12 +826,23 @@ function hello() {
 const firstSessionOn = computed(() => inFirstSession(store.status, store.fleet, firstRun.seededAgents || []))
 // trinity-enterprise#1355: the instance says the assistant leads, and the person has no agent of their own yet.
 const firstSession = computed(() => isFirstSession(store.status, store.fleet, firstRun.seededAgents || []))
+// trinity-enterprise#1356: the opening is decided once, when there is nothing
+// left to learn that would change it: the reads the hello is written from are
+// in, and the status has settled. Right after setup the first status is read
+// before the instance's account report lands and carries no line from Trinity;
+// a hello written then was replaced by Trinity's own line when the re-read
+// brought it, so the first thing a new person read changed under them.
+// The first-session opening waits on the same gate: decided on an early,
+// incomplete status it could ask the first-session question of the wrong person.
+const prepared = ref(false)      // open() has read the fleet and which agents are examples
+const openingDecided = computed(() => prepared.value && Boolean(store.status) && !store.settling)
 function startTalking() {
-  if (!isOpen.value || !store.status || store.messages.length) return
+  if (!isOpen.value || !openingDecided.value || store.messages.length) return
   if (firstSession.value) return store.welcome(OPENING)
   if (store.status.profile_known) return
   store.welcome(hello())
 }
+watch(openingDecided, (now) => { if (now) startTalking() })
 
 // While the setup overlay has the screen the assistant stays out of its way,
 // and takes over when it closes: open beside the page where there is room,
@@ -946,6 +968,7 @@ async function open({ quiet = false } = {}) {
   const fleet = store.messages.length ? null : store.refreshFleet().catch(() => {})
   if (!store.status) await store.loadStatus()
   await Promise.all([fleet, firstRun.fetchState()])     // which agents are the install's examples: read once, kept
+  prepared.value = true
   startTalking()
   if (!quiet) focusInput()
 }
