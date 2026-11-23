@@ -164,7 +164,7 @@ const coverageTally = computed(() => {
 // The agents worth a line: those with events, and those whose silence means
 // something other than "nothing happened". The server sorts loudest first.
 const rows = computed(() => agents.value
-  .map((a) => ({ ...a, notice: coverageNotice(a.coverage, a.reporting) }))
+  .map((a) => ({ ...a, notice: coverageNotice(a.coverage, a.reporting, { system: !!a.system }) }))
   .filter((a) => a.events > 0 || a.notice))
 
 function openAgent(name) {

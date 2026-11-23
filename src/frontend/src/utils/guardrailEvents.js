@@ -24,6 +24,9 @@ export const HOOKED_RUNTIMES = Object.freeze(['claude-code', 'claude'])
 export const NO_EVENTS_COPY = 'No guardrail events in the last 24 h'
 export const NEVER_COPY = "This agent isn't reporting guardrail events (older image)"
 export const NO_HOOKS_COPY = 'Guardrail hooks run on the Claude Code runtime only'
+// The system agent is started without the backend address on purpose (#1816),
+// so its reporter never runs: by design, not an older image.
+export const SYSTEM_NEVER_COPY = "The system agent doesn't report guardrail events"
 
 /** "Not reporting since <time>" — absolute, so it reads the same tomorrow. */
 export function staleCopy(lastReportAt) {
@@ -54,13 +57,14 @@ export function agentCoverage({ runtime = null, reporting = null } = {}) {
 /**
  * The notice an agent's coverage earns, or null when it is reporting.
  * `{ coverage, text, variant }` — the variant is a BaseBadge token family.
+ * `system`: the system agent, whose `never` has its own words.
  */
-export function coverageNotice(coverage, reporting = null) {
+export function coverageNotice(coverage, reporting = null, { system = false } = {}) {
   switch (coverage) {
     case 'no_hooks':
       return { coverage, text: NO_HOOKS_COPY, variant: 'neutral' }
     case 'never':
-      return { coverage, text: NEVER_COPY, variant: 'neutral' }
+      return { coverage, text: system ? SYSTEM_NEVER_COPY : NEVER_COPY, variant: 'neutral' }
     case 'stale':
       return { coverage, text: staleCopy(reporting?.last_report_at), variant: 'warning' }
     default:

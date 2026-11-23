@@ -260,6 +260,24 @@ class TestCoverage:
         assert rows[A_CODEX]["coverage"] == "no_hooks"
         assert rows[A_CODEX]["runtime"] == "codex"
 
+    def test_the_system_agent_is_marked_so_its_silence_is_not_blamed_on_an_old_image(self, world):
+        """The system agent is started without TRINITY_BACKEND_URL on purpose
+        (#1816), so its forwarder never runs: its `never` is by design, and the
+        UI needs to know which row that is to say so."""
+        from db.agents import SYSTEM_AGENT_NAME
+        rows = {a["agent_name"]: a for a in svc.fleet_stats(24, [A_SILENT, SYSTEM_AGENT_NAME])["agents"]}
+        assert rows[SYSTEM_AGENT_NAME]["system"] is True
+        assert rows[SYSTEM_AGENT_NAME]["coverage"] == "never"
+        assert rows[A_SILENT]["system"] is False
+
+    def test_the_route_carries_the_system_mark(self, world, monkeypatch):
+        """Through the response model, which would drop an undeclared field."""
+        from db.agents import SYSTEM_AGENT_NAME
+        monkeypatch.setattr(svc, "fleet_agent_names", lambda owner: [A_SILENT, SYSTEM_AGENT_NAME])
+        rows = _by_name(_get(_user(ADMIN, "admin")).json())
+        assert rows[SYSTEM_AGENT_NAME]["system"] is True
+        assert rows[A_SILENT]["system"] is False
+
     def test_the_coverage_tally(self, world):
         body = _get(_user(OWNER, "creator")).json()
         assert body["coverage"] == {"reporting": 2, "stale": 1, "never": 1, "no_hooks": 1}

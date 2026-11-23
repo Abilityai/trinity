@@ -134,6 +134,8 @@ const props = defineProps({
   // The agent's runtime as the page knows it (`agent.runtime`); the forwarder's
   // last report stands in when the page has none.
   runtime: { type: String, default: '' },
+  // The system agent never reports by design (#1816): its own words, not "older image".
+  isSystem: { type: Boolean, default: false },
 })
 
 const store = useGuardrailEventsStore()
@@ -147,7 +149,7 @@ const view = computed(() => viewState({
 }))
 
 const coverage = computed(() => agentCoverage({ runtime: props.runtime || null, reporting: store.reporting }))
-const notice = computed(() => coverageNotice(coverage.value, store.reporting))
+const notice = computed(() => coverageNotice(coverage.value, store.reporting, { system: props.isSystem }))
 const coverageLabel = computed(() => COVERAGE_LABELS[coverage.value] || '')
 const staleMessage = computed(() => staleBannerMessage('the guardrail events', lastLoadedAt.value))
 

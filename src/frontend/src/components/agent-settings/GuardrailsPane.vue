@@ -127,7 +127,7 @@
 
     <!-- trinity-enterprise#165 S4: what the guardrails refused or hid, last 24 h.
          Last in the pane, so its bounded list never moves the sections above. -->
-    <GuardrailEventsSection :agent-name="agentName" :runtime="runtime" />
+    <GuardrailEventsSection :agent-name="agentName" :runtime="runtime" :is-system="isSystem" />
   </div>
 </template>
 

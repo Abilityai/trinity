@@ -44,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from database import db
+from db.agents import SYSTEM_AGENT_NAME
 from services import rate_limiter
 from utils.credential_sanitizer import sanitize_text
 from utils.helpers import iso_cutoff, parse_iso_timestamp, to_utc_iso, utc_now
@@ -600,8 +601,11 @@ def fleet_stats(hours: int, agent_names: Iterable[str]) -> Dict[str, Any]:
     is visible rather than absent.
 
     `{"hours", "since", "events", "by_kind", "coverage": {state: n},
-      "agents": [{agent_name, runtime, coverage, events, by_kind, reporting}]}`,
-    loudest agent first, then by name.
+      "agents": [{agent_name, runtime, coverage, events, by_kind, reporting,
+                  system}]}`,
+    loudest agent first, then by name. `system` marks the system agent, which
+    is started without TRINITY_BACKEND_URL on purpose (#1816), so its `never`
+    is by design and the UI says so rather than blame an older image.
     """
     if not isinstance(hours, int) or isinstance(hours, bool) or not 1 <= hours <= STATS_HOURS_MAX:
         raise GuardrailEventQueryError("invalid_hours")
@@ -629,6 +633,7 @@ def fleet_stats(hours: int, agent_names: Iterable[str]) -> Dict[str, Any]:
             "events": sum(by_kind.values()),
             "by_kind": by_kind,
             "reporting": reporting,
+            "system": name == SYSTEM_AGENT_NAME,
         })
     agents.sort(key=lambda a: (-a["events"], a["agent_name"]))
     return {

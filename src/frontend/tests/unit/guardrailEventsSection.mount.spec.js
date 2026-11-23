@@ -26,6 +26,7 @@ import api from '../../src/api'
 import GuardrailEventsSection from '../../src/components/agent-settings/GuardrailEventsSection.vue'
 import {
   NEVER_COPY,
+  SYSTEM_NEVER_COPY,
   NO_EVENTS_COPY,
   NO_HOOKS_COPY,
 } from '../../src/utils/guardrailEvents'
@@ -88,6 +89,13 @@ describe('GuardrailEventsSection — honest states', () => {
     const w = await mountWith(page([], REPORTING))
     expect(w.find('[data-testid="guardrail-events-empty"]').text()).toBe(NO_EVENTS_COPY)
     expect(w.find('[data-testid="guardrail-events-notice"]').exists()).toBe(false)
+  })
+
+  it('on the system agent, says it does not report instead of blaming an older image', async () => {
+    const w = await mountWith(page([], NEVER), { isSystem: true })
+    const notice = w.find('[data-testid="guardrail-events-notice"]').text()
+    expect(notice).toContain(SYSTEM_NEVER_COPY)
+    expect(notice).not.toContain(NEVER_COPY)
   })
 
   it('says the agent is not reporting when it never has — not "no events"', async () => {

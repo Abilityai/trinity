@@ -46,6 +46,7 @@ The card never treats silence as good news. It says "No guardrail events in the 
 | What the card says | Meaning |
 |---|---|
 | This agent isn't reporting guardrail events (older image) | No report has ever arrived. The agent runs an image older than the event forwarder. |
+| The system agent doesn't report guardrail events | The built-in system agent runs without a connection back to the platform's event store by design. Nothing to fix. |
 | Not reporting since *time* | The agent reported before and has been silent since (more than 15 minutes). |
 | Guardrail hooks run on the Claude Code runtime only | A Codex or Gemini agent. It has no guardrail hooks, so it can never have an event. |
 

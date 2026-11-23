@@ -9,6 +9,8 @@ import {
   HOOKED_RUNTIMES,
   agentCoverage,
   coverageNotice,
+  NEVER_COPY,
+  SYSTEM_NEVER_COPY,
   kindLabel,
   kindRows,
   runtimeHasHooks,
@@ -43,6 +45,17 @@ describe('coverageNotice', () => {
     const texts = ['never', 'stale', 'no_hooks'].map((c) =>
       coverageNotice(c, { last_report_at: '2026-11-06T08:30:00Z' }).text)
     expect(new Set(texts).size).toBe(3)
+  })
+
+  it('the system agent never reporting is by design, not an older image', () => {
+    const sys = coverageNotice('never', null, { system: true })
+    expect(sys.text).toBe(SYSTEM_NEVER_COPY)
+    expect(sys.text).not.toMatch(/older image/)
+    expect(coverageNotice('never').text).toBe(NEVER_COPY)
+    // Only the never state changes: a system agent that does report reads as any other.
+    expect(coverageNotice('reporting', null, { system: true })).toBeNull()
+    expect(coverageNotice('stale', { last_report_at: '2026-11-06T08:30:00Z' }, { system: true }).text)
+      .toMatch(/^Not reporting since/)
   })
 
   it('a stale notice names when the agent went quiet', () => {

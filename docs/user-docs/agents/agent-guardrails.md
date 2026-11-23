@@ -212,6 +212,7 @@ An empty list is not taken as good news. Both places say which kind of silence i
 |---|---|
 | No guardrail events in the last 24 h | The agent is reporting and nothing was refused or hidden. |
 | This agent isn't reporting guardrail events (older image) | No report has ever arrived. Recreate the agent on a current image. |
+| The system agent doesn't report guardrail events | Shown for the built-in system agent, which runs without a connection back to the platform's event store by design. Nothing to fix. |
 | Not reporting since *time* | The agent reported before and has been silent for more than 15 minutes. Events it sent earlier are still listed. |
 | Guardrail hooks run on the Claude Code runtime only | A Codex or Gemini agent. These hooks don't run on those runtimes, so they produce no events. |
 

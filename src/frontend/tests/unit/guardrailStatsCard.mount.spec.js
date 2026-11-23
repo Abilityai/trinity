@@ -19,7 +19,7 @@ vi.mock('vue-router', () => ({ useRouter: () => ({ push: vi.fn() }) }))
 import api from '../../src/api'
 import GuardrailStatsCard from '../../src/components/GuardrailStatsCard.vue'
 import { useGuardrailEventsStore } from '../../src/stores/guardrailEvents'
-import { NEVER_COPY, NO_EVENTS_COPY, NO_HOOKS_COPY } from '../../src/utils/guardrailEvents'
+import { NEVER_COPY, NO_EVENTS_COPY, NO_HOOKS_COPY, SYSTEM_NEVER_COPY } from '../../src/utils/guardrailEvents'
 
 const REP = { state: 'reporting', last_report_at: '2026-11-08T10:00:00.000000Z', runtime: 'claude-code', dropped_total: 0 }
 
@@ -95,6 +95,21 @@ describe('GuardrailStatsCard', () => {
     expect(text(w)).not.toContain(NO_EVENTS_COPY)
     expect(w.find('[data-testid="guardrail-stats-none-reporting"]').exists()).toBe(true)
     expect(w.find('[data-testid="guardrail-stats-total"]').text()).toBe('—')
+  })
+
+  it('says the system agent does not report, instead of blaming an older image', async () => {
+    const never = { state: 'never', last_report_at: null, runtime: null, dropped_total: 0 }
+    const w = await mountWith(stats([
+      agent('fine'),
+      agent('trinity-system', { coverage: 'never', system: true, reporting: never }),
+      agent('old', { coverage: 'never', system: false, reporting: never }),
+    ]))
+    const rows = Object.fromEntries(w.findAll('[data-testid="guardrail-stats-agent"]')
+      .map((r) => [r.attributes('data-agent'), r]))
+    expect(rows['trinity-system'].text()).toContain(SYSTEM_NEVER_COPY)
+    expect(rows['trinity-system'].text()).not.toContain(NEVER_COPY)
+    expect(rows['trinity-system'].text()).toContain('Not reporting')
+    expect(rows.old.text()).toContain(NEVER_COPY)
   })
 
   it('names each agent that is not reporting, with its own words', async () => {

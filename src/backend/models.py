@@ -3374,6 +3374,8 @@ class GuardrailStatsAgent(BaseModel):
     events: int
     by_kind: Dict[str, int] = Field(default_factory=dict)
     reporting: GuardrailReportingState
+    # The system agent never reports by design (#1816); the UI words it so.
+    system: bool = False
 
 
 class GuardrailStatsResponse(BaseModel):
