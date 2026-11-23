@@ -24,6 +24,8 @@ import { buildContext, buildFleet, describePage } from '../utils/assistantContex
 import { acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, validBuild, webLink } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
 import { useAuthStore } from './auth'
+import { useFirstRunStore } from './firstRun'
+import { isFirstSession } from '../utils/firstSession'
 
 export const FEATURE_ID = 'assistant'
 
@@ -415,7 +417,9 @@ export const useAssistantStore = defineStore('assistant', {
         let { data } = await api.post(`${BASE}/turn`, {
           conversation_id: this.conversationId,
           message: clicked.length ? `${clicked.join('\n')}\n${message}` : message,
-          context: { ...buildContext(route, fleet), ...(said ? { said } : {}), ...setupSteps() },
+          context: { ...buildContext(route, fleet), ...(said ? { said } : {}), ...setupSteps(),
+            // trinity-enterprise#1355: the assistant leads this session and follows its script for it.
+            ...(isFirstSession(this.status, fleet, useFirstRunStore().seededAgents || []) ? { first_session: true } : {}) },
           counted,
         }, { timeout: STEP_TIMEOUT_MS })
 

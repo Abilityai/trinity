@@ -1488,6 +1488,7 @@ describe('assistant panel', () => {
       await flushPromises()
       expect(sent(TURN)[0].body.message).toBe('Start from scratch')
       expect(sent(TURN)[0].body.context.said).toContain('Where are you starting from?')
+      expect(sent(TURN)[0].body.context.first_session).toBe(true)     // the assistant follows its first-session script
     })
 
     it('a typed answer goes to the assistant the same way', async () => {
@@ -1513,6 +1514,8 @@ describe('assistant panel', () => {
       await openPanel()
       expect(wrapper.text()).not.toContain('Where are you starting from?')
       expect(button('Start from scratch')).toBeUndefined()
+      await say('hello')
+      expect(sent(TURN)[0].body.context.first_session).toBeUndefined()
     })
   })
 })
