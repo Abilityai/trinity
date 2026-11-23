@@ -9738,6 +9738,17 @@
       "description": "perform_health_check (behind POST /api/monitoring/agents/{name}/check and the first-check path of GET) reports a measured 0.0 uptime_percent_24h and 0.0 avg_latency_24h_ms as 0.0, not null; probes and DB stubbed. With no measurement at all both fields still read None."
     },
     {
+      "file": "../src/frontend/tests/unit/assistantCredentialField.mount.spec.js",
+      "feature": "trinity-enterprise#1358",
+      "added": "2026-11-23",
+      "categories": [
+        "frontend",
+        "unit",
+        "credentials"
+      ],
+      "description": "The assistant panel's credential card, mounted: a masked field that says the assistant cannot see the value and where it is stored; Save posts the value once to the instance, empties the field and sends only 'Provided: NAME for ...'; Cancel sends 'Not provided' and stores nothing; a refusal is named and sends nothing; a value already set is said to be replaced, never shown; the value is in no turn, no kept message and no browser storage."
+    },
+    {
       "file": "unit/test_ent1176_managed_hooks.py",
       "feature": "trinity-enterprise#1176",
       "added": "2026-11-23",
