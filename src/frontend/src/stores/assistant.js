@@ -21,7 +21,7 @@ import { defineStore } from 'pinia'
 import api from '../api'
 import { useOnboardingStore } from './onboarding'
 import { buildContext, buildFleet, describePage } from '../utils/assistantContext'
-import { acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, validBuild, webLink } from '../utils/assistantCards'
+import { acceptCards, buildOutcome, cardLabel, cardNote, credentialLine, outcomeLine, runCard, validBuild, webLink } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
 import { useAuthStore } from './auth'
 
@@ -758,6 +758,70 @@ export const useAssistantStore = defineStore('assistant', {
       entry.state = outcome.kind
       entry.reason = outcome.reason
       await this.send(outcome.line, route, { shown: false })
+    },
+
+    /**
+     * Whether the credential a field asks for is set already, so the field can
+     * say that sending replaces it. `{ set: true | false | null }`,
+     * never the value; null when it cannot be read. A 422 is the instance's
+     * own policy refusing the name (or agent) outright: `{ refused: words }`,
+     * so the field closes before anyone types a secret Save would refuse.
+     */
+    async credentialState(card) {
+      try {
+        const { data } = await api.get(`${BASE}/credential`, { params: { name: card.name, ...(card.agent ? { agent: card.agent } : {}) } })
+        return data || null
+      } catch (error) {
+        if (error?.response?.status === 422) return { refused: words(error, "It can't be set from here.") }
+        return null
+      }
+    },
+
+    /**
+     * Close a credential field the instance refused by name. No value was
+     * typed and no turn is sent: the card says why, and nothing else changes.
+     */
+    refuseCredential(messageId, cardId, reason) {
+      const entry = this.messages.find((m) => m.id === messageId)?.cards?.find((c) => c.id === cardId)
+      if (!entry || entry.card.action !== 'credential' || entry.state !== 'open') return
+      entry.state = 'refused'
+      entry.reason = reason
+    },
+
+    /**
+     * The person answered a credential field. `value` is what they
+     * typed, or null for Cancel. The value is posted once, to this instance,
+     * and is held nowhere here: not on the card, not in the conversation kept
+     * in this browser, not in the line the assistant is sent, which says only
+     * "Provided" or "Not provided". A refusal leaves the card open and sends
+     * nothing: the person can fix the value or cancel.
+     * Returns `{ ok }` or `{ ok: false, error, code }`.
+     */
+    async answerCredential(messageId, cardId, value, route) {
+      const entry = this.messages.find((m) => m.id === messageId)?.cards?.find((c) => c.id === cardId)
+      if (!entry || entry.card.action !== 'credential' || entry.state !== 'open' || this.sending) return { ok: false, error: '' }
+      if (value === null) {
+        entry.state = 'declined'
+        await this.send(credentialLine(entry.card, false), route, { shown: false })
+        return { ok: true }
+      }
+      entry.state = 'running'
+      try {
+        const { data } = await api.post(`${BASE}/credential`,
+          { agent: entry.card.agent || null, name: entry.card.name, value }, { timeout: STEP_TIMEOUT_MS })
+        entry.state = 'done'
+        entry.reason = data?.replaced ? 'replaced' : ''
+      } catch (error) {
+        entry.state = 'open'
+        const code = error?.response?.status
+        return {
+          ok: false,
+          code: detail(error)?.code || null,
+          error: words(error, code ? `Trinity refused it (${code}). Nothing was stored.` : "Couldn't reach Trinity, so it may or may not have been stored."),
+        }
+      }
+      await this.send(credentialLine(entry.card, true), route, { shown: false })
+      return { ok: true }
     },
 
     /** Build an approved design. The instance creates the agents as this person. */
