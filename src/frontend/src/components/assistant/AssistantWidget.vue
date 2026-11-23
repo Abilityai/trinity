@@ -362,6 +362,8 @@
                   Create them here as soon as they're ready
                 </label>
               </div>
+              <!-- A credential: a masked field whose value goes to this instance, never to the assistant -->
+              <AssistantCredentialField v-else-if="c.card.action === 'credential'" :message-id="m.id" :entry="c" :route="route" />
               <div v-else-if="c.state === 'open' || c.state === 'running'" class="flex flex-wrap gap-2 pt-1">
                 <BaseButton
                   size="sm"
@@ -698,6 +700,7 @@ import BaseSegmented from '../base/BaseSegmented.vue'
 import BaseTextarea from '../base/BaseTextarea.vue'
 import InlineError from '../InlineError.vue'
 import ChatBubble from '../chat/ChatBubble.vue'
+import AssistantCredentialField from './AssistantCredentialField.vue'
 import HelpChatWidget from '../HelpChatWidget.vue'
 import { maskAddress, useAssistantStore } from '../../stores/assistant'
 import { useOnboardingStore } from '../../stores/onboarding'
@@ -725,7 +728,7 @@ const OUTCOME = Object.freeze({
 })
 const CONFIRM = Object.freeze({ build: 'Build', upgrade: 'Continue', feedback: 'Send' })
 const LOADING = Object.freeze({ build: 'Building…', feedback: 'Sending…' })
-const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running', feedback: 'For the Trinity team' })
+const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running', feedback: 'For the Trinity team', credential: 'A credential, kept from the assistant' })
 const SHOWN_STEPS = 4
 const FOLLOWED = ['job', 'run']
 // A followed card's heading follows what happened to it.
