@@ -153,3 +153,151 @@ class TestLogin:
         assert seen.thread is not None and seen.thread != loop_thread
         assert status_code == 401, "a wrong password is still refused"
         assert audited == ["login_failed"], "and still audited"
+
+
+class _FakeRedis:
+    """Just enough of the sync client for the login counters."""
+
+    def __init__(self):
+        self.data = {}
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def ttl(self, key):
+        return 900
+
+    def delete(self, key):
+        self.data.pop(key, None)
+
+    def pipeline(self):
+        outer = self
+
+        class _Pipe:
+            def incr(self, key):
+                outer.data[key] = str(int(outer.data.get(key, 0)) + 1)
+
+            def expire(self, key, seconds):
+                pass
+
+            def execute(self):
+                pass
+
+        return _Pipe()
+
+
+def _login_rig(monkeypatch, verify):
+    """The real `login`, the real limit check and record, a fake Redis."""
+    from routers import auth
+
+    fake = _FakeRedis()
+    monkeypatch.setattr(auth, "get_redis_client", lambda: fake)
+    monkeypatch.setattr(auth, "authenticate_user", verify)
+    monkeypatch.setattr(auth, "is_setup_completed", lambda: True)
+
+    async def audit(**kw):
+        return None
+
+    monkeypatch.setattr(auth.platform_audit_service, "log", audit)
+
+    def attempt(username, ip="127.0.0.1"):
+        request = SimpleNamespace(client=SimpleNamespace(host=ip), headers={},
+                                  state=SimpleNamespace(), scope={"path": "/api/token"})
+        return auth.login(request, SimpleNamespace(username=username, password="wrong"), None)
+
+    return auth, fake, attempt
+
+
+async def _statuses(coros):
+    results = await asyncio.gather(*coros, return_exceptions=True)
+    return sorted(r.status_code for r in results)
+
+
+class TestLoginLockoutUnderConcurrency:
+    """The verify is awaited now, so the lockout must hold without the event
+    loop serialising the handler."""
+
+    def test_concurrent_wrong_passwords_verify_only_up_to_the_account_limit(self, monkeypatch):
+        verified = []
+
+        def wrong(username, password):
+            verified.append(username)
+            time.sleep(0.02)
+            return None
+
+        auth, fake, attempt = _login_rig(monkeypatch, wrong)
+        # One address per request, so only the per-account bucket can refuse.
+        codes = asyncio.run(_statuses(attempt("admin", ip=f"10.0.0.{i}") for i in range(40)))
+
+        limit = auth.LOGIN_ACCOUNT_LIMIT
+        assert len(verified) == limit, f"{len(verified)} passwords were verified, the limit is {limit}"
+        assert codes == [401] * limit + [429] * (40 - limit)
+        assert fake.data["login_attempts_acct:admin"] == str(limit)
+        assert auth._verify_locks == {}, "no lock entry outlives its requests"
+
+    def test_the_account_is_normalised_before_it_is_locked(self, monkeypatch):
+        verified = []
+
+        def wrong(username, password):
+            verified.append(username)
+            time.sleep(0.02)
+            return None
+
+        auth, _, attempt = _login_rig(monkeypatch, wrong)
+        names = ["admin", "ADMIN", " Admin "] * 6
+        asyncio.run(_statuses(attempt(n, ip=f"10.0.1.{i}") for i, n in enumerate(names)))
+        assert len(verified) == auth.LOGIN_ACCOUNT_LIMIT
+
+    def test_one_account_does_not_delay_another(self, monkeypatch):
+        running = SimpleNamespace(now=0, peak=0)
+        guard = threading.Lock()
+
+        def wrong(username, password):
+            with guard:
+                running.now += 1
+                running.peak = max(running.peak, running.now)
+            time.sleep(0.05)
+            with guard:
+                running.now -= 1
+            return None
+
+        _, _, attempt = _login_rig(monkeypatch, wrong)
+        asyncio.run(_statuses(attempt(f"user{i}", ip=f"10.0.2.{i}") for i in range(3)))
+        assert running.peak == 3, "different accounts verify in parallel"
+
+    def test_parallel_verifies_are_capped(self, monkeypatch):
+        running = SimpleNamespace(now=0, peak=0)
+        guard = threading.Lock()
+
+        def wrong(username, password):
+            with guard:
+                running.now += 1
+                running.peak = max(running.peak, running.now)
+            time.sleep(0.05)
+            with guard:
+                running.now -= 1
+            return None
+
+        auth, _, attempt = _login_rig(monkeypatch, wrong)
+        asyncio.run(_statuses(attempt(f"user{i}", ip=f"10.0.3.{i}") for i in range(12)))
+        assert running.peak == auth.LOGIN_VERIFY_CONCURRENCY
+
+    def test_a_correct_password_clears_the_counter_and_logs_in(self, monkeypatch):
+        from routers import auth as auth_module
+
+        def right(username, password):
+            return {"username": username, "role": "admin", "id": 1}
+
+        auth, fake, attempt = _login_rig(monkeypatch, right)
+        fake.data["login_attempts_acct:admin"] = "3"
+        class _Stop(Exception):
+            pass
+
+        def after_login(*a, **k):
+            raise _Stop          # past the lock; the rest of the handler is not under test
+
+        monkeypatch.setattr(auth_module.db, "update_last_login", after_login)
+        with pytest.raises(_Stop):
+            asyncio.run(attempt("admin"))
+        assert "login_attempts_acct:admin" not in fake.data
+        assert auth._verify_locks == {}

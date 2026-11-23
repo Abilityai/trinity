@@ -2,6 +2,7 @@
 Authentication routes for the Trinity backend.
 """
 import asyncio
+import contextlib
 import logging
 from datetime import timedelta
 from typing import Optional
@@ -241,6 +242,59 @@ def record_login_attempt(client_ip: str, success: bool, account: Optional[str] =
         logger.warning(f"Failed to record login attempt: {e}")
 
 
+# Password verification runs in a thread (#4674), so the handler now awaits
+# between the limit check and the failure record. Without the two guards below
+# every concurrent request for one account passes the check before any failure
+# is counted, and the 5-per-15-min lockout stops bounding guesses.
+#
+# * `_account_verify_lock` — check → verify → record is one critical section per
+#   account, so attempts on an account are counted one at a time, as they were
+#   when bcrypt held the event loop. Other accounts are not delayed.
+# * `_verify_slots` — at most LOGIN_VERIFY_CONCURRENCY bcrypt runs at once per
+#   worker, so a login flood spread over many accounts cannot occupy the shared
+#   default thread pool that every other `asyncio.to_thread` caller uses.
+#
+# Both are per worker process, the same scope the lockout had before #4674.
+LOGIN_VERIFY_CONCURRENCY = 4
+
+_verify_locks: dict = {}   # account -> [asyncio.Lock, holders + waiters]
+_verify_slots_state: Optional[tuple] = None   # (loop, asyncio.Semaphore)
+
+
+@contextlib.asynccontextmanager
+async def _account_verify_lock(account: str):
+    """Serialise check → verify → record for one account.
+
+    Entries are reference-counted and dropped when the last holder leaves, so
+    the table cannot grow with attacker-chosen usernames.
+    """
+    entry = _verify_locks.get(account)
+    if entry is None:
+        entry = _verify_locks[account] = [asyncio.Lock(), 0]
+    entry[1] += 1
+    try:
+        async with entry[0]:
+            yield
+    finally:
+        entry[1] -= 1
+        if entry[1] == 0 and _verify_locks.get(account) is entry:
+            del _verify_locks[account]
+
+
+def _verify_slots() -> asyncio.Semaphore:
+    """The bcrypt concurrency cap for the running loop (one loop per worker)."""
+    global _verify_slots_state
+    loop = asyncio.get_running_loop()
+    if _verify_slots_state is None or _verify_slots_state[0] is not loop:
+        _verify_slots_state = (loop, asyncio.Semaphore(LOGIN_VERIFY_CONCURRENCY))
+    return _verify_slots_state[1]
+
+
+async def _verify_password_off_loop(username: str, password: str):
+    async with _verify_slots():
+        return await asyncio.to_thread(authenticate_user, username, password)
+
+
 def check_otp_rate_limit(email: str) -> bool:
     """
     Check if OTP verification attempts for this email are within rate limit.
@@ -390,23 +444,29 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     client_ip = request.client.host if request.client else "unknown"
     account = (form_data.username or "").strip().lower()
 
-    # Check rate limit before processing (#591)
-    check_login_rate_limit(client_ip, account=account)
+    # The limit check, the password verify and the attempt record are one
+    # critical section per account: the verify is awaited, so without the lock
+    # concurrent requests would all pass the check before any failure counted.
+    async with _account_verify_lock(account):
+        # Check rate limit before processing (#591)
+        check_login_rate_limit(client_ip, account=account)
 
-    # Block login if setup is not completed
-    if not is_setup_completed():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="setup_required"
-        )
+        # Block login if setup is not completed
+        if not is_setup_completed():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="setup_required"
+            )
 
-    # #4674: bcrypt is ~200 ms of CPU by design. Verified on the event loop it
-    # stalled the whole worker for every login — and for every failed attempt,
-    # which anyone can send (measured: 176–200 ms per login on a live instance).
-    user = await asyncio.to_thread(authenticate_user, form_data.username, form_data.password)
+        # #4674: bcrypt is ~200 ms of CPU by design. Verified on the event loop it
+        # stalled the whole worker for every login — and for every failed attempt,
+        # which anyone can send (measured: 176–200 ms per login on a live instance).
+        user = await _verify_password_off_loop(form_data.username, form_data.password)
+        # Record the outcome before the lock is released: a failure increments
+        # the counters the next waiter checks, a success clears them.
+        record_login_attempt(client_ip, success=bool(user), account=account)
+
     if not user:
-        # Record failed attempt
-        record_login_attempt(client_ip, success=False, account=account)
         # SEC-001: audit failed admin login
         await platform_audit_service.log(
             event_type=AuditEventType.AUTHENTICATION,
@@ -422,9 +482,6 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-    # Record successful login (clears attempt counter)
-    record_login_attempt(client_ip, success=True, account=account)
 
     # Update last login timestamp
     db.update_last_login(user["username"])
