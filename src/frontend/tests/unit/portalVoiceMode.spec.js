@@ -420,11 +420,13 @@ describe('modal: while the call is on, the chat is visible but inert', () => {
 
 describe('leaving mid-call ends it gracefully — the transcript is kept', () => {
   it('unmount, agent switch and a route-driven thread change all stop the call', () => {
+    // #4456: leaving for another agent or thread ends a Direct call WITHOUT sending
+    // the words still collected (`flush: false`); they were for the one being left.
     expect(CODE).toMatch(/function cleanupVoice\(\) \{[\s\S]{0,200}if \(voice\.isActive\.value\) void voice\.stop\(\)/)
-    expect(CODE).toMatch(/watch\(\(\) => props\.agent\?\.name, \(\) => \{[\s\S]{0,400}if \(anyCallActive\.value\) void endVoiceCall\(\)/)
+    expect(CODE).toMatch(/watch\(\(\) => props\.agent\?\.name, \(\) => \{[\s\S]{0,400}if \(anyCallActive\.value\) void endVoiceCall\(\{ flush: false \}\)/)
     // ent#551: the thread-change watcher asks the RULE, so a call's own new
     // thread being adopted (route replace → sessionId null → id) does not end it.
-    expect(CODE).toMatch(/watch\(\(\) => \[props\.agent\.name, props\.sessionId\][\s\S]{0,700}if \(threadChangeEndsCall\(\{[\s\S]{0,400}\}\)\) await endVoiceCall\(\)/)
+    expect(CODE).toMatch(/watch\(\(\) => \[props\.agent\.name, props\.sessionId\][\s\S]{0,700}if \(threadChangeEndsCall\(\{[\s\S]{0,400}\}\)\) await endVoiceCall\(\{ flush: false \}\)/)
     expect(CODE).toContain('boundSessionId: (directCallActive.value ? direct.portalSessionId.value : voice.portalSessionId.value) || currentSessionId.value,')
   })
   it('reloads the thread on the falling edge of the call, so the persisted block is the truth', () => {
