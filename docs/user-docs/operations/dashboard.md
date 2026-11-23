@@ -1,6 +1,6 @@
 # Dashboard
 
-The main Dashboard at `/` monitors all agents and their activities in real time. Switch between three view modes with the switcher at the far right of the header — **Timeline**, **Grid**, and **List**. Timeline is the default; your choice persists per browser in `localStorage['trinity-dashboard-view']`. (A previously saved mode that no longer exists — such as the retired `graph` view — falls back to the default.)
+The main Dashboard at `/` monitors all agents and their activities in real time. Switch between three view modes with the switcher at the far right of the header — **Timeline**, **Grid**, and **List**. If you have never picked a view, the Dashboard opens in **Grid**, which shows every agent you have. Once you pick a view, your choice persists per browser in `localStorage['trinity-dashboard-view']` and wins from then on. (A previously saved mode that no longer exists — such as the retired `graph` view — falls back to Timeline.)
 
 The Dashboard is also where you create agents: **Create Agent** sits in the header and is available in every view mode.
 
@@ -39,7 +39,7 @@ When a type-to-filter query matches nothing, the Dashboard tells you so explicit
 - New agents appear at once. Creating an agent anywhere — the Create Agent dialog, another browser tab, the API, or another agent — pushes a live event, and the Dashboard refetches the fleet list right away instead of waiting for its 30-second poll. A burst of creates (first-run setup seeds several agents) is gathered into one refetch. Closing the first-run setup overlay also refetches, so the agents it seeded are there when it closes. A deleted agent drops out the same way.
 - Background polls swap values in place. A poll that fails after a successful one keeps the numbers on screen and marks them stale rather than blanking them — for example, the Executions tile's stamp becomes `24h · stale`.
 
-### Timeline View (default)
+### Timeline View
 
 ![Trinity Dashboard — Timeline view showing live executions across oracle and market agents](../../screenshots/dashboard-timeline.png)
 
