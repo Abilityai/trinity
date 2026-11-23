@@ -1768,6 +1768,34 @@ describe('assistant panel', () => {
       expect(blanks).toEqual([])
     })
 
+    // The other side of that (validation XsCeM4B5n3JEwNbhNhJF_A on #4736): when
+    // the read fails and the retry error is what the panel says, nothing pulses
+    // under it as if the assistant were still loading.
+    it('a failed first read shows the retry error alone: no loading placeholder pulses under it', async () => {
+      statusReads = [{ fails: true }, { fails: true }, { fails: true }, { fails: true }, { fails: true }, { fails: true }]
+      status = { ...SETTLED }
+      const both = []
+      let errorSeen = false
+      wrapper.unmount()
+      setActivePinia(createPinia())
+      const { useAuthStore } = await import('@/stores/auth')
+      useAuthStore().isAuthenticated = true
+      wrapper = mount(AssistantWidget, { attachTo: document.body, global: { stubs: {
+        ChatBubble: { props: ['role', 'content'], template: '<div class="bubble" :data-role="role">{{ content }}</div>' },
+        HelpChatWidget: { template: '<div />' } } } })
+      await wrapper.get('[data-testid="assistant-launcher"]').trigger('click')
+      for (const ms of [0, 0, 250, 500, 1000, 2000, 4000]) {
+        await vi.advanceTimersByTimeAsync(ms)
+        await flushPromises()
+        const error = document.body.textContent.includes("Couldn't load the assistant")
+        if (error) errorSeen = true
+        const pulsing = wrapper.findAll('[aria-busy="true"]').length > 0
+        if (error && pulsing) both.push(ms)
+      }
+      expect(errorSeen).toBe(true)
+      expect(both).toEqual([])
+    })
+
     it('someone it already knows, with nothing to say: its own words, and nothing replaces them', async () => {
       statusReads = [{ ...PENDING }]
       status = { ...SETTLED, profile_known: true }

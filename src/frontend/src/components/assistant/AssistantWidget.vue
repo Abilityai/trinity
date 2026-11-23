@@ -263,6 +263,8 @@
         <!-- On the ground colour, so each reply (a surface) reads as its own box. -->
         <div ref="messagesEl" class="flex-1 min-h-0 overflow-y-auto p-4 space-y-3 text-sm bg-gray-50 dark:bg-gray-900" aria-live="polite">
           <!-- The opening is not decided yet (trinity-enterprise#1356): nothing is shown that could be replaced a moment later -->
+          <!-- No statusError guard here: the retry error shows only while there is no status (the branch above), so this
+               placeholder can never pulse under it; a failed re-read with the status on screen keeps it, never a blank panel -->
           <div
             v-if="store.messages.length === 0 && !openingDecided"
             class="space-y-2 animate-pulse motion-reduce:animate-none"
