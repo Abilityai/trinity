@@ -1794,6 +1794,35 @@ describe('assistant panel', () => {
       }
       expect(errorSeen).toBe(true)
       expect(both).toEqual([])
+
+      // And with the status on screen (re-validation Zqjq3aKcBH1mjog-KtmXmA on #4736):
+      // a re-read that fails while the opening settles sets statusError, but the
+      // retry error belongs to the no-status branch only. It must never render
+      // beside the conversation, where it would sit over a working panel.
+      statusReads = [{ ...PENDING }, { fails: true }, { fails: true }, { fails: true }]
+      status = { ...SETTLED }
+      const beside = []
+      let failedWithStatus = false
+      wrapper.unmount()
+      setActivePinia(createPinia())
+      const auth = await import('@/stores/auth')
+      auth.useAuthStore().isAuthenticated = true
+      wrapper = mount(AssistantWidget, { attachTo: document.body, global: { stubs: {
+        ChatBubble: { props: ['role', 'content'], template: '<div class="bubble" :data-role="role">{{ content }}</div>' },
+        HelpChatWidget: { template: '<div />' } } } })
+      await wrapper.get('[data-testid="assistant-launcher"]').trigger('click')
+      for (const ms of [0, 0, 250, 250, 250, 250, 500, 500, 1000, 2000, 4000]) {
+        await vi.advanceTimersByTimeAsync(ms)
+        await flushPromises()
+        const { useAssistantStore } = await import('@/stores/assistant')
+        const store = useAssistantStore()
+        if (store.status && store.statusError) failedWithStatus = true
+        const conversation = wrapper.find('[data-testid="assistant-input"]').exists()
+        const error = document.body.textContent.includes("Couldn't load the assistant")
+        if (conversation && error) beside.push(ms)
+      }
+      expect(failedWithStatus).toBe(true)
+      expect(beside).toEqual([])
     })
 
     it('someone it already knows, with nothing to say: its own words, and nothing replaces them', async () => {
