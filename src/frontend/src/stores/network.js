@@ -7,7 +7,7 @@ import { useAgentsStore } from './agents'
 import { parseUTC, getTimestampMs } from '@/utils/timestamps'
 import { isOrgTag } from '@/utils/gridOrg'
 import { agentDisplayName } from '@/utils/agentName'
-import { VIEW_MODES, DEFAULT_VIEW_MODE } from '@/utils/viewModes'
+import { VIEW_MODES, DEFAULT_VIEW_MODE, initialViewMode } from '@/utils/viewModes'
 
 // #3109: how long a burst of `agent_created` events is gathered into one refetch.
 export const AGENT_CREATED_COALESCE_MS = 300
@@ -70,16 +70,18 @@ export const useNetworkStore = defineStore('network', () => {
   let socketGeneration = 0
   let socketMinting = null
 
-  // View mode state (timeline | grid | list) — default timeline, persisted.
+  // View mode state (timeline | grid | list), persisted. A person who has never
+  // chosen opens in Grid (trinity-enterprise#1357, `initialViewMode`); opening
+  // writes nothing — only setViewMode records a choice.
   // trinity-enterprise#47 added 'grid'; trinity-enterprise#260 added 'list'
   // (the Agents page consolidated into the dashboard); the legacy 'graph' Vue
   // Flow canvas was decommissioned (#1689). A persisted stale mode (e.g.
   // 'graph', or 'list' on an older bundle) degrades to the default (timeline)
-  // via the VIEW_MODES.includes() guard below. The list lives in
+  // inside `initialViewMode`. The list lives in
   // `utils/viewModes.js` (#2536) — ONE home shared with the Dashboard's mode
   // toggle v-for, the `v` cycle order and the e2e specs; do not re-declare it.
   const savedViewMode = localStorage.getItem('trinity-dashboard-view')
-  const viewMode = ref(VIEW_MODES.includes(savedViewMode) ? savedViewMode : DEFAULT_VIEW_MODE)
+  const viewMode = ref(initialViewMode(savedViewMode))
   const isTimelineMode = computed(() => viewMode.value === 'timeline')
   const isPlaying = ref(false)
   const replaySpeed = ref(10) // 10x default
