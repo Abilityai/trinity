@@ -22,14 +22,26 @@
 <template>
   <div ref="rootEl" data-testid="project-board">
     <p class="sr-only" aria-live="polite" data-testid="project-board-armed">{{ armedLine }}</p>
-    <div class="grid items-start gap-3" :style="{ gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))` }">
+    <!-- #4729: a column's notice is drawn above the board, not inside the
+         column, so every column's first card starts on the same line. -->
+    <p
+      v-for="col in hinted"
+      :id="`${uid}-hint-${col.key}`"
+      :key="col.key"
+      class="mb-2 px-1 text-xs text-gray-600 dark:text-gray-300"
+      :data-testid="`board-hint-${col.key}`"
+    ><span class="font-semibold text-gray-700 dark:text-gray-200">{{ col.label }}:</span> {{ hints[col.key] }}</p>
+    <!-- One shared header row (subgrid) and stretched columns: every column is
+         as tall as the tallest, and its cards start below the tallest header. -->
+    <div class="grid grid-rows-[auto_1fr] gap-x-3" :style="{ gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))` }">
       <section
         v-for="(col, ci) in columns"
         :key="col.key"
         :aria-label="`${col.label}, ${col.cards.length}`"
         :data-testid="`board-column-${col.key}`"
         :data-over="overKey === col.key ? 'true' : null"
-        class="flex min-w-0 flex-col gap-2 rounded-lg border p-2"
+        :aria-describedby="hints[col.key] ? `${uid}-hint-${col.key}` : undefined"
+        class="row-span-2 grid min-w-0 grid-rows-subgrid gap-2 rounded-lg border p-2"
         :class="overKey === col.key
           ? 'border-dashed border-action-primary-500 bg-action-primary-100 dark:border-action-primary-400 dark:bg-action-primary-500/16'
           : 'border-solid border-gray-200 bg-gray-100 dark:border-gray-700 dark:bg-gray-750'"
@@ -38,25 +50,23 @@
         @dragleave="onDragLeave(col)"
         @drop="onDrop($event, col)"
       >
-        <header class="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 pt-1">
+        <header class="flex self-start flex-wrap items-center gap-x-2 gap-y-1 px-1 pt-1">
           <BaseBadge size="sm" :variant="col.badge">{{ col.label }}</BaseBadge>
           <span class="text-xs font-semibold tabular-nums text-gray-700 dark:text-gray-200" :data-testid="`board-count-${col.key}`">{{ col.cards.length }}</span>
           <span v-if="col.held.length" class="text-xs tabular-nums text-gray-600 dark:text-gray-300" :data-testid="`board-held-${col.key}`">
             {{ col.held.map((h) => `${h.count} ${h.label}`).join(' · ') }}
           </span>
         </header>
-        <p v-if="hints[col.key]" class="px-1 text-xs text-gray-600 dark:text-gray-300" :data-testid="`board-hint-${col.key}`">{{ hints[col.key] }}</p>
-
         <div
           v-if="!col.cards.length"
-          class="flex flex-col items-center gap-2 rounded-lg border border-dashed border-gray-300 px-3 py-4 text-center text-xs text-gray-600 dark:border-gray-600 dark:text-gray-300"
+          class="flex flex-col items-center gap-2 self-start rounded-lg border border-dashed border-gray-300 px-3 py-4 text-center text-xs text-gray-600 dark:border-gray-600 dark:text-gray-300"
           :data-testid="`board-empty-${col.key}`"
         >
           <span>{{ col.first ? 'Nothing active. Add a task, or ask an agent on the project to break the goal into tasks.' : `Nothing ${col.label.toLowerCase()}.` }}</span>
           <BaseButton v-if="col.first && canCreate" size="sm" variant="ghost" data-testid="board-new-task" @click="$emit('new')">New task</BaseButton>
         </div>
 
-        <BoundedRegion v-else :label="`${col.label} tasks`" :fill="false" class="max-h-[34rem] rounded-md">
+        <BoundedRegion v-else :label="`${col.label} tasks`" :fill="false" class="max-h-[34rem] self-start rounded-md">
           <ul class="flex flex-col gap-2 p-0.5">
             <li
               v-for="c in shown(col)"
@@ -101,7 +111,7 @@
                 tabindex="0"
                 class="cursor-pointer rounded text-left text-sm font-[550] leading-snug break-words hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40"
                 :class="c.status === 'done' ? 'text-gray-600 line-through dark:text-gray-300' : 'text-gray-900 dark:text-gray-100'"
-                :aria-describedby="movable(c) ? 'board-keys' : undefined"
+                :aria-describedby="movable(c) ? `${uid}-keys` : undefined"
                 :data-testid="`board-open-${c.id}`"
                 @click="$emit('open', c.id)"
                 @keydown="onKey($event, c, ci)"
@@ -157,12 +167,12 @@
         </BoundedRegion>
       </section>
     </div>
-    <p id="board-keys" class="sr-only">Press Left or Right to pick a column, Enter to move the task there, Escape to cancel.</p>
+    <p :id="`${uid}-keys`" class="sr-only">Press Left or Right to pick a column, Enter to move the task there, Escape to cancel.</p>
   </div>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onBeforeUpdate, onMounted, onUpdated, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onBeforeUpdate, onMounted, onUpdated, ref, useId, watch } from 'vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BoundedRegion from '@/components/BoundedRegion.vue'
@@ -176,7 +186,8 @@ const props = defineProps({
   canMove: { type: Boolean, default: false },
   canConfirm: { type: Boolean, default: false },
   canCreate: { type: Boolean, default: false },
-  // A line under a column's header, by column key (the verification rule).
+  // A column's notice, by column key (the verification rule) — drawn once
+  // above the board as "<label>: <text>", never inside the column (#4729).
   hints: { type: Object, default: () => ({}) },
   // How many cards a column shows before "Show all" (Done grows without limit).
   limit: { type: Number, default: 20 },
@@ -201,6 +212,9 @@ const labelOf = (key) => props.columns.find((c) => c.key === key)?.label || ''
 const initial = (name) => String(name || '?').trim().slice(0, 1).toUpperCase()
 const age = (ts) => formatCompactAge(Date.now() - getTimestampMs(ts))
 const shown = (col) => (expanded.value[col.key] ? col.cards : col.cards.slice(0, props.limit))
+// Ids are per board: with milestone lanes there is one board per lane.
+const uid = useId()
+const hinted = computed(() => props.columns.filter((c) => props.hints[c.key]))
 const armedLine = computed(() => (armed.value ? `${armed.value.id}: move to ${labelOf(armed.value.to)}. Press Enter to confirm, Escape to cancel.` : ''))
 
 watch(() => Boolean(dragId.value || armed.value), (busy) => emit('busy', busy))

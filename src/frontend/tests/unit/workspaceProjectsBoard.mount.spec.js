@@ -11,6 +11,7 @@
  * that is checked in a real browser, by hand (see the PR).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { h } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 
@@ -28,7 +29,8 @@ vi.mock('axios', () => {
 
 import { useProjectsStore } from '@/stores/projects'
 import ProjectTasks from '@/components/portal/projects/ProjectTasks.vue'
-import { tasksViewKey, boardMinWidth } from '@/components/portal/projects/projectsUtils'
+import ProjectTaskBoard from '@/components/portal/projects/ProjectTaskBoard.vue'
+import { tasksViewKey, boardMinWidth, boardColumns } from '@/components/portal/projects/projectsUtils'
 
 const ME = 'eva@example.com'
 const byTestId = (id) => document.querySelector(`[data-testid="${id}"]`)
@@ -509,5 +511,95 @@ describe('the re-read', () => {
     await vi.advanceTimersByTimeAsync(20000)
     expect(projects.fetchTasks).toHaveBeenCalled()
     expect(byTestId('project-task-title-edit').value).toBe('Draft the brief, v2')
+  })
+})
+
+// #4729: every column is as tall as the tallest and every first card starts on
+// one line. jsdom has no layout, so what is pinned is the STRUCTURE that
+// regressed — a notice drawn between a column's header and its cards — and the
+// grid classes that share the header row and stretch the columns.
+describe('#4729 — even columns, the notice above the board', () => {
+  const columnsOf = () => [...document.querySelectorAll('[data-testid^="board-column-"]')]
+
+  it('no column holds a notice: each is its header, then its cards or its empty state', async () => {
+    await tasksTab()
+    for (const col of columnsOf()) {
+      expect(col.querySelector('[data-testid^="board-hint-"]')).toBeNull()
+      const kids = [...col.children]
+      expect(kids).toHaveLength(2)
+      expect(kids[0].tagName).toBe('HEADER')
+      expect(kids[1].matches('[data-testid^="board-empty-"]') || kids[1].querySelector('ul') !== null).toBe(true)
+    }
+  })
+
+  it('the verification rule is one labelled line, before the columns, read in the column too', async () => {
+    await tasksTab()
+    const hints = document.querySelectorAll('[data-testid="board-hint-pending-verification"]')
+    expect(hints).toHaveLength(1)
+    const hint = hints[0]
+    expect(hint.textContent).toMatch(/^\s*Awaiting verification:/)
+    expect(hint.textContent).toContain('confirm')
+    const grid = byTestId('board-column-active').parentElement
+    expect(hint.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(grid.contains(hint)).toBe(false)
+    const col = byTestId('board-column-pending-verification')
+    expect(document.getElementById(col.getAttribute('aria-describedby'))).toBe(hint)
+    expect(byTestId('board-column-active').hasAttribute('aria-describedby')).toBe(false)
+  })
+
+  it('names an active steward agent in the line', async () => {
+    await tasksTab({ project: { id: 'prj_1', steward: { kind: 'agent', ref: 'corbin' }, agents: [{ agent_name: 'corbin', state: 'active' }] } })
+    expect(byTestId('board-hint-pending-verification').textContent).toContain('steward agent corbin')
+  })
+
+  it('without a hint there is no line at all', async () => {
+    wrapper = mount(ProjectTaskBoard, { props: { columns: boardColumns(ROWS(), {}) }, attachTo: document.body })
+    await flushPromises()
+    expect(document.querySelector('[data-testid^="board-hint-"]')).toBeNull()
+    expect(byTestId('board-column-pending-verification').hasAttribute('aria-describedby')).toBe(false)
+  })
+
+  it('the grid shares one header row across columns and stretches every column', async () => {
+    await tasksTab()
+    const grid = byTestId('board-column-active').parentElement
+    expect(grid.classList.contains('items-start')).toBe(false)
+    expect(grid.classList.contains('grid-rows-[auto_1fr]')).toBe(true)
+    for (const col of columnsOf()) {
+      expect(col.classList.contains('row-span-2')).toBe(true)
+      expect(col.classList.contains('grid-rows-subgrid')).toBe(true)
+      expect(col.querySelector(':scope > header').classList.contains('self-start')).toBe(true)
+      expect(col.children[1].classList.contains('self-start')).toBe(true)
+    }
+  })
+
+  it('two boards on one page (milestone lanes) keep their ids apart', async () => {
+    const props = { columns: boardColumns(ROWS(), {}), canMove: true, hints: { 'pending-verification': 'Rule.' } }
+    // One app, as the lanes are: useId is unique per app.
+    wrapper = mount({ render: () => h('div', [h(ProjectTaskBoard, props), h(ProjectTaskBoard, props)]) }, { attachTo: document.body })
+    await flushPromises()
+    const ids = [...document.querySelectorAll('[id]')].map((n) => n.id)
+    expect(ids.length).toBe(4)
+    expect(new Set(ids).size).toBe(ids.length)
+    for (const root of document.querySelectorAll('[data-testid="project-board"]')) {
+      const col = root.querySelector('[data-testid="board-column-pending-verification"]')
+      expect(root.contains(document.getElementById(col.getAttribute('aria-describedby')))).toBe(true)
+      const title = root.querySelector('[data-testid="board-open-T-001"]')
+      const keys = document.getElementById(title.getAttribute('aria-describedby'))
+      expect(keys).not.toBeNull()
+      expect(root.contains(keys)).toBe(true)
+    }
+  })
+
+  it('grouped by milestone: the rule is said once, above the first lane', async () => {
+    seed(ROWS().map((r, i) => ({ ...r, milestone: i % 2 ? 'ms_a' : null })))
+    await tasksTab({ project: { id: 'prj_1', steward: { kind: 'person', ref: ME }, milestones: [{ id: 'ms_a', name: 'Beta open', position: 0 }] } })
+    const select = byTestId('project-tasks-group')
+    select.value = 'milestone'
+    select.dispatchEvent(new Event('change'))
+    await flushPromises()
+    expect(document.querySelectorAll('[data-testid^="project-board-lane-"]')).toHaveLength(2)
+    const hints = document.querySelectorAll('[data-testid="board-hint-pending-verification"]')
+    expect(hints).toHaveLength(1)
+    expect(byTestId('project-board-lane-ms_a').contains(hints[0])).toBe(true)
   })
 })
