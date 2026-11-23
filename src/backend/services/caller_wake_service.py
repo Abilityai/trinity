@@ -323,11 +323,11 @@ async def _has_free_slot(caller: str) -> bool:
         from database import db
         from services.capacity_manager import get_capacity_manager
 
-        state = await get_capacity_manager().get_slot_state(
-            caller, db.get_max_parallel_tasks(caller))
+        max_tasks = await asyncio.to_thread(db.get_max_parallel_tasks, caller)
+        state = await get_capacity_manager().get_slot_state(caller, max_tasks)
         if int(getattr(state, "available_slots", 1)) > 0:
             return True
-        return not _caller_running(caller)
+        return not await asyncio.to_thread(_caller_running, caller)
     except Exception as e:  # noqa: BLE001 — admission still guards the slot
         logger.debug("#4733: slot check for %s failed (%s); dispatching", caller, type(e).__name__)
         return True
@@ -599,7 +599,7 @@ async def _park(caller: str, callee: str, execution_id: str, policy_source) -> N
         return
     # The holder may have ended and drained between our check and the SET.
     # Still held: its end drains the marker. Free: nobody will, so take it.
-    if _caller_busy(caller):
+    if await asyncio.to_thread(_caller_busy, caller):
         return
     await _drain_missed(caller)
 
@@ -618,7 +618,7 @@ async def _park_at_capacity(caller: str, callee: str, execution_id: str, idem,
             logger.exception("#4733: idempotency release failed")
     if not await _mark_parked(caller, callee, execution_id, policy_source, reason="at_capacity"):
         return
-    if await _has_free_slot(caller) and not _caller_busy(caller):
+    if await _has_free_slot(caller) and not await asyncio.to_thread(_caller_busy, caller):
         await _drain_missed(caller)
 
 
@@ -635,7 +635,7 @@ async def _drain_if_idle(agent_name: Optional[str]) -> None:
             return
     except Exception:  # noqa: BLE001 — a hint read; the next end tries again
         return
-    if _caller_busy(agent_name):
+    if await asyncio.to_thread(_caller_busy, agent_name):
         return
     await _drain_missed(agent_name)
 
@@ -775,7 +775,7 @@ async def maybe_wake_caller(
         # #4536: a wake's own end delivers what was parked while it ran. It
         # wakes nobody for itself (the recursion break below still holds).
         if getattr(row, "agent_name", None):
-            _release_hold_of(row)                       # #4733: its own hold only
+            await asyncio.to_thread(_release_hold_of, row)   # #4733: its own hold only
             await _drain_missed(row.agent_name)
         return None
     if _expect_caller is None:
@@ -936,7 +936,7 @@ async def _claimed_wake(row, caller, callee, execution_id, verdict, idem):
                  error=result.error, policy_source=verdict.source,
                  ask_ids=ask_ids, chain_depth=chain_depth,
                  callee_chain_depth=callee_depth, standing=standing)
-    if _refused_for_a_slot(caller, result) and await _mark_parked(
+    if await asyncio.to_thread(_refused_for_a_slot, caller, result) and await _mark_parked(
             caller, callee, execution_id, verdict.source, reason="at_capacity"):
         return _PARKED_AT_CAPACITY      # #4733: the slot check lost a race
     return result.execution_id
