@@ -83,16 +83,16 @@ REFUSED_SCHEDULE_UNREADABLE = (
     "access. This agent's guardrails are not running right now, so it did not run."
 )
 
-# path -> ((dev, ino, size, mtime_ns), skips)
+# path -> ((dev, ino, size, mtime_ns, ctime_ns), skips). The change time is in
+# the key because a rewrite can restore the mtime but never the ctime.
 _memo: Dict[str, Tuple[tuple, bool]] = {}
 
 
 def _switched_on(value) -> bool:
-    """A `disableAllHooks` value the CLI could read as on. Unknown shapes count."""
-    if value is None or value is False or value == 0:
+    """A `disableAllHooks` value the CLI could read as on. Unknown shapes count,
+    and any non-empty string does (it is truthy to the CLI whatever it says)."""
+    if value is None or value is False or value == 0 or value == "":
         return False
-    if isinstance(value, str):
-        return value.strip().lower() not in ("", "false", "0", "no", "off")
     return True
 
 
@@ -123,7 +123,7 @@ def _cache_skips(path: str) -> bool:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_size > CACHE_MAX_BYTES:
             return True
-        signature = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+        signature = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
         seen = _memo.get(path)
         if seen and seen[0] == signature:
             return seen[1]
@@ -161,6 +161,8 @@ def config_dirs() -> Tuple[str, ...]:
         if not value:
             continue
         if value == "~" or value.startswith("~/"):
+            # Whether the CLI expands `~` is not established: read both spellings.
+            dirs.extend((os.path.join(os.getcwd(), value), os.path.join(AGENT_HOME, value)))
             value = AGENT_HOME + value[1:]
         if os.path.isabs(value):
             dirs.append(value)

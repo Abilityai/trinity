@@ -143,6 +143,21 @@ def test_an_unreadable_agent_the_alert_named_holds_it(fleet):
     fleet.clear.assert_not_called()
 
 
+def test_a_silent_agent_the_alert_named_stays_named_until_it_reads_clean(fleet):
+    """X and Y named; X goes silent while Y still reads skipped: the alert keeps
+    naming X. Then Y is fixed while X is still silent: the alert is not ended."""
+    fleet.agent("x-agent", "skipped").agent("y-agent", "skipped")
+    fleet.run()
+    fleet.health["x-agent"] = None
+    assert fleet.run()["status"] == "skipped"
+    assert fleet.observe.call_args.kwargs["context"]["agents"] == ["x-agent", "y-agent"]
+    fleet.health["y-agent"] = "ok"
+    assert fleet.run()["status"] == "could_not_check"
+    fleet.clear.assert_not_called()
+    fleet.health["x-agent"] = "ok"
+    assert fleet.run()["status"] == "clear"
+
+
 def test_an_unreadable_agent_the_alert_never_named_does_not_hold_it(fleet):
     fleet.agent("alpha", "skipped").agent("beta", None)
     fleet.run()

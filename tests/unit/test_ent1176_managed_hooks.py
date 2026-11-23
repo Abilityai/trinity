@@ -101,6 +101,8 @@ def test_no_cache_is_ok():
     # under merge a disable* switch takes the strictest value any source sets
     ({"channelsEnabled": True, "managedSourcesBehavior": "merge", "disableAllHooks": True}, "skipped"),
     ({"managedSourcesBehavior": "merge", "disableAllHooks": "true"}, "skipped"),
+    # a string is truthy to the CLI whatever it says: fail closed
+    ({"managedSourcesBehavior": "merge", "disableAllHooks": "false"}, "skipped"),
     ({"disableAllHooks": False}, "skipped"),                  # still a policy key, no merge
 ])
 def test_a_cached_payload_decides(home, payload, expected):
@@ -170,6 +172,24 @@ def test_a_relative_or_home_relative_config_dir_is_read_too(home, monkeypatch, v
     monkeypatch.chdir(home)
     _cache(home, {"channelsEnabled": True}, where=home / "claude-other")
     (home / ".env").write_text(f"CLAUDE_CONFIG_DIR={value}\n")
+    assert managed_hooks.state() == managed_hooks.SKIPPED
+
+
+def test_a_same_size_rewrite_with_its_mtime_restored_is_read_again(home):
+    """The memo keys on the file's change time too, which a rewrite cannot restore."""
+    path = _cache(home, '{"a": 1}', raw=True)
+    assert managed_hooks.state() == managed_hooks.SKIPPED
+    st = os.stat(path)
+    path.write_text('{"$": 1}')                       # same size; `$` keys are metadata
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert managed_hooks.state() == managed_hooks.OK
+
+
+def test_a_literal_tilde_config_dir_is_read_as_a_relative_dir_too(home, monkeypatch):
+    """If the CLI does not expand `~`, `~/x` is a directory named `~` under its cwd."""
+    monkeypatch.chdir(home)
+    _cache(home, {"channelsEnabled": True}, where=home / "~" / "claude-other")
+    (home / ".env").write_text("CLAUDE_CONFIG_DIR=~/claude-other\n")
     assert managed_hooks.state() == managed_hooks.SKIPPED
 
 

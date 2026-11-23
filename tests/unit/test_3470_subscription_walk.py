@@ -640,6 +640,25 @@ class TestTheTaskPathWalksThePool:
         assert len(sent) == 1 and sent[0].get("auth_override") is None
         assert wired.performed == [] and db._state["current"] == "sub-a"
 
+    def test_a_refusal_whose_words_name_an_auth_term_switches_nothing(self, wired):
+        """trinity-enterprise#1176: a schedule run's refusal carries the schedule's
+        name, which a share holder chose ("Refresh OAuth token"). The except
+        handler's legacy SUB-003 check reads the error TEXT for auth words, so a
+        typed refusal must be exempt there too, not only in the walk."""
+        import services.subscription_auto_switch as sas
+        legacy = AsyncMock(return_value=None)
+        wired.monkeypatch.setattr(sas, "handle_subscription_failure", legacy)
+        refused = {"detail": {"message": "This run is the scheduled task 'Refresh OAuth token', not a "
+                                         "chat. It runs with the access of the person who created it, "
+                                         "and this agent's guardrails are not running right now, so it "
+                                         "did not run.",
+                              "error_code": "turn_refused"}}
+        result, db, ex_db, sent, Status = _run_task(
+            wired, responses=[_resp(403, refused)], viable=[_sub("sub-b")])
+        assert result.status == Status.FAILED and result.error_code.value == "turn_refused"
+        legacy.assert_not_awaited()
+        assert wired.performed == [] and len(sent) == 1
+
     def test_the_key_rung_serves_without_moving_the_assignment(self, wired):
         """AC Part2 (b): subscription exhausted + healthy key ⇒ served; the
         assignment is preserved; the row's spend is not a subscription's."""

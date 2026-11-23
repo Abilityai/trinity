@@ -16,10 +16,10 @@ It runs inside the fleet-image cycle (`fleet_image_service.FleetImageCheckServic
 .run_cycle`): same leader lease, same cadence, no loop of its own.
 
 **"Could not check" is its own answer** (the #4483 rule): Docker unreadable
-leaves the alert as it is. An agent whose `/health` gives no answer holds the
-alert only if the last reading in this process named it, or if this process
-has not read the fleet yet; one silent agent the alert never named must not
-keep a fixed fleet's alert open forever.
+leaves the alert as it is. An agent whose `/health` gives no answer stays
+named, and holds the alert, if the last reading in this process named it, or if
+this process has not read the fleet yet; one silent agent the alert never named
+must not keep a fixed fleet's alert open forever.
 
 The system agent is checked (no other alert covers it). Ephemeral agents are
 left out: they come and go, so they would churn the named set; their turns are
@@ -168,27 +168,31 @@ async def _run_once() -> Dict[str, Any]:
     values = await asyncio.gather(*(read(n) for n in names))
     skipped = [n for n, v in zip(names, values) if v == SKIPPED]
     unreadable = [n for n, v in zip(names, values) if v is None]
+    # An agent the last reading named that gives no answer now is still named:
+    # it has not been proven clean.
+    held = [n for n in unreadable if _last_named and n in _last_named]
+    named = sorted(set(skipped) | set(held))
     result: Dict[str, Any] = {"skipped": skipped, "unchecked": unreadable}
 
     if skipped:
-        text = describe(skipped)
+        text = describe(named)
         outcome = platform_alerts.observe(
             ALERT_AGENT_NAME, ALERT_KIND, ALERT_KEY,
             priority="high",
             title=text["title"],
             question=text["question"],
             context={
-                "agents": skipped[:_CONTEXT_MAX_AGENTS],
+                "agents": named[:_CONTEXT_MAX_AGENTS],
                 "agents_skipped": len(skipped),
                 "agents_unchecked": len(unreadable),
             },
         )
-        _last_named = set(skipped)
+        _last_named = set(named)
         logger.warning("[managed-hooks] %d agent(s) not applying the managed hooks: alert %s",
                        len(skipped), outcome)
         return {"status": "skipped", **result}
 
-    holding = unreadable if _last_named is None else [n for n in unreadable if n in _last_named]
+    holding = unreadable if _last_named is None else held
     if holding:
         logger.warning("[managed-hooks] could not check %d agent(s); the alert is left as it is",
                        len(holding))

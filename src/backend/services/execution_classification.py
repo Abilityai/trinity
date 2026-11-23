@@ -151,6 +151,15 @@ def _typed_error_code(response) -> Optional[str]:
     return code if isinstance(code, str) else None
 
 
+def is_turn_refusal(response) -> bool:
+    """The agent refused the turn for who it is for: a 403 whose body is typed
+    `error_code: "turn_refused"` (a runtime that cannot scope it, or a Claude
+    agent whose guardrails are not running, trinity-enterprise#1176). No
+    credential changes that, so no subscription logic may act on it. Read from
+    the typed body only: a bare 403 is not one."""
+    return getattr(response, "status_code", None) == 403 and _typed_error_code(response) == "turn_refused"
+
+
 def _extract_agent_error(
     response: Optional[httpx.Response], fallback: str
 ) -> tuple[str, dict, Any]:
@@ -226,7 +235,7 @@ def classify_switch_failure(response: httpx.Response) -> Optional[str]:
     # credential changes that, and a walk would record an auth refusal against
     # every subscription and the key. Read from the typed body only: a bare 403
     # stays auth.
-    if code == 403 and _typed_error_code(response) == "turn_refused":
+    if is_turn_refusal(response):
         return None
     if code >= 400:
         error_msg, _, _ = _extract_agent_error(response, "")
