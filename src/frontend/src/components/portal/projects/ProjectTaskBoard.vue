@@ -41,7 +41,7 @@
         :data-testid="`board-column-${col.key}`"
         :data-over="overKey === col.key ? 'true' : null"
         :aria-describedby="hints[col.key] ? `${uid}-hint-${col.key}` : undefined"
-        class="row-span-2 grid min-w-0 grid-rows-subgrid gap-2 rounded-lg border p-2"
+        class="row-span-2 grid min-w-0 grid-rows-subgrid content-start gap-2 rounded-lg border p-2"
         :class="overKey === col.key
           ? 'border-dashed border-action-primary-500 bg-action-primary-100 dark:border-action-primary-400 dark:bg-action-primary-500/16'
           : 'border-solid border-gray-200 bg-gray-100 dark:border-gray-700 dark:bg-gray-750'"

@@ -567,6 +567,8 @@ describe('#4729 — even columns, the notice above the board', () => {
     for (const col of columnsOf()) {
       expect(col.classList.contains('row-span-2')).toBe(true)
       expect(col.classList.contains('grid-rows-subgrid')).toBe(true)
+      // Without subgrid the fallback grid would stretch a short column's rows; pack them at the top.
+      expect(col.classList.contains('content-start')).toBe(true)
       expect(col.querySelector(':scope > header').classList.contains('self-start')).toBe(true)
       expect(col.children[1].classList.contains('self-start')).toBe(true)
     }
