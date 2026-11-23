@@ -94,6 +94,13 @@ CLI_FACTS_TO_REAUDIT = (
     "The Monitor tool (offered since 2.1.310 with telemetry off) runs a shell command of its "
     "own; hooks registered for Bash see that command as a Bash call (since 2.1.314) and can "
     "block it. Headless and chat turns do not offer the tool at all (PLATFORM_DENIED_TOOLS).",
+    "A server-managed settings payload the CLI holds (cached as <config dir>/remote-settings.json, "
+    "the settings object itself) that sets any key but managedSourcesBehavior and "
+    "wslInheritsWindowsSettings is the managed tier alone: managed-settings.json and every "
+    "managed-settings.d file are skipped, so none of their hooks run (only env still merges per "
+    "key). With managedSourcesBehavior \"merge\" they run, unless the payload sets "
+    "disableAllHooks. agent_server/services/managed_hooks.py reads that cache "
+    "(trinity-enterprise#1176).",
 )
 
 MARKER = "/opt/trinity/skill-gates-active"

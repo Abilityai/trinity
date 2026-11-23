@@ -36,6 +36,7 @@ from ._runtime_config import (
     merged_disallowed_tools,
 )
 from .execution_env import build_execution_env, auth_override_env_layers, auto_memory_env_layer
+from . import managed_hooks
 from .error_classifier import (
     _classify_signal_exit,
     _diagnose_exit_failure,
@@ -165,6 +166,9 @@ class ClaudeCodeRuntime(AgentRuntime):
             - execution_log: Simplified ExecutionLogEntry objects for activity tracking
             - raw_messages: Full Claude Code JSON transcript for execution log viewer
         """
+        # trinity-enterprise#1176: a turn whose rule lives in a hook Claude Code
+        # is skipping does not start.
+        await managed_hooks.require_hooks_or_owner(execution_id)
         # Note: continue_session is handled internally: execute_claude_code
         # resumes the chat's own session id (agent_state.chat_session_id, #2958).
         return await execute_claude_code(prompt, stream, model, system_prompt=system_prompt,
@@ -195,6 +199,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             images: Optional list of vision images: [{"media_type": str, "data": base64_str}] (#562)
             auth_override: #3470 per-spawn credential (SUB-003 re-issue); Claude only
         """
+        await managed_hooks.require_hooks_or_owner(execution_id)  # trinity-enterprise#1176
         return await execute_headless_task(
             prompt, model, allowed_tools, system_prompt, timeout_seconds,
             max_turns, execution_id, resume_session_id,
@@ -256,8 +261,9 @@ async def _execute_claude_code_once(
         max_turns_chat = int(guardrails.get("max_turns_chat") or _DEFAULT_MAX_TURNS_CHAT)
         cmd.extend(["--max-turns", str(max_turns_chat)])
         logger.info(f"[Chat] Limiting to {max_turns_chat} agentic turns")
-        # GUARD-003 deny-list ∪ the platform denials (#2454).
-        disallowed_tools = merged_disallowed_tools(guardrails)
+        # GUARD-003 deny-list ∪ the platform denials (#2454) ∪ the skill tools on a
+        # gated agent whose skill-gate hook is skipped (trinity-enterprise#1176).
+        disallowed_tools = merged_disallowed_tools(guardrails, extra=managed_hooks.gated_fallback_denials())
         if disallowed_tools:
             cmd.extend(["--disallowedTools", ",".join(disallowed_tools)])
             logger.info(f"[Chat] Disallowed tools: {disallowed_tools}")

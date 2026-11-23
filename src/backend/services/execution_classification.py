@@ -141,6 +141,16 @@ def detect_unresolved_slash_command(
     return match.group(1) if match else None
 
 
+def _typed_error_code(response) -> Optional[str]:
+    """`detail.error_code` from an agent error body, or None. Never raises."""
+    try:
+        detail = response.json().get("detail")
+    except Exception:  # noqa: BLE001 — no body, not JSON, not an object
+        return None
+    code = detail.get("error_code") if isinstance(detail, dict) else None
+    return code if isinstance(code, str) else None
+
+
 def _extract_agent_error(
     response: Optional[httpx.Response], fallback: str
 ) -> tuple[str, dict, Any]:
@@ -211,6 +221,13 @@ def classify_switch_failure(response: httpx.Response) -> Optional[str]:
     from services.subscription_auto_switch import is_auth_failure
 
     code = response.status_code
+    # trinity-enterprise#1176: the agent refused the turn for who it is for (a
+    # runtime that cannot scope it, or guardrails that are not running). No
+    # credential changes that, and a walk would record an auth refusal against
+    # every subscription and the key. Read from the typed body only: a bare 403
+    # stays auth.
+    if code == 403 and _typed_error_code(response) == "turn_refused":
+        return None
     if code >= 400:
         error_msg, _, _ = _extract_agent_error(response, "")
         if is_model_rejection(error_msg):

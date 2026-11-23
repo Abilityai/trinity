@@ -300,6 +300,17 @@ describe('in-agent enforcement warning (owner, gates exist)', () => {
     expect(tid(w, 'skills-hook-warning').text()).toMatch(/predates the in-agent gate check/)
   })
 
+  it('says why the gates cannot be checked when Claude Code skips the hooks, and what the owner keeps', async () => {
+    // trinity-enterprise#1176: the agent reports `skipped`.
+    respond({ probe: MAP({ hook: 'skipped' }) })
+    const { w } = await mountTab()
+    expect(tid(w, 'skills-hook-warning').text()).toBe(
+      "Gates can't be checked inside this agent: Claude Code on this agent is using cached organization "
+      + "settings, so it skips Trinity's guardrails. The owner's turns run without skills. Shared and visitor "
+      + 'turns are refused until that is fixed.',
+    )
+  })
+
   it('says nothing when the hook is ok or nobody answered', async () => {
     for (const hook of ['ok', 'unknown']) {
       respond({ probe: MAP({ hook }) })

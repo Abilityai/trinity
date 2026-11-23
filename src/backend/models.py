@@ -4562,7 +4562,8 @@ class SkillGateMapResponse(BaseModel):
     trinity-enterprise#754: `approvers` is `approver_kinds` with each kind's
     reach and whether the caller fills it. `hook` is the in-agent gate check's
     state (`ok`, `missing`, `not_root_owned`, `writable`, `unsupported_runtime`,
-    `predates` or `unknown`), read only on `?probe=true` by a person who may
+    `skipped` — Claude Code is not applying the managed hooks,
+    trinity-enterprise#1176 — `predates` or `unknown`), read only on `?probe=true` by a person who may
     manage the agent's skills; null otherwise."""
     agent_name: str
     gates: List[SkillGateEntry]

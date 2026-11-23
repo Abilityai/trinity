@@ -355,10 +355,19 @@ class FleetImageCheckService:
             pass
 
     async def run_cycle(self) -> Optional[Dict[str, Any]]:
-        """One leader-gated pass; None when another worker holds the lease."""
+        """One leader-gated pass; None when another worker holds the lease.
+
+        The same lease and cadence also run the managed-hooks fleet check
+        (trinity-enterprise#1176); its failure never breaks this one."""
         if not await asyncio.to_thread(self._try_acquire_leadership):
             return None
-        return await run_once()
+        result = await run_once()
+        try:
+            from services import managed_hooks_check_service
+            await managed_hooks_check_service.run_once()
+        except Exception:  # noqa: BLE001 — a second report must not break the first
+            logger.error("[fleet-image] managed-hooks check failed", exc_info=True)
+        return result
 
     async def _run_loop(self) -> None:
         delay = FIRST_CHECK_DELAY_SECONDS

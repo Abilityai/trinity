@@ -243,7 +243,9 @@ class TestHealMigration:
         # no row could carry a prefix that did not exist when the one-time
         # migration ran, so there is nothing for the frozen list to fix.
         # #4281: `schedule-restricted-` likewise, for the same reason.
-        reserved_after_heal = {"mention-", "queue-stall-", "schedule-restricted-"}
+        # trinity-enterprise#1176: `managed-hooks-skipped-` likewise.
+        reserved_after_heal = {"mention-", "queue-stall-", "schedule-restricted-",
+                               "managed-hooks-skipped-"}
         assert set(PLATFORM_ALERT_HEAL_PREFIXES) == set(oqs._RESERVED_ID_PREFIXES) - reserved_after_heal
 
     def test_is_registered_on_both_tracks(self):

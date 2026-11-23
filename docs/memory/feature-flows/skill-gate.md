@@ -369,7 +369,7 @@ On a refusal: the scheduler leaves the row `skipped`; channels, rooms and public
   - plugin and nested names follow #751 (the hook over-matches the last segment);
   - voice-tool calls carry no platform execution and are always refused on a gated agent;
   - it needs a base-image rebuild and an agent recreate, and an older backend answers 404, so nothing is refused;
-  - server-managed claude.ai settings outrank the files;
+  - server-managed claude.ai settings outrank the files: while Claude Code holds such a payload the hook does not run. Since trinity-enterprise#1176 the agent reports it (`skill_gate_hook: skipped`, the Skills tab says so), the owner's turns run without the `Skill`, `Agent` and `Task` tools, shared and visitor turns are refused, and one Operations alert names the agent ([agent-runtime.md](../architecture/agent-runtime.md)). The peer-skill grant check lives in the same hook and holds only at dispatch then;
   - a self-approved turn in a Workspace thread or the Chat tab keeps the loaded skill in that conversation.
 - Security audit: `docs/security-reports/cso-diff-2026-10-02-ent751-gated-skills.md`.
 

@@ -9736,6 +9736,31 @@
         "monitoring"
       ],
       "description": "perform_health_check (behind POST /api/monitoring/agents/{name}/check and the first-check path of GET) reports a measured 0.0 uptime_percent_24h and 0.0 avg_latency_24h_ms as 0.0, not null; probes and DB stubbed. With no measurement at all both fields still read None."
+    },
+    {
+      "file": "unit/test_ent1176_managed_hooks.py",
+      "feature": "trinity-enterprise#1176",
+      "added": "2026-11-23",
+      "categories": [
+        "unit",
+        "agent-server",
+        "guardrails",
+        "security"
+      ],
+      "description": "trinity-enterprise#1176, agent side: managed_hooks.state() reads Claude Code's cached server-managed settings (remote-settings.json in ~/.claude and any CLAUDE_CONFIG_DIR) and reports skipped for a policy key without merge, a disableAllHooks under merge, or a cache that is present but not a readable settings object (not JSON, not an object, oversized, a directory, a symlink, a FIFO without blocking, unreadable); ok otherwise; unsupported_runtime off Claude Code. In that state ClaudeCodeRuntime.execute/execute_headless refuse before spawning a shared person's or a shell-less visitor's turn (403 turn_refused, the approved words), a schedule run (own words, no take-over), and answer 502 (never 503) when the platform cannot be asked; the owner's and a shell-holding visitor's turns run; the real /api/chat and /api/task routes (an MCP chat) refuse; the async and pull terminals type it; a gated agent's spawn sites drop Skill/Agent/Task; /health reads skipped on guardrails_registration and skill_gate_hook and never carries the cache's content."
+    },
+    {
+      "file": "unit/test_ent1176_managed_hooks_fleet.py",
+      "feature": "trinity-enterprise#1176",
+      "added": "2026-11-23",
+      "categories": [
+        "unit",
+        "backend",
+        "guardrails",
+        "operator-queue",
+        "reliability"
+      ],
+      "description": "trinity-enterprise#1176, platform side: the managed-hooks fleet check (run inside the leased fleet-image cycle, whose failure it never breaks) names every running, non-ephemeral agent whose /health reads guardrails_registration=skipped in ONE high alert (managed_hooks_skipped:fleet, approved words, singular and plural), ends it when none is, leaves it on Docker unreadable, and lets a silent agent hold it only if the last reading named it or before the first reading; the /health read maps every answer; the kind is registered under a reserved prefix with the new-agent escalation; a typed turn_refused 403 is not a switch failure while any other 403 still is; no new text reads as an auth failure and every refusal is recognised by the public status read; HOOK_STATES carries skipped."
     }
   ]
 }
