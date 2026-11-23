@@ -381,28 +381,8 @@
                   Create them here as soon as they're ready
                 </label>
               </div>
-              <!-- Connect Claude, in the chat (ent#1355): a masked field saved on this instance; the sign-in button replaces it when it exists -->
-              <div v-else-if="c.card.action === 'connect-claude' && (c.state === 'open' || c.state === 'running')" class="space-y-2 pt-1" data-testid="assistant-claude">
-                <BaseButton v-if="CLAUDE_SIGN_IN" size="sm" @click="CLAUDE_SIGN_IN.start()">{{ CLAUDE_SIGN_IN.label }}</BaseButton>
-                <template v-else>
-                  <BaseInput
-                    v-model="claudeKey[c.id]"
-                    type="password"
-                    label="Anthropic API key"
-                    placeholder="sk-ant-api03-…"
-                    autocomplete="off"
-                    data-testid="assistant-claude-key"
-                    :error="claudeError[c.id] || ''"
-                  />
-                  <p class="text-[12.5px] text-gray-600 dark:text-gray-300">
-                    No key yet? <a :href="CLAUDE_KEY_URL" target="_blank" rel="noopener" class="underline text-action-primary-600 dark:text-action-primary-400">Create one at Anthropic</a>.
-                  </p>
-                  <div class="flex flex-wrap gap-2">
-                    <BaseButton size="sm" :loading="c.state === 'running'" loading-label="Connecting…" :disabled="store.sending" data-testid="assistant-claude-connect" @click="connectClaude(m.id, c.id)">Connect</BaseButton>
-                    <BaseButton variant="secondary" size="sm" :disabled="c.state === 'running' || store.sending" @click="answer(m.id, c.id, false)">Not now</BaseButton>
-                  </div>
-                </template>
-              </div>
+              <!-- A credential: a masked field whose value goes to this instance, never to the assistant -->
+              <AssistantCredentialField v-else-if="c.card.action === 'credential'" :message-id="m.id" :entry="c" :route="route" />
               <div v-else-if="c.state === 'open' || c.state === 'running'" class="flex flex-wrap gap-2 pt-1">
                 <BaseButton
                   size="sm"
@@ -739,6 +719,7 @@ import BaseSegmented from '../base/BaseSegmented.vue'
 import BaseTextarea from '../base/BaseTextarea.vue'
 import InlineError from '../InlineError.vue'
 import ChatBubble from '../chat/ChatBubble.vue'
+import AssistantCredentialField from './AssistantCredentialField.vue'
 import HelpChatWidget from '../HelpChatWidget.vue'
 import { maskAddress, useAssistantStore } from '../../stores/assistant'
 import { useOnboardingStore } from '../../stores/onboarding'
@@ -746,8 +727,7 @@ import { useFirstRunStore } from '../../stores/firstRun'
 import { irreversibleTool, toolWords, webLink } from '../../utils/assistantCards'
 import { describePage } from '../../utils/assistantContext'
 import { starterGroups } from '../../utils/assistantStarters'
-import { CLAUDE_SIGN_IN, OPENING, OPENING_GROUP, inFirstSession, isFirstSession, localHandOff } from '../../utils/firstSession'
-import { CLAUDE_TAB_COPY } from '../onboarding/steps/credentialSteps'
+import { OPENING, OPENING_GROUP, inFirstSession, isFirstSession, localHandOff } from '../../utils/firstSession'
 import { renderMarkdown } from '../../utils/markdown'
 
 defineProps({
@@ -768,7 +748,7 @@ const OUTCOME = Object.freeze({
 })
 const CONFIRM = Object.freeze({ build: 'Build', upgrade: 'Continue', feedback: 'Send' })
 const LOADING = Object.freeze({ build: 'Building…', feedback: 'Sending…' })
-const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running', feedback: 'For the Trinity team' })
+const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running', feedback: 'For the Trinity team', credential: 'A credential, kept from the assistant' })
 const SHOWN_STEPS = 4
 const FOLLOWED = ['job', 'run']
 // A followed card's heading follows what happened to it.
@@ -1051,17 +1031,6 @@ function pick(starter) {
   if (!starter.fill) return send(starter.text)
   draft.value = starter.text
   focusInput()
-}
-
-// Connect Claude from its card (ent#1355): the key stays on this instance.
-const CLAUDE_KEY_URL = CLAUDE_TAB_COPY.api_key.providerUrl
-const claudeKey = ref({})
-const claudeError = ref({})
-async function connectClaude(messageId, cardId) {
-  claudeError.value = { ...claudeError.value, [cardId]: '' }
-  const wrong = await store.connectClaude(messageId, cardId, claudeKey.value[cardId], route)
-  if (wrong) claudeError.value = { ...claudeError.value, [cardId]: wrong }
-  else claudeKey.value = { ...claudeKey.value, [cardId]: '' }
 }
 
 // A result opens beside the panel; the first one in an assistant-led session opens by itself (ent#1355).

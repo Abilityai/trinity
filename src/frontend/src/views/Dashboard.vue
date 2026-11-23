@@ -335,7 +335,7 @@
 
     <!-- Grid View (trinity-enterprise#47) — magnetic tile canvas. v-if so its
          polling and timers tear down whenever the mode is not active. -->
-    <div v-if="viewMode === 'grid'" class="relative bg-white dark:bg-gray-800 shadow-sm dark:shadow-gray-900 flex-1 min-h-0">
+    <div v-if="viewMode === 'grid'" data-testid="grid-view" class="relative bg-white dark:bg-gray-800 shadow-sm dark:shadow-gray-900 flex-1 min-h-0">
       <!-- Loading skeleton: immediate feedback while the fleet list loads -->
       <div
         v-if="isFleetLoading && agents.length === 0"

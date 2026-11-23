@@ -29,6 +29,7 @@ let refusals = {}        // url → [{ status, detail }], thrown in order by the
 let confirmEmail         // the `email` /subscription/confirm answers: masked or null at the door
 let codeVersion          // the terms version /subscription/code names; undefined: the one served
 let agentsList = null    // what /api/agents answers when set (ent#1355: an instance with no agent of the person's own)
+let credentialAnswer     // what POST /credential answers (ent#1355: the instance's save, count and check)
 let agentsWait = null    // when set, /api/agents answers only once this settles (a slow agent list)
 
 vi.mock('@/api', () => {
@@ -64,8 +65,8 @@ vi.mock('@/api', () => {
       status = { ...status, contacted: true, reachable: true, plan: 'free', allowance: ALLOWANCE, trial_terms: { version: 't0', url: '', accepted: 't0' }, nudge: afterAgreeing }
       return { plan: 'free', email: null, allowance: ALLOWANCE, trial_terms: { version: 't0', url: '', accepted: 't0' } }
     }
-    if (url === '/api/settings/api-keys/anthropic/test') return { valid: true }
-    if (url === '/api/settings/api-keys/anthropic') return { connected_agents: 1 }
+    if (url === '/api/enterprise/assistant/credential' && method === 'get') return { set: false }
+    if (url === '/api/enterprise/assistant/credential') return credentialAnswer
     if (url === '/api/enterprise/assistant/feedback') return { ok: true }
     if (url === '/api/enterprise/assistant/opened') return { ok: true }
     if (url === '/api/enterprise/onboarding/checklist') return checklist
@@ -143,6 +144,7 @@ describe('assistant panel', () => {
     confirmEmail = 'a•••@example.com'
     codeVersion = undefined
     agentsList = null
+    credentialAnswer = { provided: true, agent: null, name: 'ANTHROPIC_API_KEY', replaced: false, connected_agents: 2, working: true }
     agentsWait = null
     pushed.length = 0
     subTerms = { version: 's1', title: 'Subscription terms', url: '', text: '# Subscription terms\n\nYou pay monthly.' }
@@ -1546,31 +1548,52 @@ describe('assistant panel', () => {
   // trinity-enterprise#1355 checkpoint 3: Claude is connected in the chat at the
   // moment the first agent is about to run, and the first result opens by itself.
   describe('the first run', () => {
-    it('connects Claude from a masked field in the chat; the key goes to this instance only', async () => {
-      turns = [final('One thing before it runs: connect Claude.', [{ action: 'connect-claude' }]), final('Running it now.')]
+    const CLAUDE = { action: 'credential', name: 'ANTHROPIC_API_KEY', why: 'Your agent runs on Claude.' }
+    const save = async (value) => {
+      await wrapper.get('[data-testid="assistant-credential-input"]').setValue(value)
+      await wrapper.get('[data-testid="assistant-credential"]').trigger('submit')
+      await flushPromises()
+    }
+
+    it('connects Claude through the shared credential field; the key goes to this instance only', async () => {
+      turns = [final('One thing before it runs: connect Claude.', [CLAUDE]), final('Running it now.')]
       await openPanel()
       await say('run my agent')
-      const field = wrapper.get('[data-testid="assistant-claude-key"]')
-      expect(field.attributes('type')).toBe('password')
-      await field.setValue('sk-ant-api03-SECRETVALUE')
-      await wrapper.get('[data-testid="assistant-claude-connect"]').trigger('click')
-      await flushPromises()
-      expect(calls.find((c) => c.url === '/api/settings/api-keys/anthropic')?.body).toEqual({ api_key: 'sk-ant-api03-SECRETVALUE' })
+      expect(wrapper.findAll('[data-testid="assistant-credential"]')).toHaveLength(1)
+      expect(wrapper.get('[data-testid="assistant-credential-input"]').attributes('type')).toBe('password')
+      expect(wrapper.get('[data-testid="assistant-credential-help"] a').attributes('href')).toMatch(/^https:\/\/console\.anthropic\.com/)
+      await save('sk-ant-api03-SECRETVALUE')
+      const stored = calls.filter((c) => c.url === '/api/enterprise/assistant/credential' && c.method === 'post')
+      expect(stored.map((c) => c.body)).toEqual([{ agent: null, name: 'ANTHROPIC_API_KEY', value: 'sk-ant-api03-SECRETVALUE' }])
+      expect(calls.some((c) => c.url.startsWith('/api/settings/api-keys'))).toBe(false)     // the instance saves and checks it, not the page
       expect(JSON.stringify(sent(TURN))).not.toContain('SECRETVALUE')
-      expect(sent(TURN)[1].body).toMatchObject({ counted: false })
-      expect(sent(TURN)[1].body.message).toBe('Done: Connect Claude.')
-      expect(wrapper.find('[data-testid="assistant-claude-key"]').exists()).toBe(false)
+      expect(sent(TURN)[1].body).toMatchObject({ counted: false, message: 'Provided: ANTHROPIC_API_KEY for this instance.' })
+      expect(wrapper.find('[data-testid="assistant-credential-input"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="assistant-credential-connected"]').text()).toContain('Connected 2 agents')
+      expect(wrapper.find('[data-testid="assistant-credential-check"]').exists()).toBe(false)
     })
 
-    it('says what is wrong with a pasted value before anything is sent', async () => {
-      turns = [final('Connect Claude first.', [{ action: 'connect-claude' }])]
+    it('a key Anthropic rejects after the save is said on the card and to the assistant, never the key', async () => {
+      credentialAnswer = { provided: true, agent: null, name: 'ANTHROPIC_API_KEY', replaced: false, connected_agents: 0,
+        working: false, problem: 'Anthropic rejected this key.' }
+      turns = [final('Connect Claude first.', [CLAUDE]), final('That key was not accepted.')]
       await openPanel()
       await say('run my agent')
-      await wrapper.get('[data-testid="assistant-claude-key"]').setValue('hello')
-      await wrapper.get('[data-testid="assistant-claude-connect"]').trigger('click')
-      await flushPromises()
-      expect(calls.some((c) => c.url.startsWith('/api/settings/api-keys'))).toBe(false)
-      expect(wrapper.text()).toContain("doesn't look like")
+      await save('sk-ant-api03-SECRETVALUE')
+      expect(sent(TURN)[1].body.message).toBe(
+        'Provided: ANTHROPIC_API_KEY for this instance. Anthropic did not accept it, so agents cannot run on it yet.')
+      expect(wrapper.get('[data-testid="assistant-credential-check"]').text()).toContain('Anthropic rejected this key.')
+      expect(JSON.stringify(sent(TURN))).not.toContain('SECRETVALUE')
+    })
+
+    it('there is one credential card: the old connect-claude card is not shown', async () => {
+      turns = [final('Connect Claude.', [{ action: 'connect-claude' }])]
+      await openPanel()
+      await say('run my agent')
+      expect(wrapper.find('[data-testid="assistant-claude"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="assistant-claude-key"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="assistant-credential"]').exists()).toBe(false)
+      expect(wrapper.findAll('.bubble').at(-1).text()).toContain('Connect Claude.')
     })
 
     it('opens the first result in front of the person where the assistant leads, once', async () => {

@@ -10,6 +10,7 @@
  * names of its steps, so journey events (trinity-enterprise#1352) have one
  * place to take them from. Nothing here is sent anywhere by itself.
  */
+import { CLAUDE_TAB_COPY } from '../components/onboarding/steps/credentialSteps'
 
 /** The steps of the first session, in order. Names only: nothing emits them yet. */
 export const FIRST_SESSION_STEPS = Object.freeze([
@@ -99,13 +100,31 @@ export function inFirstSession(status, fleet = [], examples = []) {
 }
 
 /**
- * Connecting Claude at the moment the first agent is about to run. Today the
- * panel shows a masked field and saves the key on this instance (never sent to
- * the assistant). The one-button sign-in is its own work
- * (trinity-enterprise#1354): when it exists, it is set here, as
- * `{ label, start() }`, and the card shows that button instead of the field.
+ * Connecting Claude at the moment the first agent is about to run. The
+ * assistant asks for it with the shared credential field (ent#1358,
+ * `ask_credential` for this instance): the person pastes it into the masked
+ * field, it is saved on this instance and the assistant hears only
+ * "Provided" / "Not provided". Today what is pasted is an Anthropic API key.
+ *
+ * The one seam for the Claude step (trinity-enterprise#1354): when the
+ * Claude Code sign-in exists, set this to `{ name, label, href }`. The same
+ * field then shows that link instead of the API-key link; the person signs in
+ * there, copies the code and pastes it into the same field, stored under
+ * `name` (a credential the instance adds for it). Nothing else changes.
  */
 export const CLAUDE_SIGN_IN = null
+
+/** The instance's own Claude credentials: the API key, and the sign-in code once it exists. */
+export function isClaudeCredential(card, signIn = CLAUDE_SIGN_IN) {
+  if (!card || card.agent) return false
+  return card.name === 'ANTHROPIC_API_KEY' || Boolean(signIn && card.name === signIn.name)
+}
+
+/** Where the person gets what they paste: the sign-in when it exists, else an API key at Anthropic. */
+export function claudeHelp(signIn = CLAUDE_SIGN_IN) {
+  if (signIn) return { lead: 'Sign in, copy the code, and paste it here:', label: signIn.label, href: signIn.href }
+  return { lead: 'No key yet?', label: 'Create one at Anthropic', href: CLAUDE_TAB_COPY.api_key.providerUrl }
+}
 
 /**
  * The example agents kept off the first screen (checkpoint 4): only where the
