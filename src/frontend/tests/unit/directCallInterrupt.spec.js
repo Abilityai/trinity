@@ -5,9 +5,9 @@
  * and the composable's stop protocol. The mounted conversation is in
  * `portalDirectCall.mount.spec.js`.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { isStopUtterance } from '../../src/components/portal/portalDirectCall'
+import { GRACE_MS, isStopUtterance } from '../../src/components/portal/portalDirectCall'
 import { createEndpointer, VAD } from '../../src/utils/voiceEndpointing'
 import { directEscapeAction } from '../../src/utils/turnCancel'
 import { useDirectVoiceSession } from '../../src/composables/useDirectVoiceSession'
@@ -124,6 +124,10 @@ describe('the player level', () => {
 })
 
 describe('the stop protocol', () => {
+  // #4456: words are sent after a quiet period, so every "is sent" below advances the
+  // clock by exactly that, and every "is stopped" asserts with no advance at all.
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
   function session(overrides = {}) {
     setActivePinia(createPinia())
     const hooks = { onTranscript: vi.fn(), onBargeIn: vi.fn(), onStop: vi.fn(), onAnswer: vi.fn(), ...overrides }
@@ -149,6 +153,7 @@ describe('the stop protocol', () => {
     const { hooks, call } = session()
     hear(call, 1, 'Wait.')
     expect(hooks.onStop).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(GRACE_MS)
     expect(hooks.onTranscript).toHaveBeenCalledWith('Wait.')
   })
   it('a spoken turn still being sent counts as something to stop', () => {
@@ -163,17 +168,17 @@ describe('the stop protocol', () => {
     hear(call, 1, 'Actually, stop doing that and run the tests.')
     expect(hooks.onBargeIn).toHaveBeenCalledTimes(1)
     expect(hooks.onStop).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(GRACE_MS)
     expect(hooks.onTranscript).toHaveBeenCalledWith('Actually, stop doing that and run the tests.')
   })
   it('drops an unfinished sentence that was being held', () => {
-    vi.useFakeTimers()
     const { hooks, call } = session()
     hear(call, 1, 'send the report to')
     thinking(call)
     hear(call, 2, 'never mind')
+    expect(hooks.onStop).toHaveBeenCalledTimes(1)
     vi.advanceTimersByTime(5000)
     expect(hooks.onTranscript).not.toHaveBeenCalled()
-    vi.useRealTimers()
   })
   it('"stop" answers a waiting approval with no, after its prompt has played', () => {
     let t = 10000
@@ -220,8 +225,11 @@ describe('the stop protocol', () => {
     call.interrupt()
     hear(call, 1, 'What about the other file?')
     expect(hooks.onTranscript).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(GRACE_MS)
+    expect(hooks.onTranscript).not.toHaveBeenCalled()
     call._handleUtterance({ samples: new Float32Array(16000), duringPlayback: false })
     hear(call, 2, 'What about the other file?')
+    vi.advanceTimersByTime(GRACE_MS)
     expect(hooks.onTranscript).toHaveBeenCalledTimes(1)
   })
   it('a prompt cut by Stop is not answered by a later yes: the card decides', () => {

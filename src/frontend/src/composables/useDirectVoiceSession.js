@@ -16,10 +16,14 @@ import {
   VOICE_BAD_START_REASON, VOICE_CONNECT_TIMEOUT_MS, VOICE_NOT_VERIFIED_REASON, VOICE_TIMEOUT_REASON,
   VOICE_SESSION_ID_SHAPE as SESSION_ID_SHAPE, VOICE_TICKET_SHAPE as TICKET_SHAPE,
 } from './useVoiceSession'
-import { answersAsk, HOLD_UNFINISHED_MS, isEcho, isOwnSentence, isStopUtterance, looksUnfinished } from '../components/portal/portalDirectCall'
+import {
+  answersAsk, heldWord, HOLD_LOST_MS, holdDelay, isEcho, isOwnSentence, isStopUtterance, joinHeld,
+} from '../components/portal/portalDirectCall'
 
 const SAVED_TIMEOUT_MS = 5000
 const RECENT_SPOKEN = 12
+// #4456: how long sent words wait for their turn to start before they stop counting.
+const SENT_PENDING_MS = 15000
 export const STOPPED_NOTICE = 'Stopped.'
 export const STOPPED_REPLY_IN_CHAT = 'Stopped. The full reply is in the chat.'
 
@@ -64,8 +68,19 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
   let wasPlaying = false
   let promptEndedAt = null
   let promptArmed = false
-  let held = ''
+  // #4456: what the person has said and not yet sent, as `{seq, text}` so it is joined in
+  // spoken order. It goes out as ONE turn once they have been quiet (`armHold`).
+  let heldParts = []
   let holdTimer = null
+  // The person is mid-utterance: between the endpointer's onset and its utterance/discard.
+  let personSpeaking = false
+  // When their last utterance ended: the quiet period is measured from here.
+  let lastEndAt = null
+  // "Hold on" was said: the sentence waits the longer hold.
+  let holdLong = false
+  // The turn the last flush started, until it is heard or over. A continuation that
+  // arrives before the agent said anything supersedes it WITH its words, not without.
+  let lastSent = null
   // The person's own level, so the orb moves while they talk, not only while it does.
   // Speech is a few hundredths RMS; scaled so a normal voice reads as most of the range.
   let micLevel = 0
@@ -87,11 +102,63 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
     status.value = waitingAsk.value ? 'awaiting_approval' : 'listening'
   }
 
-  function flushHeld() {
+  function dropHeld() {
     clearTimeout(holdTimer); holdTimer = null
-    const text = held.trim()
-    held = ''
-    if (text) onTranscript?.(text)
+    heldParts = []
+    holdLong = false
+  }
+
+  function flushHeld() {
+    const text = joinHeld(heldParts)
+    dropHeld()
+    if (!text) return
+    lastSent = { text, answered: false, started: false, at: now() }
+    // Parked behind a turn that is still settling: the conversation's own queue joins
+    // whatever follows, so these words are not a turn to supersede.
+    if (onTranscript?.(text) === 'queued') lastSent = null
+  }
+
+  // The words last sent, while they can still be the first half of a sentence. A send
+  // that never became a turn (the dispatch failed: no `thinking`, no `idle`) stops
+  // counting after `SENT_PENDING_MS`, or it would ride along with some later turn.
+  function sentAndPending() {
+    if (lastSent && !lastSent.started && now() - lastSent.at > SENT_PENDING_MS) lastSent = null
+    return lastSent
+  }
+  function turnStarted() {
+    if (sentAndPending()) lastSent.started = true
+  }
+
+  // The one place the send is scheduled, called from every path that could leave words
+  // collected. Nothing is sent while the person is speaking or a transcript is still on
+  // its way; otherwise the words go once the quiet period, counted from the end of the
+  // last utterance, is over.
+  function armHold() {
+    clearTimeout(holdTimer); holdTimer = null
+    if (!heldParts.length || personSpeaking || status.value === 'ended') return
+    const since = lastEndAt ?? now()
+    if (utterances.size > 0) {
+      // Still being transcribed. Only a lost frame ends this wait.
+      holdTimer = setTimeout(() => { utterances.clear(); flushHeld() }, Math.max(0, since + HOLD_LOST_MS - now()))
+      return
+    }
+    const due = since + holdDelay(joinHeld(heldParts), { long: holdLong })
+    holdTimer = setTimeout(flushHeld, Math.max(0, due - now()))
+  }
+
+  function speechStarted({ duringPlayback } = {}) {
+    personSpeaking = true
+    // More is coming: whatever is collected waits for it.
+    clearTimeout(holdTimer); holdTimer = null
+    if (duringPlayback) { pausedForSpeech.value = true; player?.pause() }
+    // "Got it" while they are talking again reads as if the mic had stopped.
+    else if (status.value === 'transcribing') resting()
+  }
+
+  function speechDiscarded() {
+    personSpeaking = false
+    resumeIfPaused()
+    armHold()
   }
 
   function resumeIfPaused() {
@@ -109,6 +176,8 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
   }
 
   function handleUtterance({ samples, duringPlayback }) {
+    personSpeaking = false
+    lastEndAt = now()
     seq += 1
     // When the person began: the audio's length back from now, less the preroll that
     // was kept from before they spoke.
@@ -116,6 +185,7 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
     utterances.set(seq, { duringPlayback, startedAt: now() - Math.max(0, spokenMs) })
     status.value = 'transcribing'
     sendFrame({ type: 'utterance', seq, data: samplesToPcm16Base64(samples) })
+    armHold()
   }
 
   function somethingToStop(meta) {
@@ -123,10 +193,14 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
   }
 
   function handleTranscript({ seq: id, text }) {
+    // The call is over: a transcript still on the wire starts nothing.
+    if (status.value === 'ended') return
+    const known = utterances.has(id)
     const meta = utterances.get(id) || { duringPlayback: false, startedAt: now() }
     utterances.delete(id)
+    if (!known) lastEndAt = now()
     // ent#1087: said before the person stopped the agent. It must not start a turn.
-    if (typeof id === 'number' && id <= stopSeq) return
+    if (typeof id === 'number' && id <= stopSeq) { armHold(); return }
     if (notice.value === STOPPED_NOTICE || notice.value === STOPPED_REPLY_IN_CHAT) notice.value = ''
     const waiting = waitingAsk.value
     // A stop word, unless it is the agent's own sentence heard back word for word.
@@ -134,7 +208,7 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
 
     // Echo is judged while something was playing, except when a yes is awaited: the
     // prompt contains the very words the person answers with.
-    if (meta.duringPlayback && !waiting && !stopWord && isEcho(text, recentSpoken)) { resumeIfPaused(); return }
+    if (meta.duringPlayback && !waiting && !stopWord && isEcho(text, recentSpoken)) { resumeIfPaused(); armHold(); return }
 
     liveText.value = text
 
@@ -145,6 +219,7 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
       waitingAsk.value = null
       resting()
       onAnswer?.(waiting, answer)
+      armHold()
       return
     }
 
@@ -155,22 +230,33 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
       return
     }
 
-    // Real speech over the agent: stop it, and stop the turn it was speaking.
-    if (meta.duringPlayback || turnRunning.value || pausedForSpeech.value) {
+    // #4456: with words collected and nothing to stop, "never mind" takes them back and
+    // "hold on" asks for a moment. Neither is sent.
+    if (heldParts.length) {
+      const word = heldWord(text)
+      if (word === 'drop') { dropHeld(); liveText.value = ''; resting(); return }
+      if (word === 'wait') { holdLong = true; liveText.value = joinHeld(heldParts); armHold(); resting(); return }
+    }
+
+    // Real speech over the agent: stop it, and stop the turn it was speaking. A turn the
+    // last flush started and that is still being dispatched counts: it is the same turn.
+    const dispatching = !turnRunning.value && !!sentAndPending() && !lastSent.started && !!isBusy?.()
+    if (meta.duringPlayback || turnRunning.value || pausedForSpeech.value || dispatching) {
+      // #4456: the person carried on before the agent said anything. Their first words go
+      // again with the rest, or the continuation would arrive without what it continues.
+      const carry = sentAndPending() && !lastSent.answered && !meta.duringPlayback && !pausedForSpeech.value ? lastSent.text : ''
+      lastSent = null
       pausedForSpeech.value = false
       player?.stop()
       if (sendFrame({ type: 'interrupt' })) dropAudio = true
-      if (turnRunning.value) { turnRunning.value = false; onBargeIn?.({ executionId: speakingExecutionId }) }
+      if (turnRunning.value || dispatching) { turnRunning.value = false; onBargeIn?.({ executionId: speakingExecutionId }) }
+      if (carry) heldParts.push({ seq: 0, text: carry })
     }
 
-    held = held ? `${held} ${text}` : text
-    clearTimeout(holdTimer); holdTimer = null
-    if (looksUnfinished(held)) {
-      holdTimer = setTimeout(flushHeld, HOLD_UNFINISHED_MS)
-      resting()
-    } else {
-      flushHeld()
-    }
+    heldParts.push({ seq: typeof id === 'number' ? id : seq, text })
+    liveText.value = joinHeld(heldParts)
+    armHold()
+    if (personSpeaking || utterances.size === 0) resting()
   }
 
   // ent#1087: what talking over the agent does, without a new turn. The Stop button, a
@@ -183,8 +269,8 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
     player?.stop()
     if (sendFrame({ type: 'interrupt' })) dropAudio = true
     stopSeq = seq
-    clearTimeout(holdTimer); holdTimer = null
-    held = ''
+    dropHeld()
+    lastSent = null
     // A prompt cut off is answered on its card, never by a yes to words not heard.
     promptArmed = false
     promptEndedAt = null
@@ -201,6 +287,9 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
     switch (msg.type) {
       case 'audio':
         if (dropAudio) break
+        // #4456: the agent has started to answer what was sent. From here a new phrase
+        // is the person talking over it, not the rest of their sentence.
+        if (msg.data && lastSent) lastSent.answered = true
         if (msg.data && player) {
           player.play(msg.data)
           if (!pausedForSpeech.value) status.value = 'speaking'
@@ -220,6 +309,7 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
         if (msg.reason === 'too_long') notice.value = 'That was too long to catch in one go. Try shorter pieces.'
         else if (msg.reason === 'rate_limited') notice.value = 'Too much speech in a minute. Give it a moment.'
         resumeIfPaused()
+        armHold()
         break
       case 'speak_state':
         if (msg.state === 'thinking') {
@@ -230,6 +320,7 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
         } else {
           if (msg.execution_id === speakingExecutionId) speakingExecutionId = null
           turnRunning.value = false
+          lastSent = null
           tool.value = ''
           if (!player?.isPlaying()) resting()
           onTurnIdle?.(msg.execution_id)
@@ -237,6 +328,9 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
         break
       case 'activity':
         tool.value = msg.tool || ''
+        // #4456: it is already acting on what was sent. Sending those words again with
+        // the rest would run the same action twice.
+        if (msg.tool && lastSent) lastSent.answered = true
         break
       case 'audio_flush':
         dropAudio = false
@@ -292,7 +386,9 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
     }
     error.value = null; notice.value = ''; liveText.value = ''; tool.value = ''; timing.value = null
     endReason.value = null; endMessage.value = ''; waitingAsk.value = null; muted.value = false
-    recentSpoken.length = 0; held = ''; promptEndedAt = null; promptArmed = false
+    recentSpoken.length = 0; dropHeld(); promptEndedAt = null; promptArmed = false
+    personSpeaking = false; lastEndAt = null; lastSent = null
+    turnRunning.value = false; pausedForSpeech.value = false
     speakingExecutionId = null; stopSeq = 0; dropAudio = false
     active.value = true
     status.value = 'connecting'
@@ -339,11 +435,9 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
           ownPlayer = createAudioPlayer()
           player = ownPlayer
           endpointer = createEndpointer({
-            onSpeechStart: ({ duringPlayback }) => {
-              if (duringPlayback) { pausedForSpeech.value = true; player?.pause() }
-            },
+            onSpeechStart: speechStarted,
             onUtterance: handleUtterance,
-            onDiscard: () => resumeIfPaused(),
+            onDiscard: speechDiscarded,
           })
           const ownMic = await startMicCapture((_b64, samples) => { if (samples) onFrames(samples) })
           if (stale()) {
@@ -413,9 +507,12 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
     if (savedResolve) { const r = savedResolve; savedResolve = null; r(value) }
   }
 
-  async function stop() {
+  // `flush: false` when the call ends because the person left for another agent or
+  // thread: words still collected were meant for the one they left, and go nowhere.
+  async function stop({ flush = true } = {}) {
     if (!active.value) return null
-    flushHeld()
+    if (flush) flushHeld()
+    else dropHeld()
     const saved = new Promise((resolve) => { savedResolve = resolve })
     savedTimer = setTimeout(() => { finishSaved(null); cleanup() }, SAVED_TIMEOUT_MS)
     if (!sendFrame({ type: 'end' })) { finishSaved(null); cleanup() }
@@ -428,7 +525,9 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
     if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null }
     amplitude.value = 0
     micLevel = 0
-    clearTimeout(holdTimer); holdTimer = null
+    dropHeld()
+    personSpeaking = false
+    lastSent = null
     if (mic) { mic.stop(); mic = null }
     if (player) { player.stop(); player = null }
     endpointer = null
@@ -449,7 +548,7 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
     }
   }
 
-  if (getCurrentInstance()) onBeforeUnmount(() => { if (active.value) void stop() })
+  if (getCurrentInstance()) onBeforeUnmount(() => { if (active.value) void stop({ flush: false }) })
 
   return {
     active, isActive, canStop, status, muted, error, voiceSessionId, portalSessionId,
@@ -458,10 +557,21 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
     startWith, stop, interrupt,
     // Whether the agent's voice is coming out (or held mid-reply) right now: Escape asks.
     isSpeaking() { return !!player?.isPlaying() || pausedForSpeech.value },
-    toggleMute() { muted.value = !muted.value; if (muted.value) endpointer?.reset() },
+    toggleMute() {
+      muted.value = !muted.value
+      if (!muted.value) return
+      // `reset()` reports neither an utterance nor a discard: say the speech is over here.
+      endpointer?.reset()
+      personSpeaking = false
+      armHold()
+    },
+    // The words last sent did not become a turn (the dispatch failed).
+    forgetSent() { lastSent = null },
     speak(executionId) {
+      if (!active.value) return
       if (notice.value === STOPPED_NOTICE || notice.value === STOPPED_REPLY_IN_CHAT) notice.value = ''
       speakingExecutionId = executionId
+      turnStarted()
       turnRunning.value = true
       status.value = 'thinking'
       sendFrame({ type: 'speak', execution_id: executionId })
@@ -479,6 +589,8 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
     // Exposed for specs: the frame handlers are the protocol.
     _handleFrame: handleFrame,
     _handleUtterance: handleUtterance,
+    _speechStart: speechStarted,
+    _discard: speechDiscarded,
     _promptPlayed: onPlaybackEnded,
   }
 }
