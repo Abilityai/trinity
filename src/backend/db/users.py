@@ -23,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from .engine import get_engine
 from .tables import agent_ownership, agent_sharing, users
 from db_models import UserCreate
+from utils import request_memo
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,7 @@ class UserOperations:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_user_dict(row) if row else None
 
+    @request_memo.memoized_method
     def get_user_by_username(self, username: str) -> Optional[Dict]:
         """Get user by username."""
         return self._get_user_by_field("username", username)
@@ -124,6 +126,18 @@ class UserOperations:
         """Get user by ID."""
         return self._get_user_by_field("id", user_id)
 
+    def get_users_by_ids(self, user_ids: List[int]) -> Dict[int, Dict]:
+        """`{id: user}` for many ids in ONE query (#4281: a fleet read rates
+        every schedule's creator without a lookup per creator). Ids with no
+        user row are absent."""
+        ids = list(dict.fromkeys(i for i in user_ids if isinstance(i, int)))
+        if not ids:
+            return {}
+        stmt = select(*self._USER_COLUMNS).where(users.c.id.in_(ids))
+        with get_engine().connect() as conn:
+            return {row["id"]: self._row_to_user_dict(row) for row in conn.execute(stmt).mappings()}
+
+    @request_memo.memoized_method
     def get_user_by_email(self, email: str) -> Optional[Dict]:
         """Get user by email address — case-insensitively, the way it is unique
         (ent#720)."""
@@ -134,6 +148,25 @@ class UserOperations:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_user_dict(row) if row else None
+
+    def get_users_by_emails(self, emails) -> Dict[str, Optional[Dict]]:
+        """`{email as given: user or None}` in ONE query (#4671) — the batch
+        form of `get_user_by_email`, matched the same way. Inside a
+        `request_memo.scope()` it also answers the per-email read for the rest
+        of the scope, so a list resolves its people once instead of per row."""
+        asked = {e: normalize_email(e) for e in dict.fromkeys(emails or []) if isinstance(e, str)}
+        wanted = sorted({n for n in asked.values() if n})
+        found: Dict[str, Dict] = {}
+        if wanted:
+            stmt = select(*self._USER_COLUMNS).where(func.lower(users.c.email).in_(wanted))
+            with get_engine().connect() as conn:
+                for row in conn.execute(stmt).mappings():
+                    user = self._row_to_user_dict(row)
+                    found.setdefault(normalize_email(user.get("email")), user)
+        out = {given: found.get(normalized) for given, normalized in asked.items()}
+        for given, user in out.items():
+            self.get_user_by_email.prime(given, value=user)
+        return out
 
     # ---------------------------------------------------------------- ent#720
     # THE writer of `users.email`. Every path that sets the column — insert or

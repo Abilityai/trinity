@@ -168,7 +168,7 @@
       the person has said not to show it.
     -->
     <section
-      v-if="setup.visible"
+      v-if="setup.visible && !firstSessionOn"
       class="shrink-0 border-b border-action-primary-200 dark:border-action-primary-500/40 bg-action-primary-50 dark:bg-action-primary-500/16 text-action-primary-700 dark:text-action-primary-200"
       data-testid="assistant-setup"
     >
@@ -262,7 +262,20 @@
         <!-- Conversation -->
         <!-- On the ground colour, so each reply (a surface) reads as its own box. -->
         <div ref="messagesEl" class="flex-1 min-h-0 overflow-y-auto p-4 space-y-3 text-sm bg-gray-50 dark:bg-gray-900" aria-live="polite">
-          <div v-if="store.messages.length === 0" class="space-y-3" data-testid="assistant-welcome">
+          <!-- The opening is not decided yet (trinity-enterprise#1356): nothing is shown that could be replaced a moment later -->
+          <!-- No statusError guard here: the retry error shows only while there is no status (the branch above), so this
+               placeholder can never pulse under it; a failed re-read with the status on screen keeps it, never a blank panel -->
+          <div
+            v-if="store.messages.length === 0 && !openingDecided"
+            class="space-y-2 animate-pulse motion-reduce:animate-none"
+            aria-busy="true"
+            data-testid="assistant-opening-pending"
+          >
+            <span class="sr-only">Loading the assistant</span>
+            <div class="h-3 w-3/4 rounded bg-gray-100 dark:bg-gray-750" />
+            <div class="h-3 w-1/2 rounded bg-gray-100 dark:bg-gray-750" />
+          </div>
+          <div v-else-if="store.messages.length === 0 && openingDecided" class="space-y-3" data-testid="assistant-welcome">
             <p class="text-gray-900 dark:text-gray-100">
               I help you set Trinity up and get agents working for you: I build them with you, check on them and fix what I can.
             </p>
@@ -336,6 +349,14 @@
               </dl>
               <p v-if="!(FOLLOWED.includes(c.card.action) && c.state !== 'making')" class="text-[12.5px] text-gray-600 dark:text-gray-300">{{ c.note }}</p>
 
+              <!-- A run that ended well: its result, one click away (ent#1355) -->
+              <a
+                v-if="c.result"
+                :href="c.result"
+                class="inline-block text-[12.5px] font-medium underline text-action-primary-600 dark:text-action-primary-400"
+                data-testid="assistant-result"
+                @click.prevent="openResult(c.result)"
+              >Open the result</a>
               <div v-if="c.state === 'making'" class="space-y-1.5" data-testid="assistant-job">
                 <!-- Steps known (a build): how far. Not known (a run): that it is alive. -->
                 <div
@@ -356,12 +377,14 @@
                   <span>{{ c.progress || 'Starting' }}…</span>
                   <span class="tabular-nums flex-none">{{ elapsed(c.since) }}</span>
                 </p>
-                <!-- Their agents, their instance: on by default so nothing waits on a second click -->
+                <!-- Off by default: a proposed build waits for the owner's click on Build (ent#1343) -->
                 <label v-if="c.card.action === 'job'" class="flex items-center gap-2 text-[12.5px] text-gray-900 dark:text-gray-100">
                   <input v-model="c.auto" type="checkbox" class="rounded" data-testid="assistant-auto-create" />
                   Create them here as soon as they're ready
                 </label>
               </div>
+              <!-- A credential: a masked field whose value goes to this instance, never to the assistant -->
+              <AssistantCredentialField v-else-if="c.card.action === 'credential'" :message-id="m.id" :entry="c" :route="route" />
               <div v-else-if="c.state === 'open' || c.state === 'running'" class="flex flex-wrap gap-2 pt-1">
                 <BaseButton
                   size="sm"
@@ -390,7 +413,7 @@
           </template>
 
           <!-- What it can do, offered until the person has said something: also under a line it opened with -->
-          <div v-if="fresh && !store.sending" class="space-y-3">
+          <div v-if="fresh && !store.sending && openingDecided" class="space-y-3">
             <div v-for="g in starters" :key="g.heading" class="space-y-1.5" data-testid="assistant-starters">
               <p class="font-mono text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">{{ g.heading }}</p>
               <div class="flex flex-wrap gap-2">
@@ -445,7 +468,85 @@
             <BaseButton variant="ghost" size="sm" :disabled="store.account.busy" @click="store.closeAccount()">Cancel</BaseButton>
           </div>
 
-          <form v-if="store.account.step === 'email'" class="space-y-3" @submit.prevent="store.startAccount(email)">
+          <!-- Subscribing by code (trinity-enterprise#1331): the terms, then the code sent to the registered admin -->
+          <form
+            v-if="store.account.step === 'sub-terms'"
+            class="space-y-3"
+            data-testid="assistant-sub-terms"
+            @submit.prevent="store.sendSubscriptionCode()"
+          >
+            <p v-if="store.account.busy && !store.account.subTerms" class="text-[12.5px] text-gray-500 dark:text-gray-400 animate-pulse motion-reduce:animate-none">Loading the subscription terms…</p>
+            <InlineError v-if="store.account.error" :message="store.account.error" />
+            <BaseButton
+              v-if="!store.account.subTerms && store.account.error && !store.account.stuck && !store.account.busy"
+              type="button"
+              variant="secondary"
+              size="sm"
+              data-testid="assistant-sub-terms-retry"
+              @click="store.reloadSubscriptionTerms()"
+            >Try again</BaseButton>
+            <template v-if="store.account.subTerms && !store.account.stuck">
+              <p class="font-medium text-gray-900 dark:text-gray-100">
+                {{ store.account.subTerms.title || 'Subscription terms' }}
+                <span v-if="store.account.subTerms.version" class="font-normal text-gray-500 dark:text-gray-400">(version {{ store.account.subTerms.version }})</span>
+              </p>
+              <div
+                v-if="store.account.subTerms.text"
+                class="max-h-48 overflow-y-auto rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 prose prose-sm dark:prose-invert max-w-none prose-headings:my-2 prose-p:my-1.5 prose-ul:my-1.5 prose-li:my-0 text-[12.5px]"
+                tabindex="0"
+                aria-label="Subscription terms"
+                data-testid="assistant-sub-terms-text"
+                v-html="renderMarkdown(store.account.subTerms.text)"
+              ></div>
+              <a
+                v-if="webLink(store.account.subTerms.url)"
+                :href="webLink(store.account.subTerms.url)"
+                target="_blank"
+                rel="noopener"
+                class="inline-block underline text-action-primary-700 dark:text-action-primary-300"
+                data-testid="assistant-sub-terms-link"
+              >Read the subscription terms</a>
+              <label class="flex items-start gap-2 text-gray-900 dark:text-gray-100">
+                <input v-model="store.account.ticked" type="checkbox" class="mt-0.5 rounded" data-testid="assistant-sub-terms-tick" />
+                <span>I accept the subscription terms.</span>
+              </label>
+              <p class="text-[12.5px] text-gray-600 dark:text-gray-300" data-testid="assistant-sub-address">
+                The code goes to
+                <span v-if="subAddress" class="font-medium">{{ subAddress }}</span>
+                <template v-else>the email of this instance's registered admin</template>.
+              </p>
+              <BaseButton v-if="!store.account.blocked" type="submit" size="sm" :loading="store.account.busy" loading-label="Sending…" data-testid="assistant-sub-send">Send code</BaseButton>
+            </template>
+          </form>
+
+          <form
+            v-else-if="store.account.step === 'sub-code'"
+            class="space-y-3"
+            @submit.prevent="store.confirmSubscription(code, route)"
+          >
+            <p class="text-gray-900 dark:text-gray-100" data-testid="assistant-sub-sent">
+              <template v-if="store.account.resent">A new code is on its way to</template>
+              <template v-else>Enter the code sent to</template>
+              <span class="font-medium">{{ store.account.sentTo || subAddress || "this instance's registered admin" }}</span>.
+              <span v-if="subMinutes" class="text-gray-500 dark:text-gray-400">It works for {{ subMinutes }} minutes.</span>
+            </p>
+            <BaseInput
+              v-model="code"
+              label="Code"
+              placeholder="123456"
+              inputmode="numeric"
+              autocomplete="one-time-code"
+              maxlength="12"
+              :error="store.account.error"
+              data-testid="assistant-sub-code"
+            />
+            <div v-if="!store.account.blocked" class="flex flex-wrap gap-2">
+              <BaseButton type="submit" size="sm" :loading="store.account.busy" loading-label="Checking…" data-testid="assistant-sub-confirm">Confirm</BaseButton>
+              <BaseButton variant="ghost" size="sm" :disabled="store.account.busy" data-testid="assistant-sub-resend" @click="store.sendSubscriptionCode({ resend: true })">Send a new code</BaseButton>
+            </div>
+          </form>
+
+          <form v-else-if="store.account.step === 'email'" class="space-y-3" @submit.prevent="store.startAccount(email)">
             <BaseInput
               v-model="email"
               type="email"
@@ -460,6 +561,9 @@
           </form>
 
           <form v-else-if="store.account.step === 'code'" class="space-y-3" @submit.prevent="store.verifyAccount(code, accepted)">
+            <p v-if="store.account.stale" class="text-[12.5px] text-gray-600 dark:text-gray-300" data-testid="assistant-terms-changed">
+              The terms have changed since you last accepted them. Read the current terms and accept them to continue.
+            </p>
             <p class="text-gray-900 dark:text-gray-100">
               Enter the 6-digit code sent to <span class="font-medium">{{ store.account.email }}</span>.
             </p>
@@ -528,6 +632,13 @@
         </div>
 
         <!-- Composer -->
+        <!-- The status is being read again before the terms are offered (trinity-enterprise#1330) -->
+        <p
+          v-if="store.settling && !store.agreed"
+          class="mx-3 mb-1 mt-3 text-[12.5px] text-gray-500 dark:text-gray-400 animate-pulse motion-reduce:animate-none shrink-0"
+          aria-live="polite"
+          data-testid="assistant-finishing"
+        >Finishing setup…</p>
         <!-- Before the first message, once per instance: one button, no email -->
         <div
           v-if="needsAgreement"
@@ -603,20 +714,22 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import BaseButton from '../base/BaseButton.vue'
 import BaseInput from '../base/BaseInput.vue'
 import BaseSegmented from '../base/BaseSegmented.vue'
 import BaseTextarea from '../base/BaseTextarea.vue'
 import InlineError from '../InlineError.vue'
 import ChatBubble from '../chat/ChatBubble.vue'
+import AssistantCredentialField from './AssistantCredentialField.vue'
 import HelpChatWidget from '../HelpChatWidget.vue'
-import { useAssistantStore } from '../../stores/assistant'
+import { maskAddress, useAssistantStore } from '../../stores/assistant'
 import { useOnboardingStore } from '../../stores/onboarding'
 import { useFirstRunStore } from '../../stores/firstRun'
 import { irreversibleTool, toolWords, webLink } from '../../utils/assistantCards'
 import { describePage } from '../../utils/assistantContext'
 import { starterGroups } from '../../utils/assistantStarters'
+import { OPENING, OPENING_GROUP, inFirstSession, isFirstSession, localHandOff } from '../../utils/firstSession'
 import { renderMarkdown } from '../../utils/markdown'
 
 defineProps({
@@ -637,7 +750,7 @@ const OUTCOME = Object.freeze({
 })
 const CONFIRM = Object.freeze({ build: 'Build', upgrade: 'Continue', feedback: 'Send' })
 const LOADING = Object.freeze({ build: 'Building…', feedback: 'Sending…' })
-const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running', feedback: 'For the Trinity team' })
+const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running', feedback: 'For the Trinity team', credential: 'A credential, kept from the assistant' })
 const SHOWN_STEPS = 4
 const FOLLOWED = ['job', 'run']
 // A followed card's heading follows what happened to it.
@@ -664,6 +777,11 @@ const messagesEl = ref(null)
 
 // What the empty screen offers, for this page and this fleet.
 const starters = computed(() => {
+  // trinity-enterprise#1355: the assistant-led first session asks one question, with two answers.
+  if (firstSession.value) {
+    const last = store.messages.at(-1)
+    return last?.local && last.handOff ? [{ heading: OPENING_GROUP.heading, items: last.handOff }] : [OPENING_GROUP]
+  }
   const groups = starterGroups(describePage(route), store.fleet, { known: Boolean(store.status?.profile_known) })
   // Under its own hello there is one question to answer, not a menu: the rest comes once they have.
   return store.messages.length === 1 && store.messages[0].local ? groups.slice(0, 1) : groups
@@ -686,10 +804,27 @@ function hello() {
     : ''
   return `Hi, I'm Trinity's assistant 👋\n\nLet's get you **an agent of your own** working in a few minutes: tell me a little about your work, I'll suggest one, build it and run it once so you see what it produces.${shown}`
 }
+// trinity-enterprise#1355: while the first session runs, no settings steps are raised (checkpoint 4).
+const firstSessionOn = computed(() => inFirstSession(store.status, store.fleet, firstRun.seededAgents || []))
+// trinity-enterprise#1355: the instance says the assistant leads, and the person has no agent of their own yet.
+const firstSession = computed(() => isFirstSession(store.status, store.fleet, firstRun.seededAgents || []))
+// trinity-enterprise#1356: the opening is decided once, when there is nothing
+// left to learn that would change it: the reads the hello is written from are
+// in, and the status has settled. Right after setup the first status is read
+// before the instance's account report lands and carries no line from Trinity;
+// a hello written then was replaced by Trinity's own line when the re-read
+// brought it, so the first thing a new person read changed under them.
+// The first-session opening waits on the same gate: decided on an early,
+// incomplete status it could ask the first-session question of the wrong person.
+const prepared = ref(false)      // open() has read the fleet and which agents are examples
+const openingDecided = computed(() => prepared.value && Boolean(store.status) && !store.settling)
 function startTalking() {
-  if (!isOpen.value || !store.status || store.status.profile_known || store.messages.length) return
+  if (!isOpen.value || !openingDecided.value || store.messages.length) return
+  if (firstSession.value) return store.welcome(OPENING)
+  if (store.status.profile_known) return
   store.welcome(hello())
 }
+watch(openingDecided, (now) => { if (now) startTalking() })
 
 // While the setup overlay has the screen the assistant stays out of its way,
 // and takes over when it closes: open beside the page where there is room,
@@ -736,7 +871,9 @@ function helpWith(step) {
 }
 
 // Nothing leaves this instance until someone here has agreed to the trial's terms.
-const needsAgreement = computed(() => Boolean(store.status) && !store.agreed)
+// While the status is still being settled (trinity-enterprise#1330) the box waits:
+// the next read may say the terms were already accepted.
+const needsAgreement = computed(() => Boolean(store.status) && !store.agreed && !store.settling)
 
 const termsOpen = ref(false)
 function toggleTerms() {
@@ -745,6 +882,12 @@ function toggleTerms() {
 }
 
 const fullTermsOpen = ref(false)
+// Subscribing by code: the address is only ever shown masked, and the code's life in minutes.
+const subAddress = computed(() => maskAddress(store.status?.email))
+const subMinutes = computed(() => {
+  const seconds = Number(store.account.expiresIn)
+  return seconds > 0 ? Math.round(seconds / 60) : 0
+})
 function toggleFullTerms() {
   fullTermsOpen.value = !fullTermsOpen.value
   if (fullTermsOpen.value) store.readFullTerms()
@@ -807,6 +950,7 @@ async function open({ quiet = false } = {}) {
   const fleet = store.messages.length ? null : store.refreshFleet().catch(() => {})
   if (!store.status) await store.loadStatus()
   await Promise.all([fleet, firstRun.fetchState()])     // which agents are the install's examples: read once, kept
+  prepared.value = true
   startTalking()
   if (!quiet) focusInput()
 }
@@ -871,16 +1015,36 @@ function send(text) {
   const message = String(text || '').trim()
   if (!message || store.sending) return
   draft.value = ''
-  if (needsAgreement.value) return store.hold(message)     // kept until they agree; one click sends it
+  // Kept until they agree; one click sends it. While the status is still being read
+  // again (trinity-enterprise#1330) it is held too: nobody has agreed yet.
+  if (needsAgreement.value || (store.settling && !store.agreed)) return store.hold(message)
   store.send(message, route)
 }
 
 // A starter: sent as it stands, or put in the box for the person to finish.
 function pick(starter) {
+  // Agents already run elsewhere: the hand-off is said on the page (its own work, trinity-enterprise#1353).
+  if (starter.path === 'local') {
+    const { reply, offer } = localHandOff()
+    store.messages.push({ id: `h${Date.now()}`, role: 'user', content: starter.text, opener: true, local: true })
+    store.messages.push({ id: `h${Date.now()}r`, role: 'assistant', content: reply, opener: true, local: true, handOff: offer })
+    return
+  }
   if (!starter.fill) return send(starter.text)
   draft.value = starter.text
   focusInput()
 }
+
+// A result opens beside the panel; the first one in an assistant-led session opens by itself (ent#1355).
+const router = useRouter()
+function openResult(path) {
+  router.push(path).catch?.(() => {})
+}
+watch(() => store.openResult, (path) => {
+  if (!path) return
+  store.openResult = ''
+  openResult(path)
+})
 
 function answer(messageId, cardId, confirm) {
   store.answerCard(messageId, cardId, confirm, route)
@@ -909,12 +1073,34 @@ onMounted(() => {
   firstRun.fetchState()
   if (wide.value && chosen !== 'false' && !firstRun.overlayOpen) open({ quiet: true })
 })
+
+// trinity-enterprise#1355: where the assistant leads the first session it opens by
+// itself, whatever the width, unless the person closed it before.
+watch(() => store.status?.leads_setup, async (leads) => {
+  if (!leads || isOpen.value) return
+  let chosen = null
+  try {
+    chosen = localStorage.getItem(OPEN_KEY)
+  } catch { /* no choice known */ }
+  if (chosen === 'false' || firstRun.overlayOpen) return
+  await Promise.all([store.refreshFleet().catch(() => {}), firstRun.fetchState()])
+  if (firstSession.value && !isOpen.value) open({ quiet: true })
+}, { immediate: true })
 onBeforeUnmount(() => {
   stopKeeping?.()
   wideQuery?.removeEventListener?.('change', onWide)
   window.removeEventListener('resize', onWindowResize)
   window.removeEventListener('keydown', onKey)
   store.setOpen(false)
+  store.stopSettling()
+})
+
+// The re-read settled and the terms were already accepted: what was held goes now.
+watch(() => store.settling, (on, was) => {
+  if (!was || on || !store.agreed || !store.waiting) return
+  const held = store.waiting
+  store.waiting = ''
+  store.send(held, route)
 })
 
 // What the assistant just did may have ticked a step: read them again when a turn ends.
@@ -929,6 +1115,8 @@ watch(() => route.path, () => store.recheck())
 watch(() => store.account.step, (step) => {
   code.value = ''
   if (step !== 'code') accepted.value = false
+  // A code that could not be sent to a known address leaves that address filled in.
+  if (step === 'email' && store.account.email) email.value = store.account.email
 })
 
 watch(

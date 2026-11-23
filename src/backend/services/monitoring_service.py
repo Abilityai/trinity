@@ -24,6 +24,7 @@ import httpx
 
 from database import db
 from redis_breaker_util import get_breaker_redis
+from services import loop_health
 from services.agent_auth import agent_httpx_client
 from services.model_context import DEFAULT_CONTEXT_WINDOW
 from db_models import (
@@ -855,8 +856,8 @@ async def perform_health_check(
         business=business_check,
         issues=issues,
         recent_alerts=[],  # TODO: Fetch from notifications
-        uptime_percent_24h=round(uptime, 2) if uptime else None,
-        avg_latency_24h_ms=round(avg_latency, 2) if avg_latency else None
+        uptime_percent_24h=round(uptime, 2) if uptime is not None else None,
+        avg_latency_24h_ms=round(avg_latency, 2) if avg_latency is not None else None
     )
 
 
@@ -1067,7 +1068,8 @@ class MonitoringService:
                 self._is_leader = leader
 
                 if leader:
-                    await self._run_check_cycle()
+                    with loop_health.tick("monitoring"):
+                        await self._run_check_cycle()
             except Exception as e:
                 print(f"Monitoring check cycle failed: {e}")
 

@@ -54,7 +54,7 @@ def _owner_turn(monkeypatch):
     from agent_server.services import turn_scope
 
     async def owner(agent, run):
-        return "owner", True, None
+        return "owner", True, None, None
     monkeypatch.setattr(turn_scope, "fetch_turn", owner)
 
 EID = "failed-handoff"

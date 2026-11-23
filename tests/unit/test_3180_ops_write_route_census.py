@@ -356,6 +356,7 @@ NO_TRINITY_CREDENTIAL = {
     "routers/files.py::head_shared_file": OTHER_CREDENTIAL + " (signed file id)",
     "routers/setup.py::get_setup_status": UNAUTHENTICATED,
     "routers/setup.py::set_admin_password": UNAUTHENTICATED + " (first-run only)",
+    "routers/setup.py::get_registration_terms": UNAUTHENTICATED + " (first-run only, trinity-enterprise#1329)",
     "routers/internal.py::internal_agent_pre_check": OTHER_CREDENTIAL + " (X-Internal-Secret)",
     "routers/internal.py::internal_agent_brief_readiness": OTHER_CREDENTIAL + " (X-Internal-Secret)",
     "routers/internal.py::execute_task_internal": OTHER_CREDENTIAL + " (X-Internal-Secret)",

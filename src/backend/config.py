@@ -402,6 +402,8 @@ TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "1500"))
 # (Telegram voice messages). Both default to the same model today.
 GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL") or "gemini-3.5-flash"
 GEMINI_TRANSCRIPTION_MODEL = os.getenv("GEMINI_TRANSCRIPTION_MODEL") or "gemini-3.5-flash"
+# Image generation model (the previous hard-coded gemini-3.1-flash-image-preview was shut down).
+GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL") or "gemini-nano-banana-2.1"
 # Workspace Direct calls (trinity-enterprise#1046). The speech model transcribes only:
 # on a silent clip it returns nothing, where a general model has been seen to invent
 # text. TTS tries the models in order.

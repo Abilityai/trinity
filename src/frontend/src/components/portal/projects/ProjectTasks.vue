@@ -45,6 +45,11 @@
   A task the steward rejected twice says it needs a decision, and why. A run
   under way on a task is named on its row and in its detail, and Start says
   why it is not offered on a project that isn't running.
+
+  trinity-enterprise#1233: on a project whose goal has milestones, a Milestone
+  filter (v-model `milestoneFilter`, set by a milestone row on the Overview)
+  narrows both views, the board can be grouped by milestone (one lane per
+  milestone, status columns in each), and the forms set a task's milestone.
 -->
 <template>
   <div ref="rootEl" class="space-y-4" data-testid="project-tasks">
@@ -60,6 +65,30 @@
         @update:model-value="setView"
       />
       <span class="flex-1"></span>
+      <BaseSelect
+        v-if="showBoard && milestones.length && !milestoneFilter"
+        id="project-tasks-group"
+        v-model="groupBy"
+        size="sm"
+        aria-label="Group the board by"
+        data-testid="project-tasks-group"
+      >
+        <option value="status">Group: status</option>
+        <option value="milestone">Group: milestone</option>
+      </BaseSelect>
+      <BaseSelect
+        v-if="milestones.length"
+        id="project-tasks-milestone"
+        :model-value="milestoneFilter"
+        size="sm"
+        aria-label="Milestone"
+        data-testid="project-tasks-milestone"
+        @update:model-value="$emit('update:milestoneFilter', $event)"
+      >
+        <option value="">All milestones</option>
+        <option v-for="m in milestones" :key="m.id" :value="m.id">{{ m.name }}</option>
+        <option value="none">No milestone</option>
+      </BaseSelect>
       <BaseButton v-if="canContribute && !archived" size="sm" data-testid="project-task-new" @click="openCreate">New task</BaseButton>
     </div>
     <!-- trinity-enterprise#1132: the withheld control, said where it would be. -->
@@ -76,7 +105,28 @@
     <template v-else>
       <InlineError v-if="view.stale && !quietMiss" :message="state.error" @dismiss="load" />
       <template v-if="showBoard">
+        <template v-if="lanes">
+          <section v-for="lane in lanes" :key="lane.key" class="space-y-2" :data-testid="`project-board-lane-${lane.key}`">
+            <h3 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+              {{ lane.label }} <span class="tabular-nums">· {{ lane.rows.length }}</span>
+            </h3>
+            <ProjectTaskBoard
+              :columns="lane.columns"
+              :can-move="canConfirm"
+              :can-confirm="canConfirm"
+              :can-create="canConfirm"
+              :hints="lane === lanes[0] ? boardHints : {}"
+              @open="openTask"
+              @move="onBoardMove"
+              @set-status="onSetStatus"
+              @confirm="onBoardConfirm"
+              @new="openCreate"
+              @busy="boardBusy = $event"
+            />
+          </section>
+        </template>
         <ProjectTaskBoard
+          v-else
           :columns="columns"
           :can-move="canConfirm"
           :can-confirm="canConfirm"
@@ -101,6 +151,9 @@
       <template v-else>
       <p v-if="view.state === 'empty'" class="rounded-lg border border-dashed border-gray-300 dark:border-gray-700 p-6 text-center text-sm text-gray-600 dark:text-gray-300" data-testid="project-tasks-empty">
         No tasks yet. Add the first one, or ask an agent on the project to break the goal into tasks.
+      </p>
+      <p v-else-if="milestoneFilter && !visibleRows.length" class="rounded-lg border border-dashed border-gray-300 dark:border-gray-700 p-6 text-center text-sm text-gray-600 dark:text-gray-300" data-testid="project-tasks-milestone-empty">
+        {{ milestoneFilter === 'none' ? 'Every task belongs to a milestone.' : 'No tasks under this milestone yet. Add one, or move a task here from its detail.' }}
       </p>
       <section v-for="g in groups" v-show="g.rows.length" :key="g.key" class="space-y-1.5">
         <h3 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
@@ -135,6 +188,7 @@
               <BaseBadge v-if="t.closed_without_claim" size="sm" variant="warning">Done without a done claim</BaseBadge>
               <span v-if="assignedLabel(t)" class="hidden sm:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400">{{ assignedLabel(t, ownerLabel) }}</span>
               <span v-if="creatorOf(t)" class="hidden md:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400">by {{ creatorOf(t) }}</span>
+              <span v-if="!milestoneFilter && milestoneName(milestones, t.milestone)" class="hidden lg:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400" :data-testid="`project-task-milestone-${t.id}`">{{ milestoneName(milestones, t.milestone) }}</span>
               <BaseBadge :variant="TASK_STATUS_BADGE[t.status] || 'neutral'">{{ taskStatusLabel(t.status) }}</BaseBadge>
             </button>
             <BaseButton
@@ -210,6 +264,10 @@
           <BaseInput id="task-parent-new" v-model="form.parent" label="Subtask of (optional)" placeholder="T-001" :error="formError.parent" help="One level deep." data-testid="project-task-parent-new" />
           <BaseInput id="task-blocked-by-new" v-model="form.blocked_by" label="Waits on (optional)" placeholder="T-002, T-004" :error="formError.blocked_by" help="Tasks that must be done first." data-testid="project-task-blocked-by-new" />
         </div>
+        <BaseSelect v-if="milestones.length" id="task-milestone-new" v-model="form.milestone" label="Milestone (optional)" :error="formError.milestone" data-testid="project-task-milestone-new">
+          <option value="">No milestone</option>
+          <option v-for="m in milestones" :key="m.id" :value="m.id">{{ m.name }}</option>
+        </BaseSelect>
         <BaseToggle v-model="form.for_person" label="A person does this task, not an agent (pick its owner)" data-testid="project-task-for-person-new" />
         <InlineError v-if="actionError" :message="actionError" @dismiss="actionError = ''" />
         <div class="flex justify-end gap-2">
@@ -240,6 +298,7 @@
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Subtask of</dt><dd class="font-mono text-gray-900 dark:text-gray-100">{{ task.parent || '—' }}</dd></div>
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Subtasks</dt><dd class="tabular-nums text-gray-900 dark:text-gray-100">{{ subtaskLabel(task) || '—' }}</dd></div>
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Waits on</dt><dd class="truncate font-mono text-gray-900 dark:text-gray-100">{{ (task.blocked_by || []).join(', ') || '—' }}</dd></div>
+          <div v-if="milestones.length"><dt class="text-xs text-gray-500 dark:text-gray-400">Milestone</dt><dd class="truncate text-gray-900 dark:text-gray-100" data-testid="project-task-milestone">{{ milestoneName(milestones, task.milestone) || '—' }}</dd></div>
         </dl>
         <p v-if="waitingLabel(task)" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-task-waiting">
           {{ waitingLabel(task) }} — it is ready once {{ task.waiting_for.length === 1 ? 'that task is' : 'those tasks are' }} done.
@@ -389,6 +448,18 @@
               data-testid="project-task-blocked-by-edit"
             />
           </div>
+          <BaseSelect
+            v-if="milestones.length"
+            id="task-milestone-edit"
+            v-model="edit.milestone"
+            label="Milestone"
+            :disabled="locked"
+            :error="editError.milestone"
+            data-testid="project-task-milestone-edit"
+          >
+            <option value="">No milestone</option>
+            <option v-for="m in milestones" :key="m.id" :value="m.id">{{ m.name }}</option>
+          </BaseSelect>
           <BaseTextarea
             id="task-note"
             v-model="edit.note"
@@ -452,7 +523,8 @@ import {
   verificationRule, waitingLabel, withheldLine,
   RUN_BADGE, liveRun, needsDecisionReason, projectState, runLabel,
   doneWithoutClaim, UNCLAIMED_MEANING,
-  boardColumns, boardMinWidth, boardMove, readTasksView, writeTasksView, TASK_TEXT_MAX } from './projectsUtils'
+  boardColumns, boardMinWidth, boardMove, readTasksView, writeTasksView, TASK_TEXT_MAX,
+  milestoneLanes, milestoneName, tasksForMilestone } from './projectsUtils'
 
 const props = defineProps({
   // trinity-enterprise#1132: the page read, for the withheld line and the rule.
@@ -465,19 +537,21 @@ const props = defineProps({
   members: { type: Array, default: () => [] },
   // trinity-enterprise#1193: the viewer holds the creator role (may change anyone's brief).
   isCreator: { type: Boolean, default: false },
+  // trinity-enterprise#1233: '' every task · 'none' under no milestone · a milestone id.
+  milestoneFilter: { type: String, default: '' },
 })
 
-const emit = defineEmits(['open-thread'])
+const emit = defineEmits(['open-thread', 'update:milestoneFilter'])
 const store = useProjectsStore()
 const createOpen = ref(false)
 const taskOpen = ref(false)
 const task = ref(null)
 const busy = ref(false)
 const actionError = ref('')
-const EMPTY_FORM = { title: '', objective: '', done_definition: '', owner: '', priority: 'p2', parent: '', blocked_by: '', for_person: false }
+const EMPTY_FORM = { title: '', objective: '', done_definition: '', owner: '', priority: 'p2', parent: '', blocked_by: '', for_person: false, milestone: '' }
 const form = reactive({ ...EMPTY_FORM })
 const formError = ref({})
-const edit = reactive({ status: '', priority: 'p2', owner: '', note: '', title: '', objective: '', done_definition: '', parent: '', blocked_by: '' })
+const edit = reactive({ status: '', priority: 'p2', owner: '', note: '', title: '', objective: '', done_definition: '', parent: '', blocked_by: '', milestone: '' })
 const editError = ref({})
 // The three editable text fields, and the key each one sends.
 const EDIT_TEXT = ['title', 'objective', 'done_definition']
@@ -501,8 +575,11 @@ function ownerPerson(owner) {
 
 const state = computed(() => store.tasks[props.projectId] || { rows: [], loaded: false, error: null })
 const view = computed(() => viewState({ hasLoaded: state.value.loaded, error: state.value.error, count: state.value.rows.length }))
+// ent#1233: the goal's milestones, and the rows the milestone filter leaves.
+const milestones = computed(() => props.project?.milestones || [])
+const visibleRows = computed(() => tasksForMilestone(state.value.rows, props.milestoneFilter))
 const groups = computed(() => {
-  const g = groupTasks(state.value.rows)
+  const g = groupTasks(visibleRows.value)
   return [
     { key: 'open', label: 'Open', rows: g.open },
     { key: 'verifying', label: 'Awaiting verification', rows: g.verifying },
@@ -535,8 +612,17 @@ const showBoard = computed(() => tasksView.value === 'board' && fits.value)
 const { inflight, error: moveError, notice: moveNotice, move: sendMove, confirm: sendConfirm, refuse } =
   useTaskBoardMoves(() => props.projectId, store)
 const boardRows = ref([])
-watch([() => state.value.rows, boardBusy], ([rows, busy]) => { if (!busy) boardRows.value = rows }, { immediate: true })
+watch([visibleRows, boardBusy], ([rows, busy]) => { if (!busy) boardRows.value = rows }, { immediate: true })
 const columns = computed(() => boardColumns(boardRows.value, { inflight: inflight.value, members: props.members, myEmail: props.myEmail }))
+// ent#1233: Group by milestone — one lane per milestone (the goal's order), then none.
+const groupBy = ref('status')
+const lanes = computed(() => {
+  if (groupBy.value !== 'milestone' || !milestones.value.length || props.milestoneFilter) return null
+  return milestoneLanes(boardRows.value, milestones.value).map((lane) => ({
+    ...lane,
+    columns: boardColumns(lane.rows, { inflight: inflight.value, members: props.members, myEmail: props.myEmail }),
+  }))
+})
 const boardHints = computed(() => ({ 'pending-verification': rule.value }))
 const askDone = ref(null)
 const taskById = (id) => state.value.rows.find((t) => t.id === id)
@@ -616,7 +702,8 @@ const dirty = computed(() => task.value && (
   edit.status !== task.value.status || edit.priority !== task.value.priority || edit.note.trim() !== ''
   || (task.value.status !== 'done' && edit.owner.trim() !== (task.value.owner || ''))
   || Object.keys(changedText()).length > 0
-  || edit.parent.trim() !== (task.value.parent || '') || edit.blocked_by.trim() !== (task.value.blocked_by || []).join(', ')))
+  || edit.parent.trim() !== (task.value.parent || '') || edit.blocked_by.trim() !== (task.value.blocked_by || []).join(', ')
+  || (task.value.status !== 'done' && edit.milestone !== (task.value.milestone || ''))))
 
 // One missed background read is not worth a banner that shifts the page: the
 // rows on screen are at most one interval old. A second miss in a row, or a
@@ -640,7 +727,8 @@ useVisiblePolling(poll, {
 })
 
 function openCreate() {
-  Object.assign(form, EMPTY_FORM)
+  // ent#1233: a task added while one milestone is shown starts under it.
+  Object.assign(form, EMPTY_FORM, { milestone: milestones.value.some((m) => m.id === props.milestoneFilter) ? props.milestoneFilter : '' })
   createPicked.value = null
   formError.value = {}
   actionError.value = ''
@@ -664,11 +752,12 @@ async function create() {
     if (parent.ids.length) body.parent = parent.ids[0]
     if (blockers.ids.length) body.blocked_by = blockers.ids
     if (form.for_person) body.for_person = true
+    if (form.milestone) body.milestone = form.milestone
     await store.createTask(props.projectId, body)
     createOpen.value = false
   } catch (err) {
     const field = TASK_FIELD_ERROR_CODES[err?.response?.data?.detail?.code]
-    if (field === 'parent' || field === 'blocked_by') formError.value = { [field]: projectErrorMessage(err) }
+    if (field === 'parent' || field === 'blocked_by' || field === 'milestone') formError.value = { [field]: projectErrorMessage(err) }
     else actionError.value = projectErrorMessage(err)
   } finally {
     busy.value = false
@@ -741,6 +830,7 @@ function resetEdit() {
     title: task.value.title || '', objective: task.value.objective || '',
     done_definition: task.value.done_definition || '',
     parent: task.value.parent || '', blocked_by: (task.value.blocked_by || []).join(', '),
+    milestone: task.value.milestone || '',
   })
 }
 
@@ -764,6 +854,7 @@ async function saveTask() {
   // Blank clears a long field; a title is required, so it is never sent blank.
   for (const [f, v] of Object.entries(text)) body[f] = f === 'title' ? v : (v || null)
   Object.assign(body, shape.out)
+  if (task.value.status !== 'done' && edit.milestone !== (task.value.milestone || '')) body.milestone = edit.milestone || null
   busy.value = true
   actionError.value = ''
   try {

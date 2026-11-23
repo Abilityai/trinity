@@ -112,3 +112,25 @@ html.dark {
     animation: none;
   }
 }
+
+/* Touch-screen form controls at 16px. iOS Safari zooms the page in when a
+   focused field's text is smaller than 16px and leaves it zoomed after the
+   field blurs, so every text-xs / text-sm filter, search box and composer on a
+   phone pushed the layout sideways. Keyed on a coarse pointer alone, not on
+   width: an iPhone in landscape is 667-932px wide and zooms the same way. The
+   desktop's dense controls keep their size on a fine pointer. The `[class]`
+   copies lift the rule over a single text-* utility (0,1,1 beats 0,1,0);
+   checkboxes, radios and sliders show no text. A text-xs textarea would be
+   16px text on text-xs's 16px line-height, so it gets text-sm's 20px. */
+@media (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  select,
+  select[class],
+  textarea,
+  textarea[class] {
+    font-size: 16px;
+  }
+  textarea.text-xs {
+    line-height: 1.25rem;
+  }
+}

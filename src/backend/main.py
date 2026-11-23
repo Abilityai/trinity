@@ -464,6 +464,11 @@ async def _init_logging_and_first_run_notice() -> None:
             "admin account. On an internet-reachable instance, keep it behind a "
             "tunnel/VPN until setup completes (docs/DEPLOYMENT.md → Security)."
         )
+    else:
+        # #4693: installs set up before the admin's email was allow-listed at
+        # setup. Once per install, never raises, logs no address.
+        from services.admin_email_allowlist import backfill_admin_email_once
+        backfill_admin_email_once()
 
 
 async def _start_event_bus() -> None:
@@ -801,9 +806,11 @@ async def _start_capacity_and_canary() -> None:
             # small startup jitter so replicas don't realign their maintenance
             # ticks after a coordinated restart.
             await asyncio.sleep(15 + random.uniform(0, 2))
+            from services import loop_health
             while True:
                 try:
-                    await capacity.run_maintenance(max_age_hours=24)
+                    with loop_health.tick("capacity_maintenance"):
+                        await capacity.run_maintenance(max_age_hours=24)
                 except Exception as exc:
                     logger.warning(f"[Capacity] maintenance tick failed: {exc}")
                 # #1085: jitter the loop period so concurrent replicas' drain
@@ -828,9 +835,11 @@ async def _start_capacity_and_canary() -> None:
         async def _loop_due_sweep():
             await asyncio.sleep(8 + random.uniform(0, 2))
             service = get_loop_service()
+            from services import loop_health
             while True:
                 try:
-                    await service.dispatch_due_loops()
+                    with loop_health.tick("loop_due_sweep"):
+                        await service.dispatch_due_loops()
                 except Exception as exc:
                     logger.warning(f"[Loop] due sweep tick failed: {exc}")
                 await asyncio.sleep(5 + random.uniform(0, 1))
@@ -848,6 +857,14 @@ async def _schedule_watch_loops() -> None:
     former 580-line `lifespan`; the body below is unchanged. Ordering between
     phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
     """
+    # #4671 / #4674: this worker's event-loop probe — names what blocked the
+    # loop, with the pid. No lease by design: a worker measures its own loop.
+    try:
+        from services import loop_health
+        loop_health.start()
+    except Exception as e:
+        logger.error(f"Error starting the event-loop probe: {e}")
+
     # RELIABILITY-004 / #307: agent heartbeat watch loop — 5s cadence,
     # staggered +10s. Actively downgrades an agent to a soft `degraded` health
     # state after 3 consecutive missed heartbeats (additive to the 30s
@@ -1204,6 +1221,12 @@ async def _shutdown_probes_and_clients(app: FastAPI) -> None:
 
     Extracted VERBATIM (#1028); the body below is unchanged.
     """
+    try:
+        from services import loop_health
+        await loop_health.stop()
+    except Exception as e:
+        logger.error(f"Error stopping the event-loop probe: {e}")
+
     # Shutdown subscription recovery probe service (#447) — releases the
     # leader lease so a sibling worker takes over immediately instead of
     # waiting out the TTL.
