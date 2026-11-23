@@ -290,10 +290,13 @@ export const useAssistantStore = defineStore('assistant', {
     greet(nudge) {
       const text = typeof nudge?.text === 'string' ? nudge.text.trim().slice(0, 400) : ''
       if (!text || this.sending) return
+      const key = typeof nudge?.key === 'string' ? nudge.key : ''
+      // Already on screen (a reload, a second sign-in, a re-read): said once, not again (trinity-enterprise#1356).
+      if (this.messages.some((m) => m.opener && !m.local && ((key && m.key === key) || m.content === text))) return
       this.messages = this.messages.filter((m) => !m.local)      // its own line takes the place of the page's hello
-      this.messages.push({ id: newId(), role: 'assistant', content: text, opener: true })
+      this.messages.push({ id: newId(), role: 'assistant', content: text, opener: true, ...(key ? { key } : {}) })
       this.opening = text
-      this.openingKey = typeof nudge?.key === 'string' ? nudge.key : ''
+      this.openingKey = key
       if (!this.panelOpen) this.unread += 1
       else this.sawOpening()
     },
