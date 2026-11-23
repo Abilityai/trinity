@@ -158,6 +158,26 @@ describe('GuardrailEventsSection — the rows', () => {
     expect(rows[1].text()).toContain('Credential hidden')
   })
 
+  it('starts every row with its source, whatever the kind, and stacks the badge over the time on the right', async () => {
+    // Badge labels differ in width ("Refused" vs "Credential hidden") and so do
+    // times ("5 minutes ago" vs "1 hour ago"): a leading badge would start each
+    // row's text somewhere else, and a badge beside the time would end somewhere else.
+    const w = await mountWith(page([
+      ev('e-1'),
+      ev('e-2', { kind: 'credential_redacted', hook: 'output_scanner', code: 'sk', details: { patterns: ['sk'] } }),
+    ], REPORTING))
+    for (const row of w.findAll('[data-testid="guardrail-event-row"]')) {
+      const [first, second, ...rest] = row.element.children
+      expect(rest).toHaveLength(0)
+      expect(first.querySelector('p.font-mono')).not.toBeNull()
+      expect(second.classList.contains('flex-col')).toBe(true)
+      expect(second.classList.contains('items-end')).toBe(true)
+      const [badge, time] = second.children
+      expect(badge.textContent).toMatch(/Refused|Credential hidden/)
+      expect(time.tagName).toBe('TIME')
+    }
+  })
+
   it('states the total, and that only the latest are shown when there are more', async () => {
     const w = await mountWith(page([ev('e-1'), ev('e-2')], REPORTING, 'cursor-1'))
     expect(w.find('[data-testid="guardrail-events-total"]').text()).toBe('Latest 2 shown')

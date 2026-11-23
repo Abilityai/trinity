@@ -81,16 +81,21 @@
               class="px-4 py-2.5 flex items-start gap-3"
               data-testid="guardrail-event-row"
             >
-              <BaseBadge :variant="kindVariant(event.kind)" size="sm" class="mt-0.5 shrink-0">{{ kindLabel(event.kind) }}</BaseBadge>
               <div class="min-w-0 flex-1">
                 <p class="font-mono text-[12.5px] text-gray-900 dark:text-gray-100 truncate" :title="sourceText(event)">{{ sourceText(event) }}</p>
                 <p v-if="detailText(event)" class="text-[12.5px] text-gray-600 dark:text-gray-400 truncate" :title="detailText(event)">{{ detailText(event) }}</p>
               </div>
-              <time
-                :datetime="event.occurred_at"
-                :title="eventTimes(event.occurred_at).absolute"
-                class="shrink-0 text-[12.5px] tabular-nums text-gray-600 dark:text-gray-400 whitespace-nowrap"
-              >{{ eventTimes(event.occurred_at).relative }}</time>
+              <!-- Badge over time, right-aligned: labels and times differ in
+                   width, so a leading badge would start each row's text
+                   somewhere else and a badge beside the time would end there. -->
+              <div class="shrink-0 flex flex-col items-end gap-1">
+                <BaseBadge :variant="kindVariant(event.kind)" size="sm">{{ kindLabel(event.kind) }}</BaseBadge>
+                <time
+                  :datetime="event.occurred_at"
+                  :title="eventTimes(event.occurred_at).absolute"
+                  class="text-[12.5px] tabular-nums text-gray-600 dark:text-gray-400 whitespace-nowrap"
+                >{{ eventTimes(event.occurred_at).relative }}</time>
+              </div>
             </li>
           </ul>
         </template>
