@@ -46,7 +46,7 @@ def _load_prompts():
     return _load_module("image_generation_prompts", "image_generation_prompts.py")
 
 
-def _load_service(api_key=""):
+def _load_service(api_key="", image_model="gemini-nano-banana-2.1"):
     """Load image_generation_service module with mocked config.GEMINI_API_KEY.
 
     The service module imports from config and from image_generation_prompts.
@@ -62,6 +62,8 @@ def _load_service(api_key=""):
     # #1130: the service imports GEMINI_TEXT_MODEL from config — must be a
     # real string or it lands as a MagicMock repr in the request URL
     mock_config.GEMINI_TEXT_MODEL = "gemini-3.5-flash"
+    # #4717: the image model is env-overridable via config too
+    mock_config.GEMINI_IMAGE_MODEL = image_model
 
     # Pre-populate sys.modules so the service can import its dependencies
     saved_modules = {}
@@ -693,6 +695,28 @@ class TestCallGeminiImage:
         assert isinstance(image_bytes, bytes)
         assert mime_type == "image/png"
         assert image_bytes == b"fake_png_image_data_for_testing"
+
+    @pytest.mark.asyncio
+    async def test_image_model_comes_from_config(self):
+        """Image model is read from config (env-overridable), not hard-coded.
+
+        Regression for a retired hard-coded image model: the request URL and
+        the reported model_used must follow config.GEMINI_IMAGE_MODEL.
+        """
+        mod = _load_service(api_key="test-key", image_model="gemini-test-image-override")
+        service = mod.ImageGenerationService()
+
+        mock_http = AsyncMock()
+        mock_http.post.return_value = _make_mock_response(200, FAKE_IMAGE_RESPONSE)
+        mock_http.is_closed = False
+        service._client = mock_http
+
+        await service._call_gemini_image("prompt", "1:1")
+
+        url = mock_http.post.call_args.args[0]
+        assert "/gemini-test-image-override:generateContent" in url
+        assert "gemini-3.1-flash-image-preview" not in url
+        assert mod.GEMINI_IMAGE_MODEL == "gemini-test-image-override"
 
     @pytest.mark.asyncio
     async def test_raises_on_non_200(self):

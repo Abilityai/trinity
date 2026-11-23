@@ -1,7 +1,7 @@
 # Feature: Platform Image Generation (IMG-001)
 
 ## Overview
-Platform-level image generation service using Google Gemini models with a two-step pipeline: prompt refinement via Gemini 2.0 Flash text model, then image generation via Gemini 3.1 Flash Image Preview model. Supports use-case-specific best practices (general, thumbnail, diagram, social, avatar), configurable aspect ratios, and image-to-image variation generation from a reference image.
+Platform-level image generation service using Google Gemini models with a two-step pipeline: prompt refinement via Gemini 2.0 Flash text model, then image generation via the `GEMINI_IMAGE_MODEL` model (default `gemini-nano-banana-2.1`, #4717). Supports use-case-specific best practices (general, thumbnail, diagram, social, avatar), configurable aspect ratios, and image-to-image variation generation from a reference image.
 
 ## User Story
 As a platform user (or internal service), I want to generate high-quality images from text descriptions so that agents and platform features can produce visual content without managing their own image generation infrastructure.
@@ -49,7 +49,7 @@ router = APIRouter(prefix="/api/images", tags=["images"])
       "mime_type": "image/png",
       "refined_prompt": "the refined prompt used for generation",
       "original_prompt": "the user's raw prompt",
-      "model_used": "gemini-3.1-flash-image-preview",
+      "model_used": "gemini-nano-banana-2.1",
       "use_case": "general",
       "aspect_ratio": "1:1"
   }
@@ -64,9 +64,9 @@ router = APIRouter(prefix="/api/images", tags=["images"])
       "available": true,
       "models": {
           "text_refinement": "gemini-3.5-flash",
-          "image_generation": "gemini-3.1-flash-image-preview"
+          "image_generation": "gemini-nano-banana-2.1"
       },
-      "default_model": "gemini-3.1-flash-image-preview",
+      "default_model": "gemini-nano-banana-2.1",
       "use_cases": ["general", "thumbnail", "diagram", "social", "avatar"],
       "aspect_ratios": ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"]
   }
@@ -89,7 +89,7 @@ Singleton service accessed via `get_image_generation_service()` (line 395).
 | Constant | Value |
 |----------|-------|
 | `GEMINI_TEXT_MODEL` | `gemini-3.5-flash` (env-overridable, defined in `config.py` — #1130) |
-| `GEMINI_IMAGE_MODEL` | `gemini-3.1-flash-image-preview` |
+| `GEMINI_IMAGE_MODEL` | `gemini-nano-banana-2.1` (env-overridable, defined in `config.py`) |
 | `GEMINI_API_BASE` | `https://generativelanguage.googleapis.com/v1beta/models` |
 | `PROMPT_REFINEMENT_TIMEOUT` | 30 seconds |
 | `IMAGE_GENERATION_TIMEOUT` | 120 seconds |
@@ -120,7 +120,7 @@ Main entry point. Parameters: `prompt`, `use_case`, `aspect_ratio`, `refine_prom
 - **Response parsing**: `data["candidates"][0]["content"]["parts"][0]["text"]`
 
 #### _call_gemini_image() (line 232)
-- **URL**: `{GEMINI_API_BASE}/gemini-3.1-flash-image-preview:generateContent`
+- **URL**: `{GEMINI_API_BASE}/gemini-nano-banana-2.1:generateContent`
 - **Auth**: `x-goog-api-key` header with `GEMINI_API_KEY`
 - **Config**: `responseModalities: ["image", "text"]`, `imageConfig.aspectRatio`
 - **Parameters**:
@@ -246,10 +246,12 @@ Used by `avatar.py:_generate_emotions_background()` to build emotion-specific pr
 **File**: `src/backend/config.py`
 - `GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")`
 - `GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL") or "gemini-3.5-flash"` -- prompt-refinement model, env-overridable (#1130; `or`-coalesce per #1076 so an empty var can't shadow the default)
+- `GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL") or "gemini-nano-banana-2.1"` -- image-generation model, env-overridable (#4717; same coalesce)
 
 **Files**: `docker-compose.yml` + `docker-compose.prod.yml`
 - `GEMINI_API_KEY=${GEMINI_API_KEY:-}` -- Passed through from host `.env` to backend container
 - `GEMINI_TEXT_MODEL=${GEMINI_TEXT_MODEL:-gemini-3.5-flash}` -- non-empty default (#1130)
+- `GEMINI_IMAGE_MODEL=${GEMINI_IMAGE_MODEL:-gemini-nano-banana-2.1}` -- non-empty default (#4717)
 
 ---
 
