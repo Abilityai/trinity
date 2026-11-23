@@ -54,8 +54,8 @@ vi.mock('axios', () => {
   }
 })
 
-import { useClientPortalStore, portalHttp } from '@/stores/clientPortal'
-import { resetInFlight } from '@/utils/inflight'
+import { useClientPortalStore, portalHttp, joinedGet } from '@/stores/clientPortal'
+import { resetInFlight, joinFresh } from '@/utils/inflight'
 import Portal from '@/views/Portal.vue'
 
 globalThis.ResizeObserver = globalThis.ResizeObserver || class { observe() {} unobserve() {} disconnect() {} }
@@ -272,5 +272,83 @@ describe('#4671 — and never a stale list', () => {
     await settle()
 
     expect(counts()).toEqual({ sessions: 2, chatState: 2, rooms: 2, asks: 2, mentions: 0, markRead: 2 })
+  })
+})
+
+/**
+ * Is a read that left BEFORE `act` still handed to a caller that asks AFTER it?
+ * The real `joinFresh` on a key of its own, so nothing else is counted.
+ */
+async function readAcross(act) {
+  let release
+  const before = joinFresh('probe', () => new Promise((resolve) => { release = () => resolve('before') }))
+  await Promise.resolve()
+  await act()
+  const after = joinFresh('probe', async () => 'after')
+  const joined = after === before
+  release()
+  return { joined, value: await after }
+}
+
+describe('#4671 — the shell marks a turn end as a change', () => {
+  // `onWorkState` is where the shell learns a turn ended (1:1: `sending` fell;
+  // room: the `working` list went idle). The rail reads that follow must not
+  // join one that left while the turn was running.
+  it('work going from live to idle: the read after it is a new one', async () => {
+    const conversation = await boot()
+    conversation.vm.$emit('work-state', { live: 1 })
+    await flushPromises()
+
+    const seen = await readAcross(async () => {
+      conversation.vm.$emit('work-state', { live: 0 })
+      await flushPromises()
+    })
+    expect(seen).toEqual({ joined: false, value: 'after' })
+  })
+
+  it('a turn merely STARTING, or continuing, is not a change', async () => {
+    const conversation = await boot()
+    const starting = await readAcross(async () => {
+      conversation.vm.$emit('work-state', { live: 1 })
+      await flushPromises()
+    })
+    expect(starting).toEqual({ joined: true, value: 'before' })
+    const continuing = await readAcross(async () => {
+      conversation.vm.$emit('work-state', { live: 2 })
+      await flushPromises()
+    })
+    expect(continuing).toEqual({ joined: true, value: 'before' })
+  })
+})
+
+describe('#4671 — a read is joined only by the same credential', () => {
+  const as = (token) => ({ headers: { Authorization: `Bearer ${token}` } })
+
+  it('two sessions asking for the same list at once are two requests', async () => {
+    const [a, b] = await Promise.all([
+      joinedGet(`${BASE}/sessions`, as('alice')),
+      joinedGet(`${BASE}/sessions`, as('bob')),
+    ])
+    expect(started(`${BASE}/sessions`)).toBe(2)
+    expect(a).not.toBe(b)
+    const sent = portalHttp.get.mock.calls.map(([, config]) => config.headers.Authorization)
+    expect(sent.sort()).toEqual(['Bearer alice', 'Bearer bob'])
+  })
+
+  it('the same session asking twice at once is one', async () => {
+    const [a, b] = await Promise.all([
+      joinedGet(`${BASE}/sessions`, as('alice')),
+      joinedGet(`${BASE}/sessions`, as('alice')),
+    ])
+    expect(started(`${BASE}/sessions`)).toBe(1)
+    expect(a).toBe(b)
+  })
+
+  it('different parameters are different reads', async () => {
+    await Promise.all([
+      joinedGet(`${BASE}/asks`, { ...as('alice'), params: { include_ended: true } }),
+      joinedGet(`${BASE}/asks`, as('alice')),
+    ])
+    expect(started(`${BASE}/asks`)).toBe(2)
   })
 })

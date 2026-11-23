@@ -31,6 +31,7 @@ import { __portal as portal } from '@/stores/clientPortal'
 import { tailHeld } from '@/components/portal/portalThreadTail'
 import { usePortalWorkStore } from '@/stores/portalWork'
 import { usePortalRailFeedsStore } from '@/stores/portalRailFeeds'
+import { joinFresh, resetInFlight } from '@/utils/inflight'
 
 // ---------------------------------------------------------------------------
 // History
@@ -148,5 +149,68 @@ describe('a direct rail refresh cancels the pending push-driven one', () => {
 
     expect(portal.fetchAgentCanvases).toHaveBeenCalledTimes(2)
     expect(portal.fetchDocuments).toHaveBeenCalledTimes(2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A push is a change
+// ---------------------------------------------------------------------------
+
+/**
+ * Is a read that left BEFORE `act` still handed to a caller that asks AFTER it?
+ * The real `joinFresh`: `joined` is true when the later caller got the earlier
+ * flight, and `value` is what the later caller was answered with.
+ */
+async function readAcross(act) {
+  let release
+  const before = joinFresh('probe', () => new Promise((resolve) => { release = () => resolve('before') }))
+  await Promise.resolve()
+  await act()
+  const after = joinFresh('probe', async () => 'after')
+  const joined = after === before
+  release()
+  return { joined, value: await after }
+}
+
+describe('a push makes every read that left before it stale', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    resetInFlight()
+  })
+
+  it('control: with nothing in between, the later caller joins the earlier read', async () => {
+    expect(await readAcross(() => {})).toEqual({ joined: true, value: 'before' })
+  })
+
+  it('work: a participant\'s push — the read after it is a new one', async () => {
+    const work = usePortalWorkStore()
+    work.setScope(['scout'], 'sess-a')
+    expect(await readAcross(() => work.handleWebSocketEvent(PUSH))).toEqual({ joined: false, value: 'after' })
+    work.clear()
+  })
+
+  it('work: a push for an agent outside this chat changes nothing here', async () => {
+    const work = usePortalWorkStore()
+    work.setScope(['scout'], 'sess-a')
+    const stranger = { ...PUSH, agent_name: 'someone-else' }
+    expect(await readAcross(() => work.handleWebSocketEvent(stranger))).toEqual({ joined: true, value: 'before' })
+    work.clear()
+  })
+
+  it('canvases and files: a participant\'s push — the read after it is a new one', async () => {
+    const feeds = usePortalRailFeedsStore()
+    feeds.setParticipants(['scout'])
+    feeds.setFeeds({ canvas: true, files: true })
+    expect(await readAcross(() => feeds.handleWebSocketEvent(PUSH))).toEqual({ joined: false, value: 'after' })
+    feeds.clear?.()
+  })
+
+  it('canvases and files: a STARTED activity is not a change to them', async () => {
+    const feeds = usePortalRailFeedsStore()
+    feeds.setParticipants(['scout'])
+    feeds.setFeeds({ canvas: true, files: true })
+    const startedPush = { ...PUSH, activity_state: 'started' }
+    expect(await readAcross(() => feeds.handleWebSocketEvent(startedPush))).toEqual({ joined: true, value: 'before' })
+    feeds.clear?.()
   })
 })
