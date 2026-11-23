@@ -290,16 +290,14 @@ describe('assistant panel', () => {
       expect(reads()).toBe(5)
     })
 
-    it('a message or a starter sent while it is being read again is held, never sent', async () => {
+    it('a message sent while it is being read again is held, never sent; no starter is offered until the opening is decided', async () => {
       statusReads = [{ ...PENDING }, { ...PENDING }]
       status = { ...NOT_AGREED }
       await load()
+      // trinity-enterprise#1356: what the empty panel offers waits with the opening, so it cannot change under the person
+      expect(wrapper.find('[data-testid="assistant-starters"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="assistant-opening-pending"]').attributes('aria-busy')).toBe('true')
       await say('how are my agents?')
-      expect(sent(TURN)).toEqual([])
-      const starter = wrapper.findAll('[data-testid="assistant-starters"] button')[0]
-      expect(starter).toBeTruthy()
-      await starter.trigger('click')
-      await flushPromises()
       expect(sent(TURN)).toEqual([])
     })
 
@@ -1439,6 +1437,99 @@ describe('assistant panel', () => {
       await flushPromises()
       expect(sent(`${BYCODE}/terms`)).toHaveLength(1)
       expect(wrapper.find('[data-testid="assistant-email"]').exists()).toBe(true)
+    })
+  })
+
+  // trinity-enterprise#1356: on a newly set-up instance the first status is read
+  // while the account report is still pending, so it carries nothing to say.
+  // The panel used to write its own hello at once, and the settled re-read a
+  // moment later brought Trinity's own opening, which took the hello's place:
+  // the first thing a new person read changed under them. The opening is now
+  // decided once the status has settled, and a line already shown is not shown
+  // again on a reload or a second sign-in.
+  describe('one opening, decided once', () => {
+    const NUDGE = { key: 'first-agent', text: "You don't have an agent yet. Tell me one task you'd hand off." }
+    const SETTLED = { available: true, contacted: true, reachable: true, plan: 'free', email: null, allowance: ALLOWANCE, trial_terms: { version: 't0', url: '', accepted: 't0' }, profile_known: false }
+    const PENDING = { available: true, contacted: false, reachable: null, plan: null, email: null, allowance: null, trial_terms: { version: 't0', url: '', accepted: null }, bind: { state: 'pending' } }
+    const seen = []
+    // What the panel shows as its opening right now: its own words when empty, else the messages.
+    const opening = () => {
+      const empty = wrapper.find('[data-testid="assistant-welcome"]')
+      if (empty.exists()) return `welcome: ${empty.text()}`
+      return wrapper.findAll('.bubble').map((b) => b.text()).join(' | ')
+    }
+    const look = () => { const now = opening(); if (now) seen.push(now) }
+    const distinct = () => [...new Set(seen)]
+    // A page load: a new script with this browser's storage, signed in.
+    const load = async () => {
+      wrapper.unmount()
+      setActivePinia(createPinia())
+      const { useAuthStore } = await import('@/stores/auth')
+      useAuthStore().isAuthenticated = true
+      wrapper = mount(AssistantWidget, { attachTo: document.body, global: { stubs: {
+        ChatBubble: { props: ['role', 'content'], template: '<div class="bubble" :data-role="role">{{ content }}</div>' },
+        HelpChatWidget: { template: '<div />' } } } })
+      look()
+      await wrapper.get('[data-testid="assistant-launcher"]').trigger('click')
+      look()
+      for (const ms of [0, 0, 500, 1000, 2000, 4000, 8000]) {
+        await vi.advanceTimersByTimeAsync(ms)
+        await flushPromises()
+        look()
+      }
+    }
+
+    beforeEach(() => {
+      seen.length = 0
+      vi.useFakeTimers({ toFake: ['setTimeout'] })
+    })
+    afterEach(() => { vi.useRealTimers() })
+
+    it("Trinity's opening: shown alone on first open, on reload and on a second sign-in", async () => {
+      statusReads = [{ ...PENDING }]
+      status = { ...SETTLED, nudge: { ...NUDGE } }
+      await load()
+      expect(distinct()).toEqual([NUDGE.text])
+      expect(wrapper.findAll('.bubble').length).toBe(1)
+
+      seen.length = 0
+      await load()                                   // a reload: Trinity says the same line again
+      expect(distinct()).toEqual([NUDGE.text])
+      expect(wrapper.findAll('.bubble').length).toBe(1)
+
+      seen.length = 0
+      sessionStorage.clear()                         // a second sign-in, in a new session
+      status = { ...SETTLED, nudge: null }           // Trinity was told it was seen: it does not say it again
+      await load()
+      expect(distinct()).toEqual([NUDGE.text])
+      expect(wrapper.findAll('.bubble').length).toBe(1)
+    })
+
+    it("the panel's own hello: shown alone on first open, on reload and on a second sign-in", async () => {
+      statusReads = [{ ...PENDING }]
+      status = { ...SETTLED }
+      await load()
+      const shown = distinct()
+      expect(shown.length).toBe(1)
+      expect(shown[0]).toContain("I'm Trinity's assistant")
+
+      seen.length = 0
+      await load()
+      expect(distinct()).toEqual(shown)
+
+      seen.length = 0
+      sessionStorage.clear()
+      await load()
+      expect(distinct()).toEqual(shown)
+    })
+
+    it('someone it already knows, with nothing to say: its own words, and nothing replaces them', async () => {
+      statusReads = [{ ...PENDING }]
+      status = { ...SETTLED, profile_known: true }
+      await load()
+      const shown = distinct()
+      expect(shown.length).toBe(1)
+      expect(shown[0]).toContain('get agents working for you')
     })
   })
 })

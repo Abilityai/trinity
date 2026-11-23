@@ -188,6 +188,7 @@ services:
       # lines the env knobs are inert in prod (#1039 packaging-gap class). Non-empty
       # defaults so an unset var doesn't inject "" (#1076).
       - GEMINI_TEXT_MODEL=${GEMINI_TEXT_MODEL:-gemini-3.5-flash}              # image-gen prompt refinement
+      - GEMINI_IMAGE_MODEL=${GEMINI_IMAGE_MODEL:-gemini-nano-banana-2.1}              # image-gen model
       - GEMINI_TRANSCRIPTION_MODEL=${GEMINI_TRANSCRIPTION_MODEL:-gemini-3.5-flash}  # Telegram voice transcription
       # Voice chat (VOICE-001) — mirrors docker-compose.yml so operators can
       # tune/disable voice in prod (code default is ON; without these lines the

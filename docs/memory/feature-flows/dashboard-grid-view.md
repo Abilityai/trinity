@@ -18,10 +18,11 @@ included) the operator arranges freely — islands, gaps, parked loners — with
 iPhone-style drag and live snap preview, on a pan/zoom dotted-canvas.
 
 - Mode toggle: `Timeline / Grid / List` in the Dashboard header; selection
-  persists to `localStorage['trinity-dashboard-view']`. **Timeline stays the
-  default** for users with no saved preference (and a stale mode — `'graph'`,
-  or `'list'` on an older bundle — degrades to it via the
-  `VIEW_MODES.includes()` guard). Since #2536 the toggle is the LAST header
+  persists to `localStorage['trinity-dashboard-view']`. **Grid is the first
+  view** for a person with no saved preference (trinity-enterprise#1357 —
+  `viewModes.js::initialViewMode`, nothing written on open); a saved mode always
+  wins, and a stale one — `'graph'`, or `'list'` on an older bundle — still
+  degrades to Timeline. Since #2536 the toggle is the LAST header
   control (position pinned across modes and the history spinner — in a
   right-anchored flex row a child's x depends only on the siblings to its
   right, so with none it cannot move; Tidy up / Reset sit immediately to its

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { VIEW_MODES } from '../src/utils/viewModes.js'
+import { VIEW_MODES, FIRST_VIEW_MODE, nextViewMode } from '../src/utils/viewModes.js'
 
 /**
  * Dashboard view-mode switcher: pinned position + `v` cycle (#2536).
@@ -30,7 +30,8 @@ import { VIEW_MODES } from '../src/utils/viewModes.js'
  *
  * PERSISTED MODE: a fresh context carries NO saved mode (`dashboard-list-
  * view.spec.js` pins `localStorage['trinity-dashboard-view'] === null`), so
- * every test starts in Timeline. Test B clears the key ONCE in-page; it never
+ * every test starts in `FIRST_VIEW_MODE` (Grid since trinity-enterprise#1357);
+ * a test that needs Timeline clicks it. Test B clears the key ONCE in-page; it never
  * uses `page.addInitScript` for it — init scripts re-run on every navigation
  * INCLUDING `page.reload()`, so a reload-based persistence check would see the
  * key wiped and go red on the fixed tree.
@@ -153,9 +154,13 @@ test.describe('dashboard view-mode switcher (#2536)', () => {
     // would wipe the persisted mode the last step asserts on.
     await page.evaluate((k) => localStorage.removeItem(k), MODE_KEY)
     await page.reload()
-    await expectMode(page, VIEW_MODES[0])
+    // Never chose → the first view (trinity-enterprise#1357), not the degrade default.
+    await expectMode(page, FIRST_VIEW_MODE)
 
-    for (const next of [...VIEW_MODES.slice(1), VIEW_MODES[0]]) {
+    let current = FIRST_VIEW_MODE
+    for (let i = 0; i < VIEW_MODES.length; i++) {
+      const next = nextViewMode(current)
+      current = next
       await page.keyboard.press('v')
       await expectMode(page, next)
       // Same store path as a click → the saved selection follows the pane.
@@ -170,15 +175,18 @@ test.describe('dashboard view-mode switcher (#2536)', () => {
     // Persistence across a reload (persist: true — distinct from the `/agents`
     // redirect's one-shot `persist: false`, which dashboard-list-view pins).
     await page.keyboard.press('v')
-    await expectMode(page, 'grid')
+    await expectMode(page, nextViewMode(current))
     await page.reload()
-    await expectMode(page, 'grid')
+    await expectMode(page, nextViewMode(current))
   })
 
   test('@smoke guards: `v` is inert in editable targets, under chords and Shift, and inside the filter pill; the switcher advertises the key', async ({
     page,
   }) => {
     await page.goto('/')
+    // A fresh context opens in Grid (trinity-enterprise#1357); these guards are
+    // asserted from Timeline, so pick it first.
+    await modeButton(page, 'timeline').click()
     await expectMode(page, 'timeline')
 
     // Editable target (guard 4): the TIME-RANGE select specifically — the first

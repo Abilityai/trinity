@@ -514,7 +514,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `ELEVENLABS_API_KEY` | dev · prod · hosted | Outbound voice replies on channels; empty = off. |
 | `ELEVENLABS_MODEL_ID` | dev · prod · hosted | ElevenLabs model (default `eleven_multilingual_v2`). |
 | `TTS_MAX_CHARS` | dev · prod · hosted | Replies longer than this are delivered as text instead of synthesized. |
-| `GEMINI_TEXT_MODEL` / `GEMINI_TRANSCRIPTION_MODEL` (commented) | dev · prod · hosted | Override the built-in Gemini model ids. Keep commented unless overriding — an empty value shadows the default. |
+| `GEMINI_TEXT_MODEL` / `GEMINI_TRANSCRIPTION_MODEL` / `GEMINI_IMAGE_MODEL` (commented) | dev · prod · hosted | Override the built-in Gemini model ids. Keep commented unless overriding — an empty value shadows the default. |
 | `VOICE_ENABLED` | dev · prod · hosted | Voice chat platform-wide (default on). |
 | `VOICE_MODEL` (commented) | dev · prod · hosted | Gemini Live model override. Keep commented unless overriding. |
 | `WORKSPACE_VOICE_MAX_DURATION` | dev · prod · hosted | Max length of one Workspace voice call, seconds (default 1800). |

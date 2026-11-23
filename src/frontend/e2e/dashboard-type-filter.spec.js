@@ -27,8 +27,9 @@ const kbdHint = (page) => page.getByTestId('filter-kbd-hint')
 
 async function gotoTimeline(page) {
   await page.goto('/')
-  // Timeline is the default mode; wait for the fleet row so the filter has
-  // loaded data to operate on.
+  // A fresh context opens in Grid (trinity-enterprise#1357) — pick Timeline,
+  // then wait for the fleet row so the filter has loaded data to operate on.
+  await page.getByRole('button', { name: 'timeline', exact: true }).click()
   await expect(page.locator('[data-agent="trinity-system"]')).toBeVisible({ timeout: 15000 })
 }
 

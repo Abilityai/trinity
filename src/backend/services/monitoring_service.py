@@ -856,8 +856,8 @@ async def perform_health_check(
         business=business_check,
         issues=issues,
         recent_alerts=[],  # TODO: Fetch from notifications
-        uptime_percent_24h=round(uptime, 2) if uptime else None,
-        avg_latency_24h_ms=round(avg_latency, 2) if avg_latency else None
+        uptime_percent_24h=round(uptime, 2) if uptime is not None else None,
+        avg_latency_24h_ms=round(avg_latency, 2) if avg_latency is not None else None
     )
 
 
