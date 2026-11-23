@@ -25,7 +25,9 @@ import { acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, v
 import { useAgentsStore } from './agents'
 import { useAuthStore } from './auth'
 import { useFirstRunStore } from './firstRun'
-import { isFirstSession } from '../utils/firstSession'
+import { firstResultSeen, inFirstSession, markFirstResultSeen, resultPath } from '../utils/firstSession'
+import { usePlatformKeysStore } from './platformKeys'
+import { claudeCredentialError, describeKeyTest } from '../components/onboarding/steps/credentialSteps'
 
 export const FEATURE_ID = 'assistant'
 
@@ -190,6 +192,7 @@ export const useAssistantStore = defineStore('assistant', {
     account: closedAccount(),
     byCode: null,        // the module offers subscribing by code: null until Subscribe is first pressed (trinity-enterprise#1331)
     fleet: [],
+    openResult: '',      // ent#1355: a first result the page should open in front of the person (the panel does it)
   }),
 
   getters: {
@@ -419,7 +422,7 @@ export const useAssistantStore = defineStore('assistant', {
           message: clicked.length ? `${clicked.join('\n')}\n${message}` : message,
           context: { ...buildContext(route, fleet), ...(said ? { said } : {}), ...setupSteps(),
             // trinity-enterprise#1355: the assistant leads this session and follows its script for it.
-            ...(isFirstSession(this.status, fleet, useFirstRunStore().seededAgents || []) ? { first_session: true } : {}) },
+            ...(inFirstSession(this.status, fleet, useFirstRunStore().seededAgents || []) ? { first_session: true } : {}) },
           counted,
         }, { timeout: STEP_TIMEOUT_MS })
 
@@ -559,6 +562,12 @@ export const useAssistantStore = defineStore('assistant', {
       let line
       if (seen?.ended && seen.ok) {
         entry.state = 'done'
+        entry.result = resultPath(agent, runId)
+        // ent#1355: where the assistant leads, the first result opens in front of the person, once.
+        if (this.status?.leads_setup && !firstResultSeen()) {
+          markFirstResultSeen()
+          this.openResult = entry.result
+        }
         line = `The run "${title}" on ${agent} finished (execution ${runId}). Read its result and tell the person what it produced.`
       } else if (seen?.ended) {
         entry.state = 'refused'
@@ -570,6 +579,36 @@ export const useAssistantStore = defineStore('assistant', {
         line = `The run "${title}" on ${agent} is still going after half an hour (execution ${runId}). I have stopped watching it.`
       }
       await this.comeBack(line, route)
+    },
+
+    /**
+     * Connect Claude from the card in the chat (ent#1355). The key is checked
+     * and saved on this instance as the platform key, exactly as Settings does;
+     * it is never part of a message, and the assistant hears only the outcome.
+     * Returns a sentence to show on the card when the key was not taken.
+     */
+    async connectClaude(messageId, cardId, credential, route) {
+      const entry = this.messages.find((m) => m.id === messageId)?.cards?.find((c) => c.id === cardId)
+      if (!entry || entry.state !== 'open') return ''
+      const key = String(credential || '').trim()
+      const wrong = claudeCredentialError('api_key', key)
+      if (wrong || !key) return wrong || 'Paste the key first.'
+      const keys = usePlatformKeysStore()
+      entry.state = 'running'
+      try {
+        const verdict = describeKeyTest('anthropic', await keys.test('anthropic', { api_key: key }))
+        if (!verdict.ok) {
+          entry.state = 'open'
+          return verdict.error
+        }
+        await keys.save('anthropic', { api_key: key })
+      } catch (error) {
+        entry.state = 'open'
+        return words(error, "Couldn't save the key. Try again in a moment.")
+      }
+      entry.state = 'done'
+      await this.send(outcomeLine('done', entry.label), route, { shown: false })
+      return ''
     },
 
     /** Something being followed ended: tell the assistant once it is free to hear it. */

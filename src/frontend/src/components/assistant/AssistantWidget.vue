@@ -336,6 +336,14 @@
               </dl>
               <p v-if="!(FOLLOWED.includes(c.card.action) && c.state !== 'making')" class="text-[12.5px] text-gray-600 dark:text-gray-300">{{ c.note }}</p>
 
+              <!-- A run that ended well: its result, one click away (ent#1355) -->
+              <a
+                v-if="c.result"
+                :href="c.result"
+                class="inline-block text-[12.5px] font-medium underline text-action-primary-600 dark:text-action-primary-400"
+                data-testid="assistant-result"
+                @click.prevent="openResult(c.result)"
+              >Open the result</a>
               <div v-if="c.state === 'making'" class="space-y-1.5" data-testid="assistant-job">
                 <!-- Steps known (a build): how far. Not known (a run): that it is alive. -->
                 <div
@@ -361,6 +369,28 @@
                   <input v-model="c.auto" type="checkbox" class="rounded" data-testid="assistant-auto-create" />
                   Create them here as soon as they're ready
                 </label>
+              </div>
+              <!-- Connect Claude, in the chat (ent#1355): a masked field saved on this instance; the sign-in button replaces it when it exists -->
+              <div v-else-if="c.card.action === 'connect-claude' && (c.state === 'open' || c.state === 'running')" class="space-y-2 pt-1" data-testid="assistant-claude">
+                <BaseButton v-if="CLAUDE_SIGN_IN" size="sm" @click="CLAUDE_SIGN_IN.start()">{{ CLAUDE_SIGN_IN.label }}</BaseButton>
+                <template v-else>
+                  <BaseInput
+                    v-model="claudeKey[c.id]"
+                    type="password"
+                    label="Anthropic API key"
+                    placeholder="sk-ant-api03-…"
+                    autocomplete="off"
+                    data-testid="assistant-claude-key"
+                    :error="claudeError[c.id] || ''"
+                  />
+                  <p class="text-[12.5px] text-gray-600 dark:text-gray-300">
+                    No key yet? <a :href="CLAUDE_KEY_URL" target="_blank" rel="noopener" class="underline text-action-primary-600 dark:text-action-primary-400">Create one at Anthropic</a>.
+                  </p>
+                  <div class="flex flex-wrap gap-2">
+                    <BaseButton size="sm" :loading="c.state === 'running'" loading-label="Connecting…" :disabled="store.sending" data-testid="assistant-claude-connect" @click="connectClaude(m.id, c.id)">Connect</BaseButton>
+                    <BaseButton variant="secondary" size="sm" :disabled="c.state === 'running' || store.sending" @click="answer(m.id, c.id, false)">Not now</BaseButton>
+                  </div>
+                </template>
               </div>
               <div v-else-if="c.state === 'open' || c.state === 'running'" class="flex flex-wrap gap-2 pt-1">
                 <BaseButton
@@ -691,7 +721,7 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import BaseButton from '../base/BaseButton.vue'
 import BaseInput from '../base/BaseInput.vue'
 import BaseSegmented from '../base/BaseSegmented.vue'
@@ -705,7 +735,8 @@ import { useFirstRunStore } from '../../stores/firstRun'
 import { irreversibleTool, toolWords, webLink } from '../../utils/assistantCards'
 import { describePage } from '../../utils/assistantContext'
 import { starterGroups } from '../../utils/assistantStarters'
-import { OPENING, OPENING_GROUP, isFirstSession, localHandOff } from '../../utils/firstSession'
+import { CLAUDE_SIGN_IN, OPENING, OPENING_GROUP, isFirstSession, localHandOff } from '../../utils/firstSession'
+import { CLAUDE_TAB_COPY } from '../onboarding/steps/credentialSteps'
 import { renderMarkdown } from '../../utils/markdown'
 
 defineProps({
@@ -996,6 +1027,28 @@ function pick(starter) {
   draft.value = starter.text
   focusInput()
 }
+
+// Connect Claude from its card (ent#1355): the key stays on this instance.
+const CLAUDE_KEY_URL = CLAUDE_TAB_COPY.api_key.providerUrl
+const claudeKey = ref({})
+const claudeError = ref({})
+async function connectClaude(messageId, cardId) {
+  claudeError.value = { ...claudeError.value, [cardId]: '' }
+  const wrong = await store.connectClaude(messageId, cardId, claudeKey.value[cardId], route)
+  if (wrong) claudeError.value = { ...claudeError.value, [cardId]: wrong }
+  else claudeKey.value = { ...claudeKey.value, [cardId]: '' }
+}
+
+// A result opens beside the panel; the first one in an assistant-led session opens by itself (ent#1355).
+const router = useRouter()
+function openResult(path) {
+  router.push(path).catch?.(() => {})
+}
+watch(() => store.openResult, (path) => {
+  if (!path) return
+  store.openResult = ''
+  openResult(path)
+})
 
 function answer(messageId, cardId, confirm) {
   store.answerCard(messageId, cardId, confirm, route)

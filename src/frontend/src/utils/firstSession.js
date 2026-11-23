@@ -64,3 +64,45 @@ export function isFirstSession(status, fleet = [], examples = []) {
   if (!status?.leads_setup) return false
   return !(fleet || []).some((a) => a?.name && !examples.includes(a.name))
 }
+
+/**
+ * The first result: where the assistant leads, the first run that ends well
+ * opens in front of the person, once. Kept in this browser until journey
+ * events (trinity-enterprise#1352) can say it from the instance.
+ */
+export const FIRST_RESULT_KEY = 'trinity-assistant-first-result'
+export function firstResultSeen() {
+  try {
+    return Boolean(localStorage.getItem(FIRST_RESULT_KEY))
+  } catch {
+    return true      // storage refused: never jump the page about
+  }
+}
+export function markFirstResultSeen() {
+  try {
+    localStorage.setItem(FIRST_RESULT_KEY, String(Date.now()))
+  } catch { /* it may open once more; harmless */ }
+}
+
+/** Where a run's result is read in the app. */
+export function resultPath(agent, runId) {
+  return `/agents/${encodeURIComponent(agent)}/executions/${encodeURIComponent(runId)}`
+}
+
+/**
+ * The session keeps its script until the first result has been seen, even
+ * once the person has an agent of their own (it was just built).
+ */
+export function inFirstSession(status, fleet = [], examples = []) {
+  if (!status?.leads_setup) return false
+  return isFirstSession(status, fleet, examples) || !firstResultSeen()
+}
+
+/**
+ * Connecting Claude at the moment the first agent is about to run. Today the
+ * panel shows a masked field and saves the key on this instance (never sent to
+ * the assistant). The one-button sign-in is its own work
+ * (trinity-enterprise#1354): when it exists, it is set here, as
+ * `{ label, start() }`, and the card shows that button instead of the field.
+ */
+export const CLAUDE_SIGN_IN = null

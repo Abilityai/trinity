@@ -59,6 +59,8 @@ vi.mock('@/api', () => {
       status = { ...status, contacted: true, reachable: true, plan: 'free', allowance: ALLOWANCE, trial_terms: { version: 't0', url: '', accepted: 't0' }, nudge: afterAgreeing }
       return { plan: 'free', email: null, allowance: ALLOWANCE, trial_terms: { version: 't0', url: '', accepted: 't0' } }
     }
+    if (url === '/api/settings/api-keys/anthropic/test') return { valid: true }
+    if (url === '/api/settings/api-keys/anthropic') return { connected_agents: 1 }
     if (url === '/api/enterprise/assistant/feedback') return { ok: true }
     if (url === '/api/enterprise/assistant/opened') return { ok: true }
     if (url === '/api/enterprise/onboarding/checklist') return checklist
@@ -92,7 +94,8 @@ vi.mock('@/api', () => {
   }
   return { default: client }
 })
-vi.mock('vue-router', () => ({ useRoute: () => ({ path: '/', params: {}, query: {} }) }))
+const pushed = []
+vi.mock('vue-router', () => ({ useRoute: () => ({ path: '/', params: {}, query: {} }), useRouter: () => ({ push: async (to) => { pushed.push(to) } }) }))
 vi.mock('@/stores/agents', () => ({ useAgentsStore: () => ({ fetchAgents: async () => {} }) }))
 
 import AssistantWidget from '@/components/assistant/AssistantWidget.vue'
@@ -132,6 +135,7 @@ describe('assistant panel', () => {
     confirmEmail = 'a•••@example.com'
     codeVersion = undefined
     agentsList = null
+    pushed.length = 0
     subTerms = { version: 's1', title: 'Subscription terms', url: '', text: '# Subscription terms\n\nYou pay monthly.' }
     status = { available: true, contacted: true, reachable: true, plan: 'free', email: null, allowance: null, trial_terms: { version: 't0', url: '', accepted: 't0' }, profile_known: true }
     localStorage.clear()
@@ -1516,6 +1520,65 @@ describe('assistant panel', () => {
       expect(button('Start from scratch')).toBeUndefined()
       await say('hello')
       expect(sent(TURN)[0].body.context.first_session).toBeUndefined()
+    })
+  })
+
+  // trinity-enterprise#1355 checkpoint 3: Claude is connected in the chat at the
+  // moment the first agent is about to run, and the first result opens by itself.
+  describe('the first run', () => {
+    it('connects Claude from a masked field in the chat; the key goes to this instance only', async () => {
+      turns = [final('One thing before it runs: connect Claude.', [{ action: 'connect-claude' }]), final('Running it now.')]
+      await openPanel()
+      await say('run my agent')
+      const field = wrapper.get('[data-testid="assistant-claude-key"]')
+      expect(field.attributes('type')).toBe('password')
+      await field.setValue('sk-ant-api03-SECRETVALUE')
+      await wrapper.get('[data-testid="assistant-claude-connect"]').trigger('click')
+      await flushPromises()
+      expect(calls.find((c) => c.url === '/api/settings/api-keys/anthropic')?.body).toEqual({ api_key: 'sk-ant-api03-SECRETVALUE' })
+      expect(JSON.stringify(sent(TURN))).not.toContain('SECRETVALUE')
+      expect(sent(TURN)[1].body).toMatchObject({ counted: false })
+      expect(sent(TURN)[1].body.message).toBe('Done: Connect Claude.')
+      expect(wrapper.find('[data-testid="assistant-claude-key"]').exists()).toBe(false)
+    })
+
+    it('says what is wrong with a pasted value before anything is sent', async () => {
+      turns = [final('Connect Claude first.', [{ action: 'connect-claude' }])]
+      await openPanel()
+      await say('run my agent')
+      await wrapper.get('[data-testid="assistant-claude-key"]').setValue('hello')
+      await wrapper.get('[data-testid="assistant-claude-connect"]').trigger('click')
+      await flushPromises()
+      expect(calls.some((c) => c.url.startsWith('/api/settings/api-keys'))).toBe(false)
+      expect(wrapper.text()).toContain("doesn't look like")
+    })
+
+    it('opens the first result in front of the person where the assistant leads, once', async () => {
+      vi.useFakeTimers()
+      const { useAssistantStore } = await import('@/stores/assistant')
+      runs = [{ status: 'success', ended: true, ok: true, error: '' }]
+      turns = [final("It's running.", [{ action: 'run', agent: 'issue-digest', execution_id: 'exec-12345', title: 'First run' }]), final('Here is what it produced.')]
+      await openPanel()
+      useAssistantStore().status = { ...useAssistantStore().status, leads_setup: true }
+      await say('run it')
+      await vi.advanceTimersByTimeAsync(1600)
+      await flushPromises()
+      expect(pushed).toEqual(['/agents/issue-digest/executions/exec-12345'])
+      expect(wrapper.get('[data-testid="assistant-result"]').attributes('href')).toContain('/agents/issue-digest/executions/exec-12345')
+      vi.useRealTimers()
+    })
+
+    it('elsewhere the result is a link, not a jump', async () => {
+      vi.useFakeTimers()
+      runs = [{ status: 'success', ended: true, ok: true, error: '' }]
+      turns = [final("It's running.", [{ action: 'run', agent: 'issue-digest', execution_id: 'exec-12345', title: 'A run' }]), final('Done.')]
+      await openPanel()
+      await say('run it')
+      await vi.advanceTimersByTimeAsync(1600)
+      await flushPromises()
+      expect(pushed).toEqual([])
+      expect(wrapper.find('[data-testid="assistant-result"]').exists()).toBe(true)
+      vi.useRealTimers()
     })
   })
 })

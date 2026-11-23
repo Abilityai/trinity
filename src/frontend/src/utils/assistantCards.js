@@ -282,6 +282,7 @@ export function acceptCards(raw, fleet) {
     else if (item?.action === 'choice') card = validChoice(item)
     else if (item?.action === 'feedback') card = validFeedback(item)
     else if (item?.action === 'upgrade' && Object.keys(item).length === 1) card = { action: 'upgrade' }
+    else if (item?.action === 'connect-claude' && Object.keys(item).length === 1) card = { action: 'connect-claude' }   // ent#1355
     else card = validCard(item, fleet)
     const duplicate = card && cards.some((c) => JSON.stringify(c) === JSON.stringify(card))
     if (card && !duplicate && cards.length < MAX_CARDS_PER_REPLY) cards.push(card)
@@ -296,6 +297,7 @@ export function cardLabel(card, fleet) {
   if (card.action === 'feedback') return `Send ${feedbackKind(card).toLowerCase()}: ${card.summary}`
   if (card.action === 'build') return `Build "${card.design.title}"`
   if (card.action === 'upgrade') return 'Subscribe to Trinity Pro'
+  if (card.action === 'connect-claude') return 'Connect Claude'
   if (card.action === 'tool') {
     const { title, details } = toolWords(card)
     const first = details.find((d) => ['name', 'agent name', 'agent'].includes(d.key)) || details[0]
@@ -312,6 +314,7 @@ export function cardNote(card) {
   if (card.action === 'feedback') return 'Goes to the people who make Trinity, with the page you are on and your Trinity version. Nothing else is attached.'
   if (card.action === 'build') return 'Creates these agents on this instance, as you. Nothing is switched on.'
   if (card.action === 'tool') return irreversibleTool(card) ? 'This cannot be undone. It runs as you.' : 'Changes this instance. It runs as you.'
+  if (card.action === 'connect-claude') return 'Your agents run on Claude. Paste an Anthropic API key: it is saved on this instance and never sent to the assistant.'
   if (card.action === 'upgrade') return "A larger allowance and bigger teams. We email a code to this instance's registered address to confirm."
   return 'Runs as you, not as the assistant.'
 }
