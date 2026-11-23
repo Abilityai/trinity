@@ -24,6 +24,7 @@ its owner's role, so on an admin-owned install it would otherwise read the whole
 fleet), every live agent for an admin, the agents they OWN for anyone else.
 """
 
+import asyncio
 import json
 import logging
 from typing import Optional
@@ -79,8 +80,10 @@ def _require_own_key(request: Request, agent_name: str) -> None:
 
 @router.post("/{agent_name}/guardrail-events", response_model=GuardrailEventIngestResponse)
 async def post_guardrail_events(agent_name: str, request: Request):
-    """Ingest one batch of the agent's own guardrail events."""
-    _require_own_key(request, agent_name)
+    """Ingest one batch of the agent's own guardrail events. The key checks and
+    the write read and write the database, so they run on a worker thread rather
+    than block the event loop (#4674)."""
+    await asyncio.to_thread(_require_own_key, request, agent_name)
 
     limit = guardrail_event_service.check_rate(agent_name)
     if not limit.allowed:
@@ -95,7 +98,7 @@ async def post_guardrail_events(agent_name: str, request: Request):
     # delete or rename (keys deactivated or re-bound, rows cascaded, reporter
     # cleared). Writing then would leave rows under the retired name and mark a
     # later agent of that name as reporting.
-    _require_own_key(request, agent_name)
+    await asyncio.to_thread(_require_own_key, request, agent_name)
     try:
         batch = GuardrailEventBatch.model_validate(json.loads(raw))
     except (ValueError, ValidationError) as exc:
@@ -106,7 +109,8 @@ async def post_guardrail_events(agent_name: str, request: Request):
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                             detail="batch_too_large")
 
-    return guardrail_event_service.ingest(
+    return await asyncio.to_thread(
+        guardrail_event_service.ingest,
         agent_name, batch.events, runtime=batch.runtime, dropped=batch.dropped)
 
 
