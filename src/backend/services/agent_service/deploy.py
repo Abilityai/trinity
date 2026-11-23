@@ -129,6 +129,16 @@ def _validate_archive_mcp_config(mcp_file: Path, version_name: str,
     shape as the inject path, so the two ingresses now agree. A valid config —
     including the canonical auto-injected `trinity` entry — passes unchanged.
     """
+    # Never read through a link (trinity-enterprise#1328): the config that is
+    # validated here, and later staged into the agent, must be the archive's
+    # own bytes, not whatever a link in the archive points at.
+    if mcp_file.is_symlink():
+        logger.warning("deploy-local refused for %s by %s: .mcp.json is a symlink",
+                       version_name, actor_email or "?")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid .mcp.json in archive: it must be a regular file, not a symlink",
+        )
     try:
         validate_mcp_config(mcp_file.read_text())
     except McpValidationError as e:
@@ -442,6 +452,56 @@ def _collect_dangling_symlinks(root: Path) -> List[Tuple[str, str]]:
             except OSError:  # pragma: no cover — racy unlink
                 out.append((rel, "?"))
     return sorted(out)
+
+
+def _escaping_symlinks(root: Path) -> List[Tuple[str, str]]:
+    """Symlinks under `root` that RESOLVE outside it (trinity-enterprise#1328).
+
+    The pre-extraction check in `_validate_tar_member` judges each link name on
+    its own, lexically, before anything exists on disk. That cannot see what
+    links do in combination: a member `a -> .` makes every `a/` hop a no-op
+    once it is extracted, so a second link `x -> a/a/../../outside` cancels to
+    an in-root path on paper and climbs out of the root on disk.
+
+    So this runs on the materialized tree and asks where each link really
+    goes. `os.path.realpath` resolves component by component, following the
+    links that now exist, which is what opening the path would do. A link is
+    reported when that lands outside the root, whether or not the target
+    exists: containment is the property, not danglingness. A link that stays
+    in-root (dangling or not) is untouched, so the #2060 contract holds.
+    """
+    real_root = os.path.realpath(root)
+    out = []
+    for rel, full in _walk_tree_entries(root):
+        if not full.is_symlink():
+            continue
+        resolved = os.path.realpath(full)
+        if resolved != real_root and not resolved.startswith(real_root + os.sep):
+            try:
+                target = os.readlink(full)
+            except OSError:  # pragma: no cover — racy unlink
+                target = "?"
+            out.append((rel, target))
+    return sorted(out)
+
+
+def _refuse_escaping_symlinks(root: Path, stage: str) -> None:
+    """400 when any link under `root` resolves outside it, naming the first."""
+    escaping = _escaping_symlinks(root)
+    if not escaping:
+        return
+    rel, target = escaping[0]
+    more = f" (and {len(escaping) - 1} more)" if len(escaping) > 1 else ""
+    logger.warning("deploy-local refused %s: symlink %s -> %s resolves outside the archive root%s",
+                   stage, rel, target, more)
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "error": (f"Invalid archive: Symlink escapes extraction directory: "
+                      f"{rel} -> {target}{more}"),
+            "code": "INVALID_ARCHIVE",
+        },
+    )
 
 
 def _count_deployed(root: Path) -> Tuple[int, int]:
@@ -1026,6 +1086,13 @@ async def deploy_local_agent_logic(
         else:
             extract_root = temp_dir
 
+        # 4-pre. Link containment on the MATERIALIZED tree (trinity-enterprise#1328).
+        # First thing after extraction, before the manifest, template.yaml or
+        # `.mcp.json` is read: every later step may open a path in this tree.
+        # This is in addition to the pre-extraction member checks, never
+        # instead of them (see `_escaping_symlinks`).
+        _refuse_escaping_symlinks(extract_root, "post-extract")
+
         # 4a. Integrity manifest (#2060) — parse + POST-EXTRACT verification,
         # strictly before any side effect (no version computed, no previous
         # agent stopped, nothing persisted — the #2006 gate-ordering rule).
@@ -1110,7 +1177,9 @@ async def deploy_local_agent_logic(
         # stop-previous-version step, so a deploy that will be refused no
         # longer stops a running agent on its way to the refusal.
         archive_mcp_file = extract_root / ".mcp.json"
-        if archive_mcp_file.exists():
+        # `is_symlink()` too: a dangling link does not `exist()`, and it must
+        # be refused, not skipped.
+        if archive_mcp_file.exists() or archive_mcp_file.is_symlink():
             _validate_archive_mcp_config(
                 archive_mcp_file, base_name, getattr(current_user, "email", None)
             )
@@ -1263,6 +1332,11 @@ async def deploy_local_agent_logic(
                 },
             )
         logger.info(f"Copied agent template to: {dest_path}")
+
+        # 8-pre. The same containment on the deployed copy, which is what
+        # agents are created from (trinity-enterprise#1328). The copy lives in
+        # another directory, so a link is judged against ITS root here.
+        _refuse_escaping_symlinks(dest_path, "post-copy")
 
         # 8a. POST-COPY manifest re-verification (#2060) — the deployed
         # template is what agents are actually created from. Runs BEFORE the

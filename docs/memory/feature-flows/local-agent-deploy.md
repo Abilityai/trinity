@@ -235,6 +235,16 @@ a compat-gate-unavailable note. The MCP `deploy_local_agent` tool
 `JSON.stringify`s the whole response, so warnings reach `/trinity:onboard`
 automatically.
 
+**Symlink containment (trinity-enterprise#1328).** A link is checked twice. Before
+extraction `_validate_tar_member` reads each link name on its own and refuses an
+absolute or lexically escaping target. After extraction, and again on the deployed
+copy, `_refuse_escaping_symlinks` resolves every link on disk
+(`os.path.realpath`) and refuses any that lands outside its root, existing or
+not: `400 INVALID_ARCHIVE`, naming the member and its target. The second pass is
+what sees links that only escape in combination. In-root links, dangling ones
+included, are kept as before. A `.mcp.json` that is a symlink is refused at
+validation, and `template_service.generate_credential_files` does not read one.
+
 ### Deployment Flow (`deploy.py`)
 
 1. **Decode & Validate Archive**
