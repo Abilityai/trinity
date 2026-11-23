@@ -705,6 +705,7 @@ import { useFirstRunStore } from '../../stores/firstRun'
 import { irreversibleTool, toolWords, webLink } from '../../utils/assistantCards'
 import { describePage } from '../../utils/assistantContext'
 import { starterGroups } from '../../utils/assistantStarters'
+import { OPENING, OPENING_GROUP, isFirstSession, localHandOff } from '../../utils/firstSession'
 import { renderMarkdown } from '../../utils/markdown'
 
 defineProps({
@@ -752,6 +753,11 @@ const messagesEl = ref(null)
 
 // What the empty screen offers, for this page and this fleet.
 const starters = computed(() => {
+  // trinity-enterprise#1355: the assistant-led first session asks one question, with two answers.
+  if (firstSession.value) {
+    const last = store.messages.at(-1)
+    return last?.local && last.handOff ? [{ heading: OPENING_GROUP.heading, items: last.handOff }] : [OPENING_GROUP]
+  }
   const groups = starterGroups(describePage(route), store.fleet, { known: Boolean(store.status?.profile_known) })
   // Under its own hello there is one question to answer, not a menu: the rest comes once they have.
   return store.messages.length === 1 && store.messages[0].local ? groups.slice(0, 1) : groups
@@ -774,8 +780,12 @@ function hello() {
     : ''
   return `Hi, I'm Trinity's assistant 👋\n\nLet's get you **an agent of your own** working in a few minutes: tell me a little about your work, I'll suggest one, build it and run it once so you see what it produces.${shown}`
 }
+// trinity-enterprise#1355: the instance says the assistant leads, and the person has no agent of their own yet.
+const firstSession = computed(() => isFirstSession(store.status, store.fleet, firstRun.seededAgents || []))
 function startTalking() {
-  if (!isOpen.value || !store.status || store.status.profile_known || store.messages.length) return
+  if (!isOpen.value || !store.status || store.messages.length) return
+  if (firstSession.value) return store.welcome(OPENING)
+  if (store.status.profile_known) return
   store.welcome(hello())
 }
 
@@ -975,6 +985,13 @@ function send(text) {
 
 // A starter: sent as it stands, or put in the box for the person to finish.
 function pick(starter) {
+  // Agents already run elsewhere: the hand-off is said on the page (its own work, trinity-enterprise#1353).
+  if (starter.path === 'local') {
+    const { reply, offer } = localHandOff()
+    store.messages.push({ id: `h${Date.now()}`, role: 'user', content: starter.text, opener: true, local: true })
+    store.messages.push({ id: `h${Date.now()}r`, role: 'assistant', content: reply, opener: true, local: true, handOff: offer })
+    return
+  }
   if (!starter.fill) return send(starter.text)
   draft.value = starter.text
   focusInput()
@@ -1007,6 +1024,19 @@ onMounted(() => {
   firstRun.fetchState()
   if (wide.value && chosen !== 'false' && !firstRun.overlayOpen) open({ quiet: true })
 })
+
+// trinity-enterprise#1355: where the assistant leads the first session it opens by
+// itself, whatever the width, unless the person closed it before.
+watch(() => store.status?.leads_setup, async (leads) => {
+  if (!leads || isOpen.value) return
+  let chosen = null
+  try {
+    chosen = localStorage.getItem(OPEN_KEY)
+  } catch { /* no choice known */ }
+  if (chosen === 'false' || firstRun.overlayOpen) return
+  await Promise.all([store.refreshFleet().catch(() => {}), firstRun.fetchState()])
+  if (firstSession.value && !isOpen.value) open({ quiet: true })
+}, { immediate: true })
 onBeforeUnmount(() => {
   stopKeeping?.()
   wideQuery?.removeEventListener?.('change', onWide)

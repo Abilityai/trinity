@@ -28,6 +28,7 @@ let subTerms             // what GET /subscription/terms answers
 let refusals = {}        // url → [{ status, detail }], thrown in order by the by-code routes
 let confirmEmail         // the `email` /subscription/confirm answers: masked or null at the door
 let codeVersion          // the terms version /subscription/code names; undefined: the one served
+let agentsList = null    // what /api/agents answers when set (ent#1355: an instance with no agent of the person's own)
 
 vi.mock('@/api', () => {
   const respond = (method, url, body) => {
@@ -75,6 +76,7 @@ vi.mock('@/api', () => {
       throw { response: { status: 409, data: { detail: { code: 'sign_in_first', message: 'Accept the current terms first.' } } } }
     }
     if (url === '/api/enterprise/assistant/subscription/start') return { plan: 'pro', billing: 'unbilled', checkout_url: null, email: 'ada@example.com' }
+    if (url === '/api/agents' && agentsList) return agentsList
     if (url === '/api/agents') return [{ name: 'trinity-system', status: 'running', is_system: true }, { name: 'issue-digest', status: 'running' }]
     if (url === '/api/agents/autonomy-status') return { 'issue-digest': { autonomy_enabled: false } }
     if (url === '/api/ops/schedules') return { schedules: [{ id: 's1', agent_name: 'issue-digest', name: 'Mondays', enabled: scheduleOn }] }
@@ -129,6 +131,7 @@ describe('assistant panel', () => {
     refusals = {}
     confirmEmail = 'a•••@example.com'
     codeVersion = undefined
+    agentsList = null
     subTerms = { version: 's1', title: 'Subscription terms', url: '', text: '# Subscription terms\n\nYou pay monthly.' }
     status = { available: true, contacted: true, reachable: true, plan: 'free', email: null, allowance: null, trial_terms: { version: 't0', url: '', accepted: 't0' }, profile_known: true }
     localStorage.clear()
@@ -1439,6 +1442,77 @@ describe('assistant panel', () => {
       await flushPromises()
       expect(sent(`${BYCODE}/terms`)).toHaveLength(1)
       expect(wrapper.find('[data-testid="assistant-email"]').exists()).toBe(true)
+    })
+  })
+
+  // trinity-enterprise#1355: where the instance says the assistant leads the
+  // first session, the panel opens by itself with one question and two answers.
+  describe('the first session where the assistant leads', () => {
+    const leads = async () => {
+      agentsList = [{ name: 'trinity-system', status: 'running', is_system: true }]
+      status = { ...status, leads_setup: true, profile_known: false }
+      wrapper.unmount()
+      setActivePinia(createPinia())
+      wrapper = mount(AssistantWidget, {
+        attachTo: document.body,
+        global: { stubs: {
+          ChatBubble: { props: ['role', 'content'], template: '<div class="bubble" :data-role="role">{{ content }}</div>' },
+          HelpChatWidget: { props: ['embedded', 'askOnly'], template: '<div data-testid="ask-tab">ask</div>' },
+        } },
+      })
+      await flushPromises()
+      await flushPromises()
+    }
+
+    it('opens by itself, even where the screen is narrow, with one question and two answers', async () => {
+      await leads()
+      expect(wrapper.find('[data-testid="assistant-input"]').exists()).toBe(true)
+      const said = wrapper.findAll('.bubble').map((b) => b.text())
+      expect(said).toHaveLength(1)
+      expect(said[0]).toContain('Where are you starting from?')
+      const offered = wrapper.findAll('[data-testid="assistant-starters"]')
+      expect(offered).toHaveLength(1)
+      expect(offered[0].findAll('button').map((b) => b.text())).toEqual(['I already run agents in Claude Code', 'Start from scratch'])
+      expect(calls.filter((c) => c.method !== 'get')).toEqual([])
+    })
+
+    it('does not open by itself when the person closed it before', async () => {
+      localStorage.setItem('trinity-assistant-open', 'false')
+      await leads()
+      expect(wrapper.find('[data-testid="assistant-input"]').exists()).toBe(false)
+    })
+
+    it('Start from scratch goes to the assistant, which is told the question it answers', async () => {
+      await leads()
+      await button('Start from scratch').trigger('click')
+      await flushPromises()
+      expect(sent(TURN)[0].body.message).toBe('Start from scratch')
+      expect(sent(TURN)[0].body.context.said).toContain('Where are you starting from?')
+    })
+
+    it('a typed answer goes to the assistant the same way', async () => {
+      await leads()
+      await say('I run a bakery, what can you do?')
+      expect(sent(TURN)[0].body.message).toBe('I run a bakery, what can you do?')
+      expect(sent(TURN)[0].body.context.said).toContain('Where are you starting from?')
+    })
+
+    it('agents already run elsewhere: a hand-off said on the page, nothing sent, the other path still open', async () => {
+      await leads()
+      await button('I already run agents in Claude Code').trigger('click')
+      await flushPromises()
+      expect(sent(TURN)).toEqual([])
+      const said = wrapper.findAll('.bubble').map((b) => b.text())
+      expect(said.at(-1)).toContain('coming soon')
+      expect(button('Start from scratch')).toBeTruthy()
+    })
+
+    it('an instance where the assistant does not lead keeps its usual hello', async () => {
+      agentsList = [{ name: 'trinity-system', status: 'running', is_system: true }]
+      status = { ...status, profile_known: false }
+      await openPanel()
+      expect(wrapper.text()).not.toContain('Where are you starting from?')
+      expect(button('Start from scratch')).toBeUndefined()
     })
   })
 })
