@@ -75,7 +75,7 @@ const SECRET_PATTERNS = [
   // GitHub: classic PAT, OAuth, server, user, fine-grained.
   /\bghp_[A-Za-z0-9]+/g,
   /\bgho_[A-Za-z0-9]+/g,
-  /\bghs_[A-Za-z0-9]+/g,
+  /\bghs_[A-Za-z0-9._-]+/g,
   /\bghu_[A-Za-z0-9]+/g,
   /\bgithub_pat_[A-Za-z0-9_]+/g,
   // Slack bot / user OAuth tokens.

@@ -70,6 +70,8 @@ The Tasks tab has two views of the same tasks, **List** and **Board**; it opens 
 
 **Board** shows one column per step a task goes through: **Active**, **Awaiting verification** and **Done**, each with its count. A task that is blocked, needs a decision or is paused stays in **Active** and carries a badge saying so; the column header counts them. A card shows the task's id and title, **P1** when it is one, who it is assigned to (a person, an agent or both), who created it and how long ago it last changed. Opening a card's title opens the same task the list opens.
 
+![A project's Tasks tab in Board view: Active, Awaiting verification and Done columns, with a blocked task and Confirm buttons on finished work](../../screenshots/workspace-project-board.webp)
+
 - **Move a card** by dragging it to another column. With a keyboard, focus the card's title, press **←** or **→** to pick a column, then **Enter** to move it there (**Esc** cancels). The card shows **Saving…** in its new column until the server has it; if the move is refused, the card goes back and a message says why.
 - **Into Done.** From **Awaiting verification**, a move to **Done** is your confirmation, the same as **Confirm** on the card. From **Active** it asks first and needs a short reason — where the result is, or why the task is no longer needed — because the task never waited for verification and nothing has checked the work. The reason is added to the task's log, where the agents on the project read it.
 - **A done task** can only be moved back to **Active**, which reopens it.
@@ -125,6 +127,8 @@ The **Steward** card on the Overview shows who it is, the project's health as a 
 
 A goal and a steward do not start a project: a person does. A new project begins **Not started**.
 
+![A running project: Stop project and the Mode menu set to Propose in the header, the Continue card, Where it stands, and the Steward card showing when Trinity last woke the steward](../../screenshots/workspace-project-mode-steward.webp)
+
 | State | What it means for agents |
 |-------|--------------------------|
 | **Not started** | No task's run starts. The steward may write the plan (tasks, notes, the log) before you press **Start project**; other agents' turns with no person in them can't write to it. |
@@ -157,6 +161,8 @@ Lowering the mode to Track withdraws pending proposals; going from Auto to Propo
 
 Open a task and use **Run this task** to start its work from the project itself:
 
+![A task open on Run this task: the agent picker, Start, and the preview of what the agent is given — the objective, the definition of done, the context files and the recent task log](../../screenshots/workspace-project-task-run.webp)
+
 - **Pick the agent.** You're offered the agents working on the project that you can use. An agent on the project that you can't use yet is named, with what to do (ask its owner for access). With none at all, add one in **Members & access** first.
 - **Preview what it gets.** This is the exact first message the agent will receive: the task's objective and definition of done, the context marked for agents (it reads each item itself), and the last few log entries.
 - **Start** opens a chat with that agent, tied to the task. The first message is sent once, even if you press Start twice. Starting again with the same agent reopens the same chat, and the task lists **Chat for this task** so you can get back to it. The run uses the agent's own Claude subscription or API key, and its cost shows on the turn when it's done.
@@ -164,6 +170,12 @@ Open a task and use **Run this task** to start its work from the project itself:
 Only members and the creator can start a run. Picking the agent also sets the task's **Agent**, and a *to do* task moves to *active*. A task for a person can't be started.
 
 On a project that is not started, stopped or done, **Run this task** says why in place of **Start**; the task's chats stay open. A task with a run under way names it — **Run R-… on {agent}: Running** — and **Start** is refused with a run already under way. A refused **Start** always says why, by name.
+
+### Runs
+
+The **Runs** tab lists the runs behind the project across its agents. The cards at the top give the total cost and the cost and run count for each agent. Each row shows a run's status, agent, model, cost, how long it ran, when, and the task it belongs to. Filter by **Agent**, **Status** and **Window**. Runs are kept for 90 days.
+
+![A project's Runs tab: the total cost and a card per agent, then each run with its status, agent, model, cost, run time and task](../../screenshots/workspace-project-runs.webp)
 
 ### Files, reports and decisions
 
@@ -195,7 +207,9 @@ A brief often needs more room than a task's fields: a call transcript, your view
 
 ## For Agents
 
-Agents reach a project through the MCP tools the platform exposes to them — `list_projects`, `get_project`, `list_project_tasks`, `get_project_log`, `read_project_context` (a brief people marked for agents, 200 KB a call), `create_project_task` (with `parent`, `blocked_by` and `for_person`), `update_project_task` (`parent` — `null` clears it — `blocked_by_add`, `blocked_by_remove`, `for_person`), `add_project_task_note`, `add_project_log_entry`, `link_to_project`, `propose_project_changes` (any agent on the project, with the project-management permission), `list_project_executions` (the project's runs; a run the agent cannot open shows only its agent and status), and for a steward agent `get_steward_digest`, `set_project_health` and `start_project_task`. `list_project_tasks` with `view: "next"` returns the tasks that can be worked now; an agent never sees a task for a person there. Each task carries `creator`, `assigned_to`, `for_person`, `parent`, `subtasks`, `blocked_by`, `waiting_for` and `unblocked`. Projects carry `state` and `mode`; tasks carry `needs_go` and `needs_decision`. An agent sees only the projects it is active on, and only in a turn whose audience is internal: a chat or room with no outside client in it.
+Agents reach a project through the MCP tools the platform exposes to them — `list_projects`, `get_project`, `list_project_tasks`, `get_project_log`, `read_project_context` (a brief people marked for agents, 200 KB a call), `create_project_task` (with `parent`, `blocked_by` and `for_person`), `update_project_task` (`parent` — `null` clears it — `blocked_by_add`, `blocked_by_remove`, `for_person`), `add_project_task_note`, `add_project_log_entry`, `link_to_project`, `propose_project_changes` (any agent on the project, with the project-management permission), `list_project_executions` (the project's runs; a run the agent cannot open shows only its agent and status), and for a steward agent `get_steward_digest`, `set_project_health`, `start_project_task` and `propose_project_plan` (the kickoff plan, which a person approves once). `list_project_tasks` with `view: "next"` returns the tasks that can be worked now; an agent never sees a task for a person there. Each task carries `creator`, `assigned_to`, `for_person`, `parent`, `subtasks`, `blocked_by`, `waiting_for` and `unblocked`. Projects carry `state` and `mode`; tasks carry `needs_go` and `needs_decision`. An agent sees only the projects it is active on, and only in a turn whose audience is internal: a chat or room with no outside client in it.
+
+A person's own user-scoped MCP key works on the project tools too, acting as that person with their Workspace permissions. A Workspace-only account cannot create an MCP key.
 
 `start_project_task` (`project_id`, `task_id`, `agent`): As a project's steward, start one task's run on an agent you name. The platform never picks the task or the agent. What happens depends on the project's mode, which only a person sets: in Track a person starts every run, so this is refused (`mode_track`); in Propose, and on a task held for a person's go in any mode, it becomes a proposal the task's person approves (state `proposed`); in Auto the run starts (state `started`). The run is the person's: the one in this conversation, or, in a turn with no person, the person who turned Auto on (refused as `auto_origin_unavailable` when they can no longer start that agent here). Other refusals: the project is not running (`project_not_started`, `project_stopped`, `project_done`); `only_the_steward_starts`; the task is done, awaiting its check, for a person (`task_is_for_a_person`), needs a decision, blocked or waiting on another task; the agent is not on the project; `agent_consent_predates_runs`; a run is already live (`task_run_live`) or proposed. A refusal never asks you to widen a permission. A run ends one of two ways: the worker moves the task to pending-verification with its evidence, or raises an ask with `context.run_id`. In a turn with no person, an agent may move a task to active or pending-verification only as that task's run. The agent-dev plugin's `project-*` skills wrap these tools; see the [agent-dev plugin page](../abilities/agent-dev-plugin.md).
 

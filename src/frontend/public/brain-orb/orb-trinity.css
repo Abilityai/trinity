@@ -45,3 +45,79 @@ body:not(.brain-orb-voice) #controls > div:nth-child(2),
 body:not(.brain-orb-write) #controls > div:nth-child(11) {
   display: none !important;
 }
+
+/* ============================================================================
+ * Ambient mode (trinity-enterprise#1302) — the watch-only screen.
+ * body.ambient-on hides every interactive surface (they need a pointer) and
+ * shows #ambientHud. Sizes are in viewport units so it reads from across a room.
+ * ========================================================================== */
+#ambientHud, #amLabels { display: none; }
+body.ambient-on { cursor: none; }
+body.ambient-on > *:not(#scene):not(#ambientHud):not(#amLabels):not(script) { display: none !important; }
+body.ambient-on #ambientHud { display: block; }
+body.ambient-on #amLabels { display: block; position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+
+#ambientHud {
+  --am-state: #4a6fa5; --am-mood: #4a6fa5;
+  --am-ink: #cfe3ff; --am-dim: #6f86ab; --am-faint: #3a4a66; --am-line: rgba(120,160,230,.14);
+  position: fixed; inset: 0; pointer-events: none; color: var(--am-ink);
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: clamp(10px, 1.05vmin, 22px);
+}
+.am-vignette { position: absolute; inset: 0;
+  background: radial-gradient(ellipse at 50% 48%, transparent 42%, rgba(2,3,8,.55) 78%, rgba(1,2,5,.92) 100%); }
+.am { position: absolute; }
+.am-cap { letter-spacing: .26em; text-transform: uppercase; font-size: .78em; color: var(--am-dim); }
+.am-h1 { font: 200 2.5em/1 -apple-system, 'SF Pro Display', 'Helvetica Neue', sans-serif; letter-spacing: .3em;
+  color: #eaf4ff; text-transform: uppercase; margin-bottom: .36em; white-space: nowrap; }
+.am-id { top: 3.2vmin; left: 3.6vmin; max-width: 60vw; overflow: hidden; }
+.am-clock { top: 3.2vmin; right: 3.6vmin; text-align: right; }
+.am-clock .am-h1 { letter-spacing: .08em; }
+
+.am-panel { width: 24vw; max-width: 34em; min-width: 15em; }
+.am-head { margin-bottom: .9em; }
+.am-stats { left: 3.6vmin; top: 14vmin; }
+.am-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1em; margin-bottom: 1.8em; }
+.am-big { font: 200 2.1em/1 -apple-system, 'SF Pro Display', sans-serif; color: #eaf4ff; letter-spacing: .04em; margin-bottom: .25em; }
+.am-row { display: flex; justify-content: space-between; gap: 1em; padding: .34em 0; border-top: 1px solid var(--am-line); }
+.am-row > span { color: var(--am-dim); white-space: nowrap; }
+.am-row > b { font-weight: 400; color: #e6f1ff; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.am-led { display: inline-block; width: .6em; height: .6em; border-radius: 50%; margin-right: .6em; background: #55607a; vertical-align: .05em; }
+
+.am-used { right: 3.6vmin; top: 14vmin; text-align: right; min-height: 12em; }
+.am-n { padding: .4em 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.am-dim { color: var(--am-dim); }
+
+.am-mood { right: 3.6vmin; bottom: 9vmin; text-align: right; width: 24vw; max-width: 30em; }
+.am-moodword { font: 200 2.6em/1.15 -apple-system, 'SF Pro Display', sans-serif; letter-spacing: .14em; margin: .3em 0 .25em;
+  text-shadow: 0 0 1.4em var(--am-mood); }
+.am-moodwhy { color: #a9c3ea; }
+
+.am-status { left: 26vw; right: 26vw; bottom: 8.4vmin; text-align: center; }
+.am-verb { font: 200 3.4em/1.1 -apple-system, 'SF Pro Display', 'Helvetica Neue', sans-serif; letter-spacing: .2em;
+  color: #f2f8ff; text-shadow: 0 0 1.6em var(--am-state); }
+.am-dot { display: inline-block; width: .34em; height: .34em; border-radius: 50%; background: var(--am-state);
+  box-shadow: 0 0 .7em var(--am-state), 0 0 1.6em var(--am-state); margin-right: .5em; vertical-align: .22em; }
+.am-what { margin: 1em auto .8em; font-size: 1.12em; color: #a9c3ea; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; min-height: 1.3em; }
+.am-missing { margin-top: .9em; color: #f0b100; min-height: 1.2em; font-size: .9em; }
+
+.am-ribbon { left: 26vw; right: 26vw; bottom: 3.6vmin; height: 1.5vmin; }
+.am-track { position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: var(--am-line); }
+#amTicks i { position: absolute; bottom: 0; width: 2px; border-radius: 1px; opacity: .85; }
+.am-lab { position: absolute; bottom: -1.9em; font-size: .7em; letter-spacing: .2em; color: var(--am-faint); }
+.am-lab-l { left: 0; } .am-lab-r { right: 0; }
+
+.am-lbl { position: absolute; transform: translate(-50%, -180%); white-space: nowrap; max-width: 30vw; overflow: hidden;
+  text-overflow: ellipsis; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: clamp(10px, 1.05vmin, 22px);
+  color: #f1f7ff; padding: .15em .6em; border-left: 1px solid #8af; transition: opacity .8s;
+  text-shadow: 0 0 .8em rgba(0,0,0,.95), 0 0 .3em rgba(0,0,0,.9); }
+
+@media (max-width: 760px) {
+  .am-used, .am-stats .am-grid { display: none; }
+  .am-panel { width: 60vw; }
+  .am-status, .am-ribbon { left: 6vw; right: 6vw; }
+  .am-mood { bottom: 22vmin; }
+}
+
+#ambientBtn { cursor: pointer; }
+#ambientBtn:hover { color: #aee9ff; }

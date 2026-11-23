@@ -54,7 +54,8 @@ class PollerCoreMixin:
         self._skipped_native: set[tuple[str, str]] = set()
         # #3243: (agent, req_id) already logged for an entry held over the
         # authoring caps — once per process, bounded like the sets above.
-        self._cap_held_logged: set[tuple[str, str]] = set()
+        # #4599: and (agent, req_id, hold) for a held credential entry.
+        self._cap_held_logged: set[tuple] = set()
         self._file_channel_noticed: set[str] = set()
         # #1632: unique per worker process so the cross-worker leader lock only
         # ever refreshes/releases ITS OWN lease (mirror monitoring #1464).
@@ -147,9 +148,15 @@ class PollerCoreMixin:
 
     async def _poll_loop(self):
         """Main polling loop."""
+        # Imported here, not at module level: a submodule of this package may
+        # import nothing its `__init__` has not imported first (#3785), and
+        # `__init__` is at its line cap.
+        from services import loop_health
+
         while self._running:
             try:
-                await self._poll_cycle()
+                with loop_health.tick("operator_queue_sync"):
+                    await self._poll_cycle()
             except asyncio.CancelledError:
                 break
             except Exception as e:

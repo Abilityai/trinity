@@ -63,6 +63,10 @@ def catalog_ids():
         # covered by the derived test below, so the expected STRING is pinned
         # and not merely "does not contain a split version".
         ("claude-opus-5-5", "Claude Opus 5.5"),
+        # #4528: the three ids that release added.
+        ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+        ("claude-fable-5-2", "Claude Fable 5.2"),
+        ("claude-haiku-5-5", "Claude Haiku 5.5"),
         # Unchanged neighbours — proof the new entry swallowed nothing.
         ("claude-fable-5", "Claude Fable 5"),
         ("claude-opus-5", "Claude Opus 5"),

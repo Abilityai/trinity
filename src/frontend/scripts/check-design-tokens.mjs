@@ -130,7 +130,7 @@ const INK_LADDER_SWEPT = {
   'components/HostTelemetry.vue': 3,          // 3 separator glyphs
   'components/NavBar.vue': 0,
   'components/ReplayTimeline.vue': 2,          // 2 separator glyphs
-  'components/SystemViewsSidebar.vue': 0,
+  'components/SystemViewsMenu.vue': 1,         // edit pencil, shown on hover
   'components/TasksPanel.vue': 1,              // empty-state svg
   'components/operator/NotificationsPanel.vue': 2, // spinner svg + inbox svg
   'components/operator/QueueCard.vue': 4,      // separator, dismiss glyph, 2 disabled buttons

@@ -29,6 +29,13 @@ SECRET_VALUE_PATTERNS = [
     r'ghp_[a-zA-Z0-9]{36,}',          # GitHub PAT (fine-grained)
     r'github_pat_[a-zA-Z0-9_]{22,}',  # GitHub PAT (classic)
     r'gho_[a-zA-Z0-9]{36,}',          # GitHub OAuth token
+    # Installation tokens are `ghs_<appid>_<JWT>`, about 390 chars, and contain
+    # `.`, `-` and `_` (trinity-enterprise#1277).
+    # Matched by structure: a looser class also matches a word ending in `ghs`
+    # plus a long file name (`boroughs_population_2020-2024_final.csv`).
+    # Every quantifier is bounded: unbounded segments scan quadratically on
+    # `ghs_1_ghs_1_…` input.
+    r'ghs_\d{1,20}_[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]{1,2048}\.[A-Za-z0-9_-]{1,512}',
     r'ghs_[a-zA-Z0-9]{36,}',          # GitHub App token
     r'ghr_[a-zA-Z0-9]{36,}',          # GitHub refresh token
     r'xoxb-[a-zA-Z0-9\-]+',           # Slack bot token
@@ -478,6 +485,7 @@ _GUARD_SHAPES = {
     r'ghp_[a-zA-Z0-9]{36,}': "github",
     r'github_pat_[a-zA-Z0-9_]{22,}': "github",
     r'gho_[a-zA-Z0-9]{36,}': "github",
+    r'ghs_\d{1,20}_[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]{1,2048}\.[A-Za-z0-9_-]{1,512}': "github",
     r'ghs_[a-zA-Z0-9]{36,}': "github",
     r'ghr_[a-zA-Z0-9]{36,}': "github",
     r'xoxb-[a-zA-Z0-9\-]+': "slack",

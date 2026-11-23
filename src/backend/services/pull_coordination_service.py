@@ -34,6 +34,8 @@ from database import db
 from models import TaskExecutionStatus
 from services import channel_completion_report
 from services import event_dispatch_service
+from services import schedule_tier_alerts
+from services.execution_integrity import with_restricted_turn
 from services import subscription_auto_switch
 from services.activity_service import activity_service
 from services.platform_prompt_service import (
@@ -829,6 +831,14 @@ def apply_task_result(
     compact_events = metadata.get("compact_events") or []
     compact_json = json.dumps(compact_events) if compact_events else None
 
+    # #4281: a schedule-backed run whose tier is not owner records that it ran
+    # without the shell, as `apply_result` does. None keeps the column. Never
+    # raises (`run_restriction` is total, the merge of one record into nothing
+    # cannot fail), so it cannot fail the CAS write below.
+    _rated, restricted_turn = schedule_tier_alerts.run_restriction(
+        db, execution.agent_name, execution)
+    restricted_json = with_restricted_turn(None, restricted_turn)
+
     if row_status == TaskExecutionStatus.SUCCESS:
         won = db.update_execution_status(
             execution_id=execution_id,
@@ -842,6 +852,7 @@ def apply_task_result(
                 tool_calls=log_json,
                 claude_session_id=session_id,
                 compact_metadata=compact_json,
+                turn_integrity=restricted_json,
             ),
             claim_token=claim_token,
         )
@@ -870,6 +881,7 @@ def apply_task_result(
                 context_used=context_used,
                 context_max=context_max,
                 compact_metadata=compact_json,
+                turn_integrity=restricted_json,
             ),
             claim_token=claim_token,
         )

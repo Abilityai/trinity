@@ -111,7 +111,7 @@ git log --oneline -10
 git diff HEAD~1 HEAD --stat
 ```
 
-If `docker/base-image/Dockerfile` appears in the diff, see [Base Image Upgrade](#base-image-upgrade-if-needed) below.
+If anything under `docker/base-image/` appears in the diff, see [Base Image Upgrade](#base-image-upgrade-if-needed) below.
 
 **Hosted install:** pin the new release in `.env` (the last `TRINITY_IMAGE_TAG` line wins) and check out the matching tag, so the compose file and the mounted `config/` move with the images:
 
@@ -130,7 +130,7 @@ When updating Trinity code, rebuild the platform images only:
 docker compose build --no-cache backend frontend mcp-server scheduler
 ```
 
-The `trinity-agent-base` image is **not** rebuilt by this command. It changes much less often, and rebuilding it forces every agent to be re-deployed. Rebuild it only when `docker/base-image/Dockerfile` itself changes, via `./scripts/deploy/build-base-image.sh`.
+The `trinity-agent-base` image is **not** rebuilt by this command. Rebuilding it means every agent has to be restarted to adopt it, so it is a separate step: rebuild it when anything under `docker/base-image/` changed in the release, via `./scripts/deploy/build-base-image.sh`. See [Base Image Upgrade](#base-image-upgrade-if-needed).
 
 For production:
 
@@ -234,7 +234,7 @@ The same metadata is visible in the UI via the version chip in the navigation ba
 
 ## Base Image Upgrade (if needed)
 
-Rebuild the base image only when `docker/base-image/Dockerfile` changes:
+The base image bakes in more than its Dockerfile: the agent server (`agent_server/`), the guard hooks (`hooks/`) and `startup.sh` are all copied into it. Rebuild it whenever anything under `docker/base-image/` changed in the release — `scripts/deploy/update.sh` (`trinity update`) does this for you:
 
 ```bash
 ./scripts/deploy/build-base-image.sh
@@ -249,7 +249,13 @@ What this means in practice:
 - A **running** agent is never replaced out from under you. Drift is detected but not acted on until the agent is next started cold.
 - **Restart the fleet** (Operations) to roll the new image out: each agent goes through the normal lifecycle, so a drifted agent is recreated and an up-to-date one keeps its container.
 - The **system agent** (`trinity-system`) follows the same rule and is deliberately never replaced while running. If its image goes stale you get an operator alert rather than a mid-operation container swap; it adopts the rebuild the next time it is started cold.
-- Rebuilding the base image is what makes newly shipped agent-side features available. Skipping it means agents keep running the old runtime, which is usually harmless but occasionally leaves a feature silently inert.
+- Rebuilding the base image is what makes newly shipped agent-side changes available, and an agent receives them only once it has restarted onto the new image. Until then the agent accepts the new platform's requests and ignores what it does not understand, so an agent-side fix in the release — a security fix included — does not apply to it.
+
+**After every upgrade, restart the fleet** (or stop and start each agent) so agents receive the release's agent-side changes.
+
+**Trinity tells you which agents are behind.** Shortly after the backend starts, and every ten minutes after that, it compares each running agent with the installed base image and keeps **one** alert in the operator queue naming the agents still on an older image. The alert updates as agents are restarted and ends by itself when none are left. It never restarts an agent for you. Ephemeral agents are not listed.
+
+The same alert also appears when the installed base image is itself older than the platform — the case where the update path did not rebuild it, so no agent looks out of date although all of them are. It names the fix: `./scripts/deploy/build-base-image.sh` on a source install, `./scripts/deploy/start.sh --hosted` on a hosted one, then a fleet restart. If the base image has no version label, or Docker cannot be read, nothing is reported as up to date: the backend log says the check could not run.
 
 ---
 

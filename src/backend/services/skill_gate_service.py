@@ -54,6 +54,7 @@ from services.skill_gate_errors import (  # noqa: F401 — re-exported for entri
     SkillGateRefused,
 )
 from services.skill_packaging import SKILL_NAME_RE
+from utils import request_memo
 from utils.credential_sanitizer import sanitize_text
 from utils.helpers import to_utc_iso, utc_now
 from utils.skill_invocation import find_gated_invocations
@@ -379,8 +380,9 @@ def _can_open(agent_name: str, email: str) -> bool:
     `role_addressing.can_open_agent` (trinity-enterprise#881; moved there for
     trinity-enterprise#1007 so an ask to a canon role applies the same one).
     This name stays the gate's seam: `_approvers` reads it, and the tests
-    patch it."""
-    return role_addressing.can_open_agent(agent_name, email)
+    patch it. The answer is `role_addressing.agent_reach`'s: True, False, or
+    None when the platform could not check (#4599)."""
+    return role_addressing.agent_reach(agent_name, email)
 
 
 def _approvers(agent_name: str, role: str) -> List[str]:
@@ -391,7 +393,13 @@ def _approvers(agent_name: str, role: str) -> List[str]:
     role nobody is seated in), `approver_cannot_open_agent` when everyone it
     names is outside the agent. An approval raised to people who can never see
     it waits silently until it expires. The refusal names the role's label,
-    never a person."""
+    never a person.
+
+    #4599: when nobody is reachable because the platform could not check
+    (a `_can_open` answer of None; each person is read once), the refusal is the gate's own 503
+    `gate_unavailable`, marked `unchecked`. `approver_cannot_open_agent` is a
+    STANDING refusal — a room records the post as refused for good — and an
+    outage clears by itself, so it must be one a room delivers again."""
     people = _resolved_people(agent_name, role)
     if not people:
         raise SkillGateRefused(
@@ -399,13 +407,21 @@ def _approvers(agent_name: str, role: str) -> List[str]:
             f"Nobody fills the {role_addressing.role_label(role)} role for {agent_name}, "
             "so this gated request can't be approved. Ask the agent's owner to assign one.",
             role=role)
-    reachable = [p for p in people if _can_open(agent_name, p)]
+    reach = {p: _can_open(agent_name, p) for p in people}
+    reachable = [p for p in people if reach[p]]
     if not reachable:
+        if any(v is None for v in reach.values()):
+            refusal = SkillGateRefused(
+                503, "gate_unavailable",
+                f"Could not check who can open {agent_name} to approve this request; "
+                "nothing was run. Try again shortly.", role=role)
+            refusal.unchecked = True
+            raise refusal
         raise SkillGateRefused(
             422, "approver_cannot_open_agent",
             f"The {role_addressing.role_label(role)} for {agent_name} can't open {agent_name}, "
-            "so they would never see this approval. Ask the agent's owner to share "
-            f"{agent_name} with them.", role=role)
+            "so they would never see this approval. Ask the agent's owner or an admin to "
+            f"make sure {agent_name} is shared with them and that they can sign in.", role=role)
     return reachable
 
 
@@ -413,12 +429,15 @@ def approver_reason(agent_name: str, role: str) -> Optional[str]:
     """Why `role` reaches nobody on `agent_name`, for the Skills tab
     (trinity-enterprise#881): `unfilled` (it names nobody), `not_shared`
     (everyone it names is outside the agent), or None when it reaches someone.
-    Never raises; a failed lookup reads `unfilled`."""
+    Never raises; a failed lookup reads `unfilled`. A reach that could not be
+    checked (#4599) keeps reading `not_shared`, the label it had before that
+    arm got its own refusal: the tab's vocabulary has no third word."""
     try:
         _approvers(agent_name, role)
         return None
     except SkillGateRefused as e:
-        return "not_shared" if e.code == "approver_cannot_open_agent" else "unfilled"
+        cannot_open = e.code == "approver_cannot_open_agent" or getattr(e, "unchecked", False)
+        return "not_shared" if cannot_open else "unfilled"
     except Exception:  # noqa: BLE001
         return "unfilled"
 
@@ -2185,6 +2204,7 @@ def outcome_delivery(kind: Optional[str], *, agent_name: Optional[str] = None,
 SKILL_DESCRIPTION_MAX_CHARS = 300
 
 
+@request_memo.memoized
 def _skill_descriptions(agent_name: str) -> Dict[str, str]:
     """Each skill's description from the agent's last-known listing (Redis,
     display-only, fail-open): a card without one still names the skill."""
@@ -2225,6 +2245,54 @@ def _openable_run(viewer: Optional[str], agent_name: Optional[str],
         return None
 
 
+def _is_gate_approval(item: Mapping[str, Any]) -> bool:
+    return item.get("raised_by") == "gate" and item.get("type") == "approval"
+
+
+def _card_approvers(item: Mapping[str, Any]) -> List[str]:
+    """The people an approval was delivered to, casefolded and de-duplicated."""
+    resolved = item.get("resolved_to") or []
+    if isinstance(resolved, str):
+        try:
+            resolved = json.loads(resolved)
+        except ValueError:
+            resolved = []
+    return list(dict.fromkeys(str(p).strip().casefold() for p in resolved if str(p).strip()))
+
+
+def prefetch_cards(items, *, run_viewer: Optional[str] = None,
+                   name_approvers: bool = False) -> None:
+    """Read once what `card_view` would read per gate approval (#4671, #4672).
+
+    One query each for the gate records, the approvers' user rows
+    (`name_approvers`) and — when the viewer may get run links — the owners
+    of, and the viewer's shares on, the agents those runs are on. Call it
+    inside a `request_memo.scope()` before projecting a page: each batch read
+    answers the matching per-item read for the rest of the scope, so
+    `card_view`, `_openable_run` and `can_user_access_agent` are unchanged and
+    still decide everything.
+
+    Best-effort: a failure is logged and the per-card reads run as they always
+    did, with their own error handling.
+    """
+    try:
+        gates = [item for item in items or [] if _is_gate_approval(item)]
+        if not gates:
+            return
+        records = db.get_gate_requests([g.get("request_id") or "" for g in gates])
+        if name_approvers:
+            db.get_users_by_emails([p for g in gates for p in _card_approvers(g)])
+        if not run_viewer:
+            return
+        run_agents = [name for record in records.values() if isinstance(record, dict)
+                      for name in (record.get("agent_name"), record.get("source_agent"))]
+        if run_agents:
+            db.get_agent_owners(run_agents)
+            db.agents_shared_with_user(run_agents, run_viewer)
+    except Exception:  # noqa: BLE001 — see the docstring: fall back to per-card reads
+        logger.warning("[SkillGate] card prefetch failed; reading per card", exc_info=True)
+
+
 def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
               run_viewer: Optional[str] = None,
               name_approvers: bool = False) -> Optional[Dict[str, Any]]:
@@ -2243,20 +2311,14 @@ def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
     (the operator's queue, whose reader already sees `resolved_to`; a Workspace
     addressee is not told who else was asked). None when there is no such record.
     """
-    if not (item.get("raised_by") == "gate" and item.get("type") == "approval"):
+    if not _is_gate_approval(item):
         return None
     record = db.get_gate_request(item.get("request_id") or "")
     if not record or record.get("agent_name") != item.get("agent_name"):
         return None
-    resolved = item.get("resolved_to") or []
-    if isinstance(resolved, str):
-        try:
-            resolved = json.loads(resolved)
-        except ValueError:
-            resolved = []
-    people = list(dict.fromkeys(str(p).strip().casefold() for p in resolved if str(p).strip()))
-    # ponytail: one Redis read + one user lookup per approver, per gate ask in
-    # a listing; batch them if a queue ever holds hundreds of gate asks.
+    people = _card_approvers(item)
+    # A listing calls `prefetch_cards` first (#4672), which reads the records,
+    # the approvers and the run agents' access once for the whole page.
     described = _skill_descriptions(record["agent_name"])
     proposal = item.get("proposal") if isinstance(item.get("proposal"), Mapping) else {}
     return {

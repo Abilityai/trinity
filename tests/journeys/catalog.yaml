@@ -59,6 +59,11 @@ journeys:
         promise: "I open my new one-click droplet in a browser and create the admin account there, without ever opening a terminal."
       - name: pre-provisioned
         promise: "I gave a password when I created the droplet, so it has an admin from the start and nobody else can claim it."
+      # trinity-enterprise#1312: the emailed-link claim (PROV-020). Pinned until
+      # the harness exists by tests/unit/test_ent1312_setup_link_claim.py and
+      # src/frontend/tests/unit/setupPasswordLink.spec.js.
+      - name: link-claim
+        promise: "I open the setup link from my email, choose a password, and I'm in."
 
   - id: J02
     issue: 2341

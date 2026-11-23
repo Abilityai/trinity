@@ -107,6 +107,7 @@ export interface McpApiKeyValidationResult {
   // narrower set here (it named only user/agent/system) makes the cast below
   // launder two live values, which is how `portal_delegate` went unnoticed.
   scope?: McpAuthContext["scope"];
+  user_role?: string;   // Role of the key owner — used for admin bypass in chat ACL (#4654)
 }
 
 // ---------------------------------------------------------------------------
@@ -561,6 +562,7 @@ export async function createServer(config: ServerConfig = {}) {
               // `mcp_api_keys.scope` is free-text with no CHECK constraint, so a
               // value the union does not name arrives here as a plain string.
               scope: scope as McpAuthContext["scope"],
+              userRole: result.user_role,  // #4654: role-based admin bypass in chat ACL
               mcpApiKey: apiKey,  // Store the actual API key for user-scoped requests
               // #2392: per-request — fastmcp re-authenticates every POST.
               executionId: parseExecutionIdHeader(readHeader(request.headers[EXECUTION_ID_HEADER])),

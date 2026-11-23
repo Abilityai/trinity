@@ -115,6 +115,12 @@
 - **Description**: Real-time container metrics on the agent's Overview tab (moved from the header by trinity-enterprise#887)
 - **Key Features**: CPU/memory usage, network I/O, uptime display, auto-refresh every 10 seconds
 
+### 1.6a Agent Overview tab (#1107; rebuilt trinity-enterprise#1317)
+- **Status**: 🚧 In Dev
+- **Description**: The default tab on the agent page is a page about the agent, top to bottom: **Now** (state, next scheduled run, items needing attention, New task), **Activity** (runs per day with failures on the same scale, and what started the window's runs as one split bar, 7d/14d/30d) beside **Recent work**, three measures over the same window (**Finished** with its denominator, **Time per run**, **Context used** as a share of the window), **Reported by this agent** (declared metrics), **Schedules** and **Health**.
+- **Rules**: every section keeps one footprint across loading, empty, failed and ready; an agent with no runs, schedules, metrics or health checks still gets the whole page (ghost charts, `—` for anything never measured, an empty state naming what will appear and one next action); a failed read is a failed section and never another agent's figures; no cost tile (the header owns cost); the compatibility report is not on this tab (Settings › General).
+- **Flow**: `feature-flows/agent-overview-dashboard.md`
+
 ### 1.7 Agent Settings home (trinity#966; trinity-enterprise#887, #888, #890, #891, #353, #951)
 - **Status**: 🚧 In Dev — General, Credentials, Guardrails, People, Storage panes built; Channels and Integrations hold only the cards the old flat Settings list carried, and point at the Sharing / Permissions / A2A / Payments tabs until their steps land
 - **Description**: The agent page splits into a working strip and ONE Settings home: Settings is the last tab, pinned outside the overflow menu, with a left rail of panes, each answering one question. The header keeps identity (avatar, name, id, description), running state, the autonomy chip, the Brain door and Start/Stop; trinity-enterprise#950 amended it to also show the bound GitHub repository (linked, with branch and changed / ahead / behind counts, from the live git status — nothing when no repo is bound or the agent is stopped), the tags (two chips and a counted "+N"; owners add and remove them in a dialog that reuses the Settings › General tag editor) and a small context-window chart for a running agent ("—" until there is a reading, never a 0% ring), and to drop the Workspace and Talk doors (the Workspace is in the nav; the voice call lives in its composer). trinity-enterprise#955 (operator, 2026-10-19) brought two in-place edits back to the header for owners: a pencil beside the name that edits the **display label** inline (pre-filled with the label, never the slug; Enter/blur save, Esc cancels, empty clears), and the hover overlay on the avatar (camera when there is none; change-prompt + next-emotion when one exists with an identity prompt) — the same `set-label` / `open-avatar-modal` / `cycle-emotion` events Settings › General's Identity rows emit, so the page keeps one handler per verb. The id rename stays in Settings only. The same ruling restored the pre-#3798 rows: the funding badge doubling as the subscription switcher (row 1), the autonomy and read-only toggles with the tags and the live CPU / MEM sparklines (row 2), the 7-day spend row (row 3), and the GitHub line — repo, branch, commit, changed / ahead / behind — only when a repository is connected and **without** Pull / Push / Refresh (row 4; the Git tab keeps the verbs). `AgentLiveStrip` is deleted and Overview no longer shows a strip. Nothing else.
@@ -2470,6 +2476,22 @@ with a `template.yaml` allow-list ceiling + #1083 detached-execution integration
 issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
 
 ---
+- **FR-12 — Ambient (watch-only) mode (trinity-enterprise#1302)**: one control and one key (`M`) switch
+  the orb into a hands-off view for a wall screen; any deliberate key, click or scroll returns to the
+  interactive orb with selection, scope and camera as they were (a moving pointer does nothing). With no
+  input it shows: a plain-language line for the current run's step, the notes used in the current or most
+  recent run (lit on the graph, listed by title, the camera glides to them), live stats (status, running /
+  last run, next scheduled, queued, context, 24h runs / failures / cost, note and link counts), and a
+  **mood** — one word from a fixed first-match ladder (unknown · asleep · struggling · strained · working ·
+  backed up · digesting · neglected · resting) with the deciding signal shown beside it. **Frontend-only
+  and read-only**: it composes existing viewer-scoped `GET` routes (agent, executions list / stream / log,
+  queue, schedules, brain-orb data) and issues nothing else — no new endpoint, no write, no run, no voice
+  session. **Withheld by construction**: prompt text, reply text, reasoning, raw commands, search queries,
+  web addresses and the names of files that are not notes; a run is named only when it is a playbook
+  (`/name`) or a named schedule. **Honest status**: a stopped agent, a lost feed and an expired sign-in are
+  each stated in words and the visuals drop to rest; the idle replay of the last run is labelled "not live";
+  a viewer who cannot read the agent's runs sees graph + status and is told what is hidden. Buffers are
+  capped and every scene object it creates is disposed, so it can run for hours.
 
 ## Default Cornelius Agent — Auto-Seed on Fresh Install (trinity-enterprise#107)
 
@@ -2657,6 +2679,20 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   an `operator_resume_dispatch` audit entry (ent#329). An absent or false
   `resume_requested` says only "Sent." — reading `null` as "started" would be
   the over-claim ent#430 spent a blocker removing.
+  **An agent that is not running also gets only "Sent."** (#4502):
+  `resume_requested` says a wake was
+  requested, not that it could be delivered, and the response is projected
+  before the dispatch learns the agent is stopped. So the card re-reads the
+  roster after such an answer and keeps "is picking this up" only when the
+  agent's `availability` is not `stopped` / `unavailable` (and the row does not
+  already say `wake_state: pending`); `unknown` — Docker could not be asked —
+  keeps it, as the dispatch itself still tries. Nothing is said while the read
+  is out, and a read that fails or takes longer than 1.5 s says only "Sent.":
+  the roster in hand is from page load, so it is not evidence the agent still
+  runs. The line is drawn only where the card outlives the answer — a project's
+  "Needs you" card. The Inbox pane shows none (it opens the next ask, §5.40),
+  and the tile in a chat never did: it becomes its history row, which is the
+  confirmation there.
 - The confirmation cannot live on the ask row, because answering removes it.
   `PortalAsks.visible` therefore also stays true while a confirmation is up —
   gating on `items.length` alone unmounted the surface at the same instant the
@@ -3241,9 +3277,10 @@ to localStorage in the clear.
 - **AC-1 — curation is a policy dimension on the ONE catalog**: `workspace` +
   `workspace_tier` are appended to `ModelEntry` (`services/model_catalog.py`,
   §47.2 in `public-access.md`), never a second hand-typed list — the drift the
-  #2086 registry exists to prevent. Three entries carry it: `claude-opus-5`
-  ("Most capable"), `claude-sonnet-5` ("Balanced — fast and smart"),
-  `claude-haiku-4-5-20251001` ("Fastest"). Fable 5 is out (its `note` also reads
+  #2086 registry exists to prevent. Three entries carry it, one per tier, and
+  the id behind a tier moves with the lineup: today `claude-opus-5-5`
+  ("Most capable"), `claude-sonnet-5-5` ("Balanced — fast and smart"),
+  `claude-haiku-5-5` ("Fastest"). Fable 5 is out (its `note` also reads
   "Most capable"; Opus-vs-Fable is an operator distinction), and every "Legacy"
   entry is out — a client-facing surface offering "Claude Opus 4.6 — Legacy" *is*
   the combobox this reacts against. Two import-time assertions make the
@@ -3977,15 +4014,27 @@ to localStorage in the clear.
   read from that, never parsed out of the body (an agent reply that begins "**Finished**" is
   not a run outcome).
 - **The pane (AC 3)**: an ask renders the existing ask card for that one ask (select-option,
-  note, Send — never a one-tap Approve) and stays selected after an answer, shown ended in
-  place. A chat renders its newest arrivals (from the first unread message) and its
+  note, Send — never a one-tap Approve). **Answer, then next**: once the server confirms the
+  reader's OWN answer given in the pane (a typed answer, an approval, a one-click gate
+  Approve / Reject, "Got it", a credential), the row holds its ended badge for a short beat,
+  the next pending ask in the visible order opens (the one below, else the one above; ended
+  rows are skipped; `?item=` is replaced, never pushed) and the row collapses out of the list
+  — about 350 ms in all, at once under `prefers-reduced-motion`. After the last one the pane
+  says "All caught up" with a next action; a `?from=` filter the reader's own answers emptied
+  is kept, with "Show all agents". On All the row stays (it is a member for 7 days) and only
+  the selection moves on. An ask that ends any other way — another person's answer, an
+  expiry, a withdrawal, the reader's own answer from another tab, a Dismiss (which keeps its
+  Undo), a failed answer — stays selected, shown ended in place. For 300 ms after the next
+  ask opens this way its answer controls ignore input, so a late second click cannot answer
+  an ask the reader has not seen. A chat renders its newest arrivals (from the first unread message) and its
   deliverables through `ReportRenderer` with the summary fallback. Opening a chat row (or
   arriving on its `?item=` deep link) marks it read only AFTER the pane has rendered it —
   history, deliverables and every deliverable payload on screen (§3g S5, D-3); a failed load
   leaves it unread, a failed write says so in the pane, and the pane's **Mark read** (shown
   while the chat has new messages) reads it on demand. The row keeps its place, drawn read, for the rest of the tab visit (§3g S1: a row that
   leaves any tab stays as a ghost — a chat drawn read, an ask drawn ended — and a poll never
-  re-sorts; leaving the tab, clicking it again or a completed Mark all read starts a new visit). **Open
+  re-sorts; leaving the tab, clicking it again or a completed Mark all read starts a new visit; the
+  one exception is the reader's own answer in Action, above, which removes its row). **Open
   in chat** / **Reply in chat** open the chat at the first arrival (`?anchor=`), with the
   composer focused for Reply (A2 — no composer in the pane). **Reply to one message** works
   through both doors (ent#738): each agent message in the pane, and each persisted agent

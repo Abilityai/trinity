@@ -995,7 +995,9 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
     "routers/schedules.py::disable_schedule": (
         "POST /api/agents/{name}/schedules/{schedule_id}/disable", "MCP disable_schedule", _SIB_SCHEDULES),
     "routers/schedules.py::trigger_schedule": (
-        "POST /api/agents/{name}/schedules/{schedule_id}/trigger", "MCP trigger_schedule (a manual run)",
+        "POST /api/agents/{name}/schedules/{schedule_id}/trigger",
+        "MCP trigger_schedule (a manual run); a schedule whose runs are a shared person's is refused to "
+        "every key (409 schedule_runs_as_shared_person, #4281): a manual run has the caller's tier",
         "no capability fence ('trigger now' is exempt from schedules.manage, trinity-enterprise#164): a sibling "
         "triggers another agent's schedule only as an agent it spawned (OwnedAgent, the ent#629 manage reach)"),
     # trinity-enterprise#719: uses of what a person granted — a channel binding and its
@@ -1187,6 +1189,7 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
     "routers/internal.py::validate_execution": ("POST /api/internal/validate-execution", _SECRET),
     "routers/setup.py::get_setup_status": ("GET /api/setup/status", "unauthenticated by design (first-run status)"),
     "routers/setup.py::set_admin_password": ("POST /api/setup/admin-password", "unauthenticated by design until setup completes, then refused"),
+    "routers/setup.py::get_registration_terms": ("GET /api/setup/registration-terms", "unauthenticated by design: open only until setup completes and only with a registration-terms provider registered; reads nothing from the caller (trinity-enterprise#1329)"),
     "routers/webhooks.py::trigger_webhook": ("POST /api/webhooks/{webhook_token}", "the webhook token in the path is the credential"),
     "routers/paid.py::get_paid_agent_info": ("GET /api/paid/{agent_name}/info", "public paid-agent listing (x402)"),
     "routers/paid.py::paid_chat": ("POST /api/paid/{agent_name}/chat", "x402 payment is the credential"),

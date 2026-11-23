@@ -11,8 +11,9 @@ NAME only.
 What is pinned here, driven through the real sink over the real SQLite:
 
 * the kind is raised with a valid name, no options, addressed to primary on
-  every door (`invalid_to` for any other role; the file channel's clamp leaves
-  a non-primary addressee unaddressed), and exactly one resolved person
+  every door (`invalid_to` for any other role; on the file channel the
+  platform picks the reader and the address the agent wrote is ignored), and
+  exactly one resolved person
   (`no_person` otherwise — a secret field has one reader);
 * the name is a variable name the agent's own `.env` reader would set, at most
   64 characters, and never one the platform or the agent runtime reserves
@@ -231,22 +232,27 @@ class TestRaise:
             _raise(ask, self.AGENT, _body(rid, to=to))
         assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, rid) is None
 
-    def test_the_file_channel_addresses_a_credential_ask_to_the_primary_only(self, ask, monkeypatch):
-        """The file channel never reaches `_validated_ask`; its clamp resolves
-        the addressee. A credential entry addressed to anyone but the agent's
-        primary person is ingested unaddressed — an operator item no
-        Workspace field opens for — never handed to that person."""
-        from services import role_addressing
+    def test_the_file_channel_never_hands_a_credential_ask_to_the_address_the_agent_wrote(self, ask):
+        """The file channel never reaches `_validated_ask`; its clamp sets the
+        addressee. For a credential entry that is the reader the PLATFORM
+        picked (the poller's `CredentialCycle`, the chain of the native raise:
+        abilityai/trinity#4599, pinned end to end in
+        test_4599_credential_reader_doors.py), never the address the agent
+        wrote — whoever that is, the primary included. Without a reader the
+        clamp leaves the entry unaddressed; the poller holds such an entry
+        and never creates the row."""
         from services.operator_queue_service import _clamp_ingested_item
 
-        monkeypatch.setattr(role_addressing, "owner_email", lambda agent: OWNER)
         entry = {"id": "file-cred", "type": "credential", "title": f"Needs {NAME}",
                  "context": {"credential_name": NAME}}
-        other = _clamp_ingested_item({**entry, "addressed_to_email": "viewer@example.com"},
-                                     self.AGENT)
-        assert other["addressed_to_email"] is None
-        primary = _clamp_ingested_item({**entry, "addressed_to_email": OWNER}, self.AGENT)
-        assert primary["addressed_to_email"] == OWNER
+        for written in ("viewer@example.com", OWNER):
+            unjudged = _clamp_ingested_item({**entry, "addressed_to_email": written}, self.AGENT)
+            assert unjudged["addressed_to_email"] is None
+        picked = _clamp_ingested_item(
+            {**entry, "addressed_to_email": "viewer@example.com"}, self.AGENT,
+            credential=(OWNER, {"credential_name": NAME}))
+        assert picked["addressed_to_email"] == OWNER
+        assert picked["context"]["credential_name"] == NAME
         # every other kind keeps the roster rule it had
         question = _clamp_ingested_item({**entry, "type": "question",
                                          "addressed_to_email": "viewer@example.com"}, self.AGENT)

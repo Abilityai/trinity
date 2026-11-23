@@ -216,8 +216,9 @@ deployment**. Canonical check list: **`docs/agent-validation-spec.md`** (100
 checks, 11 categories), the single source of truth kept in lockstep with
 `services/compatibility/spec.py` by a sync test.
 
-- **FR-1 — Surface**: results render in the Agent Detail **Overview tab**
-  (`components/CompatibilityPanel.vue`, reusing the "needs attention" idiom —
+- **FR-1 — Surface**: results render in Agent Detail → **Settings › General**
+  (`components/CompatibilityPanel.vue`; moved off the Overview tab by
+  trinity-enterprise#1317 —
   count hidden when clean, expandable to the full grouped checklist) and via the
   MCP tool `get_agent_compatibility_report`. Re-runnable on demand. Non-blocking.
 - **FR-2 — Severity**: each check is **HARD** (will likely break Trinity),
@@ -251,7 +252,7 @@ persisted AI), `POST /api/agents/{name}/compatibility/fix` (owner/admin).
 original issue specified transient results with no table. Implementation **adds
 `agent_compatibility_results`** (latest-snapshot-per-agent, dual-track SQLite +
 Alembic) because AI verdicts are **not** cheaply recomputable (they cost API
-calls): persistence lets AI findings show on every Overview load without
+calls): persistence lets AI findings show on every load of the panel without
 re-spending tokens, unlocks fleet aggregation ("N agents have HARD findings"),
 and enables cheap post-fix re-checks. STATIC checks still recompute live each
 read; persisted AI verdicts merge in until a re-run. History/trend retention is a

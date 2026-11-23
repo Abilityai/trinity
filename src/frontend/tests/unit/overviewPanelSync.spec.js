@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 /**
- * Agent Detail → Overview: the footprint's sync line (trinity-enterprise#707) — MOUNTED.
+ * Agent Detail → Overview: the sync line (trinity-enterprise#707) — MOUNTED.
+ * It sits in the Health card since trinity-enterprise#1317; the contract is unchanged.
  *
  * It read only `consecutive_failures` and said `ok` for every agent that had
  * not failed a push — including one 15 commits ahead with auto-sync off, and
@@ -10,7 +11,8 @@
  * on chrome), and `—` when the backend has no
  * observation. The attention count still counts failed syncs (decision D13).
  *
- * axios is mocked per URL; everything else the panel fetches answers empty.
+ * axios is mocked per URL (the store reads through `api.js`, an instance of the
+ * same mock); everything else the panel fetches answers empty.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
@@ -33,19 +35,8 @@ vi.mock('axios', () => {
   return { default: { ...instance, create: () => instance } }
 })
 
-vi.mock('../../src/components/TrendLineChart.vue', () => ({
-  default: { name: 'TrendLineChart', template: '<div />' },
-}))
-vi.mock('../../src/components/StackedBarChart.vue', () => ({
-  default: { name: 'StackedBarChart', template: '<div />' },
-}))
-vi.mock('../../src/components/CompatibilityPanel.vue', () => ({
-  default: { name: 'CompatibilityPanel', template: '<div />' },
-}))
 
 import OverviewPanel from '../../src/components/OverviewPanel.vue'
-import { useAgentsStore } from '../../src/stores/agents'
-import { useExecutionsStore } from '../../src/stores/executions'
 
 const NAME = 'overview-agent'
 const RAW_ERROR = 'remote: LEAKMARKER fatal: unable to access'
@@ -69,11 +60,6 @@ function state(over = {}) {
 }
 
 async function mountPanel() {
-  const agents = useAgentsStore()
-  agents.getAgentInfo = vi.fn(async () => ({}))
-  const executions = useExecutionsStore()
-  executions.fetchAgentAnalytics = vi.fn(async () => null)
-  executions.fetchSchedulesSummary = vi.fn(async () => null)
   const wrapper = mount(OverviewPanel, {
     props: { agent: { name: NAME, status: 'running' } },
     global: { stubs: { 'router-link': { template: '<a><slot /></a>' } } },

@@ -1119,8 +1119,16 @@ class DatabaseManager:
     def get_user_by_id(self, user_id: int):
         return self._user_ops.get_user_by_id(user_id)
 
+    def get_users_by_ids(self, user_ids):
+        return self._user_ops.get_users_by_ids(user_ids)
+
     def get_user_by_email(self, email: str):
         return self._user_ops.get_user_by_email(email)
+
+    def get_users_by_emails(self, emails):
+        # #4671: the batch form — one query, and it answers the per-email read
+        # for the rest of a `request_memo.scope()`.
+        return self._user_ops.get_users_by_emails(emails)
 
     def create_user(self, user_data: UserCreate):
         return self._user_ops.create_user(user_data)
@@ -1131,8 +1139,8 @@ class DatabaseManager:
     def update_last_login(self, username: str):
         return self._user_ops.update_last_login(username)
 
-    def update_user_password(self, username: str, hashed_password: str):
-        return self._user_ops.update_user_password(username, hashed_password)
+    def update_user_password(self, username: str, hashed_password: str, email: str = None):
+        return self._user_ops.update_user_password(username, hashed_password, email=email)
 
     def get_or_create_auth0_user(self, auth0_sub: str, email: str, name: str = None, picture: str = None):
         return self._user_ops.get_or_create_auth0_user(auth0_sub, email, name, picture)
@@ -1212,6 +1220,10 @@ class DatabaseManager:
 
     def get_agent_owner(self, agent_name: str):
         return self._agent_ops.get_agent_owner(agent_name)
+
+    def get_agent_owners(self, agent_names):
+        # #4671: the batch form of `get_agent_owner`.
+        return self._agent_ops.get_agent_owners(agent_names)
 
     def get_agents_by_owner(self, owner_username: str):
         return self._agent_ops.get_agents_by_owner(owner_username)
@@ -1339,6 +1351,10 @@ class DatabaseManager:
 
     def is_agent_shared_with_user(self, agent_name: str, username: str):
         return self._agent_ops.is_agent_shared_with_user(agent_name, username)
+
+    def agents_shared_with_user(self, agent_names, username: str):
+        # #4671: the batch form of `is_agent_shared_with_user`.
+        return self._agent_ops.agents_shared_with_user(agent_names, username)
 
     def can_user_share_agent(self, username: str, agent_name: str):
         return self._agent_ops.can_user_share_agent(username, agent_name)
@@ -1622,6 +1638,10 @@ class DatabaseManager:
     def get_execution_timeout(self, agent_name: str) -> int:
         return self._agent_ops.get_execution_timeout(agent_name)
 
+    def get_execution_timeouts(self, agent_names) -> dict:
+        # #4672: the batch form of `get_execution_timeout`.
+        return self._agent_ops.get_execution_timeouts(agent_names)
+
     def get_all_execution_timeouts(self) -> dict:
         return self._agent_ops.get_all_execution_timeouts()
 
@@ -1721,8 +1741,11 @@ class DatabaseManager:
 
     # Physical-occupancy meter (#1081 Phase 3): read-only leased-row counters
     # consumed by CapacityManager's two meter methods. Metering only.
-    def count_active_leased_by_agent(self, agent_names):
-        return self._schedule_ops.count_active_leased_by_agent(agent_names)
+    def count_active_leased_by_agent(self, agent_names, unexpired_at=None):
+        # #4635: `unexpired_at` — the stall monitor counts live leases only.
+        return self._schedule_ops.count_active_leased_by_agent(
+            agent_names, unexpired_at=unexpired_at
+        )
 
     def execution_awaits_claim(self, execution_id: str) -> bool:
         return self._schedule_ops.execution_awaits_claim(execution_id)
@@ -1741,11 +1764,14 @@ class DatabaseManager:
     ) -> int:
         return self._schedule_ops.count_queued_ahead(agent_name, queued_at, execution_id)
 
-    def oldest_queued_head_per_agent(self):
-        return self._schedule_ops.oldest_queued_head_per_agent()
+    def oldest_queued_head_per_agent(self, agent_names=None, *, claimable=False):
+        return self._schedule_ops.oldest_queued_head_per_agent(
+            agent_names, claimable=claimable
+        )
 
-    def agents_with_running_conversation(self, agent_name: str):
-        return self._schedule_ops.agents_with_running_conversation(agent_name)
+    def running_conversation_keys_by_agent(self, agent_names):
+        # #4635: the #2843 guard's read, for every agent with a head in one query.
+        return self._schedule_ops.running_conversation_keys_by_agent(agent_names)
 
     def cancel_queued_execution(
         self, execution_id: str, reason: str = "cancelled", status: str = "cancelled"
@@ -1943,6 +1969,13 @@ class DatabaseManager:
     def purge_schedule(self, schedule_id: str):
         return self._schedule_ops.purge_schedule(schedule_id)
 
+    def reassign_schedule_creator(self, schedule_id: str, *, new_owner_id: int, expected_owner_id: int,
+                                  expected_updated_at, expected: dict, clear_delivery: bool):
+        """#4281: the take-over write (`db/schedules/crud.py`)."""
+        return self._schedule_ops.reassign_schedule_creator(
+            schedule_id, new_owner_id=new_owner_id, expected_owner_id=expected_owner_id,
+            expected_updated_at=expected_updated_at, expected=expected, clear_delivery=clear_delivery)
+
     def find_soft_deleted_schedules_past_retention(self, retention_days: int, limit: int = 5000):
         return self._schedule_ops.find_soft_deleted_schedules_past_retention(retention_days, limit)
 
@@ -1953,8 +1986,8 @@ class DatabaseManager:
         return self._schedule_ops.list_soft_deleted_schedules(agent_name, limit)
 
     # Webhook token management (WEBHOOK-001, #291)
-    def generate_webhook_token(self, schedule_id: str):
-        return self._schedule_ops.generate_webhook_token(schedule_id)
+    def generate_webhook_token(self, schedule_id: str, creator_id=None):
+        return self._schedule_ops.generate_webhook_token(schedule_id, creator_id)
 
     def get_schedule_by_webhook_token(self, token: str):
         return self._schedule_ops.get_schedule_by_webhook_token(token)
@@ -2092,6 +2125,10 @@ class DatabaseManager:
 
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
+
+    def get_executions_by_ids(self, execution_ids):
+        # #4672: the batch form of `get_execution`.
+        return self._schedule_ops.get_executions_by_ids(execution_ids)
 
     def get_turn_attribution(self, execution_id: str):
         """One execution's rating columns and status (trinity-enterprise#1225)."""
@@ -2524,6 +2561,10 @@ class DatabaseManager:
 
     def get_gate_request(self, request_id: str):
         return self._skill_gate_request_ops.get_gate_request(request_id)
+
+    def get_gate_requests(self, request_ids):
+        # #4671: the batch form of `get_gate_request`.
+        return self._skill_gate_request_ops.get_gate_requests(request_ids)
 
     def get_gate_request_by_dispatched_execution(self, execution_id: str):
         return self._skill_gate_request_ops.get_gate_request_by_dispatched_execution(execution_id)
@@ -4259,6 +4300,10 @@ class DatabaseManager:
     def get_operator_queue_item(self, item_id):
         return self._operator_queue_ops.get_item(item_id)
 
+    def get_operator_queue_items_by_ids(self, item_ids):
+        # #4671: the batch form of `get_operator_queue_item`.
+        return self._operator_queue_ops.get_items(item_ids)
+
     def get_operator_queue_item_for_agent_by_request_id(self, agent_name, request_id):
         # trinity-enterprise#611: the agent's own readback — ignores Clear All.
         return self._operator_queue_ops.get_item_for_agent_by_request_id(agent_name, request_id)
@@ -4423,6 +4468,10 @@ class DatabaseManager:
     # #3246 — platform alerts: one pending row per (agent, subject)
     def find_pending_operator_queue_by_subject(self, agent_name, subject):
         return self._operator_queue_ops.find_pending_by_subject(agent_name, subject)
+
+    def list_pending_operator_queue_by_subject_prefix(self, subject_prefix):
+        # #4635: one emitter's open alerts across agents (the stall reconcile).
+        return self._operator_queue_ops.list_pending_by_subject_prefix(subject_prefix)
 
     def find_person_ended_operator_queue_by_subject(self, agent_name, subject, since):
         return self._operator_queue_ops.find_person_ended_by_subject(agent_name, subject, since)
@@ -4855,6 +4904,10 @@ class DatabaseManager:
 
     def list_loop_runs(self, loop_id: str):
         return self._loop_ops.list_runs(loop_id)
+
+    def list_loop_runs_for_loops(self, loop_ids):
+        # #4672: the batch form of `list_loop_runs`.
+        return self._loop_ops.list_runs_for_loops(loop_ids)
 
     # ---- Terminal-driven advance (#2523) -----------------------------------
 

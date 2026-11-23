@@ -273,6 +273,9 @@
         :key="agent.name"
         :data-agent="agent.name"
         :class="[
+          // A row for an agent made just now glows once, so the eye finds it
+          // (the grid lands its tile; a list has no room for more than this).
+          arrivals.includes(agent.name) ? 'anchor-glow' : '',
           'relative overflow-visible bg-white dark:bg-gray-800 rounded-lg',
           // #2358: at lg the row IS a subgrid item — still the visual box
           // (background, radius, hover, the system border-l, and the
@@ -893,6 +896,11 @@ import { syncHealthColor, syncHealthLabel as syncHealthLabelFn } from '../utils/
 import { pressureBadge, isSubscriptionFunded } from '../utils/subscriptionPressure'
 
 const props = defineProps({
+  // Names that joined the fleet just now (networkStore.arrivals).
+  arrivals: {
+    type: Array,
+    default: () => []
+  },
   // The chassis-visible fleet (networkStore.visibleAgents — server-side tag
   // filter ∘ owner filter). Rows read `tags` / `read_only_enabled` /
   // `display_label` straight off these objects — they ride every

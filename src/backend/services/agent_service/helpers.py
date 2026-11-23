@@ -6,6 +6,7 @@ Contains functions used across multiple agent operations.
 import fnmatch
 import json
 import logging
+import re
 import asyncio
 from typing import Optional, List, Callable, Any, Literal
 
@@ -53,7 +54,53 @@ def is_claude_runtime(runtime: Optional[str]) -> bool:
 # #1187: every runtime the platform can launch. Mirrors the agent-side
 # `runtime_adapter.KNOWN_RUNTIMES` (which lives in the base image and isn't
 # importable from the backend). Keep the two in sync when adding a runtime.
-KNOWN_RUNTIME_NAMES = CLAUDE_RUNTIME_NAMES | frozenset({"gemini-cli", "gemini", "codex"})
+KNOWN_RUNTIME_NAMES = CLAUDE_RUNTIME_NAMES | frozenset(
+    {"gemini-cli", "gemini", "codex", "opencode"}
+)
+
+# Abilityai/lilu#257: OpenCode's `-m` takes `provider/model`, not a bare model
+# id. A bare id is not simply rejected — it is AMBIGUOUS, and the CLI's own
+# complaint arrives one container spawn and one failed turn later, attributed
+# to the agent rather than to the create request that caused it. Validated at
+# the boundary instead, with a named 400. Mirrors
+# `agent_server/services/opencode_runtime.py::validate_provider_model`; the
+# backend cannot import the base image, so the two are a parity pair.
+_OPENCODE_MODEL_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][\w./:@+-]*$"
+)
+
+
+def validate_runtime_model(runtime: Optional[str], model: Optional[str]) -> None:
+    """Reject a runtime-model pairing the runtime cannot accept.
+
+    Only OpenCode constrains the SHAPE today. Empty/unset is always valid — it
+    means "no pin", and the CLI's own default applies.
+
+    Raises:
+        HTTPException(400): with a reason naming what is wrong and what a
+            valid id looks like.
+    """
+    if not model or (runtime or "").lower() != "opencode":
+        return
+    candidate = model.strip()
+    if "/" not in candidate:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"OpenCode model {model!r} is missing a provider prefix. Use "
+                "'provider/model' (e.g. 'anthropic/claude-sonnet-5', "
+                "'ollama/qwen3.6:27b')."
+            ),
+        )
+    if not _OPENCODE_MODEL_RE.match(candidate):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"OpenCode model {model!r} is not a valid 'provider/model' "
+                "identifier: both halves must be non-empty and the provider may "
+                "contain only letters, digits, '.', '_' and '-'."
+            ),
+        )
 
 
 def validate_runtime(runtime: Optional[str]) -> None:

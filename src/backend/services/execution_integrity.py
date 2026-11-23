@@ -32,6 +32,10 @@ operator-visible state (the canary G-04 class).
 
 Failure direction: every malformed shape degrades to "no entry" — today's
 behaviour — never to a false positive on a healthy run (AC #4/#6 of #2467).
+
+The same object carries ``restricted_turn`` (#4281): a schedule-backed run whose
+tier was not owner, so it ran without the shell. The record is the rating, never
+a transcript reading, and holds codes and ids only, by the same charset rule.
 """
 from __future__ import annotations
 
@@ -66,6 +70,49 @@ def _safe_token(value: Any, fallback: str) -> str:
     if isinstance(value, str) and _TOKEN_RE.match(value):
         return value
     return fallback
+
+
+# #4281: the key a restricted schedule run records itself under.
+RESTRICTED_TURN_KEY = "restricted_turn"
+
+
+def restricted_turn_record(
+    *, tier: Any, kind: Any, cause: Any, schedule_id: Any, creator_id: Any
+) -> Dict[str, Any]:
+    """The ``restricted_turn`` entry for a schedule-backed run that did not run
+    at owner tier (#4281). Codes and ids only: each token passes the charset
+    rule above, and the creator id is a positive int or None."""
+    creator = (
+        creator_id
+        if isinstance(creator_id, int) and not isinstance(creator_id, bool) and creator_id > 0
+        else None
+    )
+    return {
+        "tier": _safe_token(tier, "unknown"),
+        "kind": None if kind is None else _safe_token(kind, "unknown"),
+        "cause": _safe_token(cause, "unknown"),
+        "schedule_id": None if schedule_id is None else _safe_token(schedule_id, "invalid"),
+        "creator_id": creator,
+        "shell": False,
+    }
+
+
+def with_restricted_turn(
+    turn_integrity_json: Optional[str], record: Optional[Dict[str, Any]]
+) -> Optional[str]:
+    """``turn_integrity_json`` with ``record`` added under ``restricted_turn``,
+    beside whatever #2467 keys it already holds. No record: the input, as is,
+    so a healthy run's write stays byte-identical."""
+    if not record:
+        return turn_integrity_json
+    merged: Dict[str, Any] = {}
+    if turn_integrity_json:
+        parsed = json.loads(turn_integrity_json)
+        if not isinstance(parsed, dict):
+            raise ValueError("turn_integrity is not a JSON object")
+        merged = parsed
+    merged[RESTRICTED_TURN_KEY] = record
+    return json.dumps(merged)
 
 
 def collect_killed_bg_tasks(execution_log: Any) -> List[Dict[str, Any]]:

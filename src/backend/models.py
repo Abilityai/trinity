@@ -3044,6 +3044,9 @@ class AgentAnalyticsTimelinePoint(BaseModel):
     success_rate: Optional[float] = None
     duration_avg_ms: Optional[int] = None
     context_avg: Optional[int] = None
+    # Share of each run's own context window, averaged (0-100); null when no
+    # run that day recorded a window (trinity-enterprise#1317).
+    context_pct_avg: Optional[int] = None
     by_type: Dict[str, int] = {}
 
 
@@ -3065,6 +3068,7 @@ class AgentAnalyticsResponse(BaseModel):
     success_rate: float
     duration_ms: DurationStats
     context_avg: Optional[int] = None
+    context_pct_avg: Optional[int] = None
     by_type: List[AgentTypeTotal] = []
     buckets: List[str] = []
     timeline: List[AgentAnalyticsTimelinePoint] = []
@@ -4715,6 +4719,14 @@ class ScheduleUpdateRequest(BaseModel):
         return ScheduleCreate._normalize_delivery_email(v)
 
 
+class ScheduleRunsAsReason(BaseModel):
+    """Why a schedule's runs have the tier `runs_as` names (#4281)."""
+    # creator_owner_tier | no_recorded_creator | creator_not_owner_tier |
+    # agent_has_no_owner | creator_missing | unknown (the cause could not be read)
+    code: str
+    message: str
+
+
 class ScheduleResponse(BaseModel):
     """Response model for schedule data."""
     id: str
@@ -4749,9 +4761,50 @@ class ScheduleResponse(BaseModel):
     # and the creator's id is not exposed.
     # Defaults False: a response built without the predicate claims nothing.
     can_manage_webhook: bool = False
+    # #4281: the tier this schedule's runs get, computed live from its creator
+    # (`turn_tier_service.schedule_run_tier`). `shared_person` runs have no
+    # shell and no owner-added tools. None = not computed (a lookup failed),
+    # never a guessed `owner`.
+    runs_as: Optional[Literal["owner", "shared_person"]] = None
+    runs_as_reason: Optional[ScheduleRunsAsReason] = None
+    # Whether the caller created it. The creator's id stays unexposed.
+    created_by_you: bool = False
+    # The creator's display name, else username: only for the agent's owner
+    # tier and for an agent key that is not acting for a shared person.
+    created_by: Optional[str] = None
+    # Whether THIS caller may take the schedule over (#4281): a person at the
+    # agent's owner tier who did not create it, on a schedule whose runs are a
+    # shared person's because of its creator. Defaults False, like
+    # `can_manage_webhook`.
+    can_take_over: bool = False
 
     class Config:
         from_attributes = True
+
+
+class ScheduleReviewed(BaseModel):
+    """What a schedule's runs will do, as the person taking it over read it
+    (#4281). Every field is required, null included, and is echoed verbatim
+    from the `ScheduleResponse` the person reviewed: the take-over adopts
+    exactly this, or nothing."""
+    message: str
+    allowed_tools: Optional[List[str]]
+    model: Optional[str]
+    validation_enabled: bool
+    validation_prompt: Optional[str]
+
+
+class ScheduleTakeOverRequest(BaseModel):
+    """`POST /api/agents/{name}/schedules/{id}/take-over` (#4281).
+
+    `expected_updated_at` is the reviewed response's `updated_at`, compared as
+    an instant. `delivery` decides a delivery to another person's Workspace:
+    `clear` removes it; `keep` keeps it only when `keep_delivery_to` repeats
+    the address. A delivery to the taker's own Workspace needs neither."""
+    expected_updated_at: datetime
+    reviewed: ScheduleReviewed
+    delivery: Optional[Literal["clear", "keep"]] = None
+    keep_delivery_to: Optional[str] = None
 
 
 class ExecutionSummary(BaseModel):
@@ -5083,9 +5136,14 @@ class SetAdminPasswordRequest(BaseModel):
     # #3004: under ADMIN_PASSWORD_SOURCE=instance-id the handler accepts a blank
     # value (AWS review: no PII required); the field itself stays required.
     email: str = Field(..., max_length=254)
-    # #3004 (PROV-018): the EC2 instance ID, checked only when
+    # #3004 (PROV-018): the EC2 instance ID, or the code from an emailed setup
+    # link (trinity-enterprise#1312), checked only when
     # ADMIN_PASSWORD_SOURCE=instance-id and ignored otherwise.
     claim_code: Optional[str] = Field(None, max_length=64)
+    # trinity-enterprise#1329: the registration-terms version the person
+    # accepted on the setup page. Read only when a provider of registration
+    # terms is registered and the claim is an emailed link; ignored otherwise.
+    registration_terms_version: Optional[str] = Field(None, max_length=100)
     # Optional operator profile — all skippable; setup completes without them.
     company: Optional[str] = Field(None, max_length=200)
     name: Optional[str] = Field(None, max_length=200)
@@ -5887,6 +5945,9 @@ class FirstRunState(BaseModel):
     seeded_agents: List[str] = []
     own_agent_count: int = 0
     demo_agent: Optional[str] = None
+    # A short opaque mark of this install: the browser remembers "setup closed"
+    # against it, so a fresh install at the same address offers setup again.
+    install: Optional[str] = None
 
 
 # =============================================================================

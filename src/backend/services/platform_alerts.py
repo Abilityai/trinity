@@ -178,6 +178,10 @@ _BUILTIN_KINDS = (
     Kind("base_image_stale", "base-image-stale-", _N, CLEARS_HOOK),
     Kind("system_agent_start_failed", "base-image-stale-start-", _N, CLEARS_HOOK),
     Kind("system_agent_pull_drift", "base-image-stale-pull-", _N, CLEARS_HOOK),  # #3814
+    # #4483: one row for the whole fleet. A person's ending snoozes the same
+    # set of agents; an agent that was not in it going stale files again.
+    Kind("fleet_base_image_stale", "base-image-stale-fleet-", _N, CLEARS_HOOK,
+         escalates=_a_new_agent_failed),
     Kind("circuit_dormant", "cb-dormant-", _N, CLEARS_HOOK),
     # -- every other in-repo platform emitter -----------------------------
     Kind("skills_reconcile_refused", "skills-reconcile-", _N, CLEARS_HOOK,
@@ -210,6 +214,12 @@ _BUILTIN_KINDS = (
     # after the queue recovered carries a different marker and files.
     Kind("dispatch_queue_stalled", "queue-stall-", _D, CLEARS_HOOK,
          material_keys=("episode_started_at",)),
+    # #4281: one row per agent x creator whose enabled schedules run as a shared
+    # person. Bounded by the agent's share list (not budgeted: the cap would hide
+    # a sixth person). A person's ending is final per cause, because the
+    # condition keeps reading true for a schedule the owner decided to accept.
+    Kind("schedule_runs_restricted", "schedule-restricted-", _N, CLEARS_HOOK,
+         material_keys=("cause",), person_ending_is_final=True),
     Kind("alert_budget", "alert-budget-", _D, CLEARS_HOOK, material_keys=("filled_by",)),
     Kind("skill_not_found", "skill-not-found-", _D, CLEARS_HOOK, budgeted_type="skill_not_found"),
     Kind("effect_unguarded", "effect-unguarded-", _D, CLEARS_LIFETIME_ONLY,
@@ -413,6 +423,7 @@ _LEGACY_PARSERS: Tuple[Tuple[str, str, Callable], ...] = (
     ("skills-legacy-adoption-", "skills_legacy_adoption", _legacy_adoption),
     ("base-image-stale-start-", "system_agent_start_failed", _rx(r"(.+)-\d+")),
     ("base-image-stale-pull-", "system_agent_pull_drift", _rx(rf"(.+)-{_TS}")),
+    ("base-image-stale-fleet-", "fleet_base_image_stale", _constant("fleet")),
     ("base-image-stale-", "base_image_stale", _rx(rf"(.+)-{_TS}")),
     ("cb-dormant-", "circuit_dormant", _rx(rf"(.+)-{_TS}")),
     ("skills-reconcile-", "skills_reconcile_refused", _rx(r"(.+)-\d+")),
@@ -633,6 +644,13 @@ OBSERVED_REFUSED_AT_BUDGET = "refused_at_budget"
 OBSERVED_FAILED = "failed"
 
 _PRIORITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+def priority_rank(priority: Optional[str]) -> int:
+    """Where a priority sits on the alert ladder: low 0 < medium 1 < high 2 <
+    critical 3; anything else reads as low (#4636 — an emitter deciding
+    whether a reading outranks its pending row)."""
+    return _PRIORITY_RANK.get(priority, 0)
 
 
 def _snoozed_by(kind: Kind, ended: Optional[Mapping], priority: str, context: Mapping) -> bool:

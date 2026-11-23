@@ -413,7 +413,7 @@ class TestTheAskContractHolds:
 
 
 # ===========================================================================
-# The ent#881 rule moved: `role_addressing.can_open_agent`, the gate delegates
+# The ent#881 rule moved: `role_addressing.agent_reach`, the gate delegates
 # ===========================================================================
 
 class TestTheReachabilityRuleMoved:
@@ -422,7 +422,9 @@ class TestTheReachabilityRuleMoved:
         from services import skill_gate_service
 
         calls = []
-        monkeypatch.setattr(role_addressing, "can_open_agent",
+        # #4599: the gate reads the rule's three-way answer (`agent_reach`:
+        # yes, no, could not check); `can_open_agent` is its yes/no form.
+        monkeypatch.setattr(role_addressing, "agent_reach",
                             lambda agent_name, email: calls.append((agent_name, email)) or False)
         assert skill_gate_service._can_open("fin", "x@example.com") is False
         assert calls == [("fin", "x@example.com")]
