@@ -17,6 +17,7 @@ Behavior is preserved byte-for-byte from the former router helpers:
 The ``hide_parameters=True`` engine flag in ``db/engine.py`` (which keeps a
 DB-error traceback from leaking bound values) is unchanged.
 """
+import asyncio
 import json
 import logging
 from typing import Optional
@@ -186,7 +187,7 @@ async def persist_chat_session(
         execution_id = getattr(result, "execution_id", None)
         if execution_id:
             try:
-                db.set_execution_chat_session(execution_id, session.id)
+                await asyncio.to_thread(db.set_execution_chat_session, execution_id, session.id)
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     "[Task] Could not link execution %s to its chat session (exc=%s)",
@@ -239,7 +240,9 @@ async def post_platform_turn_reply(*, agent_name: str, session, row) -> bool:
     content = (getattr(row, "response", None) or "").strip()
     if not content or getattr(session, "agent_name", None) != agent_name:
         return False
-    db.add_chat_message(
+    # A database write: off the event loop (#4674).
+    await asyncio.to_thread(
+        db.add_chat_message,
         session_id=session.id,
         agent_name=agent_name,
         user_id=session.user_id,

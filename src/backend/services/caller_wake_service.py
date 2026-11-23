@@ -625,9 +625,10 @@ async def _post_wake_reply(wake_row: Any) -> bool:
             return False
         if not (getattr(wake_row, "response", None) or "").strip():
             return False
-        _origin, root = _delegating_turns(
-            caller, getattr(wake_row, "continues_execution_id", None))
-        session = _reply_thread(caller, root)
+        # Database reads: off the event loop (#4674).
+        _origin, root = await asyncio.to_thread(
+            _delegating_turns, caller, getattr(wake_row, "continues_execution_id", None))
+        session = await asyncio.to_thread(_reply_thread, caller, root)
         if session is None:
             return False
         claim = _begin_idempotency(_agent_scope(caller), f"caller_wake_reply:{wake_id}")
@@ -854,8 +855,10 @@ async def _claimed_wake(row, caller, callee, execution_id, verdict, idem):
     # #4537: the wake carries the turn that delegated, and is told when its
     # reply goes back to that chat. Read from the link only — the ent#1216
     # fallback names a person, not a turn.
-    turn, root = _delegating_turns(caller, origin)
-    conversation = _conversation_lines(turn, root, _reply_thread(caller, root) is not None)
+    # Database reads: off the event loop (#4674).
+    turn, root = await asyncio.to_thread(_delegating_turns, caller, origin)
+    replies_to_chat = await asyncio.to_thread(_reply_thread, caller, root) is not None
+    conversation = _conversation_lines(turn, root, replies_to_chat)
 
     try:
         result = await _dispatch_wake(
