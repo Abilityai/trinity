@@ -1,32 +1,33 @@
-"""abilityai/trinity#4536 — an ending that collides with the 15 s wake window is
+"""abilityai/trinity#4536 — an ending that collides with a running wake is
 parked and delivered, never dropped.
 
-The window (``caller_wake:{caller}:{bucket}``) is the storm bound: a cleanup
-sweep that ends hundreds of rows must cost the delegator one turn. It used to
-swallow every other ending in the window, which also swallowed the ending of a
-run the wake turn itself had started: a fast callee (answers in under 15 s)
-ended inside the window its own wake had claimed, and a delegate→wake loop
-stalled silently after a few rounds.
+The wake's claim is the storm bound: a cleanup sweep that ends hundreds of rows
+must cost the delegator one turn. It was a 15 s window key then (one hold per
+caller since #4733, ``test_4733_wake_hold.py``), and it used to swallow every
+other ending in the window, which also swallowed the ending of a run the wake
+turn itself had started: a fast callee (answers in under 15 s) ended inside the
+window its own wake had claimed, and a delegate→wake loop stalled silently
+after a few rounds.
 
 Pinned here, against the real idempotency claim (one real DB per backend) and
 an in-memory Redis:
 
-* a finished wake releases its window, so the next ending wakes at once — the
+* a finished wake releases its hold, so the next ending wakes at once — the
   reported repro, twelve fast rounds, twelve wakes;
 * an ending that lands while the wake still runs, and ended after that wake
-  claimed the window, is parked and delivered once when the wake ends — from
+  claimed, is parked and delivered once when the wake ends — from
   the wake row's own terminal, which every terminal writer reaches;
 * an ending from before the claim is covered by that wake's
   ``list_recent_executions`` and still collapses: a 300-row sweep is one wake;
 * the holder releasing between the collision and the park still delivers it;
 * Redis trouble on the park does not raise, and the drop is audited;
 * a holder cancelled by a backend stop, or closed with its loop, leaves the
-  parked ending for the wake row's terminal; a follow-on key is released, so a
-  second ending parked on the same wake is delivered; a drain wakes only the
+  parked ending for the wake row's terminal; a follow-on releases the hold, so
+  a second ending parked on the same wake is delivered; a drain wakes only the
   caller it parked for; a holder that raises or fails still delivers;
 * a finished wake covers nothing after it: a recovered run with a back-dated
-  ``completed_at``, a parked ending drained by a later window's wake, and
-  a FAILED wake in an earlier window all still wake.
+  ``completed_at`` and the ending after a FAILED wake both still wake; a later
+  ending parks behind the same running wake instead of starting another.
 
 The only stubs are the dispatch (it writes the wake row a real dispatch would),
 the container probe, the policy, and the spawn of a follow-on wake (collected,
@@ -58,9 +59,6 @@ pytestmark = pytest.mark.unit
 
 BOSS, WORKER = "zq4536-boss", "zq4536-worker"
 MISSED = "trinity:wake_missed:"
-# Mid-bucket, so nothing in a test crosses a window boundary by accident.
-NOW = 1_800_000_000 - (1_800_000_000 % _WAKE.WAKE_BUCKET_SECONDS) + 5
-
 
 @pytest.fixture
 def world(db_backend, monkeypatch):
@@ -69,6 +67,7 @@ def world(db_backend, monkeypatch):
     audits = []
     gate = {"event": None}
     held = []
+    free = {"slot": True}
 
     async def _dispatch_wake(**kwargs):
         # What `dispatch_and_await_terminal` writes before the agent runs.
@@ -83,7 +82,12 @@ def world(db_backend, monkeypatch):
         if ev is not None:
             held.append(ev)
             await ev.wait()                  # the wake turn is still running
+        # ...and it returns once that row is terminal (#4733 reads the row).
+        _end(row.id)
         return SimpleNamespace(execution_id=row.id, status="completed", error=None)
+
+    async def _free_slot(_agent):
+        return free["slot"]
 
     async def _state(_agent):
         return "running"
@@ -101,10 +105,11 @@ def world(db_backend, monkeypatch):
     monkeypatch.setattr(_WAKE, "_resolve_policy", _policy)
     monkeypatch.setattr(_WAKE, "_caller_subscribes_to", lambda *a: False)
     monkeypatch.setattr(_WAKE, "_spawn_followon", lambda coro: spawned.append(coro), raising=False)
-    monkeypatch.setattr(_WAKE, "time", SimpleNamespace(time=lambda: NOW))
+    monkeypatch.setattr(_WAKE, "_has_free_slot", _free_slot, raising=False)   # #4733
     redis = fakeredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(_WAKE, "_wake_budget_redis", lambda: redis)
-    return SimpleNamespace(wakes=wakes, spawned=spawned, audits=audits, gate=gate, held=held, redis=redis)
+    return SimpleNamespace(wakes=wakes, spawned=spawned, audits=audits, gate=gate, held=held,
+                           redis=redis, free=free)
 
 
 def _iso(dt: datetime) -> str:
@@ -184,10 +189,10 @@ async def _finish(world, holder):
     return await holder
 
 
-def test_an_ending_parked_after_the_wake_terminal_is_drained_by_the_holder(world):
-    """The wake row's terminal fanned out (nothing parked yet), then an ending
-    collides with the window the holder has not released yet. The holder's
-    own drain, after it releases, delivers it."""
+def test_an_ending_after_the_wake_terminal_wakes_before_the_holder_returns(world):
+    """The wake row's terminal fanned out (nothing parked yet) before its
+    holder returned. That terminal freed the wake's own hold (#4733), so an
+    ending now wakes at once rather than waiting for the holder."""
     async def scenario():
         world.gate["event"] = asyncio.Event()
         first = _callee_run()
@@ -198,7 +203,7 @@ def test_an_ending_parked_after_the_wake_terminal_is_drained_by_the_holder(world
         await _wake_turn_ends(world, world.wakes[0]["id"])   # drains nothing
         late = _callee_run()
         _end(late)
-        assert await _WAKE.maybe_wake_caller(late) is None   # parked
+        assert await _WAKE.maybe_wake_caller(late)           # no wake runs any more
         await _finish(world, holder)
         while world.spawned:
             await world.spawned.pop(0)
@@ -265,8 +270,10 @@ def test_the_holder_releasing_before_the_park_still_delivers(world, monkeypatch)
 
     def _set(name, value, *a, **k):
         if name.startswith(MISSED):
-            # The holder's turn ends right here: it releases its window.
+            # The holder's turn ends right here: its row is terminal and it
+            # releases its hold, all before the marker lands.
             from services import idempotency_service
+            _end(world.wakes[0]["id"])
             idempotency_service.fail(claims[0])
         return real_set(name, value, *a, **k)
 
@@ -365,22 +372,24 @@ def test_a_cancelled_holder_leaves_the_parked_ending_for_the_wake_terminal(world
 
 def test_a_second_ending_parked_after_the_follow_on_finished_is_delivered(world):
     """X parks and is delivered from the wake row's terminal; that follow-on
-    finishes; Y parks on the window the holder still holds. The holder's own
-    drain must wake for Y."""
+    finishes. Y then ends before the first holder has returned: no wake runs
+    (both rows are terminal), so Y wakes at once and is not dropped."""
     async def scenario():
         holder = await _hold_first_wake(world)
         world.gate["event"] = None                     # later wakes run straight through
         await _park_one(world)
         await _wake_turn_ends(world, world.wakes[0]["id"])
         assert len(world.wakes) == 2                   # X delivered, its wake finished
-        y = await _park_one(world)
+        y = _callee_run()
+        _end(y)
+        assert await _WAKE.maybe_wake_caller(y)
         await _finish(world, holder)
         while world.spawned:
             await world.spawned.pop(0)
         return y
 
     y = asyncio.run(scenario())
-    assert len(world.wakes) == 3, "Y was dropped on the follow-on key"
+    assert len(world.wakes) == 3, "Y was dropped"
     assert y in world.wakes[2]["message"]
 
 
@@ -391,7 +400,7 @@ def test_a_drain_wakes_only_the_caller_it_was_parked_for(world):
     ).id
     _end(other)
     woken = asyncio.run(_WAKE.maybe_wake_caller(
-        other, _key=_WAKE._follow_on_key(BOSS, "w"), _expect_caller=BOSS))
+        other, _expect_caller=BOSS))
     assert woken is None
     assert world.wakes == []
 
@@ -449,10 +458,6 @@ def test_a_holder_that_fails_still_delivers_what_was_parked(world, monkeypatch, 
                         "completed"]
 
 
-def _set_clock(monkeypatch, t):
-    monkeypatch.setattr(_WAKE, "time", SimpleNamespace(time=lambda: t))
-
-
 def test_a_recovered_run_back_dated_before_a_returned_wake_is_delivered(world, monkeypatch):
     """A retained result is written terminal minutes late with the agent's own
     finish instant as ``completed_at``. A wake for another run that ran and
@@ -465,7 +470,6 @@ def test_a_recovered_run_back_dated_before_a_returned_wake_is_delivered(world, m
         w = await _WAKE.maybe_wake_caller(other)
         assert w
         await _wake_turn_ends(world, w)
-        _set_clock(monkeypatch, NOW + 30)
         _end(slow, t0 - timedelta(seconds=300))
         await _WAKE.maybe_wake_caller(slow)
         while world.spawned:
@@ -476,42 +480,29 @@ def test_a_recovered_run_back_dated_before_a_returned_wake_is_delivered(world, m
     assert any(slow in w["message"] for w in world.wakes), "the recovered ending was dropped"
 
 
-@pytest.mark.parametrize("other_wake", ["failed", "completed"])
-def test_a_parked_ending_survives_another_wake_in_a_later_window(world, monkeypatch, other_wake):
-    """Y parks on H's running wake. In the next window Z ends and its wake
-    (failed before the agent ran, or completed) drains Y into a follow-on:
-    no wake that ran after Y ended has listed it, so Y must be delivered."""
-    fixture_dispatch = _WAKE._dispatch_wake
-    calls = []
-
-    async def _dispatch(**kw):
-        calls.append(kw)
-        if len(calls) == 2 and other_wake == "failed":
-            return SimpleNamespace(execution_id=None, status="failed", error="Agent at capacity")
-        return await fixture_dispatch(**kw)
-
-    monkeypatch.setattr(_WAKE, "_dispatch_wake", _dispatch)
-
+def test_a_later_ending_parks_behind_the_same_running_wake(world):
+    """Y parks on H's running wake; Z ends later while H still runs. Before
+    #4733 Z's own wake started beside H (the defect) and drained Y. Now Z parks
+    too (latest wins, both parks audited) and H's end delivers ONE follow-on,
+    which starts after both ended, so its listing has Y."""
     async def scenario():
         holder = await _hold_first_wake(world)
         y = await _park_one(world)
         world.gate["event"] = None
-        _set_clock(monkeypatch, NOW + 15)
         z = _callee_run()
         _end(z)
-        zw = await _WAKE.maybe_wake_caller(z)
-        while world.spawned:
-            await world.spawned.pop(0)
-        if zw:
-            await _wake_turn_ends(world, zw)
+        assert await _WAKE.maybe_wake_caller(z) is None
+        assert len(world.wakes) == 1, "a second wake started beside the running one"
         await _wake_turn_ends(world, world.wakes[0]["id"])
         await _finish(world, holder)
         while world.spawned:
             await world.spawned.pop(0)
-        return y
+        return y, z
 
-    y = asyncio.run(scenario())
-    assert any(y in w["message"].splitlines()[0] for w in world.wakes), "the parked ending was dropped"
+    y, z = asyncio.run(scenario())
+    assert [a["callee_execution_id"] for a in world.audits if a["status"] == "parked"] == [y, z]
+    assert len(world.wakes) == 2
+    assert z in world.wakes[1]["message"].splitlines()[0]
 
 
 def test_a_holder_closed_mid_wake_leaves_the_parked_ending(world):
@@ -560,9 +551,9 @@ def test_a_holder_that_raises_past_the_dispatch_still_delivers(world, monkeypatc
     assert late in world.wakes[1]["message"]
 
 
-def test_a_failed_wake_does_not_cover_a_later_window(world, monkeypatch):
-    """Every wake comes back FAILED before the agent runs (no free slot). No
-    turn listed anything, so each later window tries again."""
+def test_a_failed_wake_does_not_cover_a_later_ending(world, monkeypatch):
+    """Every wake comes back FAILED before the agent runs. No turn listed
+    anything, so each later ending tries again."""
     attempts = []
 
     async def _capacity(**kw):
@@ -576,8 +567,7 @@ def test_a_failed_wake_does_not_cover_a_later_window(world, monkeypatch):
         earlier = datetime.now(timezone.utc) - timedelta(seconds=2)
         for r in rows:
             _end(r, earlier)
-        for i, r in enumerate(rows):
-            _set_clock(monkeypatch, NOW + 15 * i)
+        for r in rows:
             await _WAKE.maybe_wake_caller(r)
             while world.spawned:
                 await world.spawned.pop(0)
