@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4674_sync_on_loop_ratchet.py",
+      "feature": "#4674",
+      "added": "2026-11-20",
+      "categories": [
+        "backend",
+        "reliability",
+        "guard"
+      ],
+      "description": "#4674: scripts/ci/check_sync_on_loop.py — sync db / Docker / HTTP / sleep calls written inside `async def` are counted per file against a baseline that may only shrink (a new file starts at zero; a paydown must lower the baseline). Pins what counts (incl. one hop through the module's own sync functions), what does not (plain def, thread hops, nested defs), and runs the ratchet on the live tree."
+    },
+    {
       "file": "unit/test_4674_loop_health.py",
       "feature": "#4674",
       "added": "2026-11-20",
