@@ -49,6 +49,52 @@ First-time setup wizard for admin password and API key configuration. On an inst
 > submit disabled until it knows whether the ID is required. Tests: `tests/unit/test_3004_setup_instance_id_claim.py`,
 > `src/frontend/tests/unit/setupPasswordClaim.spec.js`.
 >
+> **Emailed setup link (trinity-enterprise#1312, PROV-020).** A provisioner
+> writes `/data/setup-claim` as one line `email-bound:<secret>` (64 lowercase
+> hex) and emails the owner `https://<instance>/setup#claim=<code>&email=<email>`,
+> where `<code>` is `hex(HMAC-SHA256(secret, email.strip().lower()))`. The
+> sequence:
+>
+> 1. nginx serves `/setup` (and `/setup/`) from its own location: no access log,
+>    `Referrer-Policy: no-referrer`, `no-store` (`nginx-server.conf`, the
+>    header copy rendered by `render-nginx.sh`), so a query link is never
+>    logged or sent on as a `Referer`. A fragment never reaches nginx at all.
+> 2. The router guard: on a completed install, a `/setup` visit that carried
+>    link values (`utils/setupLink.js::readSetupLink`, fragment or query) goes
+>    to `/login?notice=setup-complete` with nothing of the link forwarded, and
+>    `Login.vue` shows one status line; a plain `/setup` still goes to `/login`.
+> 3. `SetupPassword.vue` reads `claim` and `email` once and calls
+>    `router.replace({ path: '/setup' })` on every install. Only on an
+>    `instance-id` install does it use them: the instance-ID field is hidden,
+>    the email is read-only when the link carried one (required either way),
+>    and the POST sends the code as `claim_code`. The code lives only in the
+>    component; `sessionStorage` holds a non-secret `setup-link-opened` flag,
+>    so a reload shows "open the link from your email again". A refused code
+>    (403 with the generic detail), an incomplete link (email without a code,
+>    or a code outside `^[A-Za-z0-9_-]{16,64}$`) or a reload renders one card
+>    in place of the form, never mentioning an instance ID; any other 403 goes
+>    straight to `/login?notice=setup-complete`.
+> 4. The backend (`routers/setup.py::_expected_claim`) derives the expected code
+>    from the request's email under the stored secret and compares it with
+>    `hmac.compare_digest` — same rate limit, same one 403, same ordering before
+>    password work as the instance-ID form. `_take_claim` re-reads the taken
+>    file and re-verifies it (a recycle between check and take is refused);
+>    restores create the claim path exclusively (`O_EXCL`) and copy the taken
+>    file in, so they never overwrite a newer claim. The bound email is stored in
+>    the same write as the password; if that write fails, setup answers a
+>    retryable 503 and nothing is written. The bound
+>    email becomes the admin's sign-in identity and the page signs straight in.
+>
+> Provisioner note: a process killed between the take and the restore leaves
+> the secret in a `setup-claim.<random>` file beside the claim, and every setup
+> is refused until the provisioner writes a new claim. A recycle should remove
+> stray `setup-claim.*` files.
+>
+> Tests: `tests/unit/test_ent1312_setup_link_claim.py` (incl. the published
+> test vector), `tests/unit/test_ent1312_setup_nginx.py`,
+> `src/frontend/tests/unit/setupPasswordLink.spec.js`,
+> `src/frontend/tests/unit/setupLinkGuard.spec.js`.
+>
 > Two consequences for the flows documented below:
 >
 > 1. `POST /api/setup/admin-password` **refuses (403) whenever a usable admin

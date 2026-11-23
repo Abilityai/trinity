@@ -2,6 +2,8 @@
   The project's Metrics card (trinity-enterprise#661 v3.1): the declared
   metrics a member picked, each as its value, a small trend and the one stale
   rule's verdict. One of the Overview's cards; the page places it (#3694).
+  trinity-enterprise#1233: a metric a milestone already shows as a target is
+  not repeated here — the card keeps the metrics tied to no milestone.
 -->
 <template>
   <BaseCard data-testid="project-metrics">
@@ -9,7 +11,10 @@
       <h2 class="flex-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Metrics</h2>
       <BaseButton v-if="canContribute" size="sm" variant="ghost" data-testid="project-metric-add" @click="metricOpen = true">Add metric</BaseButton>
     </div>
-    <p v-if="!metrics.length" class="mt-2 text-sm text-gray-600 dark:text-gray-300">
+    <p v-if="!metrics.length && onMilestones" class="mt-2 text-sm text-gray-600 dark:text-gray-300" data-testid="project-metrics-on-milestones">
+      Every metric on this project is shown on its milestone above.
+    </p>
+    <p v-else-if="!metrics.length" class="mt-2 text-sm text-gray-600 dark:text-gray-300">
       No metrics yet. {{ canContribute ? 'Add the numbers that say whether this project is working, from the metrics its agents record.' : 'Members can add the metrics its agents record.' }}
     </p>
     <ul v-else class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -64,7 +69,7 @@ import ProjectMetricModal from './ProjectMetricModal.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import { formatMetricValue, metricUnitSuffix } from '@/utils/metricFormat'
-import { trendPoints, metricStateLabel, projectErrorMessage } from './projectsUtils'
+import { trendPoints, metricStateLabel, projectErrorMessage, metricsOutsideMilestones } from './projectsUtils'
 
 const props = defineProps({
   project: { type: Object, required: true },
@@ -73,7 +78,8 @@ const props = defineProps({
 const store = useProjectsStore()
 const metricOpen = ref(false)
 const error = ref('')
-const metrics = computed(() => props.project.metrics || [])
+const metrics = computed(() => metricsOutsideMilestones(props.project.metrics || [], props.project.milestones || []))
+const onMilestones = computed(() => (props.project.metrics || []).length > 0)
 const canContribute = computed(() => props.project.can?.contribute === true && !props.project.archived_at)
 const relative = (t) => (t ? formatRelativeTime(t) : '')
 const absolute = (t) => (t ? formatLocalDateTime(t) : '')

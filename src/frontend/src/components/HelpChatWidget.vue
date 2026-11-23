@@ -1,7 +1,7 @@
 <template>
   <!-- Floating help button -->
   <button
-    v-if="!isOpen && !hideLauncher && anyChannel"
+    v-if="!embedded && !isOpen && !hideLauncher && anyChannel"
     @click="openChat"
     class="fixed bottom-6 right-6 w-14 h-14 bg-action-primary-600 hover:bg-action-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-105 focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2 z-50"
     aria-label="Open help chat"
@@ -21,15 +21,17 @@
     leave-to-class="opacity-0 translate-y-4"
   >
     <div
-      v-if="isOpen && anyChannel"
+      v-if="(isOpen || embedded) && anyChannel"
       ref="panelRef"
-      class="fixed bottom-6 right-6 w-96 max-w-[calc(100vw-3rem)] h-[32rem] max-h-[calc(100vh-6rem)] bg-white dark:bg-gray-800 rounded-xl shadow-2xl flex flex-col z-50 border border-gray-200 dark:border-gray-700"
+      :class="embedded
+        ? 'flex flex-col flex-1 min-h-0'
+        : 'fixed bottom-6 right-6 w-96 max-w-[calc(100vw-3rem)] h-[32rem] max-h-[calc(100vh-6rem)] bg-white dark:bg-gray-800 rounded-xl shadow-2xl flex flex-col z-50 border border-gray-200 dark:border-gray-700'"
       role="dialog"
       aria-label="Help chat"
       @keydown.escape="closeChat"
     >
-      <!-- Header -->
-      <div class="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-action-primary-600 rounded-t-xl">
+      <!-- Header (the host draws its own when this is embedded) -->
+      <div v-if="!embedded" class="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-action-primary-600 rounded-t-xl">
         <div class="flex items-center space-x-2">
           <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -305,6 +307,11 @@
         </div>
       </template>
     </div>
+    <p
+      v-else-if="embedded && askOnly && buildInfo"
+      class="p-4 text-sm opacity-70"
+      data-testid="ask-off"
+    >Asking the documentation is switched off on this instance.</p>
   </Transition>
 </template>
 
@@ -336,11 +343,17 @@ const tabs = [
 
 // #3446: the host asks the launcher to stand down where it would cover one of
 // the page's own controls. The open panel is unaffected.
-defineProps({
+const props = defineProps({
   hideLauncher: { type: Boolean, default: false },
+  // Drawn inside another panel as one of its tabs: no launcher, no header of
+  // its own, always showing, and it fills the space it is given.
+  embedded: { type: Boolean, default: false },
+  // Only the documentation's Ask, with no tabs: the host has its own way to
+  // send a bug, an idea or feedback.
+  askOnly: { type: Boolean, default: false },
 })
 
-const isOpen = ref(false)
+const isOpen = ref(props.embedded)
 const mode = ref('ask')
 
 // --- Ask (Q&A) state ---
@@ -373,7 +386,7 @@ const { info: buildInfo, load: loadBuildInfo } = useBuildInfo()
 // build-time flag can still turn reporting off; it can no longer turn it on.
 const docsQaEnabled = computed(() => buildInfo.value?.help?.docs_qa === true)
 const bugReportingEnabled = computed(() => bugReportingBuilt && buildInfo.value?.help?.bug_reporting === true)
-const visibleTabs = computed(() => tabs.filter((t) => (t.id === 'ask' ? docsQaEnabled.value : bugReportingEnabled.value)))
+const visibleTabs = computed(() => tabs.filter((t) => (t.id === 'ask' ? docsQaEnabled.value : !props.askOnly && bugReportingEnabled.value)))
 const anyChannel = computed(() => visibleTabs.value.length > 0)
 
 const panelRef = ref(null)
@@ -425,7 +438,7 @@ const openChat = () => {
   nextTick(() => { inputRef.value?.focus() })
 }
 
-const closeChat = () => { isOpen.value = false }
+const closeChat = () => { if (!props.embedded) isOpen.value = false }
 
 const startNewConversation = () => {
   messages.value = []

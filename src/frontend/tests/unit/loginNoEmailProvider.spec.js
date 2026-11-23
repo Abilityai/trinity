@@ -38,11 +38,13 @@ async function requestCode({ delivers }) {
 const notice = (w) => w.find('[data-testid="login-no-email-provider"]')
 
 describe('Login — an install with no email provider (#3655)', () => {
-  beforeEach(() => { window.location.hash = '' })
+  // #4603: each test asks for a code for the same address; start every one
+  // with an empty request clock.
+  beforeEach(() => { window.location.hash = ''; window.sessionStorage.clear() })
 
   it('says no email was sent, where the code is, and the other ways in', async () => {
     const w = await requestCode({ delivers: false })
-    expect(w.text()).not.toContain('We sent a 6-digit code')
+    expect(w.text()).not.toContain('a 6-digit code is on its way')
     const text = notice(w).text()
     expect(text).toContain('No email provider is configured')
     expect(text).toContain('docker compose logs backend')
@@ -62,9 +64,9 @@ describe('Login — an install with no email provider (#3655)', () => {
     expect(w.find('#password').exists()).toBe(true)
   })
 
-  it.each([true, null])('an install that delivers (or an older backend: %s) reads as today', async (delivers) => {
+  it.each([true, null])('an install that delivers (or an older backend: %s) reads as an honest maybe (#4693)', async (delivers) => {
     const w = await requestCode({ delivers })
-    expect(w.text()).toContain('We sent a 6-digit code to')
+    expect(w.text()).toContain('is registered, a 6-digit code is on its way')
     expect(notice(w).exists()).toBe(false)
   })
 

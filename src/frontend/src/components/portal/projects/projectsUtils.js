@@ -7,6 +7,7 @@
  */
 
 import { askUrgencyCompare } from '../portalInbox'
+import { formatMetricValue } from '@/utils/metricFormat'
 
 // ent#1235: the stored status keeps its values; people read Running / Stopped.
 export const STATUS_BADGE = Object.freeze({ not_started: 'neutral', active: 'success', paused: 'warning', done: 'neutral' })
@@ -37,6 +38,8 @@ export const TASK_FIELD_ERROR_CODES = Object.freeze({
   invalid_blocked_by: 'blocked_by', blocker_not_found: 'blocked_by', blocker_is_self: 'blocked_by',
   blocker_is_parent: 'blocked_by', blocker_cycle: 'blocked_by', too_many_blockers: 'blocked_by',
   done_without_claim_needs_note: 'note',
+  // trinity-enterprise#1233: the milestone a task counts toward.
+  milestone_not_found: 'milestone',
 })
 
 /** Length in CODE POINTS, which is what Python's `len` counts — `.length`
@@ -618,6 +621,7 @@ export function writeTasksView(email, view, storage = globalThis.localStorage) {
 export const LOG_KINDS = ['decision', 'deliverable', 'task', 'blocker', 'handoff', 'note']
 // `status` is written by a health update (v3.3), never offered in the add form.
 const LOG_KIND_LABEL = {
+  milestone: 'Milestone',
   decision: 'Decision', deliverable: 'Deliverable', task: 'Task', blocker: 'Blocker', handoff: 'Hand-off', note: 'Note',
   status: 'Status',
 }
@@ -1025,3 +1029,136 @@ export function refLabel(ref) {
 
 export const REFS_MAX = 10
 export const REF_TEXT_MAX = 300
+
+
+// --- trinity-enterprise#1233: the goal as milestones -----------------------------------
+// The server derives a milestone's state and reads each target's actual through
+// the platform's one stale rule; these only say what the row shows.
+
+export const MILESTONE_STATES = Object.freeze({
+  not_started: Object.freeze({ label: 'Not started', badge: 'neutral' }),
+  in_progress: Object.freeze({ label: 'In progress', badge: 'info' }),
+  reached: Object.freeze({ label: 'Reached', badge: 'success' }),
+})
+
+/** `{ key, label, badge }`; an unknown state reads as not started (never as reached). */
+export function milestoneState(m) {
+  const key = m && Object.prototype.hasOwnProperty.call(MILESTONE_STATES, m.state) ? m.state : 'not_started'
+  return { key, ...MILESTONE_STATES[key] }
+}
+
+/** A reading that is overdue (older than twice its cadence) — shown greyed, never as current. */
+export function isOverdueReading(target) {
+  return !!target && (target.stale === true || target.freshness === 'stale')
+}
+
+const RELATION = { up_good: '≥', down_good: '≤', neutral: '=' }
+
+/**
+ * The row's one number: the milestone's worst target, against its goal.
+ * `{ metric, agent, value, target, relation, unit, reading, note, greyed, met, more }`
+ * or null when the milestone has no target. `reading` is one of `current` ·
+ * `stale` · `none` (no point yet) · `inactive` (its agent left the project) ·
+ * `unknown` (the read failed). Only `current` is ever drawn as a current number.
+ */
+export function milestoneNumberLine(m) {
+  const t = m && (m.worst || (m.targets || [])[0])
+  if (!t) return null
+  const fmt = (v) => formatMetricValue(v, typeof v === 'number' ? 'gauge' : undefined)
+  let reading = 'current'
+  if (t.agent_inactive) reading = 'inactive'
+  else if (t.actual === null || t.actual === undefined) reading = t.freshness === 'unknown' ? 'unknown' : 'none'
+  else if (isOverdueReading(t)) reading = 'stale'
+  const NOTE = {
+    current: '',
+    stale: 'Stale — no new reading in over twice its cadence',
+    none: 'No reading yet',
+    inactive: 'Its agent is no longer on the project',
+    unknown: "Couldn't read the metric",
+  }
+  return {
+    metric: t.label || t.metric,
+    agent: t.agent_name,
+    value: reading === 'inactive' || reading === 'unknown' ? '—' : fmt(t.actual),
+    target: fmt(t.target),
+    relation: RELATION[t.direction] || '→',
+    unit: t.unit || '',
+    reading,
+    note: NOTE[reading],
+    greyed: reading !== 'current',
+    met: reading === 'current' ? t.met === true : null,
+    at: t.actual_at || null,
+    more: Math.max(0, (m.targets || []).length - 1),
+  }
+}
+
+/** "3 of 5 tasks done", or '' with no task under it. */
+export function milestoneTasksLine(m) {
+  const t = (m && m.tasks) || {}
+  if (!t.total) return ''
+  return `${t.done || 0} of ${t.total} ${t.total === 1 ? 'task' : 'tasks'} done`
+}
+
+/** What on this milestone waits on the viewer, in a few words, or ''. */
+export function milestoneNeedsYou(m, project) {
+  if (!m || m.state === 'reached') return ''
+  const can = (project && project.can) || {}
+  if (m.suggest_reached && can.edit === true && !project.archived_at) return 'Targets met — mark it reached?'
+  const n = (m.tasks && m.tasks.attention) || 0
+  if (n && can.contribute === true && !project.archived_at) return `${n} ${n === 1 ? 'task needs' : 'tasks need'} a look`
+  return ''
+}
+
+/** The Metrics card's tiles that no milestone already shows as a target. */
+export function metricsOutsideMilestones(metrics, milestones) {
+  const used = new Set()
+  for (const m of milestones || []) for (const t of m.targets || []) used.add(`${t.agent_name}\u0000${t.metric}`)
+  return (metrics || []).filter((x) => !used.has(`${x.agent_name}\u0000${x.name}`))
+}
+
+/** A task's milestone name, or ''. */
+export function milestoneName(milestones, id) {
+  if (!id) return ''
+  const m = (milestones || []).find((x) => x.id === id)
+  return m ? m.name : ''
+}
+
+/** The tasks the Tasks tab shows for a milestone filter: '' all, 'none' under none, else that id. */
+export function tasksForMilestone(tasks, filter) {
+  if (!filter) return tasks || []
+  const want = filter === 'none' ? null : filter
+  return (tasks || []).filter((t) => (t.milestone || null) === want)
+}
+
+/** Board lanes by milestone (in the goal's order), then the tasks under none. */
+export function milestoneLanes(tasks, milestones) {
+  const lanes = (milestones || []).map((m) => ({ key: m.id, label: m.name, rows: tasksForMilestone(tasks, m.id) }))
+  const known = new Set((milestones || []).map((m) => m.id))
+  const rest = (tasks || []).filter((t) => !t.milestone || !known.has(t.milestone))
+  lanes.push({ key: 'none', label: 'No milestone', rows: rest })
+  return lanes
+}
+
+export const MILESTONE_NAME_MAX = 200
+export const MILESTONE_REACHED_MAX = 1000
+export const MILESTONE_TARGETS_MAX = 5
+
+/** The milestone form's named errors (principle 17), `{ field: message }`. */
+export function validateMilestone(form) {
+  const errors = {}
+  const name = String(form?.name || '').trim()
+  if (!name) errors.name = 'Name the milestone, e.g. "Ten design partners live".'
+  else if ([...name].length > MILESTONE_NAME_MAX) errors.name = `Keep the name to ${MILESTONE_NAME_MAX} characters or fewer.`
+  if ([...String(form?.reached_means || '')].length > MILESTONE_REACHED_MAX) {
+    errors.reached_means = `Keep it to ${MILESTONE_REACHED_MAX} characters or fewer.`
+  }
+  const seen = new Set()
+  ;(form?.targets || []).forEach((t, i) => {
+    const key = `${t.agent_name}\u0000${t.metric}`
+    if (!t.agent_name || !t.metric) errors[`target_${i}`] = 'Pick the agent and the metric.'
+    else if (t.target === '' || t.target === null || !Number.isFinite(Number(t.target))) errors[`target_${i}`] = 'The target is a number, e.g. 10 or 2.5.'
+    else if (seen.has(key)) errors[`target_${i}`] = 'This metric is already a target of this milestone.'
+    seen.add(key)
+  })
+  return errors
+}

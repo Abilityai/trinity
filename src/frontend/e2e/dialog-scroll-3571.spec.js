@@ -13,9 +13,11 @@ import { test, expect } from '@playwright/test'
 async function openNewView(page, viewport) {
   await page.setViewportSize(viewport)
   await page.goto('/')
-  const create = page.getByRole('button', { name: /new view/i }).first()
-  await expect(create).toBeVisible({ timeout: 15000 })
-  await create.click()
+  // New system view sits in the toolbar's Systems menu, which is opened first.
+  const menu = page.getByTestId('system-views-menu')
+  await expect(menu).toBeVisible({ timeout: 15000 })
+  await menu.click()
+  await page.getByTestId('system-view-create').click()
   const dialog = page.locator('[role="dialog"][aria-modal="true"]').last()
   await expect(dialog).toBeVisible()
   return dialog

@@ -33,12 +33,22 @@
       <section class="formwrap">
         <div class="card">
           <h2>Create your admin account</h2>
-          <p class="sub">This sets up the owner of this Trinity instance.</p>
+          <p class="sub">{{ linkMode
+            ? 'Choose a password to finish setting up your instance.'
+            : 'This sets up the owner of this Trinity instance.' }}</p>
 
-          <form @submit.prevent="handleSubmit" novalidate>
+          <!-- trinity-enterprise#1312: a setup link that cannot be used names
+               the next step instead of showing a form that would be refused. -->
+          <div v-if="linkProblem" class="linkproblem" data-testid="setup-link-problem" role="alert">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+            <span>{{ LINK_PROBLEM_TEXT[linkProblem] }}</span>
+          </div>
+
+          <form v-else @submit.prevent="handleSubmit" novalidate>
             <!-- EC2 instance ID (#3004): an AWS install's first admin proves
-                 they control this server. -->
-            <div v-if="claimRequired" class="field">
+                 they control this server. An emailed setup link carries its
+                 code instead (trinity-enterprise#1312). -->
+            <div v-if="claimRequired && !linkMode" class="field">
               <div class="labrow">
                 <label for="instanceId">EC2 instance ID <span class="req">*</span></label>
                 <span v-if="claimCode.trim() && !claimValid" class="match bad">Format: i-0abc123…</span>
@@ -64,19 +74,21 @@
 
             <!-- Admin email (required; optional on an instance-ID claim, #3004) -->
             <div class="field">
-              <label for="adminEmail">Admin email <span v-if="claimRequired" class="opt">(optional)</span><span v-else class="req">*</span></label>
+              <label for="adminEmail">Admin email <span v-if="claimRequired && !linkMode" class="opt">(optional)</span><span v-else class="req">*</span></label>
               <div class="ipt">
                 <input
                   type="email"
                   id="adminEmail"
                   v-model="email"
                   :disabled="loading"
+                  :readonly="emailLocked"
+                  :aria-readonly="emailLocked ? 'true' : undefined"
                   placeholder="you@company.com"
                   autocomplete="email"
-                  :required="!claimRequired"
+                  :required="!claimRequired || linkMode"
                 />
               </div>
-              <p class="hint">{{ claimRequired
+              <p class="hint">{{ claimRequired && !linkMode
                 ? "Leave blank to sign in as admin."
                 : "You'll sign in with this email and your password." }}</p>
             </div>
@@ -160,7 +172,26 @@
               </label>
             </div>
 
-<button class="cta" type="submit" :disabled="!isValid || loading">
+            <!-- trinity-enterprise#1329: registration terms, offered by this
+                 instance on an emailed setup link only. None offered (404) →
+                 nothing here. -->
+            <div v-if="termsState === 'unavailable'" class="terms-unavailable" data-testid="registration-terms-unavailable" role="alert">
+              <span>The terms could not be loaded.</span>
+              <button type="button" class="terms-retry" @click="loadTerms">Retry</button>
+            </div>
+            <div v-else-if="termsState === 'ready'" class="terms" data-testid="registration-terms">
+              <h3 class="terms-title">{{ terms.title || 'Terms' }}</h3>
+              <!-- eslint-disable-next-line vue/no-v-html -- sanitized by renderMarkdown (DOMPurify, H-005) -->
+              <div v-if="termsHtml" class="terms-text" data-testid="registration-terms-text" tabindex="0" role="region" :aria-label="terms.title || 'Terms'" v-html="termsHtml"></div>
+              <a v-if="termsLink" class="terms-link" :href="termsLink" target="_blank" rel="noopener noreferrer">Read the full terms</a>
+              <p v-if="termsNotice" class="terms-notice" role="status">{{ termsNotice }}</p>
+              <div class="checkrow">
+                <input id="acceptRegistrationTerms" type="checkbox" v-model="termsAccepted" :disabled="loading" required />
+                <label for="acceptRegistrationTerms">I have read and accept the {{ terms.title || 'terms' }}.</label>
+              </div>
+            </div>
+
+            <button class="cta" type="submit" :disabled="!isValid || loading">
               <svg v-if="loading" class="spin" fill="none" viewBox="0 0 24 24"><circle class="o25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="o75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
               {{ loading ? 'Creating account…' : 'Create admin account & continue →' }}
             </button>
@@ -183,15 +214,30 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 import { clearSetupCache, getSetupClaimRequired } from '../router'
 import { useAuthStore } from '../stores/auth'
+import { readSetupLink, LINK_CLAIM_RE, SETUP_LINK_FLAG } from '../utils/setupLink'
 import TrinityMark from '../components/TrinityMark.vue'
+import { renderMarkdown } from '../utils/markdown'
 
 const router = useRouter()
+const route = useRoute()
 const authStore = useAuthStore()
+
+// trinity-enterprise#1312: an emailed setup link carries the setup code and the
+// admin email. Read once, then cleared from the address bar at once (whatever
+// the install), so the code is not left in the URL or the history entry. The
+// code is held only here, never stored; a reload is told to open the link again.
+const link = readSetupLink(route)
+let reopened = false
+try {
+  if (link.present) sessionStorage.setItem(SETUP_LINK_FLAG, '1')
+  else reopened = sessionStorage.getItem(SETUP_LINK_FLAG) === '1'
+} catch { /* storage unavailable: a reload then shows the typed form */ }
+if (link.present) router.replace({ path: '/setup' })
 
 // #3004: 'instance-id' when this install's first admin must give the EC2
 // instance ID, null when not. Fetched by the router guard before this page
@@ -199,6 +245,20 @@ const authStore = useAuthStore()
 // than render a form that may be missing the ID field.
 const claimMode = ref(getSetupClaimRequired())
 const claimRequired = computed(() => claimMode.value === 'instance-id')
+// Only an instance-id install takes a link; anywhere else its values are ignored.
+const linkMode = computed(() => claimRequired.value && (link.present || reopened))
+const linkRefused = ref(false)
+const linkProblem = computed(() => {
+  if (!linkMode.value) return null
+  if (linkRefused.value) return 'refused'
+  if (!link.present) return 'reopen'
+  return LINK_CLAIM_RE.test(link.claim) ? null : 'incomplete'
+})
+const LINK_PROBLEM_TEXT = {
+  refused: "This setup link isn't valid any more. Open the latest link from your email, or ask for a new one.",
+  incomplete: 'This setup link is incomplete. Open the latest link from your email, or ask for a new one.',
+  reopen: 'To finish setting up, open the link from your email again.',
+}
 onMounted(async () => {
   if (claimMode.value !== undefined) return
   try {
@@ -216,6 +276,9 @@ const claimCode = ref('')
 const claimValid = computed(() => CLAIM_RE.test(claimCode.value.trim().toLowerCase()))
 
 const email = ref('')
+// The server refuses any other address for a link, so the one it carried is fixed.
+const emailLocked = computed(() => linkMode.value && !!link.email)
+watch(emailLocked, (locked) => { if (locked) email.value = link.email }, { immediate: true })
 const password = ref('')
 const confirmPassword = ref('')
 const company = ref('')
@@ -259,9 +322,50 @@ const strengthColor = computed(() => {
   return colors[passwordStrength.value] || colors[0]
 })
 
+// trinity-enterprise#1329: registration terms on an emailed setup link. The
+// request carries nothing from the page — never the code, never the email.
+// 'none' (404, or no usable answer: the server stays the authority) | 'loading'
+// | 'ready' | 'unavailable' (503 or unreachable: Retry, submit disabled).
+const TERMS_URL = '/api/setup/registration-terms'
+const termsState = ref('none')
+const terms = ref(null)
+const termsAccepted = ref(false)
+const termsNotice = ref(null)
+const termsHtml = computed(() => (terms.value?.text ? renderMarkdown(terms.value.text) : ''))
+const termsLink = computed(() => {
+  const u = terms.value?.url
+  return typeof u === 'string' && /^https?:\/\//i.test(u.trim()) ? u.trim() : null
+})
+const termsOk = computed(() =>
+  termsState.value === 'none' || (termsState.value === 'ready' && termsAccepted.value))
+
+async function loadTerms() {
+  termsState.value = 'loading'
+  termsAccepted.value = false
+  try {
+    const res = await axios.get(TERMS_URL)
+    const data = res?.data
+    if (data && typeof data.version === 'string' && data.version) {
+      terms.value = data
+      termsState.value = 'ready'
+    } else {
+      terms.value = null
+      termsState.value = 'none'
+    }
+  } catch (e) {
+    terms.value = null
+    termsState.value = e?.response?.status === 404 ? 'none' : 'unavailable'
+  }
+}
+watch(() => linkMode.value && !linkProblem.value, (open, was) => {
+  if (open && !was) loadTerms()
+}, { immediate: true })
+
 const isValid = computed(() =>
-  claimMode.value !== undefined &&
-  (claimRequired.value ? claimValid.value && (!email.value.trim() || emailValid.value) : emailValid.value) &&
+  claimMode.value !== undefined && termsOk.value &&
+  (claimRequired.value && !linkMode.value
+    ? claimValid.value && (!email.value.trim() || emailValid.value)
+    : emailValid.value) &&
   passwordRequirements.value.every(r => r.met) && passwordsMatch.value
 )
 
@@ -280,8 +384,10 @@ async function handleSubmit() {
       company: company.value.trim() || null,
       // The opt-in sends the email, so there is nothing to consent to without one.
       consent_updates: consentUpdates.value && !!emailValue,
-      ...(claimRequired.value ? { claim_code: claimCode.value.trim() } : {}),
+      ...(claimRequired.value ? { claim_code: linkMode.value ? link.claim : claimCode.value.trim() } : {}),
+      ...(termsState.value === 'ready' ? { registration_terms_version: terms.value.version } : {}),
     })
+    try { sessionStorage.removeItem(SETUP_LINK_FLAG) } catch { /* nothing stored */ }
 
     // Clear the cache so the router knows setup is done.
     clearSetupCache()
@@ -299,9 +405,25 @@ async function handleSubmit() {
       (await authStore.loginWithCredentials(identity, password.value))
     router.push(signedIn ? '/' : '/login')
   } catch (e) {
-    if (e.response?.status === 403 && e.response?.data?.detail === CLAIM_MISMATCH) {
-      // A wrong instance ID: stay here so it can be corrected.
-      error.value = CLAIM_MISMATCH
+    const code = e.response?.data?.detail?.code
+    if (code === 'registration_terms_changed') {
+      await loadTerms()
+      termsNotice.value = 'The terms have changed since you opened this page. Please read and accept the current version.'
+    } else if (code === 'registration_terms_required') {
+      termsAccepted.value = false
+      error.value = 'Please accept the terms to continue.'
+    } else if (code === 'registration_terms_unavailable') {
+      terms.value = null
+      termsAccepted.value = false
+      termsState.value = 'unavailable'
+    } else if (e.response?.status === 403 && e.response?.data?.detail === CLAIM_MISMATCH) {
+      // A refused link (replaced, used, or another email) cannot be corrected
+      // here: say to use the latest one. A wrong instance ID stays editable.
+      if (linkMode.value) linkRefused.value = true
+      else error.value = CLAIM_MISMATCH
+    } else if (e.response?.status === 403 && linkMode.value) {
+      error.value = 'This instance is already set up.'
+      router.push({ path: '/login', query: { notice: 'setup-complete' } })
     } else if (e.response?.status === 403) {
       // Setup already completed — endpoint self-disabled. Send them to login.
       error.value = 'Setup has already been completed.'
@@ -438,8 +560,23 @@ async function handleSubmit() {
 .cta .spin{width:18px;height:18px;animation:rot .8s linear infinite}
 .cta .spin .o25{opacity:.25}.cta .spin .o75{opacity:.75}
 @keyframes rot{to{transform:rotate(360deg)}}
+.linkproblem{display:flex;gap:10px;align-items:flex-start;padding:4px 0 8px;font-size:13px;line-height:1.5;color:var(--ink)}
+.linkproblem svg{width:18px;height:18px;color:var(--indigo-400);flex:none;margin-top:1px}
 .secnote{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:12px;font-size:11px;color:var(--muted2)}
 .secnote svg{width:13px;height:13px;color:var(--indigo-400);flex:none}
+.terms{margin-top:14px;padding-top:12px;border-top:1px solid var(--g700)}
+.terms-title{margin:0 0 8px;font-size:13px;font-weight:600;color:var(--ink)}
+.terms-text{max-height:180px;overflow-y:auto;overscroll-behavior:contain;background:var(--g900);border:1px solid var(--g700);border-radius:10px;padding:10px 12px;font-size:12px;line-height:1.5;color:var(--muted);overflow-wrap:anywhere}
+.terms-text:focus-visible,.terms-retry:focus-visible,.terms-link:focus-visible{outline:2px solid var(--indigo-500);outline-offset:2px}
+.terms-text :deep(h1),.terms-text :deep(h2),.terms-text :deep(h3){font-size:12.5px;margin:8px 0 4px;color:var(--ink)}
+.terms-text :deep(p),.terms-text :deep(ul),.terms-text :deep(ol){margin:0 0 6px}
+.terms-text :deep(a),.terms-link{color:var(--indigo-400)}
+.terms-link{display:inline-block;font-size:12px;margin:8px 0 2px}
+.terms-notice{font-size:12px;color:var(--ink);margin:8px 0 0}
+.terms .checkrow{margin-top:10px}
+.terms-unavailable{display:flex;gap:10px;align-items:center;justify-content:space-between;margin-top:14px;font-size:12.5px;color:var(--ink);flex-wrap:wrap}
+.terms-retry{background:transparent;border:1px solid var(--g700);border-radius:8px;padding:5px 12px;font-size:12px;color:var(--ink);cursor:pointer}
+.terms-retry:hover{border-color:var(--indigo-500)}
 .footnote{text-align:center;font-size:11.5px;color:var(--muted2);margin-top:10px;line-height:1.5}
 .footnote code{background:var(--g800);padding:1px 5px;border-radius:4px;color:#cbd2e3;font-size:11px}
 

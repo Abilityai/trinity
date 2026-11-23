@@ -431,6 +431,14 @@ export const useAuthStore = defineStore('auth', {
           expiresInSeconds: response.data.expires_in_seconds
         }
       } catch (error) {
+        // #4603: over the shared per-address budget. Not an access failure:
+        // the page shows the sentence beside the form, not the "Access Denied" card.
+        if (error.response?.status === 429) {
+          const detail = typeof error.response.data?.detail === 'string'
+            ? error.response.data.detail
+            : 'Too many sign-in code requests. Try again in 10 minutes.'
+          return { success: false, overBudget: true, error: detail }
+        }
         console.error('Request email code failed:', error)
         let detail = error.response?.data?.detail || 'Failed to send verification code'
         if (detail === 'email_code_disabled') detail = await this._emailCodeTurnedOff()

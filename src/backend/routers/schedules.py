@@ -49,6 +49,7 @@ from database import db, Schedule, ScheduleCreate, ScheduleExecution
 from services import dispatch_admission_service, skill_gate_map_service
 from services import execution_attribution  # ent#1105
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from utils import request_memo
 from utils.public_url import public_base_url
 from services.schedule_validation import (
     ScheduleValidationError,
@@ -194,7 +195,11 @@ def _schedule_response(schedule, agent_name: str, current_user: User) -> Schedul
 async def list_agent_schedules(name: AuthorizedAgent, current_user: User = Depends(get_current_user)):
     """List all schedules for an agent."""
     schedules = db.list_agent_schedules(name)
-    return [_schedule_response(s, name, current_user) for s in schedules]
+    # #4672: `can_manage_webhook` asks the caller's tier on this agent once per
+    # schedule, and the answer is the same for every row. One memo scope: the
+    # predicate runs per row as before and reads the user, owner and share once.
+    with request_memo.scope():
+        return [_schedule_response(s, name, current_user) for s in schedules]
 
 
 _AGENT_THIRD_PARTY = {

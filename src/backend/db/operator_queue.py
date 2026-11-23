@@ -26,6 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from .engine import get_engine, make_insert
 from .tables import operator_queue
 from .queue_mentions import not_a_tag_clause
+from utils import request_memo
 from utils.helpers import utc_now_iso, iso_cutoff, parse_iso_timestamp, to_utc_iso
 
 logger = logging.getLogger(__name__)
@@ -1065,6 +1066,7 @@ class OperatorQueueOperations:
         _note_commit_lag(now)
         return {"batch_id": batch_id, "rows": [self._row_to_item(r) for r in rows]}
 
+    @request_memo.memoized_method
     def get_item(self, item_id: str) -> Optional[Dict]:
         """Get a single queue item by ID."""
         stmt = select(*self._SELECT_COLS).where(operator_queue.c.id == item_id)
@@ -1074,6 +1076,24 @@ class OperatorQueueOperations:
         if not row:
             return None
         return self._row_to_item(row)
+
+    def get_items(self, item_ids) -> Dict[str, Optional[Dict]]:
+        """`{id: item or None}` in ONE query (#4671) — the batch form of
+        `get_item`. Inside a `request_memo.scope()` it also answers the per-id
+        read for the rest of the scope, so a list resolves the asks its rows
+        link to (`replaces` / `replaced_by`) once instead of per row."""
+        ids = [i for i in dict.fromkeys(item_ids or []) if isinstance(i, str) and i]
+        found: Dict[str, Dict] = {}
+        if ids:
+            stmt = select(*self._SELECT_COLS).where(operator_queue.c.id.in_(ids))
+            with get_engine().connect() as conn:
+                for row in conn.execute(stmt).mappings():
+                    item = self._row_to_item(row)
+                    found[item["id"]] = item
+        out = {i: found.get(i) for i in ids}
+        for item_id, item in out.items():
+            self.get_item.prime(item_id, value=item)
+        return out
 
     def get_item_for_agent_by_request_id(self, agent_name: str, request_id: str) -> Optional[Dict]:
         """One agent's ask by the id the AGENT chose (trinity-enterprise#611).

@@ -225,23 +225,13 @@ describe('the transcript block — grouped by call id, never by an opener row', 
     expect(items.map((i) => i.kind)).toEqual(['message', 'message', 'message', 'voice-call'])
   })
 
-  it('says when the window’s ceiling cut the old end of the thread (#2694)', () => {
-    // The read is a window of typed turns under a row ceiling; a thread that
-    // silently starts mid-call is the very symptom the window fix removes.
-    const src = stripComments(CONVERSATION)
-    expect(src).toContain('data-testid="portal-history-truncated"')
-    expect(src).toMatch(/v-if="historyTruncated"/)
-    expect(src).toContain('historyTruncated.value = truncated === true')
-  })
-
+  // The window's cut (#2694) and the store's `limit`/`before` params are proven
+  // by mounting/calling in `portalThreadEarlier.mount.spec.js` (trinity-enterprise#594).
   it('polls for the reply with the narrow read, never the window (#2694)', () => {
     const src = stripComments(CONVERSATION)
     expect(src).toContain('{ limit: REPLY_POLL_ROWS }')
     expect(src).toContain('replyBaseline(')
     expect(src).not.toContain('persistedAssistantCount')
-    // the store threads `limit` through as a query param
-    const store = read('../../src/stores/clientPortal.js')
-    expect(store).toContain('if (limit) params.limit = limit')
   })
 
   it('labels a call by rounded minutes, never under one, and says when the cap ended it', () => {

@@ -181,8 +181,9 @@ resolves to its owner carrying the owner's role — can no longer traverse the W
 as `is_platform=True` (it could previously read the owner's threads with agents the
 calling agent holds no `agent_permissions` edge to, and this route would have made that
 one call). User-scoped keys, `scope='system'` and portal session tokens are unaffected;
-there is no legitimate agent caller of this surface (no MCP tool targets it, no agent
-image calls it). Since trinity-enterprise#611 `scope='system'` keeps that read breadth but is
+there is no legitimate agent caller of this surface. No agent image calls it, and its
+one MCP caller, the project tools (`tools/projects.ts`), reaches it only with a person's
+own user-scoped key, which resolves here to that person. An agent key is refused. Since trinity-enterprise#611 `scope='system'` keeps that read breadth but is
 not a person: `PortalPrincipal.is_person` is False and the ask answer refuses it (403
 `person_required`), as the operator respond route does.
 
@@ -419,7 +420,10 @@ since trinity#2694 the history window is counted in **typed turns** (the newest 
 spoken rows of the calls among them riding along, under a row ceiling that reports
 `truncated`), so a call can no longer push the typed turns before it off the screen; the
 reply poll reads `?limit=N` (row semantics) and finds the reply by identity, never by
-count. The agent's next typed turn is told what was said: a resumed turn is prefixed with
+count. Since trinity-enterprise#594 the window pages: `?before=<created_at>|<id>` (a read's
+`next_before`) returns the next OLDER window, compared as stored strings against the read's own
+ORDER BY, and `has_earlier` (a probe below the oldest row, not the ceiling flag) drives "Show
+earlier", prepended under `useStickToBottom.holdPosition`; `before` never combines with `limit`. The agent's next typed turn is told what was said: a resumed turn is prefixed with
 the platform-written rows since its last typed reply (`get_platform_rows_since_last_reply`
 → `_format_voice_delta`), the cold replay carries the same rows in the same form under one
 24k spoken-char budget, and the two are mutually exclusive — a call is refused (409) while a

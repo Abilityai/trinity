@@ -3,6 +3,7 @@ import { setBaseTitle } from '@/utils/tabTitle'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { isWorkspaceOnlyRole, landingAfterSignIn, operatorRouteRedirect } from '../utils/workspaceOnly'
+import { readSetupLink } from '../utils/setupLink'
 import { loginLocation } from '../utils/platformSession'
 import { useSessionsStore } from '../stores/sessions'
 import { useAgentsStore } from '../stores/agents'
@@ -434,7 +435,9 @@ router.beforeEach(async (to, from) => {
   // the one route the block skipped. Navigating straight to /setup rendered the
   // full wizard on a completed install; only the backend 403 stopped a submit.
   if (to.meta.isSetup && (await checkSetupStatus())) {
-    return '/login'
+    // trinity-enterprise#1312: a used setup link says why it landed here. The
+    // link's values are never forwarded; every other visit is unchanged.
+    return readSetupLink(to).present ? { path: '/login', query: { notice: 'setup-complete' } } : '/login'
   }
 
   // Check setup status for login and protected routes
