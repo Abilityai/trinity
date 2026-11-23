@@ -42,12 +42,13 @@ What is counted — CANDIDATES, by reading the code, never by running it:
   counted the same as a fleet-wide Docker listing. The event-loop probe
   (`services/loop_health.py`) says which ones actually stall a worker.
 
-The helper names live in ONE place (`BLOCKING` below) so the weekly
-`/code-health` scan and this guard read the same list.
+The helper names live in ONE place (`BLOCKING` below); anything else that wants
+the list should import it from here rather than keep a second copy.
 
 Usage:
     python scripts/ci/check_sync_on_loop.py                 # check against the baseline
-    python scripts/ci/check_sync_on_loop.py --write         # regenerate the baseline
+    python scripts/ci/check_sync_on_loop.py --write         # regenerate after a paydown
+    python scripts/ci/check_sync_on_loop.py --write --allow-growth   # accept named increases
     python scripts/ci/check_sync_on_loop.py --report        # counts + top files, no check
 
 Pure stdlib; parses, never imports.
@@ -69,7 +70,7 @@ BASELINE = Path(__file__).resolve().parent / "sync_on_loop_baseline.json"
 # Alembic revisions run at boot, before the loop serves anything.
 SKIP_DIRS = ("enterprise", "migrations", "__pycache__")
 
-# The one list of blocking callables (shared with `/code-health`).
+# The one list of blocking callables.
 BLOCKING = {
     # receiver names whose every method call is a sync db read/write
     "db_receivers": ("db", "core_db", "_db"),
@@ -262,7 +263,10 @@ def report(scan: Dict[str, list], top: int = 10) -> str:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--write", action="store_true", help="regenerate the baseline")
+    parser.add_argument("--write", action="store_true",
+                        help="regenerate the baseline (refuses if any file's count grew)")
+    parser.add_argument("--allow-growth", action="store_true",
+                        help="with --write: accept the increases, each printed by name")
     parser.add_argument("--report", action="store_true", help="print counts and the top files")
     parser.add_argument("--json", action="store_true", help="with --report: machine-readable")
     args = parser.parse_args(argv)
@@ -276,11 +280,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(report(scan))
         return 0
     if args.write:
-        write_baseline(current)
+        # A regeneration must not be a way to wave new blocking calls through:
+        # it lowers entries freely, and raises one only when asked to, by name.
+        grew = [p for p in compare(current, load_baseline(BASELINE)) if p.startswith("GREW")] \
+            if BASELINE.exists() else []
+        if grew:
+            print("\n".join(grew))
+            if not args.allow_growth:
+                print("\nThe baseline was NOT written: the counts above grew. Remove the "
+                      "calls, or accept them by name with --write --allow-growth.")
+                return 1
+        write_baseline(current, BASELINE)
         print(f"baseline written: {sum(current.values())} candidates in {len(current)} files")
         return 0
 
-    problems = compare(current, load_baseline())
+    problems = compare(current, load_baseline(BASELINE))
     if problems:
         print("\n".join(problems))
         print("\nA sync db / Docker / HTTP / sleep call inside `async def` blocks the whole "

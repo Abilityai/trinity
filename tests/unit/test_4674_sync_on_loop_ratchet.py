@@ -143,6 +143,55 @@ def live_scan():
     return guard.scan_tree()
 
 
+class TestWrite:
+    """`--write` lowers entries freely; it raises one only when told to."""
+
+    @pytest.fixture
+    def rig(self, tmp_path, monkeypatch):
+        baseline = tmp_path / "baseline.json"
+        monkeypatch.setattr(guard, "BASELINE", baseline)
+        state = {"counts": {}}
+        monkeypatch.setattr(guard, "scan_tree", lambda: {
+            path: [(1, "f", "db")] * n for path, n in state["counts"].items()})
+        guard.write_baseline({"a.py": 3, "b.py": 2}, baseline)
+
+        def run(counts, *flags):
+            state["counts"] = counts
+            return guard.main(["--write", *flags])
+
+        return run, lambda: guard.load_baseline(baseline)
+
+    def test_a_paydown_is_written(self, rig):
+        run, stored = rig
+        assert run({"a.py": 1, "b.py": 2}) == 0
+        assert stored() == {"a.py": 1, "b.py": 2}
+
+    def test_growth_is_refused_and_nothing_is_written(self, rig, capsys):
+        run, stored = rig
+        assert run({"a.py": 4, "b.py": 1}) == 1
+        assert stored() == {"a.py": 3, "b.py": 2}, "not even the paydown beside it"
+        out = capsys.readouterr().out
+        assert "GREW  a.py: 4" in out and "--allow-growth" in out
+
+    def test_a_new_file_with_calls_is_growth_too(self, rig):
+        run, stored = rig
+        assert run({"a.py": 3, "b.py": 2, "new.py": 1}) == 1
+        assert "new.py" not in stored()
+
+    def test_growth_is_accepted_by_name_when_asked(self, rig, capsys):
+        run, stored = rig
+        assert run({"a.py": 4, "b.py": 2}, "--allow-growth") == 0
+        assert stored() == {"a.py": 4, "b.py": 2}
+        assert "GREW  a.py: 4" in capsys.readouterr().out
+
+    def test_a_first_baseline_can_be_written(self, rig, tmp_path, monkeypatch):
+        run, _ = rig
+        fresh = tmp_path / "none-yet.json"
+        monkeypatch.setattr(guard, "BASELINE", fresh)
+        assert run({"a.py": 5}) == 0
+        assert guard.load_baseline(fresh) == {"a.py": 5}
+
+
 class TestTheLiveTree:
     def test_the_scan_finds_the_class_it_exists_for(self, live_scan):
         """Not a pin on any one function — those are what #4674 fixes, and a
