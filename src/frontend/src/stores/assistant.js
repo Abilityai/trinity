@@ -760,15 +760,29 @@ export const useAssistantStore = defineStore('assistant', {
     /**
      * Whether the credential a field asks for is set already, so the field can
      * say that sending replaces it. `{ set: true | false | null }`,
-     * never the value; null when it cannot be read.
+     * never the value; null when it cannot be read. A 422 is the instance's
+     * own policy refusing the name (or agent) outright: `{ refused: words }`,
+     * so the field closes before anyone types a secret Save would refuse.
      */
     async credentialState(card) {
       try {
         const { data } = await api.get(`${BASE}/credential`, { params: { name: card.name, ...(card.agent ? { agent: card.agent } : {}) } })
         return data || null
-      } catch {
+      } catch (error) {
+        if (error?.response?.status === 422) return { refused: words(error, "It can't be set from here.") }
         return null
       }
+    },
+
+    /**
+     * Close a credential field the instance refused by name. No value was
+     * typed and no turn is sent: the card says why, and nothing else changes.
+     */
+    refuseCredential(messageId, cardId, reason) {
+      const entry = this.messages.find((m) => m.id === messageId)?.cards?.find((c) => c.id === cardId)
+      if (!entry || entry.card.action !== 'credential' || entry.state !== 'open') return
+      entry.state = 'refused'
+      entry.reason = reason
     },
 
     /**

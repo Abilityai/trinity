@@ -18,6 +18,7 @@ const calls = []
 let turns
 let credentialSet
 let refuse
+let refuseState
 
 vi.mock('@/api', () => {
   const respond = (method, url, body, config) => {
@@ -29,6 +30,7 @@ vi.mock('@/api', () => {
       return turns.shift() || { status: 'final', conversation_id: 'c1', text: 'Thanks.', cards: [], allowance: ALLOWANCE }
     }
     if (url === '/api/enterprise/assistant/credential' && method === 'get') {
+      if (refuseState) throw { response: { status: refuseState.status, data: { detail: refuseState.detail } } }
       return { agent: config?.params?.agent ?? null, name: config?.params?.name, set: credentialSet, use: '' }
     }
     if (url === '/api/enterprise/assistant/credential' && method === 'post') {
@@ -87,6 +89,7 @@ describe('assistant credential field', () => {
     turns = []
     credentialSet = false
     refuse = null
+    refuseState = null
     localStorage.clear()
     sessionStorage.clear()
     setActivePinia(createPinia())
@@ -179,5 +182,27 @@ describe('assistant credential field', () => {
   it('a card that carries anything but a name, a reason and a known agent is not shown', async () => {
     await openAndAsk({ ...ASK, value: VALUE })
     expect(wrapper.find('[data-testid="assistant-credential"]').exists()).toBe(false)
+  })
+
+  it('a name the instance refuses closes the card with its words, shows no field and sends no turn', async () => {
+    refuseState = { status: 422, detail: { code: 'invalid_credential_name',
+      message: "An agent's credential is set by a variable name like SERVICE_API_KEY, and this one cannot be set from here (reserved)." } }
+    const card = { action: 'credential', name: 'TRINITY_MCP_API_KEY', why: 'Scout calls the platform.', agent: 'scout' }
+    await openAndAsk(card)
+    const turnsBefore = posted(TURN).length
+    expect(wrapper.find('[data-testid="assistant-credential-input"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="assistant-credential-save"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="assistant-credential-outcome"]').text())
+      .toBe("TRINITY_MCP_API_KEY can't be set from here: An agent's credential is set by a variable name like SERVICE_API_KEY, and this one cannot be set from here (reserved). Nothing was stored.")
+    await flushPromises()
+    expect(posted(TURN).length).toBe(turnsBefore)
+    expect(posted(CRED).length).toBe(0)
+  })
+
+  it('a lookup that cannot answer (not a refusal) still opens the field', async () => {
+    refuseState = { status: 502, detail: { code: 'agent_unreachable', message: 'The agent is not running.' } }
+    await openAndAsk()
+    expect(wrapper.get('[data-testid="assistant-credential-input"]').attributes('type')).toBe('password')
+    expect(wrapper.find('[data-testid="assistant-credential-replaces"]').exists()).toBe(false)
   })
 })

@@ -21,12 +21,13 @@
       In the assistant's words: “{{ entry.card.why }}”
     </p>
     <p
-      v-if="isOpen && current === true"
+      v-if="isOpen && checked && current === true"
       class="text-[12.5px] text-gray-900 dark:text-gray-100"
       data-testid="assistant-credential-replaces"
     >{{ entry.card.name }} is already set on {{ where }}. Saving replaces it; the current value is never shown.</p>
 
-    <template v-if="isOpen">
+    <!-- The field opens only once the instance has said it may take this name. -->
+    <template v-if="isOpen && checked">
       <label :for="inputId" class="sr-only">{{ entry.card.name }}</label>
       <div class="flex items-center gap-2">
         <BaseInput
@@ -76,7 +77,7 @@
       </div>
     </template>
     <p
-      v-else
+      v-else-if="!isOpen"
       class="text-[12.5px] font-medium text-gray-900 dark:text-gray-100"
       data-testid="assistant-credential-outcome"
     >{{ outcome }}</p>
@@ -105,11 +106,15 @@ const value = ref('')
 const revealed = ref(false)
 const error = ref('')
 const current = ref(null)     // whether it is set already: true / false / null (unknown)
+const checked = ref(false)    // the instance has answered whether it takes this name
 
 const where = computed(() => credentialWhere(props.entry.card))
 const running = computed(() => props.entry.state === 'running')
 const isOpen = computed(() => ['open', 'running'].includes(props.entry.state))
 const outcome = computed(() => {
+  if (props.entry.state === 'refused') {
+    return `${props.entry.card.name} can't be set from here: ${props.entry.reason} Nothing was stored.`
+  }
   if (props.entry.state === 'done') {
     return props.entry.reason === 'replaced'
       ? `${props.entry.card.name} replaced on ${where.value}.`
@@ -124,7 +129,12 @@ watch(value, (v) => { if (v) error.value = '' })
 onMounted(async () => {
   if (!isOpen.value) return
   const state = await store.credentialState(props.entry.card)
+  if (state?.refused) {
+    store.refuseCredential(props.messageId, props.entry.id, state.refused)
+    return
+  }
   current.value = state ? state.set : null
+  checked.value = true
 })
 
 async function submit() {
