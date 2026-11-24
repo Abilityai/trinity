@@ -1161,10 +1161,14 @@ async def maybe_wake_caller(
     if not execution_id:
         return None
 
+    # Database reads and the claim below run off the event loop (#4674): this
+    # hook runs for every terminal, and a 300-row sweep runs it 300 times.
     try:
-        row = _read_row(execution_id)
+        row = await asyncio.to_thread(_read_row, execution_id)
     except Exception as e:  # noqa: BLE001 — fail-open on the billed terminal path
-        logger.debug("ent#1102: get_execution(%s) failed: %s", execution_id, e)
+        # Warning, not debug: an unread row is an ending nobody is woken for.
+        logger.warning("ent#1102: get_execution(%s) failed (%s); no wake", execution_id,
+                       type(e).__name__)
         return None
     if row is None:
         return None
@@ -1219,7 +1223,7 @@ async def maybe_wake_caller(
         return None
 
     terminal_status = getattr(row, "status", None)
-    if _caller_subscribes_to(caller, callee, terminal_status):
+    if await asyncio.to_thread(_caller_subscribes_to, caller, callee, terminal_status):
         # AC 6: the emit is already dispatching a turn on this caller for this
         # very terminal. One ending, one turn.
         return None
@@ -1238,7 +1242,7 @@ async def maybe_wake_caller(
     scope = _agent_scope(caller)
     key = _hold_key(caller)
     try:
-        idem = _claim_hold(scope, key, caller)
+        idem = await asyncio.to_thread(_claim_hold, scope, key, caller)
     except Exception:  # noqa: BLE001
         logger.exception("ent#1102: idempotency begin failed — dispatching anyway")
 
@@ -1255,7 +1259,7 @@ async def maybe_wake_caller(
             "ent#1102: %s is being woken — no second wake for %s", caller, execution_id,
         )
         return None
-    if idem is not None and _wake_live(caller):
+    if idem is not None and await asyncio.to_thread(_wake_live, caller):
         # #4733: the hold is free, but a wake row of this caller still runs (a
         # holder whose wait gave up first). The row is the fact; park for it.
         _fail_idempotency(idem)
@@ -1305,9 +1309,9 @@ async def _claimed_wake(row, caller, callee, execution_id, verdict, idem):
                      policy_source=verdict.source, limit=capped_at)
         return None
 
-    ask_ids = _pending_ask_ids(execution_id)
+    ask_ids = await asyncio.to_thread(_pending_ask_ids, execution_id)
     callee_depth = getattr(row, "chain_depth", None)
-    chain_depth = _standing_depth(caller, callee_depth)
+    chain_depth = await asyncio.to_thread(_standing_depth, caller, callee_depth)
     # ent#1225: the wake continues the caller's turn that delegated, and is
     # rated as it. ent#1216 is the fallback for a callee row with no link: an
     # owner's delegation wakes as the owner's turn, every other one as nobody.
