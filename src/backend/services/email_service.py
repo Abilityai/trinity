@@ -7,6 +7,7 @@ Supports multiple providers:
 - sendgrid: SendGrid API
 """
 import asyncio
+import os
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -23,6 +24,11 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+def _console_body_allowed() -> bool:
+    """Read per send, so a test or an operator's restart-free change applies."""
+    return os.getenv("EMAIL_CONSOLE_LOG_BODY", "").strip().lower() in ("1", "true", "yes", "on")
+
 
 # Socket timeout for each SMTP connect/read (#3637). Without it a slow or
 # unreachable server holds the send thread until the OS gives up on the socket.
@@ -81,6 +87,21 @@ class EmailService:
             settings_service.get_email_from_address(),
         )
 
+    def code_is_logged(self) -> bool:
+        """Is a sign-in code readable in the backend log on this install?
+
+        Only when an operator chose the `console` provider AND asked for mail
+        bodies to be printed (`EMAIL_CONSOLE_LOG_BODY`, a development setting).
+        Everywhere else a code that was not delivered is not written anywhere.
+        The Login page reads this (via `GET /api/auth/mode`) so it never sends
+        someone to the log for a code that is not there.
+        """
+        try:
+            provider, _, _ = self._runtime_config()
+        except Exception:  # noqa: BLE001 — copy only; never fail the mode read
+            return False
+        return provider == "console" and _console_body_allowed()
+
     def can_deliver(self) -> bool:
         """Can this install deliver an email right now, by a provider of its own
         or through a registered relay?"""
@@ -114,10 +135,11 @@ class EmailService:
         """Can a provider of this install's own deliver an email right now? (#3655)
 
         False when the provider resolved per send is `console`, unknown, or
-        missing what it needs — every one of those falls back to printing the
-        message to the backend log while the send reports success. The Login
-        page reads it (install-level, via `GET /api/auth/mode`) to stop saying
-        "we sent a code" when nothing was sent. An unreadable config answers
+        missing what it needs. None of those sends anything: `console` logs
+        who and what (the body only when `EMAIL_CONSOLE_LOG_BODY` is set), and
+        a provider missing its configuration reports the mail as not sent. The
+        Login page reads it (install-level, via `GET /api/auth/mode`) to stop
+        saying "we sent a code" when nothing was sent. An unreadable config answers
         True, so the page behaves exactly as it did before.
         """
         try:
@@ -162,8 +184,8 @@ class EmailService:
         if relayed is not None:
             if not relayed:
                 # Say it was not sent, and nothing more: a sign-in code written to the log is one
-                # hop from whoever reads the logs. (The `console` provider prints codes because an
-                # operator chose it; a relay that refused is not that choice.)
+                # hop from whoever reads the logs. (The `console` provider prints one only when a
+                # developer set EMAIL_CONSOLE_LOG_BODY; a relay that refused is not that choice.)
                 logger.warning("Verification code not sent: the mail relay refused or did not answer.")
             return relayed
 
@@ -205,9 +227,7 @@ class EmailService:
             elif provider == "resend":
                 return await self._send_resend(to_email, subject, body, html_body, resend_key, from_address)
             else:
-                logger.error(f"Unknown email provider: {provider}")
-                # Fall back to console
-                return self._send_console(to_email, subject, body)
+                return self._not_sent(to_email, subject, f"unknown email provider {provider!r}")
         except Exception as e:
             logger.error(f"Failed to send email to {to_email}: {e}")
             return False
@@ -341,17 +361,34 @@ If you didn't request this code, you can safely ignore this email.
         return await self.send_email(to_email, subject, body, html_body=html_body)
 
     def _send_console(self, to_email: str, subject: str, body: str) -> bool:
-        """Print email to console (development mode)."""
-        logger.info(f"=" * 60)
-        logger.info(f"EMAIL (console mode)")
+        """The `console` provider: an operator chose to send no mail.
+
+        Who and what is logged; the BODY is not. A body carries sign-in codes,
+        invite links and whatever an agent wrote, and the backend's log is read
+        by more than the person the mail was for (the container log, the log
+        files, anything they are shipped to). On a development machine, set
+        `EMAIL_CONSOLE_LOG_BODY=true` to print it.
+        """
+        logger.info("=" * 60)
+        logger.info("EMAIL (console mode)")
         logger.info(f"To: {to_email}")
         logger.info(f"Subject: {subject}")
-        logger.info(f"-" * 60)
-        logger.info(body)
-        logger.info(f"=" * 60)
-        print(f"\n[EMAIL to {to_email}] Subject: {subject}")
-        print(f"Body: {body}\n")
+        logger.info("-" * 60)
+        if _console_body_allowed():
+            logger.info(body)
+        else:
+            logger.info("(body not logged: set EMAIL_CONSOLE_LOG_BODY=true on a development machine to print it)")
+        logger.info("=" * 60)
         return True
+
+    @staticmethod
+    def _not_sent(to_email: str, subject: str, why: str) -> bool:
+        """A provider that is configured but cannot send. The mail is NOT
+        delivered and the send says so: nothing is printed in its place, least
+        of all the body. (`can_deliver` already reports this state to the UI.)"""
+        logger.error("Email not sent to %s (subject: %s): %s. The message body is not logged.",
+                     to_email, subject, why)
+        return False
 
     def _send_smtp(
         self,
@@ -363,9 +400,8 @@ If you didn't request this code, you can safely ignore this email.
     ) -> bool:
         """Send email via SMTP."""
         if not all([SMTP_HOST, SMTP_USER, SMTP_PASSWORD]):
-            logger.error("SMTP configuration incomplete. Set SMTP_HOST, SMTP_USER, SMTP_PASSWORD")
-            # Fall back to console in development
-            return self._send_console(to_email, subject, body)
+            return self._not_sent(to_email, subject,
+                                  "SMTP configuration incomplete (set SMTP_HOST, SMTP_USER, SMTP_PASSWORD)")
 
         try:
             msg = MIMEMultipart("alternative")
@@ -403,9 +439,7 @@ If you didn't request this code, you can safely ignore this email.
     ) -> bool:
         """Send email via SendGrid API."""
         if not SENDGRID_API_KEY:
-            logger.error("SendGrid API key not configured")
-            # Fall back to console
-            return self._send_console(to_email, subject, body)
+            return self._not_sent(to_email, subject, "SendGrid API key not configured")
 
         try:
             import httpx
@@ -438,8 +472,7 @@ If you didn't request this code, you can safely ignore this email.
                     return False
 
         except ImportError:
-            logger.error("httpx not installed, falling back to console")
-            return self._send_console(to_email, subject, body)
+            return self._not_sent(to_email, subject, "httpx is not installed")
         except Exception as e:
             logger.error(f"SendGrid send failed: {e}")
             return False
@@ -455,9 +488,7 @@ If you didn't request this code, you can safely ignore this email.
     ) -> bool:
         """Send email via Resend API."""
         if not api_key:
-            logger.error("Resend API key not configured")
-            # Fall back to console
-            return self._send_console(to_email, subject, body)
+            return self._not_sent(to_email, subject, "Resend API key not configured")
 
         try:
             import httpx
@@ -490,8 +521,7 @@ If you didn't request this code, you can safely ignore this email.
                     return False
 
         except ImportError:
-            logger.error("httpx not installed, falling back to console")
-            return self._send_console(to_email, subject, body)
+            return self._not_sent(to_email, subject, "httpx is not installed")
         except Exception as e:
             logger.error(f"Resend send failed: {e}")
             return False

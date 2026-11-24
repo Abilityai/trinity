@@ -2854,17 +2854,18 @@ _BUNDLED_AVATAR_NAMES = ("avatar.webp", "avatar.png")
 _BUNDLED_AVATAR_MAX_BYTES = 2 * 1024 * 1024
 
 
-def _install_bundled_avatar(config: AgentConfig) -> None:
+def _install_bundled_avatar(config: AgentConfig) -> bool:
     """#2693: copy a `local:` template's bundled `avatar.webp`/`avatar.png` into
     the avatar store, so an agent has a face with no Gemini key and no network.
 
-    Stored as a DEFAULT avatar (the caller writes `is_default_avatar=1`), so
-    Settings → Generate Default Avatars still overwrites it once a key exists.
-    Always re-encoded through `optimize_avatar`: the deploy-local root holds
+    Returns True only when a file was written. #4750: the caller then stamps it
+    as a KEPT avatar (`is_default_avatar=0`) — a shipped image is the author's
+    choice, so Generate Default Avatars leaves it alone; nothing written means
+    the caller seeds a default as before. Always re-encoded through `optimize_avatar`: the deploy-local root holds
     user-uploaded templates, and a decode/re-encode is what keeps an arbitrary
     file from being served verbatim on the unauthenticated avatar route."""
     if not config.template or not config.template.startswith("local:"):
-        return
+        return False
     # Both paths come from request fields. `_resolve_local_template_dir` and
     # agent-name validation already contain them, but CodeQL's
     # `py/path-injection` can't follow those callees — so the destination goes
@@ -2874,12 +2875,12 @@ def _install_bundled_avatar(config: AgentConfig) -> None:
     template_roots = tuple(os.path.join(str(r.resolve()), "") for r in _LOCAL_TEMPLATE_ROOTS)
     dest = avatar_paths.avatar_path_or_none(config.name, ".webp")
     if dest is None:
-        return
+        return False
     template_dir = str(_resolve_local_template_dir(config.template[6:]))
     for filename in _BUNDLED_AVATAR_NAMES:
         source = os.path.normpath(os.path.join(template_dir, filename))
         if not source.startswith(template_roots):
-            return
+            return False
         if not os.path.isfile(source) or os.path.getsize(source) > _BUNDLED_AVATAR_MAX_BYTES:
             continue
         from PIL import Image
@@ -2891,11 +2892,14 @@ def _install_bundled_avatar(config: AgentConfig) -> None:
         with Image.open(io.BytesIO(data)) as img:
             if img.width * img.height > 4096 * 4096:
                 raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
+        # Re-encode before opening `dest`: a failure must not leave a 0-byte file.
+        out = optimize_avatar(data)
         avatar_paths.ensure_avatar_store()
         with open(dest, "wb") as f:
-            f.write(optimize_avatar(data))
+            f.write(out)
         logger.info(f"[AVATAR-003] Installed bundled avatar from {config.template} for {config.name}")
-        return
+        return True
+    return False
 
 
 def _fetch_github_file_bytes(
@@ -2936,24 +2940,28 @@ def _stamp_bundled_avatar(agent_name: str, prompt: Optional[str]) -> None:
 
     `db.get_avatar_identity` ignores a row whose identity prompt is empty, so a
     template that ships the file without an `avatar_prompt` still needs a
-    prompt for `avatar_url` to resolve; it is also what Regenerate starts from.
+    prompt for `avatar_url` to resolve.
+    #4750: stamped as KEPT (`set_avatar_identity`, is_default_avatar=0), not as
+    a default — Generate Default Avatars leaves a shipped image alone, and the
+    Workspace shows it (#4609). The owner replaces it with Generate or Delete.
     Log-and-continue: the agent is registered and works without an avatar.
     """
     identity_prompt = prompt or f"an AI agent named {agent_name}"
     try:
-        db.set_default_avatar(agent_name, identity_prompt, datetime.now(timezone.utc).isoformat())
-        logger.info(f"[AVATAR-003] Stamped GitHub bundled avatar as default for {agent_name}")
+        db.set_avatar_identity(agent_name, identity_prompt, datetime.now(timezone.utc).isoformat())
+        logger.info(f"[AVATAR-003] Stamped GitHub bundled avatar as kept (not a default) for {agent_name}")
     except Exception as e:
         logger.warning(f"[AVATAR-003] Failed to stamp GitHub bundled avatar for {agent_name}: {e}")
 
 
-def _install_bundled_avatar_bytes(agent_name: str, data: bytes) -> None:
+def _install_bundled_avatar_bytes(agent_name: str, data: bytes) -> bool:
     """ent#1173 (AC-2): install a GitHub template's bundled avatar from raw bytes.
 
     Unlike the `local:` path (which reads from a filesystem path), the GitHub
     path delivers raw bytes fetched from the API. Same size/pixel caps as the
-    local version. Stored as a default avatar (is_default_avatar=1) so
-    Settings → Generate Default Avatars can still overwrite it.
+    local version. Returns True only when a file was written, like the `local:`
+    installer; the caller stamps it as kept (`_stamp_bundled_avatar`, #4750)
+    only on True, so a refused destination leaves the row unstamped.
     """
     import io as _io
     from PIL import Image
@@ -2961,14 +2969,17 @@ def _install_bundled_avatar_bytes(agent_name: str, data: bytes) -> None:
 
     dest = avatar_paths.avatar_path_or_none(agent_name, ".webp")
     if dest is None:
-        return
+        return False
     with Image.open(_io.BytesIO(data)) as img:
         if img.width * img.height > 4096 * 4096:
             raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
+    # Re-encode before opening `dest`: a failure must not leave a 0-byte file.
+    out = optimize_avatar(data)
     avatar_paths.ensure_avatar_store()
     with open(dest, "wb") as f:
-        f.write(optimize_avatar(data))
+        f.write(out)
     logger.info(f"[AVATAR-003] Installed GitHub bundled avatar for {agent_name}")
+    return True
 
 
 def _register_agent(
@@ -3065,16 +3076,24 @@ def _register_agent(
     # durable-identity nicety a disposable agent never benefits from)
     _avatar_prompt = (template_data.get("avatar_prompt") if template_data else None) if not config.ephemeral else None
     if _avatar_prompt:
+        _installed = False
         try:
             # #2693: install the template's bundled image BEFORE the DB row, so
             # `avatar_url` never points at a file that isn't there yet. A bad
             # image must not cost the prompt seed — that is the regeneration path.
-            _install_bundled_avatar(config)
+            _installed = _install_bundled_avatar(config)
         except Exception as e:
             logger.warning(f"[AVATAR-003] Failed to install bundled avatar for {config.name}: {e}")
         try:
-            db.set_default_avatar(config.name, _avatar_prompt, datetime.now(timezone.utc).isoformat())
-            logger.info(f"[AVATAR-003] Seeded avatar prompt from template for {config.name}")
+            _now = datetime.now(timezone.utc).isoformat()
+            if _installed:
+                # #4750: a shipped image is kept — Generate Default Avatars
+                # leaves it alone and the Workspace shows it (#4609).
+                db.set_avatar_identity(config.name, _avatar_prompt, _now)
+                logger.info(f"[AVATAR-003] Stamped bundled avatar as kept (not a default) for {config.name}")
+            else:
+                db.set_default_avatar(config.name, _avatar_prompt, _now)
+                logger.info(f"[AVATAR-003] Seeded avatar prompt from template for {config.name}")
         except Exception as e:
             logger.warning(f"[AVATAR-003] Failed to seed avatar prompt for {config.name}: {e}")
 
@@ -4401,14 +4420,15 @@ async def create_agent_internal(
             # already registered and fully functional without an avatar.
             if tr.bundled_avatar_bytes and not config.ephemeral:
                 try:
-                    _install_bundled_avatar_bytes(config.name, tr.bundled_avatar_bytes)
+                    _gh_installed = _install_bundled_avatar_bytes(config.name, tr.bundled_avatar_bytes)
                 except Exception as _e:
+                    _gh_installed = False
                     logger.warning(f"[AVATAR-003] Failed to install GitHub avatar for {config.name}: {_e}")
-                else:
+                if _gh_installed:
                     # #4570: the file alone is invisible — `avatar_url` is built
                     # only from a row with a non-empty identity prompt and a
-                    # timestamp. Stamp it as a DEFAULT avatar, like the `local:`
-                    # path, so Generate Default Avatars may still replace it.
+                    # timestamp. Stamp it as KEPT, like the `local:` path
+                    # (#4750), so Generate Default Avatars leaves it alone.
                     # Only after a successful install: a URL to a file that was
                     # never written breaks the image instead of showing initials.
                     _stamp_bundled_avatar(config.name, tr.bundled_avatar_prompt)

@@ -9,7 +9,7 @@
  * store copy would have run against the buttons. Pure module — no DOM.
  */
 import { describe, it, expect } from 'vitest'
-import { VIEW_MODES, DEFAULT_VIEW_MODE, nextViewMode } from '../../src/utils/viewModes.js'
+import { VIEW_MODES, DEFAULT_VIEW_MODE, FIRST_VIEW_MODE, nextViewMode, initialViewMode } from '../../src/utils/viewModes.js'
 
 describe('#2536 viewModes — the one home of the mode list', () => {
   it('lists timeline, grid, list in visual order; timeline is the default; the list is frozen', () => {
@@ -41,6 +41,24 @@ describe('#2536 viewModes — the one home of the mode list', () => {
       expect(m, `cycle from ${start}`).toBe(start)
       // Every mode is visited exactly once per lap — no mode is unreachable.
       expect(seen.size).toBe(VIEW_MODES.length)
+    }
+  })
+})
+
+describe('trinity-enterprise#1357 initialViewMode — the view the dashboard opens in', () => {
+  it('nothing stored opens in Grid, the first view', () => {
+    expect(FIRST_VIEW_MODE).toBe('grid')
+    expect(initialViewMode(null)).toBe('grid')
+    expect(initialViewMode(undefined)).toBe('grid')
+  })
+
+  it('a stored known mode always wins', () => {
+    for (const mode of VIEW_MODES) expect(initialViewMode(mode)).toBe(mode)
+  })
+
+  it('a stored unknown mode degrades to Timeline, unchanged from before', () => {
+    for (const bad of ['graph', '', 'GRID', 'null']) {
+      expect(initialViewMode(bad), `initialViewMode(${JSON.stringify(bad)})`).toBe(DEFAULT_VIEW_MODE)
     }
   })
 })

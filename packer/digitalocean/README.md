@@ -218,8 +218,8 @@ addresses since 2026-01-15 via the `shortlived` ACME profile (~6-day validity,
 Caddy with `issuer acme` + `profile shortlived` for any app with an HTTP
 interface. A domain is a post-login upgrade, not a prerequisite.
 
-**Docker publishes past ufw.** `docker-compose.hosted.yml` publishes 8000, 8080,
-8686, the OTel collector ports **and the frontend's `FRONTEND_PORT` (8081 here)**
+**Docker publishes past ufw.** `docker-compose.hosted.yml` publishes 8000, 8080
+**and the frontend's `FRONTEND_PORT` (8081 here)**
 on `0.0.0.0`. Docker's iptables rules are consulted before ufw's chain, so
 `ufw deny 8000` on such a droplet is silently inert. `scripts/deploy/docker-firewall.sh`
 closes it in `DOCKER-USER`, the one chain Docker leaves to the operator and

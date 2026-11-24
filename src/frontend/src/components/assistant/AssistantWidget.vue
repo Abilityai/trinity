@@ -168,7 +168,7 @@
       the person has said not to show it.
     -->
     <section
-      v-if="setup.visible"
+      v-if="setup.visible && !firstSessionOn"
       class="shrink-0 border-b border-action-primary-200 dark:border-action-primary-500/40 bg-action-primary-50 dark:bg-action-primary-500/16 text-action-primary-700 dark:text-action-primary-200"
       data-testid="assistant-setup"
     >
@@ -262,7 +262,20 @@
         <!-- Conversation -->
         <!-- On the ground colour, so each reply (a surface) reads as its own box. -->
         <div ref="messagesEl" class="flex-1 min-h-0 overflow-y-auto p-4 space-y-3 text-sm bg-gray-50 dark:bg-gray-900" aria-live="polite">
-          <div v-if="store.messages.length === 0" class="space-y-3" data-testid="assistant-welcome">
+          <!-- The opening is not decided yet (trinity-enterprise#1356): nothing is shown that could be replaced a moment later -->
+          <!-- No statusError guard here: the retry error shows only while there is no status (the branch above), so this
+               placeholder can never pulse under it; a failed re-read with the status on screen keeps it, never a blank panel -->
+          <div
+            v-if="store.messages.length === 0 && !openingDecided"
+            class="space-y-2 animate-pulse motion-reduce:animate-none"
+            aria-busy="true"
+            data-testid="assistant-opening-pending"
+          >
+            <span class="sr-only">Loading the assistant</span>
+            <div class="h-3 w-3/4 rounded bg-gray-100 dark:bg-gray-750" />
+            <div class="h-3 w-1/2 rounded bg-gray-100 dark:bg-gray-750" />
+          </div>
+          <div v-else-if="store.messages.length === 0 && openingDecided" class="space-y-3" data-testid="assistant-welcome">
             <p class="text-gray-900 dark:text-gray-100">
               I help you set Trinity up and get agents working for you: I build them with you, check on them and fix what I can.
             </p>
@@ -336,6 +349,14 @@
               </dl>
               <p v-if="!(FOLLOWED.includes(c.card.action) && c.state !== 'making')" class="text-[12.5px] text-gray-600 dark:text-gray-300">{{ c.note }}</p>
 
+              <!-- A run that ended well: its result, one click away (ent#1355) -->
+              <a
+                v-if="c.result"
+                :href="c.result"
+                class="inline-block text-[12.5px] font-medium underline text-action-primary-600 dark:text-action-primary-400"
+                data-testid="assistant-result"
+                @click.prevent="openResult(c.result)"
+              >Open the result</a>
               <div v-if="c.state === 'making'" class="space-y-1.5" data-testid="assistant-job">
                 <!-- Steps known (a build): how far. Not known (a run): that it is alive. -->
                 <div
@@ -362,6 +383,10 @@
                   Create them here as soon as they're ready
                 </label>
               </div>
+              <!-- A credential: a masked field whose value goes to this instance, never to the assistant -->
+              <AssistantCredentialField v-else-if="c.card.action === 'credential'" :message-id="m.id" :entry="c" :route="route" />
+              <!-- Agents run on the person's own machine: the steps, written by the page (ent#1353) -->
+              <AssistantLocalMove v-else-if="c.card.action === 'local-move'" />
               <div v-else-if="c.state === 'open' || c.state === 'running'" class="flex flex-wrap gap-2 pt-1">
                 <BaseButton
                   size="sm"
@@ -390,7 +415,7 @@
           </template>
 
           <!-- What it can do, offered until the person has said something: also under a line it opened with -->
-          <div v-if="fresh && !store.sending" class="space-y-3">
+          <div v-if="fresh && !store.sending && openingDecided" class="space-y-3">
             <div v-for="g in starters" :key="g.heading" class="space-y-1.5" data-testid="assistant-starters">
               <p class="font-mono text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">{{ g.heading }}</p>
               <div class="flex flex-wrap gap-2">
@@ -691,13 +716,15 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import BaseButton from '../base/BaseButton.vue'
 import BaseInput from '../base/BaseInput.vue'
 import BaseSegmented from '../base/BaseSegmented.vue'
 import BaseTextarea from '../base/BaseTextarea.vue'
 import InlineError from '../InlineError.vue'
 import ChatBubble from '../chat/ChatBubble.vue'
+import AssistantCredentialField from './AssistantCredentialField.vue'
+import AssistantLocalMove from './AssistantLocalMove.vue'
 import HelpChatWidget from '../HelpChatWidget.vue'
 import { maskAddress, useAssistantStore } from '../../stores/assistant'
 import { useOnboardingStore } from '../../stores/onboarding'
@@ -705,6 +732,7 @@ import { useFirstRunStore } from '../../stores/firstRun'
 import { irreversibleTool, toolWords, webLink } from '../../utils/assistantCards'
 import { describePage } from '../../utils/assistantContext'
 import { starterGroups } from '../../utils/assistantStarters'
+import { OPENING, inFirstSession, isFirstSession, openingGroup } from '../../utils/firstSession'
 import { renderMarkdown } from '../../utils/markdown'
 
 defineProps({
@@ -725,7 +753,7 @@ const OUTCOME = Object.freeze({
 })
 const CONFIRM = Object.freeze({ build: 'Build', upgrade: 'Continue', feedback: 'Send' })
 const LOADING = Object.freeze({ build: 'Building…', feedback: 'Sending…' })
-const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running', feedback: 'For the Trinity team' })
+const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running', feedback: 'For the Trinity team', credential: 'A credential, kept from the assistant', 'local-move': 'On your machine' })
 const SHOWN_STEPS = 4
 const FOLLOWED = ['job', 'run']
 // A followed card's heading follows what happened to it.
@@ -752,6 +780,11 @@ const messagesEl = ref(null)
 
 // What the empty screen offers, for this page and this fleet.
 const starters = computed(() => {
+  // trinity-enterprise#1355: the assistant-led first session asks one question, with two answers.
+  // ent#1353: steps already given, "My agents are here" stays once the moved agents arrive (until the first result is seen).
+  if (firstSession.value || (firstSessionOn.value && store.status?.local_agents === 'offered')) {
+    return [openingGroup(store.status)]
+  }
   const groups = starterGroups(describePage(route), store.fleet, { known: Boolean(store.status?.profile_known) })
   // Under its own hello there is one question to answer, not a menu: the rest comes once they have.
   return store.messages.length === 1 && store.messages[0].local ? groups.slice(0, 1) : groups
@@ -774,10 +807,27 @@ function hello() {
     : ''
   return `Hi, I'm Trinity's assistant 👋\n\nLet's get you **an agent of your own** working in a few minutes: tell me a little about your work, I'll suggest one, build it and run it once so you see what it produces.${shown}`
 }
+// trinity-enterprise#1355: while the first session runs, no settings steps are raised (checkpoint 4).
+const firstSessionOn = computed(() => inFirstSession(store.status, store.fleet, firstRun.seededAgents || []))
+// trinity-enterprise#1355: the instance says the assistant leads, and the person has no agent of their own yet.
+const firstSession = computed(() => isFirstSession(store.status, store.fleet, firstRun.seededAgents || []))
+// trinity-enterprise#1356: the opening is decided once, when there is nothing
+// left to learn that would change it: the reads the hello is written from are
+// in, and the status has settled. Right after setup the first status is read
+// before the instance's account report lands and carries no line from Trinity;
+// a hello written then was replaced by Trinity's own line when the re-read
+// brought it, so the first thing a new person read changed under them.
+// The first-session opening waits on the same gate: decided on an early,
+// incomplete status it could ask the first-session question of the wrong person.
+const prepared = ref(false)      // open() has read the fleet and which agents are examples
+const openingDecided = computed(() => prepared.value && Boolean(store.status) && !store.settling)
 function startTalking() {
-  if (!isOpen.value || !store.status || store.status.profile_known || store.messages.length) return
+  if (!isOpen.value || !openingDecided.value || store.messages.length) return
+  if (firstSession.value) return store.welcome(OPENING)
+  if (store.status.profile_known) return
   store.welcome(hello())
 }
+watch(openingDecided, (now) => { if (now) startTalking() })
 
 // While the setup overlay has the screen the assistant stays out of its way,
 // and takes over when it closes: open beside the page where there is room,
@@ -903,6 +953,7 @@ async function open({ quiet = false } = {}) {
   const fleet = store.messages.length ? null : store.refreshFleet().catch(() => {})
   if (!store.status) await store.loadStatus()
   await Promise.all([fleet, firstRun.fetchState()])     // which agents are the install's examples: read once, kept
+  prepared.value = true
   startTalking()
   if (!quiet) focusInput()
 }
@@ -980,6 +1031,17 @@ function pick(starter) {
   focusInput()
 }
 
+// A result opens beside the panel; the first one in an assistant-led session opens by itself (ent#1355).
+const router = useRouter()
+function openResult(path) {
+  router.push(path).catch?.(() => {})
+}
+watch(() => store.openResult, (path) => {
+  if (!path) return
+  store.openResult = ''
+  openResult(path)
+})
+
 function answer(messageId, cardId, confirm) {
   store.answerCard(messageId, cardId, confirm, route)
 }
@@ -1007,6 +1069,19 @@ onMounted(() => {
   firstRun.fetchState()
   if (wide.value && chosen !== 'false' && !firstRun.overlayOpen) open({ quiet: true })
 })
+
+// trinity-enterprise#1355: where the assistant leads the first session it opens by
+// itself, whatever the width, unless the person closed it before.
+watch(() => store.status?.leads_setup, async (leads) => {
+  if (!leads || isOpen.value) return
+  let chosen = null
+  try {
+    chosen = localStorage.getItem(OPEN_KEY)
+  } catch { /* no choice known */ }
+  if (chosen === 'false' || firstRun.overlayOpen) return
+  await Promise.all([store.refreshFleet().catch(() => {}), firstRun.fetchState()])
+  if (firstSession.value && !isOpen.value) open({ quiet: true })
+}, { immediate: true })
 onBeforeUnmount(() => {
   stopKeeping?.()
   wideQuery?.removeEventListener?.('change', onWide)

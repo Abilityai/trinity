@@ -15,7 +15,7 @@
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐    │
 │  │   Frontend   │  │   Backend    │  │  MCP Server  │  │    Vector    │    │
 │  │   (Vue.js)   │  │  (FastAPI)   │  │  (FastMCP)   │  │   (Logs)     │    │
-│  │   :80        │  │   :8000      │  │   :8080      │  │   :8686      │    │
+│  │   :80        │  │   :8000      │  │   :8080      │  │  (no port)   │    │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘    │
 │         │                 │                 │                 │             │
 │         └─────────────────┼─────────────────┼─────────────────┘             │
@@ -150,7 +150,7 @@ Local and production use the same ports. Local URLs, auth, and admin credentials
 | 80 | Frontend (nginx/Vite) — prod: `https://your-domain.com` |
 | 8000 | Backend (FastAPI) — `/docs` for OpenAPI |
 | 8080 | MCP Server (`/mcp`) |
-| 8686 | Vector health |
+| — | Vector's API (8686) and the OTel Collector (4317 / 4318 / 8889 / 13133) are **not published**: Vector's listens on its container's loopback, the collector is reached by Docker DNS |
 | 2222–2262 | Agent SSH |
 
 ---

@@ -353,7 +353,7 @@ graph BT
     BACK[backend<br/>:8000 FastAPI]
     MCP[mcp-server<br/>:8080 FastMCP]
     REDIS[(redis<br/>:6379)]
-    VECTOR[vector<br/>:8686 Log Aggregation]
+    VECTOR[vector<br/>Log Aggregation<br/>no host port]
     SCHED[scheduler<br/>Standalone Service]
 
     FRONT --> BACK
