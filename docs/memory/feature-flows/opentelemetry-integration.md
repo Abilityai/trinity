@@ -12,7 +12,7 @@ As a platform operator, I want agents to export standardized metrics so that I c
 
 - **Configuration**: `.env` file with `OTEL_ENABLED=1`
 - **API**: Agent creation at `POST /api/agents` injects OTel environment variables
-- **Metrics**: Prometheus endpoint at `http://localhost:8889/metrics`
+- **Metrics**: Prometheus endpoint at `http://trinity-otel-collector:8889/metrics`, reached by Docker DNS (the collector publishes no host port; trinity-enterprise#1314)
 
 ---
 
@@ -124,11 +124,8 @@ otel-collector:
   image: otel/opentelemetry-collector-contrib:0.120.0
   container_name: trinity-otel-collector
   restart: unless-stopped
-  ports:
-    - "4317:4317"   # gRPC receiver (OTLP)
-    - "4318:4318"   # HTTP receiver (OTLP)
-    - "8889:8889"   # Prometheus metrics exporter
-    - "13133:13133" # Health check endpoint
+  # No `ports:` — 4317 / 4318 (OTLP in), 8889 (Prometheus out) and 13133
+  # (health) are reached by Docker DNS on the collector's networks
   volumes:
     - ./config/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro  # Note: contrib path
   networks:
@@ -255,7 +252,7 @@ Agents connect to the collector via Docker's internal network:
 - **Container name**: `trinity-otel-collector`
 - **Internal gRPC endpoint**: `http://trinity-otel-collector:4317`
 - **Internal HTTP endpoint**: `http://trinity-otel-collector:4318`
-- **External Prometheus**: `http://localhost:8889/metrics`
+- **External Prometheus**: not exposed. A scraper must join the `trinity-platform` network and read `http://trinity-otel-collector:8889/metrics`, or the operator publishes the port in a compose override
 
 The `trinity-network` bridge network allows all agent containers to reach the collector by service name.
 
@@ -336,7 +333,7 @@ docker logs trinity-otel-collector 2>&1 | tail -20
 **Action**: Query the Prometheus metrics endpoint
 
 ```bash
-curl -s http://localhost:8889/metrics | grep trinity_claude_code
+docker exec trinity-backend curl -s http://trinity-otel-collector:8889/metrics | grep trinity_claude_code
 ```
 
 **Expected**: Metric lines starting with `trinity_claude_code_*` (may be empty if no agent activity yet)
@@ -352,7 +349,7 @@ curl -s http://localhost:8889/metrics | grep trinity_claude_code
 5. Query Prometheus endpoint:
 
 ```bash
-curl -s http://localhost:8889/metrics | grep -E "cost_usage|token_usage|lines_of_code"
+docker exec trinity-backend curl -s http://trinity-otel-collector:8889/metrics | grep -E "cost_usage|token_usage|lines_of_code"
 ```
 
 **Expected**: Non-zero counters for cost and token usage:
@@ -371,7 +368,7 @@ trinity_claude_code_token_usage_tokens_total{model="...",type="input"} 1234
 4. Check that metrics from both agents appear in Prometheus
 
 ```bash
-curl -s http://localhost:8889/metrics | grep trinity_claude_code | wc -l
+docker exec trinity-backend curl -s http://trinity-otel-collector:8889/metrics | grep trinity_claude_code | wc -l
 ```
 
 **Expected**: Multiple metric lines (both agents contributing)
@@ -545,7 +542,7 @@ The single read path for collected OTel metrics. The former `GET /api/observabil
 **Verify**:
 ```bash
 # Check metrics are being collected
-curl http://localhost:8889/metrics | grep trinity_claude_code
+docker exec trinity-backend curl -s http://trinity-otel-collector:8889/metrics | grep trinity_claude_code
 ```
 
 ---
