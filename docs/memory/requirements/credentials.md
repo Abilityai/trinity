@@ -264,6 +264,34 @@
 
 ---
 
+### 3.8a Connect a Claude Subscription by Pasting a Token (trinity-enterprise#1354)
+- **Status**: ✅ Implemented
+- **Description**: When an agent first needs Claude, the credential card
+  shows three short steps: open a terminal on your own computer, run Claude's
+  own `claude setup-token`, paste the token it prints into the card. The same
+  field takes an Anthropic API key instead. The instance starts no sign-in with
+  the provider and exchanges no code.
+- **Routing by shape**: `sk-ant-oat01-…` is tested with `POST /api/subscriptions/test`
+  and registered as `primary` through `POST /api/subscriptions` only once the
+  test passes, so a bad paste leaves an existing subscription and its agents
+  untouched; `sk-ant-api…` is tested with `POST /api/settings/api-keys/anthropic/test`
+  and saved through `PUT /api/settings/api-keys/anthropic` only once it passes
+  (the Settings page itself is unchanged). A provider that cannot be reached
+  answers "check unavailable" (503), not a rejection. A paste containing `#` (a sign-in code) is refused with a
+  plain message that a token is expected; any other value is refused the same
+  way. Nothing is stored on a refusal.
+- **One card, either name**: the assistant's first-session key step asks under
+  `ANTHROPIC_API_KEY`; the instance treats `ANTHROPIC_API_KEY` and
+  `CLAUDE_SUBSCRIPTION` (no agent) as this same card, and the panel posts the
+  name the assistant asked under, so its "Provided:" line names what was asked.
+  A card kept from an earlier conversation behaves the same.
+- **Record**: a registration through the card writes one audit row — the name
+  and the actor, never the value. The value never reaches the chat, a model, a
+  log line or an execution record.
+- **Gate**: the routes it calls are admin-only, as on the Settings page.
+
+---
+
 ### 3.9 The Git Credential Source of Record (trinity-enterprise#615)
 
 Git authentication is a **resolution ladder**, not a stored URL. Before

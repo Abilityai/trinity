@@ -388,7 +388,7 @@ async def run_member(op, actor, out, attempt, *, request=None) -> None:
             await _broadcast_shared(name)
 
 
-async def _broadcast_shared(name) -> None:
+async def _broadcast_shared(name: str) -> None:
     """The share route's `agent_shared` event, through its manager, so open
     sharing panels and every worker's cached roster refresh (ent#467).
     Identifiers only (#918): the module resolved who, and no address crosses

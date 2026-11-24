@@ -123,14 +123,22 @@ def world(db_backend, monkeypatch):
     monkeypatch.setattr(_WAKE, "_container_state", _state)
     monkeypatch.setattr(_WAKE, "_audit", _audit)
     monkeypatch.setattr(_WAKE, "_resolve_policy", _policy)
-    # The 15 s bucket is the storm bound and has its own tests; here each round
-    # is a separate window unless a test says otherwise.
+    # The caller's hold is the storm bound and has its own tests; here each
+    # round is a separate wake unless a test says otherwise.
     window = {"replay": False}
     monkeypatch.setattr(
         _WAKE, "_begin_idempotency",
         lambda scope, key: SimpleNamespace(replay=window["replay"], enabled=True, in_flight=False),
     )
     monkeypatch.setattr(_WAKE, "_fail_idempotency", lambda *a, **k: None)
+    # #4733: so are the hold's live-row read and the slot check
+    # (test_4733_wake_hold.py); the wake rows here stay RUNNING on purpose.
+    monkeypatch.setattr(_WAKE, "_wake_row_live", lambda caller: False)
+
+    async def _free(caller):
+        return True
+
+    monkeypatch.setattr(_WAKE, "_has_free_slot", _free)
     # The hourly wake budget (A2) counts in Redis; a fresh in-memory one per test.
     redis = fakeredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(_WAKE, "_wake_budget_redis", lambda: redis)
@@ -283,13 +291,13 @@ def test_a_reminder_fired_while_the_last_wake_still_runs_is_admitted(world):
 
 
 # ---------------------------------------------------------------------------
-# the bucket collapse: one wake answers two endings, at the deeper standing
+# the fold: one wake answers two endings, at the deeper standing
 # ---------------------------------------------------------------------------
 
 
 def test_a_collapsed_window_wakes_at_the_deeper_standing_while_it_still_runs(world):
-    """A shallow and a deep delegation end in the same 15 s window. The first
-    ending claims the window and is the one read; the deep delegator turn is
+    """A shallow and a deep delegation end together. The first ending claims
+    the caller's hold and is the one read; the deep delegator turn is
     still running, so the wake must not stand below it."""
     shallow = _delegate(world, A, B)                  # from no turn: depth 1
     deep_turn = db.create_task_execution(
@@ -484,7 +492,7 @@ def test_a_budget_of_zero_or_less_is_unlimited(world, budget, value):
 
 
 def test_a_collapsed_ending_does_not_spend_the_budget(world, budget):
-    """The 15 s window answers a second ending with no turn; only wakes count."""
+    """A held caller answers a second ending with no turn; only wakes count."""
     db.set_setting(BUDGET_KEY, "2")
     assert asyncio.run(_WAKE.maybe_wake_caller(_ended_delegation()))
     world.window["replay"] = True

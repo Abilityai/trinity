@@ -26,10 +26,22 @@
       data-testid="assistant-credential-replaces"
     >{{ entry.card.name }} is already set on {{ where }}. Saving replaces it; the current value is never shown.</p>
 
-    <!-- This instance's Claude credential: where to get it (ent#1355; the sign-in seam, ent#1354) -->
-    <p v-if="isOpen && checked && claude" class="text-[12.5px] text-gray-600 dark:text-gray-300" data-testid="assistant-credential-help">
-      {{ claude.lead }} <a :href="claude.href" target="_blank" rel="noopener" class="underline text-action-primary-600 dark:text-action-primary-400">{{ claude.label }}</a>
-    </p>
+    <!-- This instance's Claude credential: where to get it (ent#1355), the three terminal steps (ent#1354) -->
+    <template v-if="isOpen && checked && claude">
+      <ol v-if="claude.steps" class="list-decimal pl-5 space-y-0.5 text-[12.5px] text-gray-900 dark:text-gray-100" data-testid="assistant-credential-steps">
+        <li v-for="(step, i) in claude.steps" :key="i">
+          {{ step.before }}
+          <code v-if="step.command" class="font-mono" data-testid="assistant-credential-command">{{ step.command }}</code>
+          {{ step.after || '' }}
+        </li>
+      </ol>
+      <p v-if="claude.alternative" class="text-[12.5px] text-gray-600 dark:text-gray-300" data-testid="assistant-credential-alternative">
+        {{ claude.alternative.lead }} <a :href="claude.alternative.href" target="_blank" rel="noopener" class="underline text-action-primary-600 dark:text-action-primary-400">{{ claude.alternative.label }}</a>
+      </p>
+      <p v-else class="text-[12.5px] text-gray-600 dark:text-gray-300" data-testid="assistant-credential-help">
+        {{ claude.lead }} <a :href="claude.href" target="_blank" rel="noopener" class="underline text-action-primary-600 dark:text-action-primary-400">{{ claude.label }}</a>
+      </p>
+    </template>
 
     <!-- The field opens only once the instance has said it may take this name. -->
     <template v-if="isOpen && checked">
@@ -47,7 +59,7 @@
           data-1p-ignore="true"
           data-lpignore="true"
           :disabled="running"
-          placeholder="Type or paste the value"
+          :placeholder="claude && claude.steps ? 'Paste the token (or an API key)' : 'Type or paste the value'"
           data-testid="assistant-credential-input"
         />
         <BaseButton

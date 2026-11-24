@@ -225,6 +225,11 @@ RUN set -eu; \
         ls -l "$CC_DIR/bin/claude.exe"; \
     fi; \
     claude --version
+# #4757: the CLI version as an image label (Docker merges image labels into
+# each container's), so the backend can tell whether an agent's Claude Code can
+# run the platform default before handing it over. An image without this label
+# is treated as too old, and its agents keep a model every CLI accepts.
+LABEL trinity.claude-code-version="${CLAUDE_CODE_VERSION}"
 
 # Install Gemini CLI for multi-runtime support.
 # Pinned (#2971): an unpinned install took 0.60.0, which rejected the flags the

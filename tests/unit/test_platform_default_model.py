@@ -34,7 +34,7 @@ class TestGetPlatformDefaultModelUnit:
         monkeypatch.setattr(ss, "_platform_model_cache", None)
         monkeypatch.setattr(ss, "_platform_model_cache_ts", 0.0)
 
-        assert ss.SettingsService().get_platform_default_model() == "claude-sonnet-4-6"
+        assert ss.SettingsService().get_platform_default_model() == "claude-sonnet-5-5"
 
     def test_returns_db_value_when_set(self, monkeypatch):
         """A platform_default_model row → that value."""

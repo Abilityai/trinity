@@ -243,6 +243,41 @@ def test_roster_avatar_url_rules(roster_db):
     assert cards["atlas"].shared_at == "2026-07-05T00:00:00Z"
 
 
+def test_4750_shipped_avatar_is_kept_and_shown_in_the_workspace(roster_db):
+    """#4750 + #4609, against a real database: the two writers the create path
+    chooses between decide both readers of `is_default_avatar`.
+
+    A shipped image is stamped with `set_avatar_identity` — it must drop out of
+    Generate Default Avatars' selection AND reach the Workspace card as a URL.
+    A prompt-only seed is stamped with `set_default_avatar` — it stays
+    overwritable and the card stays an initials tile. The rows are written
+    through the real facade, not hand-set flags."""
+    from sqlalchemy import insert
+    from db.engine import get_engine
+    from db.tables import agent_ownership, agent_sharing
+    from database import db
+    from client_portal import service
+
+    with get_engine().begin() as conn:
+        for n in ("shipped", "promptonly"):
+            conn.execute(insert(agent_ownership).values(
+                agent_name=n, owner_id=1, created_at="t", is_system=0))
+            conn.execute(insert(agent_sharing).values(
+                agent_name=n, shared_with_email="bob@example.com", shared_by_id=1,
+                created_at="2026-07-05T00:00:00Z"))
+
+    db.set_avatar_identity("shipped", "a small owl", "2026-11-24T00:00:00Z")
+    db.set_default_avatar("promptonly", "a wizard", "2026-11-24T00:00:00Z")
+
+    overwritable = {r["agent_name"] for r in db.get_agents_without_custom_avatar()}
+    assert "shipped" not in overwritable
+    assert "promptonly" in overwritable
+
+    cards = {c.name: c for c in _run(service.get_roster("bob@example.com")).agents}
+    assert cards["shipped"].avatar_url == "/api/agents/shipped/avatar?v=2026-11-24T00:00:00Z"
+    assert cards["promptonly"].avatar_url is None
+
+
 def test_roster_is_email_scoped(roster_db):
     from client_portal import service
     # carol only has atlas; bob's shares never leak in

@@ -83,6 +83,20 @@ def get_agent_runtime(name: str) -> str:
         return "claude-code"
 
 
+def get_agent_claude_code_version(name: str) -> Optional[str]:
+    """The Claude Code version the agent's base image was built with, or None
+    (#4757). Read from the ``trinity.claude-code-version`` image label, which
+    Docker merges into the container's labels; an image built before the label
+    existed carries none. Never raises — None means "not proven"."""
+    container = get_agent_container(name)
+    if container is None:
+        return None
+    try:
+        return container.labels.get("trinity.claude-code-version") or None
+    except Exception:
+        return None
+
+
 def read_runtime_model(name: str) -> Optional[str]:
     """The container's ``AGENT_RUNTIME_MODEL`` (its template's ``runtime.model``),
     or None (#4442). Running or stopped; blocking, so call it off the loop.

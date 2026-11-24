@@ -294,7 +294,7 @@ docker exec trinity-redis redis-cli ping
 curl -s http://localhost:8080/health
 
 # Vector
-docker exec trinity-vector wget -q -O - http://localhost:8686/health
+docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health
 ```
 
 The scheduler's port 8001 is not published to the host by either server compose file — probe it from inside the container instead: `docker exec trinity-scheduler curl -sf http://localhost:8001/health`. See [monitoring.md](monitoring.md) for the full monitoring guide.

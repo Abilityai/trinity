@@ -174,11 +174,9 @@ For JSON-formatted log messages (from Python's structured logging), Vector parse
 ## Vector Health
 
 ```bash
-# Check Vector status
-curl http://localhost:8686/health
-
-# Vector API (if enabled)
-curl http://localhost:8686/api/v1/topology
+# Check Vector status. Its API is not published on the host and listens on the
+# container's own loopback, so ask it from inside the container.
+docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health
 ```
 
 ## Known Limitations

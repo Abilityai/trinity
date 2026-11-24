@@ -98,7 +98,7 @@
       <!-- Model & Timeout Selectors -->
       <div class="flex items-center space-x-3 mb-3">
         <div class="flex-1">
-          <ModelSelector v-model="selectedModel" label="Model" compact />
+          <ModelSelector v-model="selectedModel" label="Model" placeholder="Default model" compact />
         </div>
         <div>
           <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Timeout<span v-if="timeoutCapped" data-testid="task-timeout-cap" :title="`This agent's execution timeout caps every task at ${formatTimeout(agentTimeoutCap)}`"> · agent cap {{ formatTimeout(agentTimeoutCap) }}</span></label>
@@ -629,7 +629,11 @@ const triggerFilter = ref('all') // Filter by triggered_by type (AUDIT-001)
 
 // Model selection (MODEL-001)
 const taskModelKey = computed(() => `trinity-task-model-${props.agentName}`)
-const selectedModel = ref(localStorage.getItem(`trinity-task-model-${props.agentName}`) || 'claude-sonnet-4-6')
+// #4757: empty by default — the task names no model and the backend resolves it
+// (the agent's own default, else the platform default, stepped down for an agent
+// whose Claude Code is too old to run it). A hard-coded id here would be sent
+// as an explicit model and bypass both.
+const selectedModel = ref(localStorage.getItem(`trinity-task-model-${props.agentName}`) || '')
 watch(selectedModel, (val) => {
   localStorage.setItem(taskModelKey.value, val)
 })

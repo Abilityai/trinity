@@ -843,6 +843,20 @@ export const useAssistantStore = defineStore('assistant', {
       return { ok: true }
     },
 
+    /**
+     * Whether a client outside this server may reach its MCP endpoint
+     * (trinity-enterprise#1353: the first of the steps that bring local agents
+     * in). true / false, or null when it cannot be read.
+     */
+    async externalMcpAccess() {
+      try {
+        const { data } = await api.get('/api/settings/mcp-external-access')
+        return typeof data?.enabled === 'boolean' ? data.enabled : null
+      } catch {
+        return null
+      }
+    },
+
     /** Build an approved design. The instance creates the agents as this person. */
     async build(card) {
       try {
