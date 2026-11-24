@@ -1678,6 +1678,20 @@ async def _read_template_yaml_from_volume(agent_name: str) -> dict:
         return {}
 
 
+def template_runtime(tmpl: dict) -> tuple:
+    """`(runtime, model)` a recovered container gets from its `template.yaml`.
+
+    Same reading as `crud._resolve_template` applies at create (#4723), with the
+    runtime lower-cased and an unset model as `""`.
+    """
+    runtime_cfg = tmpl.get("runtime", {})
+    if isinstance(runtime_cfg, dict):
+        return (runtime_cfg.get("type") or "claude-code").lower(), runtime_cfg.get("model") or ""
+    if isinstance(runtime_cfg, str):
+        return runtime_cfg.lower(), ""
+    return "claude-code", ""
+
+
 async def recreate_missing_container(agent_name: str):
     """Rebuild a container for an existing agent that has **no** container —
     the soft-delete recovery gap (#1559).
@@ -1731,16 +1745,7 @@ async def recreate_missing_container(agent_name: str):
 
     tmpl = await _read_template_yaml_from_volume(agent_name)
     # #2104: template.yaml `type:` is parsed but ignored — the taxonomy is retired.
-    runtime_cfg = tmpl.get("runtime", {})
-    if isinstance(runtime_cfg, dict):
-        runtime = (runtime_cfg.get("type") or "claude-code").lower()
-        runtime_model = runtime_cfg.get("model") or ""
-    elif isinstance(runtime_cfg, str):
-        runtime = runtime_cfg.lower()
-        runtime_model = ""
-    else:
-        runtime = "claude-code"
-        runtime_model = ""
+    runtime, runtime_model = template_runtime(tmpl)
     # #1811: the original template id (`local:scout`, `github:Org/repo@main`)
     # lived ONLY in the destroyed container's TEMPLATE_NAME env and
     # `trinity.template` label — the workspace `template.yaml` carries `name:`
