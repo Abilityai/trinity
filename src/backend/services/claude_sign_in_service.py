@@ -43,7 +43,11 @@ CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"   # Claude Code's public OAut
 SCOPE = "user:inference"
 TOKEN_LIFETIME_SECONDS = 31536000                    # what `claude setup-token` asks for
 LINK_TTL_SECONDS = 15 * 60
-TIMEOUT_SECONDS = 30.0
+# The provider call. Well under the assistant's loopback wait for this route
+# (enterprise `assistant/credential.py::TIMEOUT_SECONDS`, 30 s): the code is
+# spent the moment the exchange starts, so a slow provider must end here, in a
+# named refusal, before that wait ends in "may or may not have been stored".
+TIMEOUT_SECONDS = 8.0
 PASTE_MAX_CHARS = 2000
 
 _KEY_PREFIX = "claude_sign_in:"
@@ -111,10 +115,26 @@ def _load_for_test(store, state: str) -> Optional[dict]:
     return json.loads(raw) if raw else None
 
 
+_API_KEY_NOT_CODE = (
+    "That looks like an API key, not the code the Claude sign-in page shows. "
+    "Anthropic API keys start with sk-ant-api (for example sk-ant-api03-…) — "
+    "paste one of those, or open the sign-in link again and copy the code."
+)
+
+
+def _looks_like_api_key(text: str) -> bool:
+    """Plainly an API-key attempt: a sign-in code is `<code>#<state>` and never
+    starts like a provider key."""
+    lowered = text.lower()
+    return "#" not in text and (lowered.startswith(("sk-", "ant-api")) or "sk-ant-api" in lowered)
+
+
 def _split(pasted) -> tuple[str, str]:
     text = "".join(pasted.split()) if isinstance(pasted, str) else ""
     if len(text) > PASTE_MAX_CHARS:
         text = ""
+    if _looks_like_api_key(text):
+        raise SignInError(422, "api_key_not_code", _API_KEY_NOT_CODE)
     code, _, state = text.partition("#")
     if not code or not state:
         raise SignInError(422, "code_incomplete",

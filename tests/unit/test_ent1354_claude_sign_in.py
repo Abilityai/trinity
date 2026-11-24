@@ -262,6 +262,153 @@ class TestWhoMay:
         assert sign_in.store.data == {} and sign_in.calls == []
 
 
+class TestMustBeAPerson:
+    """`assert_person` on the exchange route is its own check, not a by-product
+    of the admin gate: these principals pass `assert_admin` (trinity-system and
+    a request vouched by an agent are admins), so only the person rule stops
+    them, and with it gone they would register `primary`."""
+
+    @pytest.mark.parametrize("user", [
+        _user(mcp_scope="system"),
+        _user(vouched_source_agent="some-agent"),
+    ], ids=["system", "vouched-by-an-agent"])
+    def test_an_admin_who_is_not_a_person_cannot_exchange_or_start(self, sign_in, user):
+        from dependencies import assert_admin
+        assert_admin(user)                                   # the admin gate lets it through …
+        _, q = _start(_client())                             # a live link, made by a person
+        client = _client(user)
+        r = client.post("/api/subscriptions/claude-sign-in/exchange", json={"code": f"{CODE}#{q['state']}"})
+        assert r.status_code == 403                          # … the person rule does not
+        assert sign_in.calls == [] and sign_in.registered == []
+        assert sign_in.db.get_subscription_by_name("primary") is None
+        assert client.post("/api/subscriptions/claude-sign-in").status_code == 403
+
+
+SECRET = "zq9-pasted-" + "p" * 24
+
+
+@pytest.mark.parametrize("case", [
+    "incomplete", "no-link", "foreign", "rejected", "unavailable", "unexpected", "no-encryption", "api-key",
+])
+def test_the_pasted_code_is_in_no_refusal(sign_in, monkeypatch, case):
+    """Every refusal the exchange route can give, with a recognisable paste:
+    the paste (code or state half) never comes back in the answer."""
+    client = _client()
+    _, q = _start(client)
+    pasted = f"{SECRET}#{q['state']}"
+    if case == "incomplete":
+        pasted = SECRET
+    elif case == "no-link":
+        pasted = f"{SECRET}#{SECRET}-state"
+    elif case == "foreign":
+        _, q2 = _start(_client(_user(uid=2)))
+        pasted = f"{SECRET}#{q2['state']}"
+    elif case == "rejected":
+        sign_in.answer["resp"] = _Resp(400, {"error": {"message": SECRET}})
+    elif case == "unavailable":
+        sign_in.answer["resp"] = _Resp(503, {"error": {"message": SECRET}})
+    elif case == "unexpected":
+        sign_in.answer["resp"] = _Resp(200, {"access_token": SECRET})
+    elif case == "no-encryption":
+        monkeypatch.delenv("CREDENTIAL_ENCRYPTION_KEY")
+    elif case == "api-key":
+        pasted = "sk-proj-" + SECRET
+    r = client.post("/api/subscriptions/claude-sign-in/exchange", json={"code": pasted})
+    assert r.status_code >= 400, r.text
+    assert SECRET not in r.text and q["state"] not in r.text
+    assert sign_in.registered == []
+
+
+class TestAnApiKeyInTheCodeField:
+    """A value that is plainly an API-key attempt gets the API-key format
+    message, not "that is not the whole code", and spends nothing."""
+
+    @pytest.mark.parametrize("pasted", ["sk-ant-api03-" + "k" * 40, "sk-proj-" + "k" * 40, "ant-api03-" + "k" * 40])
+    def test_it_is_told_what_an_api_key_looks_like(self, sign_in, pasted):
+        client = _client()
+        _start(client)
+        r = client.post("/api/subscriptions/claude-sign-in/exchange", json={"code": pasted})
+        assert r.status_code == 422, r.text
+        detail = r.json()["detail"]
+        assert detail["code"] == "api_key_not_code"
+        assert "sk-ant-api" in detail["message"] and "not the whole code" not in detail["message"]
+        assert sign_in.calls == [] and sign_in.registered == [] and len(sign_in.store.data) == 1
+
+
+class TestTheAuditRow:
+    def test_a_subscription_registered_here_is_audited_by_name_and_actor_only(self, sign_in, monkeypatch):
+        rows = []
+
+        async def log(**kw):
+            rows.append(kw)
+
+        monkeypatch.setattr(subs_router.platform_audit_service, "log", log)
+        client = _client()
+        _, q = _start(client)
+        assert client.post("/api/subscriptions/claude-sign-in/exchange",
+                           json={"code": f"{CODE}#{q['state']}"}).status_code == 200
+        mine = [r for r in rows if r.get("event_action") == "subscription_signed_in"]
+        assert len(mine) == 1, rows
+        row = mine[0]
+        assert row["event_type"] == subs_router.AuditEventType.CREDENTIALS
+        assert row["actor_user"].id == 1
+        assert row["target_type"] == "subscription" and row["target_id"] == "primary"
+        assert row["details"] == {"name": "primary"}
+        assert TOKEN not in repr(row) and CODE not in repr(row) and q["state"] not in repr(row)
+
+    def test_a_refused_exchange_writes_no_registration_row(self, sign_in, monkeypatch):
+        rows = []
+
+        async def log(**kw):
+            rows.append(kw)
+
+        monkeypatch.setattr(subs_router.platform_audit_service, "log", log)
+        sign_in.answer["resp"] = _Resp(400, {})
+        client = _client()
+        _, q = _start(client)
+        client.post("/api/subscriptions/claude-sign-in/exchange", json={"code": f"{CODE}#{q['state']}"})
+        assert [r for r in rows if r.get("event_action") == "subscription_signed_in"] == []
+
+
+def test_the_provider_timeout_is_well_under_the_assistants_wait():
+    """The assistant's credential field reaches this route on the loopback and
+    gives up after its own timeout (enterprise `assistant/credential.py`,
+    30 s), answering "may or may not have been stored". The code is spent the
+    moment the exchange starts, so the provider call plus the registration
+    must finish well inside that wait: the provider gets a third of it at most."""
+    svc = _live("services.claude_sign_in_service")
+    assert svc.TIMEOUT_SECONDS <= 10.0
+    try:
+        from enterprise.backend.assistant import credential  # noqa: PLC0415
+    except ImportError:
+        return                                    # the private module is not mounted here
+    assert svc.TIMEOUT_SECONDS * 3 <= credential.TIMEOUT_SECONDS
+
+
+def test_the_provider_call_uses_that_timeout(monkeypatch):
+    svc = _live("services.claude_sign_in_service")
+    import httpx
+    seen = {}
+
+    class _Client:
+        def __init__(self, **kw):
+            seen.update(kw)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            return _Resp(200, {})
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    import asyncio
+    asyncio.run(svc._post_token("https://example.invalid/token", {}))
+    assert seen["timeout"] == svc.TIMEOUT_SECONDS
+
+
 def test_the_routes_are_on_the_router_main_includes():
     """main.py includes `routers.subscriptions.router`; the two routes ride on it."""
     paths = {(r.path, tuple(sorted(r.methods))) for r in subs_router.router.routes}

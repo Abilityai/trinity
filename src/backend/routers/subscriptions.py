@@ -272,10 +272,26 @@ async def exchange_claude_sign_in(
         token = await sign_in.exchange(current_user.id, body.code)
     except sign_in.SignInError as e:
         raise _sign_in_refusal(e) from None
-    return await _register_token(
+    registered = await _register_token(
         SubscriptionCredentialCreate(name=FIRST_RUN_SUBSCRIPTION_NAME, token=token),
         http_request, current_user,
     )
+    # SEC-001: who connected which subscription through the sign-in. Name and
+    # actor only — never the token or the code (Invariant #12). Best-effort:
+    # `platform_audit_service.log` never raises into the caller.
+    await platform_audit_service.log(
+        event_type=AuditEventType.CREDENTIALS,
+        event_action="subscription_signed_in",
+        source="api",
+        actor_user=current_user,
+        actor_ip=http_request.client.host if http_request.client else None,
+        target_type="subscription",
+        target_id=FIRST_RUN_SUBSCRIPTION_NAME,
+        endpoint=http_request.scope["path"],
+        request_id=getattr(http_request.state, "request_id", None),
+        details={"name": FIRST_RUN_SUBSCRIPTION_NAME},
+    )
+    return registered
 
 
 @router.get("", response_model=List[SubscriptionWithAgents])
