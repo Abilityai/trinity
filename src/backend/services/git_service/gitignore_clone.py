@@ -310,7 +310,7 @@ async def merge_gitignore_after_clone(
         # Outside the Docker-pool cap: the alert touches no container.
         if sweep is not None:
             await gitignore.gitignore_sweep._emit_gitignore_untracked_alert(
-                agent_name, sweep
+                agent_name, sweep, trigger="start"
             )
     except Exception as exc:
         logger.warning(

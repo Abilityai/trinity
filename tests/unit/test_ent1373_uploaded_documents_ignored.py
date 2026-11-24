@@ -334,6 +334,7 @@ def test_start_merge_untracks_and_alerts(monkeypatch):
     alert.assert_awaited_once()
     name, sweep = alert.await_args.args
     assert name == "a1" and sweep.removed == (PERSON_DOC,)
+    assert alert.await_args.kwargs == {"trigger": "start"}
 
 
 def test_start_merge_does_not_alert_on_a_failed_untrack(monkeypatch):
@@ -405,3 +406,53 @@ def test_start_path_asks_for_the_untrack_and_creation_does_not():
     assert start and all(_flag(c) is True for c in start), "start path lost the untrack"
     creation = _spawn_calls(svc / "crud.py", "_materialize_agent_files")
     assert creation and all(_flag(c) is False for c in creation), "creation must not untrack"
+
+
+def _capture_alert(gs, monkeypatch, sweep, **kwargs):
+    """Run the real emitter against a stand-in `platform_alerts.observe` and
+    return what it would have filed."""
+    import asyncio
+    import types
+    import services
+    calls = []
+    fake = types.ModuleType("services.platform_alerts")
+    fake.observe = lambda *a, **kw: calls.append((a, kw)) or "created"
+    monkeypatch.setitem(sys.modules, "services.platform_alerts", fake)
+    monkeypatch.setattr(services, "platform_alerts", fake, raising=False)
+    asyncio.run(gs.gitignore_sweep._emit_gitignore_untracked_alert("a1", sweep, **kwargs))
+    assert len(calls) == 1, calls
+    return calls[0][1]
+
+
+def test_push_alert_wording_is_unchanged(monkeypatch):
+    gs = _load_gitignore(monkeypatch)
+    sweep = gs.gitignore_sweep.GitignoreSweep(removed=(PERSON_DOC,))
+    item = _capture_alert(gs, monkeypatch, sweep)
+    assert item["title"] == "Push untracked files that now match .gitignore"
+    assert item["question"] == (
+        "a1: this Push removed 1 file(s) from the index because they match an "
+        "ignore rule (the working tree is untouched, but the deletion is "
+        "committed and pushed) — if one was meant to stay, negate it in the "
+        "agent's own `.gitignore`, below the managed defaults block, and re-add "
+        "it with `git add -f`."
+    )
+
+
+def test_start_alert_does_not_claim_a_push(monkeypatch):
+    """At start the removal is only staged; the next auto-sync commits and
+    pushes it. The alert must say so, not name a Push nobody ran."""
+    gs = _load_gitignore(monkeypatch)
+    sweep = gs.gitignore_sweep.GitignoreSweep(removed=(PERSON_DOC,))
+    item = _capture_alert(gs, monkeypatch, sweep, trigger="start")
+    assert item["title"] == (
+        "Agent start untracked uploaded documents that match .gitignore"
+    )
+    assert item["question"] == (
+        "a1: starting the agent removed 1 file(s) from the index because they "
+        "match an ignore rule (the working tree is untouched; the next "
+        "auto-sync commits and pushes the removal) — if one was meant to stay, "
+        "negate it in the agent's own `.gitignore`, below the managed defaults "
+        "block, and re-add it with `git add -f`."
+    )
+    assert "Push" not in item["title"] + item["question"]
+    assert item["priority"] == "high"
