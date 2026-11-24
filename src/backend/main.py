@@ -670,6 +670,13 @@ async def _start_maintenance_services() -> None:
     except Exception as e:
         logger.error(f"Error registering the rooms ask ending observer: {e}")
 
+    # trinity-enterprise#1363: ONE-SHOT removal of links in the
+    # deployed-templates store that leave their own template directory. A
+    # deploy refuses them now; this covers what was stored before it did.
+    # Idempotent, so every worker may run it; rationale in the service.
+    from services.agent_service import deploy as _deploy_boot
+    _deploy_boot.schedule_store_link_scan()
+
 
 async def _schedule_staggered_services() -> None:
     """PERF-269 staggered starts. Each spawns a delayed task; none blocks boot.
@@ -753,13 +760,6 @@ async def _schedule_staggered_services() -> None:
     # conditional, so every worker may run it; stagger and rationale in the service).
     from services import agent_model_seed as _agent_model_seed_boot
     _agent_model_seed_boot.schedule_boot_fill()
-
-    # trinity-enterprise#1363: ONE-SHOT removal of links in the
-    # deployed-templates store that leave their own template directory. A
-    # deploy refuses them now; this covers what was stored before it did.
-    # Idempotent, so every worker may run it; rationale in the service.
-    from services.agent_service import deploy as _deploy_boot
-    _deploy_boot.schedule_store_link_scan()
 
     # #447: subscription recovery probe — re-asks the provider whether a
     # subscription believed rate-limited is back. Nothing else can clear the
