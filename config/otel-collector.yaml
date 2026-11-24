@@ -35,9 +35,14 @@ processors:
     max_streams: 10000  # Maximum number of unique metric streams to track
 
 exporters:
-  # Prometheus exporter - scrape at :8889/metrics
+  # Prometheus exporter - the backend scrapes trinity-otel-metrics:8889/metrics.
+  # The host part is a Docker network alias the compose files give this
+  # container on the platform network ONLY, so the listener binds that one
+  # address. The collector also sits on the agent network (agents push to the
+  # receivers above), and the exported series are fleet-wide usage data that
+  # no single agent should read, so this must not become 0.0.0.0.
   prometheus:
-    endpoint: "0.0.0.0:8889"
+    endpoint: "trinity-otel-metrics:8889"
     namespace: trinity
     # NOTE: Don't use const_labels with resource_to_telemetry_conversion
     # to avoid duplicate label conflicts

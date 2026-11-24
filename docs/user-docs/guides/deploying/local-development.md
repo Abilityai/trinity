@@ -116,7 +116,7 @@ Once complete, the platform services are running:
 | Scheduler | `trinity-scheduler` | 8001 inside the container (health only; not published to the host) |
 | Redis | `trinity-redis` | 127.0.0.1:6379 (loopback only) |
 | Vector (logs) | `trinity-vector` | 8686 inside the container (health only; not published to the host) |
-| OTel collector | `trinity-otel-collector` | 4317, 4318, 8889, 13133 inside Docker only (agents and the backend reach it by name; not published to the host) |
+| OTel collector | `trinity-otel-collector` | 4317, 4318, 13133 inside Docker only (agents reach it by name; not published to the host). 8889 (metrics) answers only on the platform network, as `trinity-otel-metrics` |
 
 Two one-shot containers (`trinity-logs-init`, `trinity-archives-init`) prepare the log directories and exit; they are expected to show as exited.
 

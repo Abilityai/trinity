@@ -1079,13 +1079,20 @@ services:
     logging: *default-logging
     restart: unless-stopped
     # No published ports. Agents push OTLP to `trinity-otel-collector:4317`
-    # and the backend reads `:8889/metrics`, both by Docker DNS on the networks
-    # below; neither goes through the host.
+    # by Docker DNS on the agent network; nothing goes through the host.
     volumes:
       - ./config/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
     networks:
-      - trinity-platform
-      - trinity-agent      # Agents push metrics directly to the collector
+      # The alias exists on the platform network only, and it is what the
+      # Prometheus exporter listens on (config/otel-collector.yaml). So the
+      # read side, which carries fleet-wide usage data, is on the network
+      # agents are not on, and the backend reads it there as
+      # `trinity-otel-metrics:8889`. The container name resolves on both
+      # networks and must not be used for the read.
+      trinity-platform:
+        aliases:
+          - trinity-otel-metrics
+      trinity-agent: {}    # Agents push metrics directly to the collector
     labels:
       - "trinity.platform=infrastructure"
       - "trinity.service=otel-collector"
