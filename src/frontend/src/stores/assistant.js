@@ -837,6 +837,7 @@ export const useAssistantStore = defineStore('assistant', {
         entry.notUsing = Array.isArray(data?.not_using)
           ? data.not_using.filter((r) => typeof r?.name === 'string').map((r) => ({ name: r.name.slice(0, 81), model_access: typeof r.model_access === 'boolean' ? r.model_access : null }))
           : (data && 'not_using' in data ? null : undefined)
+        entry.moving = Array.isArray(data?.moving) ? data.moving.filter((n) => typeof n === 'string').map((n) => n.slice(0, 81)) : []
       } catch (error) {
         entry.state = 'open'
         const code = error?.response?.status
@@ -846,7 +847,7 @@ export const useAssistantStore = defineStore('assistant', {
           error: words(error, code ? `Trinity refused it (${code}). Nothing was stored.` : "Couldn't reach Trinity, so it may or may not have been stored."),
         }
       }
-      await this.send(credentialLine(entry.card, true, { working: entry.working, kind: entry.kind, notUsing: entry.notUsing }), route, { shown: false })
+      await this.send(credentialLine(entry.card, true, { working: entry.working, kind: entry.kind, notUsing: entry.notUsing, moving: entry.moving, connected: entry.connected }), route, { shown: false })
       return { ok: true }
     },
 

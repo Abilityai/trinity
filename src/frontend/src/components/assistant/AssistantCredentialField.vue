@@ -112,7 +112,7 @@ import BaseButton from '../base/BaseButton.vue'
 import BaseInput from '../base/BaseInput.vue'
 import InlineError from '../InlineError.vue'
 import { useAssistantStore } from '../../stores/assistant'
-import { credentialWhere } from '../../utils/assistantCards'
+import { credentialWhere, savedReportText } from '../../utils/assistantCards'
 import { claudeHelp, isClaudeCredential } from '../../utils/firstSession'
 import { claudeSavedText } from '../onboarding/steps/credentialSteps'
 
@@ -135,14 +135,9 @@ const checked = ref(false)    // the instance has answered whether it takes this
 
 const where = computed(() => credentialWhere(props.entry.card))
 const claude = computed(() => (isClaudeCredential(props.entry.card) ? claudeHelp() : null))
-// ent#1354 (ruled 2026-11-24, evening): the save switches no existing agent; it names the ones not on it.
-const connectedText = computed(() => {
-  const rows = props.entry.notUsing
-  if (!Array.isArray(rows) || rows.length === 0) return claudeSavedText(props.entry.connected)
-  const names = rows.map((r) => r.name).join(', ')
-  const them = rows.length === 1 ? 'it' : 'them'
-  return `Saved. Not on it yet: ${names}. Nothing was switched; the assistant asks you before it moves ${them}.`
-})
+// ent#1354 (ruled 2026-11-24, evening): the card's save switches no existing agent; it names the ones not on it.
+// It says what the save reported (connected, moving, not on it), never more.
+const connectedText = computed(() => savedReportText(props.entry, claudeSavedText))
 // ent#1354 (walk 2026-11-24 14:50Z): the Claude card said "CLAUDE_SUBSCRIPTION is
 // already set" on an instance holding only an API key. Its note names what is there.
 const HOLDS = {

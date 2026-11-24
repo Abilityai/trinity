@@ -233,6 +233,32 @@ describe('connecting Claude with a token made in a terminal', () => {
       expect(posted(USE)).toHaveLength(0)
     })
 
+    // Validation -9dy0iM-ikVuLGQ7KaVLcQ: the line said "Nothing was switched" while
+    // the save had connected agents and their restarts were still running.
+    it('a save that connected agents never says nothing was switched', async () => {
+      saveReport = { kind: 'subscription', connected_agents: 2, moving: [],
+        not_using: [{ name: 'other', model_access: false }, { name: 'scout', model_access: false }] }
+      await openAndAsk()
+      await paste(VALUE)
+      const field = wrapper.get('[data-testid="assistant-credential-connected"]').text()
+      expect(field).toBe('Connected 2 agents that had no Claude credential; running ones restart in the background. ' +
+        'Not on it yet: other, scout. The assistant asks you before it moves them.')
+      const told = posted(TURN).at(-1).body.message
+      expect(told).toContain('It connected 2 agents that had no Claude credential.')
+      expect(told).not.toMatch(/nothing was switched/i)
+    })
+
+    it('agents already moving onto it are named as moving, not as off it, and not offered to the assistant', async () => {
+      saveReport = { kind: 'subscription', connected_agents: 0, moving: ['scout'], not_using: [] }
+      await openAndAsk()
+      await paste(VALUE)
+      expect(wrapper.get('[data-testid="assistant-credential-connected"]').text())
+        .toBe('Saved. Moving onto it as it restarts: scout.')
+      expect(posted(TURN).at(-1).body.message).toBe(
+        'Provided: ANTHROPIC_API_KEY for this instance. Saved as subscription. ' +
+        'Already moving onto it (do not ask about these): scout.')
+    })
+
     it('yes switches exactly the agents on the card and tells the assistant which now use it', async () => {
       await openAndAsk(SWITCH)
       const card = cardFor('Use this subscription on these agents: scout')

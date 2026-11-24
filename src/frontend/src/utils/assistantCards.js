@@ -251,17 +251,58 @@ export function validCredential(raw, fleet) {
 export const credentialWhere = (card) => (card.agent ? `the agent ${card.agent}` : 'this instance')
 
 /** The only thing the assistant is told about a credential field: provided or not. */
-export function credentialLine(card, provided, { working = null, kind = null, notUsing } = {}) {
+export function credentialLine(card, provided, { working = null, kind = null, notUsing, moving, connected } = {}) {
   const line = `${provided ? 'Provided' : 'Not provided'}: ${card.name} for ${credentialWhere(card)}.`
   // ent#1355: the instance checked its own Claude key after the save; a rejection is said, the value never.
   if (provided && working === false) return `${line} Anthropic did not accept it, so agents cannot run on it yet.`
   if (!provided || !Object.hasOwn(CLAUDE_KINDS, kind || '')) return line
-  // ent#1354: which existing agents are not on it. Names and whether each runs; nothing was switched.
-  if (notUsing === null) return `${line} Saved as ${kind}. Whether existing agents use it could not be checked.`
+  // ent#1354: what the save reported, and nothing it did not: how many agents it
+  // connected, which are already moving onto it, which are not on it.
+  const facts = saveFacts({ connected, moving })
+  let said = `${line} Saved as ${kind}.`
+  if (facts.connected) said += ` It connected ${agentsWord(facts.connected)} that had no Claude credential.`
+  if (facts.moving.length) said += ` Already moving onto it (do not ask about these): ${facts.moving.join(', ')}.`
+  if (notUsing === null) {
+    return `${said} Whether ${facts.switchedNone ? '' : 'other '}existing agents use it could not be checked.`
+  }
   const words = notUsingWords(notUsing)
-  return words
-    ? `${line} Saved as ${kind}. Existing agents not on it (nothing was switched): ${words}.`
-    : `${line} Saved as ${kind}. Every existing agent is on it.`
+  if (words) return `${said} Existing agents not on it${facts.switchedNone ? ' (nothing was switched)' : ''}: ${words}.`
+  return facts.moving.length || facts.connected ? said : `${said} Every existing agent is on it.`
+}
+
+const agentsWord = (n) => (n === 1 ? '1 agent' : `${n} agents`)
+
+/** What a save reported about agents it moved: a count it connected, and names already moving onto it. */
+export function saveFacts({ connected, moving } = {}) {
+  const n = Number.isInteger(connected) && connected > 0 ? connected : 0
+  const names = Array.isArray(moving) ? moving.filter((m) => typeof m === 'string') : []
+  return { connected: n, moving: names, switchedNone: n === 0 && names.length === 0 }
+}
+
+/**
+ * The line the Claude field shows after a save (ent#1354): exactly what the
+ * save reported. "Nothing was switched" only when it connected no agent and
+ * none is moving onto it. `fallback` is the plain saved text.
+ */
+export function savedReportText({ connected, notUsing, moving } = {}, fallback) {
+  const facts = saveFacts({ connected, moving })
+  const rows = Array.isArray(notUsing) ? notUsing : []
+  if (rows.length === 0 && facts.moving.length === 0) return fallback(connected)
+  const parts = [facts.connected
+    ? `Connected ${agentsWord(facts.connected)} that had no Claude credential; running ones restart in the background.`
+    : 'Saved.']
+  if (facts.moving.length) {
+    const them = facts.moving.length === 1 ? 'it restarts' : 'they restart'
+    parts.push(`Moving onto it as ${them}: ${facts.moving.join(', ')}.`)
+  }
+  if (rows.length) {
+    const them = rows.length === 1 ? 'it' : 'them'
+    parts.push(`Not on it yet: ${rows.map((r) => r.name).join(', ')}.`)
+    parts.push(facts.switchedNone
+      ? `Nothing was switched; the assistant asks you before it moves ${them}.`
+      : `The assistant asks you before it moves ${them}.`)
+  }
+  return parts.join(' ')
 }
 
 // ---------------------------------------------------------------------------
