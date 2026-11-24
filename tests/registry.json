@@ -298,7 +298,31 @@
         "agent-collaboration",
         "reliability"
       ],
-      "description": "#4536: an ending that collides with a held 15 s wake window is parked (Redis trinity:wake_missed:{caller}) and delivered once when that wake ends, from the wake row's own terminal and from the holder after it releases; a finished wake releases its window, so twelve fast delegate->wake rounds are twelve wakes; endings from before the claim still collapse (300-row sweep = one wake); many endings during one wake give one follow-on; a holder releasing before the park still delivers; Redis down on the park audits skipped_window; a holder cancelled or closed (GeneratorExit) leaves the marker for the wake row's terminal, one that raises or returns FAILED still drains; a released follow-on key delivers a second parked ending; a drain wakes only its own caller; a finished wake covers nothing after it (a back-dated recovered run, a parked ending drained by a later window's wake, a FAILED wake in an earlier window all still wake). 19 tests. Real idempotency claim, fakeredis."
+      "description": "#4536: an ending that collides with a running wake is parked (Redis trinity:wake_missed:{caller}) and delivered once when that wake ends, from the wake row's own terminal and from the holder after it releases; a finished wake releases its hold (the per-caller hold since #4733), so twelve fast delegate->wake rounds are twelve wakes; endings from before the claim still collapse (300-row sweep = one wake); many endings during one wake give one follow-on; a holder releasing before the park still delivers; Redis down on the park audits skipped_window; a holder cancelled or closed (GeneratorExit) leaves the marker for the wake row's terminal, one that raises or returns FAILED still drains; an ending after the wake row's terminal wakes at once, and a second one after the follow-on finished is delivered; a drain wakes only its own caller; a finished wake covers nothing after it (a back-dated recovered run and the ending after a FAILED wake still wake); a later ending parks behind the same running wake. 18 tests. Real idempotency claim, fakeredis."
+    },
+    {
+      "file": "unit/test_4733_wake_hold.py",
+      "feature": "#4733",
+      "added": "2026-11-23",
+      "categories": [
+        "unit",
+        "backend",
+        "agent-collaboration",
+        "reliability"
+      ],
+      "description": "#4733: one caller wake per caller at a time, whatever window it claimed: endings in later windows (also the wake's own callee, several windows on) park behind the running wake and one follow-on delivers the latest; an ending from before the claim folds in a later window, a late write back-dated before the claim parks. The hold is a DB fact (a live caller_wake row, or a claim younger than 120 s): a clean backend stop (holder cancelled, row FAILED, no fan-out) does not hold the caller past the grace and a later run's end delivers the parked ending; a wake row's terminal frees its own hold and never a later wake's (admission instant, not a re-stamped started_at); a holder whose wait gave up while its row is live lets no second wake in. At capacity no caller_wake row is written, the ending parks (reason at_capacity) and any run's end delivers it (schedule, chat, operator_response), not while a wake runs; a refusal racing the check parks too, except on a pilot; a 300-row sweep writes no row; the real slot check parks only on a full meter with a running run (pilot, stale slots, meter down and a free slot dispatch). A stale hold that cannot be reclaimed wakes without it instead of looping; a race park whose busy run ends before the marker lands takes the freed slot; a drained ending never folds; a push /chat delivers a parked wake from its slot release (run_chat_turn drains after release, driven through the real finally). Plus idempotency peek and has_execution_with_status. 30 tests on the #4536 harness."
+    },
+    {
+      "file": "unit/test_4537_wake_conversation.py",
+      "feature": "#4537",
+      "added": "2026-11-16",
+      "categories": [
+        "unit",
+        "backend",
+        "agent-collaboration",
+        "reliability"
+      ],
+      "description": "#4537: a wake turn belongs to the conversation that delegated. The frame quotes the delegating turn's request and reply read off continues_execution_id (a second round reads the request from the head of the chain and the plan from the latest turn; another agent's turn is never quoted; a secret is redacted and long text capped from the end; a looping link is bounded). The wake row's own terminal writes the reply into the person's agent chat thread once and announces it with identifiers only; nothing is written for a failed or empty wake, a wake with no link, a turn with no thread, a turn an agent started, or a thread of another person or agent; a failed write does not raise and is retried. A /task turn saved to a chat session names its thread on the row, and a failed link does not lose the saved turn. 17 tests. Real DB, fakeredis."
     },
     {
       "file": "unit/test_4357_wake_chain_depth.py",
@@ -9747,6 +9771,17 @@
         "credentials"
       ],
       "description": "The assistant panel's credential card, mounted: a masked field that says the assistant cannot see the value and where it is stored; Save posts the value once to the instance, empties the field and sends only 'Provided: NAME for ...'; Cancel sends 'Not provided' and stores nothing; a refusal is named and sends nothing; a value already set is said to be replaced, never shown; the value is in no turn, no kept message and no browser storage."
+    },
+    {
+      "file": "../src/frontend/tests/unit/assistantClaudeToken.mount.spec.js",
+      "feature": "trinity-enterprise#1354",
+      "added": "2026-11-24",
+      "categories": [
+        "frontend",
+        "unit",
+        "credentials"
+      ],
+      "description": "The assistant's Claude card, mounted (ruled 2026-11-24): three terminal steps naming claude setup-token and no sign-in link, the API key as the alternative in the same field; the paste goes once to the instance as CLAUDE_SUBSCRIPTION and the assistant hears only 'Provided'; a pasted sign-in code is refused in plain words and sends nothing; an agent's own ANTHROPIC_API_KEY is unchanged."
     }
   ]
 }

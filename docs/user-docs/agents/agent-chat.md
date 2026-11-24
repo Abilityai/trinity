@@ -54,6 +54,8 @@ Attach files to any chat message using the paperclip button or by dragging and d
 
 Oversized files are rejected client-side with an alert. Files that exceed the total image limit or exceed the per-message count are skipped and a note is appended to the message context. File uploads work in both authenticated chat and public chat.
 
+Attached files are never committed to the agent's git repository: `uploads/` subfolders are in every agent's managed `.gitignore`. To keep one in the repo, have the agent copy it into a folder it commits, or negate it in the agent's own `.gitignore` (`!uploads/<session>/<file>`, no leading slash). Attachments committed before this rule are untracked on the agent's next start (if it auto-syncs) or Push, and the operator queue names them; copies already pushed stay in the repo's history until the owner rewrites it. See [the agent guide](../../TRINITY_COMPATIBLE_AGENT_GUIDE.md#5-gitignore-required).
+
 ### Continue as Chat
 
 - From the Execution Detail page, click **Continue as Chat**.

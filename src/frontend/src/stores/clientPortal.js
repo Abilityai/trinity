@@ -25,6 +25,7 @@ import { useAuthStore } from './auth'
 // spelled here rather than imported: specs mock the auth store whole.
 const SPA_CLIENT = 'web'
 import { laterInstant, READ_UP_TO_NOW } from '@/utils/readThrough'
+import { joinFresh, markChanged } from '@/utils/inflight'
 // A cycle by shape (that store reads this one's `clientEmail`), safe by use:
 // neither side touches the other at module evaluation, only inside actions.
 import { usePortalDraftsStore } from './portalDrafts'
@@ -141,7 +142,45 @@ export const SUGGESTIONS_FRESH_MS = 60_000
 // registering a second.
 export { setPlatformUnauthorizedHandler as setPlatformSessionLostHandler }
 
+// #4671 — one turn end sent 17–21 requests, several of them the same read
+// twice: the turn's own refresh, the 20 s tick, a tab-focus refresh and the
+// title-settle timers each issued their own sessions / chat-state / rooms /
+// asks whenever they overlapped. `joinedGet` is the seam that stops that: a GET
+// for the same URL, parameters and credential joins the one already in flight.
+//
+// `joinFresh`, not a plain join — see `utils/inflight.js`. A refresh that
+// follows a write must not be answered by a read that left before it, so every
+// write on this transport moves the change epoch when it is SENT (a read that
+// left earlier may or may not see it) and again when it SETTLES (a read that
+// left meanwhile may have raced it). `noteWorkspaceChange` does the same for a
+// change that did not travel through this transport: a turn ending, a push.
+//
+// A write under `/chat-state/` (mark read, star) changes the chat-state read
+// and nothing else — the thread list carries neither unread counts nor stars;
+// the shell stamps both on from chat state (`decorate`). It is scoped, so the
+// mark-read every turn end sends does not force the thread and room lists to
+// be read again behind it. Every other write may change anything.
+//
+// Not joined: a request with an abort `signal` (one caller's cancel must not
+// cancel another's read) or a `responseType` (a blob is its caller's own).
+const CHAT_STATE = '/client-portal/chat-state'
+const isWrite = (config) => !!config && String(config.method || 'get').toLowerCase() !== 'get'
+const scopeOf = (url) => (String(url || '').includes(CHAT_STATE) ? 'chat-state' : null)
+const noteWrite = (config) => { if (isWrite(config)) markChanged(scopeOf(config.url)) }
+
+export function joinedGet(url, config = {}) {
+  if (config.signal || config.responseType) return portalHttp.get(url, config)
+  const who = config.headers?.Authorization || ''
+  const key = `${who}|${url}|${JSON.stringify(config.params || {})}`
+  return joinFresh(key, () => portalHttp.get(url, config), scopeOf(url))
+}
+
+// `noteWrite` is called from the two interceptors this transport already has
+// (the credential one below, the rotation one in `installRotationInterceptor`)
+// rather than from a pair of its own: several specs address those by position.
+
 portalHttp.interceptors.request.use((config) => {
+  noteWrite(config)   // #4671: a write is leaving — see `joinedGet`
   // The store is the ONLY source of a workspace credential. Whatever arrived on
   // the config — a caller's `headers: this.authHeader`, or anything axios merged
   // in from defaults — is discarded and replaced by the current decision.
@@ -214,6 +253,7 @@ function installRotationInterceptor() {
   // sliding and the client is back to re-authenticating.
   portalHttp.interceptors.response.use(
     (response) => {
+    noteWrite(response?.config)   // #4671: a write settled — see `joinedGet`
     const fresh = response?.headers?.[SESSION_ROTATION_HEADER]
     if (fresh) {
       const url = response?.config?.url || ''
@@ -235,6 +275,7 @@ function installRotationInterceptor() {
     return response
     },
     (error) => {
+      noteWrite(error?.config)   // #4671: a failed write settled too
       // ent#357's operator bounce, re-homed onto the instance the workspace now
       // uses — and asked with the right discriminator (see the note beside
       // `setPlatformSessionLostHandler`). A CLIENT's 401 (wrong code, expired
@@ -1072,7 +1113,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // early removes a guaranteed-4xx round-trip per refresh.
       if (!this.multiAgentChatAvailable) return []
       try {
-        const { data } = await portalHttp.get('/api/rooms', { headers: this.authHeader })
+        const { data } = await joinedGet('/api/rooms', { headers: this.authHeader })
         return (data.rooms || []).map((r) => ({ ...r, is_room: true }))
       } catch (err) {
         throw this._noteRoomsRefusal(err)
@@ -1734,9 +1775,17 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // Inbox is mounted). Counts and previews come from one response, so the
     // row's "N new" and its excerpt cannot drift. An older backend ignores the
     // flag and `previews` is simply empty.
+    // #4671: something the Workspace's lists describe changed without a write
+    // on this transport — a turn ended (the reply came over the stream), a
+    // push arrived. A read issued after this never joins one that left before
+    // it. See `joinedGet` above.
+    noteWorkspaceChange() {
+      markChanged()
+    },
+
     async fetchChatState(opts) {
       const withPreviews = !!(opts && opts.previews)
-      const { data } = await portalHttp.get('/api/enterprise/client-portal/chat-state', {
+      const { data } = await joinedGet('/api/enterprise/client-portal/chat-state', {
         headers: this.authHeader,
         ...(withPreviews ? { params: { previews: true } } : {}),
       })
@@ -2087,7 +2136,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // reports pair uses and for the same reason (a canvas is capped at 512 KiB
     // and a list of them is not a list view).
     async fetchAgentCanvases(agentName) {
-      const { data } = await portalHttp.get(
+      const { data } = await joinedGet(
         `/api/enterprise/client-portal/agents/${agentName}/canvas`,
         { headers: this.authHeader }
       )
@@ -2132,7 +2181,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     },
 
     async fetchDocuments(agentName) {
-      const { data } = await portalHttp.get(
+      const { data } = await joinedGet(
         `/api/enterprise/client-portal/agents/${agentName}/documents`,
         { headers: this.authHeader }
       )
@@ -2155,7 +2204,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       if (sessionId) params.session_id = sessionId
       if (limit) params.limit = limit
       if (before) params.before = before
-      const { data } = await portalHttp.get(
+      const { data } = await joinedGet(
         `/api/enterprise/client-portal/agents/${agentName}/history`,
         { headers: this.authHeader, params }
       )
@@ -2440,7 +2489,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // keeps the sidebar correct whatever #2196 decides about hiding
     // container-less agents from the displayed roster.
     async fetchSessionsBatch() {
-      const { data } = await portalHttp.get(
+      const { data } = await joinedGet(
         '/api/enterprise/client-portal/sessions',
         { headers: this.authHeader }
       )
@@ -2494,7 +2543,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // trinity-enterprise#611: the asks that ended in the last 7 days ride the
         // same list, so a person sees how an ask ended instead of watching it
         // vanish; `openAsks` (the badges and the asks-waiting line) stays pending-only.
-        const { data } = await portalHttp.get('/api/enterprise/client-portal/asks', {
+        const { data } = await joinedGet('/api/enterprise/client-portal/asks', {
           headers: this.authHeader,
           params: agentName ? { agent_name: agentName, include_ended: true } : { include_ended: true },
         })
@@ -2549,7 +2598,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       const issuedUnder = this.portalToken
       const stale = () => this.portalToken !== issuedUnder || !this.isClientSignedIn
       try {
-        const { data } = await portalHttp.get('/api/enterprise/client-portal/mentions', {
+        const { data } = await joinedGet('/api/enterprise/client-portal/mentions', {
           headers: this.authHeader,
         })
         if (stale()) return []
@@ -2621,7 +2670,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // read. Rethrows; the chat keeps what `asks` gives it when this fails.
     async fetchChatTurnAsks(chatId) {
       if (!this.isClientSignedIn || !chatId) return []
-      const { data } = await portalHttp.get('/api/enterprise/client-portal/asks', {
+      const { data } = await joinedGet('/api/enterprise/client-portal/asks', {
         headers: this.authHeader,
         params: { chat_id: chatId },
       })
@@ -2635,7 +2684,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     async fetchWork(agentNames, chatId = null) {
       const params = { agents: (agentNames || []).filter(Boolean).join(',') }
       if (chatId) params.chat_id = chatId
-      const { data } = await portalHttp.get('/api/enterprise/client-portal/work', {
+      const { data } = await joinedGet('/api/enterprise/client-portal/work', {
         headers: this.authHeader,
         params,
       })
@@ -2818,7 +2867,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // for that state makes the stale case one click away.
       if (!quiet) this.unavailable = false
       try {
-        const { data } = await portalHttp.get('/api/enterprise/client-portal/my-agents', {
+        const { data } = await joinedGet('/api/enterprise/client-portal/my-agents', {
           headers: this.authHeader,
         })
         this.clientEmail = data.client_email || null

@@ -1614,6 +1614,9 @@ function onWorkState(sig) {
   // ent#475: a turn just ended (1:1: `sending` fell; room: the server's
   // `working` list went idle) — the moment a canvas or a file may have
   // changed. One trigger for both chats, no timer.
+  // #4671: a turn ending is a change — the read below must not join one that
+  // left while the turn was still running (the 12 s Work poll, a tab open).
+  if (wasLive && !workSignal.value.live) store.noteWorkspaceChange?.()
   if (wasLive && !workSignal.value.live) rail.refresh()
   // ent#525: a turn STARTING is when its row (and, soon, its delegated
   // children) appear — read the feed once the row exists; the 12 s poll then

@@ -645,7 +645,13 @@ async def start_agent_internal(agent_name: str, *, allow_key_mint: bool = True) 
     try:
         if db.get_git_auto_sync_enabled(agent_name):
             from services import git_service
-            git_service.spawn_gitignore_merge_after_clone(agent_name)
+            # abilityai/trinity-enterprise#1373: the one exception to "start =
+            # prevent only" — also untrack committed uploaded documents (two
+            # patterns, nothing else), or a never-Pushed auto-sync agent keeps
+            # re-committing them. Creation does not pass this.
+            git_service.spawn_gitignore_merge_after_clone(
+                agent_name, untrack_dropped_documents=True
+            )
     except Exception as e:
         logger.warning(
             "[#2069] failed to spawn the creation-parity .gitignore merge for "
