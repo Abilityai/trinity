@@ -37,7 +37,7 @@ Trinity is the **operating system for the AI-native company** — open source, s
 |   |  +----------+  +----------+  +----------+  +----------+  +----------+  |  |
 |   |  | Backend  |  |   MCP    |  |  Vector  |  |  Redis   |  |  SQLite  |  |  |
 |   |  | FastAPI  |  |  Server  |  |   Logs   |  | Secrets  |  |   Data   |  |  |
-|   |  |  :8000   |  |  :8080   |  |  :8686   |  |  :6379   |  |          |  |  |
+|   |  |  :8000   |  |  :8080   |  | internal |  |  :6379   |  |          |  |  |
 |   |  +----+-----+  +----+-----+  +----------+  +----------+  +----------+  |  |
 |   |       |             |                                                    |  |
 |   +-------+-------------+----------------------------------------------------+  |
@@ -74,7 +74,7 @@ Trinity is the **operating system for the AI-native company** — open source, s
 | **Web Interface** | :80 | Vue.js 3 frontend with Dashboard, Agent Details, File Manager, Settings |
 | **Backend (FastAPI)** | :8000 | REST API for agent management, authentication, credentials, scheduling |
 | **MCP Server** | :8080 | FastMCP server exposing 29 tools for external Claude Code orchestration |
-| **Vector** | :8686 | Log aggregation service capturing all container stdout/stderr |
+| **Vector** | internal (no host port) | Log aggregation service capturing all container stdout/stderr |
 | **Redis** | :6379 | Secrets storage and OAuth state cache |
 | **SQLite** | - | Primary database for users, agents, sessions, permissions |
 | **Agent Containers** | :8000 (internal) | Isolated Docker containers running Claude Code with MCP tools |

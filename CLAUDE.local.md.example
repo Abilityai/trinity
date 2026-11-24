@@ -27,7 +27,7 @@
 | Frontend (nginx/Vite) | 80 |
 | Backend (FastAPI) | 8000 |
 | MCP Server | 8080 |
-| Vector (logs) | 8686 |
+| Vector (logs) | not published (8686 inside its container only) |
 | Redis | 6379 |
 | Agent SSH | 2222-2262 |
 

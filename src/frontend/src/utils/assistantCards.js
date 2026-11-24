@@ -19,7 +19,6 @@
  * `local-move` (the steps that bring in agents run on the person's own machine,
  * written by the page: trinity-enterprise#1353).
  */
-import { instanceCredentialName } from './firstSession'
 
 const enc = encodeURIComponent
 const agentPath = (name) => `/api/agents/${enc(name)}`
@@ -237,10 +236,11 @@ export function validCredential(raw, fleet) {
   } else if (!INSTANCE_CREDENTIALS.includes(raw.name)) {
     return null
   }
-  // ent#1354: this instance's Claude card is held as the subscription credential,
-  // which takes a subscription token from `claude setup-token` or an API key.
-  const name = raw.agent === undefined ? instanceCredentialName({ name: raw.name }) : raw.name
-  const card = { action: 'credential', name, why: String(raw.why ?? '').trim().slice(0, 300) }
+  // ent#1354: the card keeps the name the assistant asked under. This instance
+  // takes both Claude names as one card (a subscription token from
+  // `claude setup-token` or an API key, tested before it is saved), and the
+  // "Provided:" line must name what the assistant asked for, or it asks again.
+  const card = { action: 'credential', name: raw.name, why: String(raw.why ?? '').trim().slice(0, 300) }
   if (raw.agent !== undefined) card.agent = raw.agent
   return card
 }
