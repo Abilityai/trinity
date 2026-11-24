@@ -21,7 +21,7 @@ import { defineStore } from 'pinia'
 import api from '../api'
 import { useOnboardingStore } from './onboarding'
 import { buildContext, buildFleet, describePage } from '../utils/assistantContext'
-import { acceptCards, buildOutcome, cardLabel, cardNote, credentialLine, outcomeLine, runCard, validBuild, webLink } from '../utils/assistantCards'
+import { acceptCards, buildOutcome, cardLabel, cardNote, credentialLine, outcomeLine, runCard, useClaude, validBuild, webLink } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
 import { useAuthStore } from './auth'
 import { useFirstRunStore } from './firstRun'
@@ -768,6 +768,8 @@ export const useAssistantStore = defineStore('assistant', {
         outcome = await this.confirmTool(entry.card, entry.label)
       } else if (entry.card.action === 'feedback') {
         outcome = await this.sendFeedback(entry.card, entry.label, route)
+      } else if (entry.card.action === 'use-claude') {
+        outcome = await useClaude(api, entry.card, entry.label)
       } else {
         const result = await runCard(api, entry.card, this.fleet)
         outcome = { kind: result.kind, reason: result.reason || '', line: outcomeLine(result.kind, entry.label, result.reason) }
@@ -834,6 +836,12 @@ export const useAssistantStore = defineStore('assistant', {
         entry.connected = Number.isInteger(data?.connected_agents) ? data.connected_agents : null
         entry.working = typeof data?.working === 'boolean' ? data.working : null
         entry.problem = entry.working === false && typeof data?.problem === 'string' ? data.problem.slice(0, 300) : ''
+        // ent#1354: the save switched no agent; which existing ones are not on it, by name.
+        entry.kind = typeof data?.kind === 'string' ? data.kind : null
+        entry.notUsing = Array.isArray(data?.not_using)
+          ? data.not_using.filter((r) => typeof r?.name === 'string').map((r) => ({ name: r.name.slice(0, 81), model_access: typeof r.model_access === 'boolean' ? r.model_access : null }))
+          : (data && 'not_using' in data ? null : undefined)
+        entry.moving = Array.isArray(data?.moving) ? data.moving.filter((n) => typeof n === 'string').map((n) => n.slice(0, 81)) : []
       } catch (error) {
         entry.state = 'open'
         const code = error?.response?.status
@@ -843,7 +851,7 @@ export const useAssistantStore = defineStore('assistant', {
           error: words(error, code ? `Trinity refused it (${code}). Nothing was stored.` : "Couldn't reach Trinity, so it may or may not have been stored."),
         }
       }
-      await this.send(credentialLine(entry.card, true, { working: entry.working }), route, { shown: false })
+      await this.send(credentialLine(entry.card, true, { working: entry.working, kind: entry.kind, notUsing: entry.notUsing, moving: entry.moving, connected: entry.connected }), route, { shown: false })
       return { ok: true }
     },
 
