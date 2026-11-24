@@ -31,6 +31,7 @@ let credentialSet
 let credentialCurrent
 let refuse
 let refuseState
+let saveReport
 
 vi.mock('@/api', () => {
   const respond = (method, url, body, config) => {
@@ -51,7 +52,10 @@ vi.mock('@/api', () => {
         refuse = null
         throw { response: { status: r.status, data: { detail: r.detail } } }
       }
-      return { provided: true, agent: body.agent, name: body.name, replaced: credentialSet === true }
+      return { provided: true, agent: body.agent, name: body.name, replaced: credentialSet === true, ...(saveReport || {}) }
+    }
+    if (url === '/api/enterprise/assistant/credential/use') {
+      return { kind: body.kind, now_using: body.agents, not_switched: [] }
     }
     if (url === '/api/agents') return [{ name: 'scout', status: 'running' }]
     if (url === '/api/agents/autonomy-status') return {}
@@ -101,6 +105,7 @@ describe('connecting Claude with a token made in a terminal', () => {
     credentialCurrent = null
     refuse = null
     refuseState = null
+    saveReport = null
     localStorage.clear()
     sessionStorage.clear()
     setActivePinia(createPinia())
@@ -205,5 +210,51 @@ describe('connecting Claude with a token made in a terminal', () => {
     await openAndAsk({ action: 'credential', name: 'ANTHROPIC_API_KEY', why: 'Scout calls Claude itself.', agent: 'scout' })
     expect(wrapper.find('[data-testid="assistant-credential-steps"]').exists()).toBe(false)
     expect(calls.find((c) => c.url === CRED && c.method === 'get').params.name).toBe('ANTHROPIC_API_KEY')
+  })
+
+  // ent#1354, ruled 2026-11-24 (evening): the save switches no agent. The
+  // assistant is told which existing agents are not on the credential and
+  // whether each runs, then shows one confirm card; only yes switches them.
+  describe('existing agents after the save', () => {
+    const USE = '/api/enterprise/assistant/credential/use'
+    const SWITCH = { action: 'use-claude', kind: 'subscription', agents: ['scout'] }
+    const cardFor = (label) => wrapper.findAll('[data-testid="assistant-card"]').find((c) => c.text().includes(label))
+    const button = (card, words) => card.findAll('button').find((b) => b.text() === words)
+
+    it('tells the assistant which agents are not on it and that nothing was switched; the field says the same', async () => {
+      saveReport = { kind: 'subscription', not_using: [{ name: 'scout', model_access: false }], connected_agents: 0 }
+      await openAndAsk()
+      await paste(VALUE)
+      expect(posted(TURN).at(-1).body.message).toBe(
+        'Provided: ANTHROPIC_API_KEY for this instance. Saved as subscription. ' +
+        'Existing agents not on it (nothing was switched): scout (cannot run as it is).')
+      expect(wrapper.get('[data-testid="assistant-credential-connected"]').text())
+        .toBe('Saved. Not on it yet: scout. Nothing was switched; the assistant asks you before it moves it.')
+      expect(posted(USE)).toHaveLength(0)
+    })
+
+    it('yes switches exactly the agents on the card and tells the assistant which now use it', async () => {
+      await openAndAsk(SWITCH)
+      const card = cardFor('Use this subscription on these agents: scout')
+      expect(card).toBeTruthy()
+      await button(card, 'Yes, switch them').trigger('click')
+      await flushPromises()
+      expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'subscription', agents: ['scout'] }])
+      expect(posted(TURN).at(-1).body.message)
+        .toBe('Done: Use this subscription on these agents: scout. Now on it: scout.')
+    })
+
+    it('no changes nothing and says so', async () => {
+      await openAndAsk(SWITCH)
+      await button(cardFor('Use this subscription on these agents: scout'), 'Not now').trigger('click')
+      await flushPromises()
+      expect(posted(USE)).toHaveLength(0)
+      expect(posted(TURN).at(-1).body.message).toBe('Not now: Use this subscription on these agents: scout.')
+    })
+
+    it('a card naming an agent this page did not read is not shown', async () => {
+      await openAndAsk({ ...SWITCH, agents: ['scout', 'ghost'] })
+      expect(cardFor('Use this subscription')).toBeUndefined()
+    })
   })
 })

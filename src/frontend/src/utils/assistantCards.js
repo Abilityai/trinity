@@ -17,7 +17,9 @@
  * makers of Trinity, sent on the person's click) and `credential` (a masked
  * field whose value goes to this instance and never to the assistant), and
  * `local-move` (the steps that bring in agents run on the person's own machine,
- * written by the page: trinity-enterprise#1353).
+ * written by the page: trinity-enterprise#1353), and `use-claude` (switch the
+ * named existing agents onto this instance's Claude credential, only on the
+ * person's yes: trinity-enterprise#1354).
  */
 
 const enc = encodeURIComponent
@@ -249,10 +251,66 @@ export function validCredential(raw, fleet) {
 export const credentialWhere = (card) => (card.agent ? `the agent ${card.agent}` : 'this instance')
 
 /** The only thing the assistant is told about a credential field: provided or not. */
-export function credentialLine(card, provided, { working = null } = {}) {
+export function credentialLine(card, provided, { working = null, kind = null, notUsing } = {}) {
   const line = `${provided ? 'Provided' : 'Not provided'}: ${card.name} for ${credentialWhere(card)}.`
   // ent#1355: the instance checked its own Claude key after the save; a rejection is said, the value never.
-  return provided && working === false ? `${line} Anthropic did not accept it, so agents cannot run on it yet.` : line
+  if (provided && working === false) return `${line} Anthropic did not accept it, so agents cannot run on it yet.`
+  if (!provided || !Object.hasOwn(CLAUDE_KINDS, kind || '')) return line
+  // ent#1354: which existing agents are not on it. Names and whether each runs; nothing was switched.
+  if (notUsing === null) return `${line} Saved as ${kind}. Whether existing agents use it could not be checked.`
+  const words = notUsingWords(notUsing)
+  return words
+    ? `${line} Saved as ${kind}. Existing agents not on it (nothing was switched): ${words}.`
+    : `${line} Saved as ${kind}. Every existing agent is on it.`
+}
+
+// ---------------------------------------------------------------------------
+// trinity-enterprise#1354 (ruled 2026-11-24, evening): existing agents and the
+// Claude credential. Saving a credential through the card switches no agent.
+// The instance reports which existing agents are not on it and whether each
+// can run as it is; the assistant shows one `use-claude` card naming them, and
+// only the person's yes switches exactly those agents.
+// ---------------------------------------------------------------------------
+
+export const CLAUDE_KINDS = Object.freeze({ subscription: 'this subscription', api_key: 'this API key' })
+export const USE_CLAUDE_MAX_AGENTS = 20
+
+/** One `use-claude` proposal: a kind and the agents, each one the page itself read. */
+export function validUseClaude(raw, fleet) {
+  if (!raw || raw.action !== 'use-claude' || !Object.hasOwn(CLAUDE_KINDS, raw.kind)) return null
+  if (Object.keys(raw).some((k) => !['action', 'kind', 'agents'].includes(k))) return null
+  if (!Array.isArray(raw.agents) || raw.agents.length === 0 || raw.agents.length > USE_CLAUDE_MAX_AGENTS) return null
+  const names = new Set((fleet || []).map((a) => a.name))
+  if (!raw.agents.every((a) => typeof a === 'string' && names.has(a))) return null
+  return { action: 'use-claude', kind: raw.kind, agents: [...new Set(raw.agents)] }
+}
+
+/** What the instance said about its existing agents, in the words the assistant is given: names, never a value. */
+export function notUsingWords(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return ''
+  const access = { true: 'runs as it is', false: 'cannot run as it is' }
+  return rows.slice(0, USE_CLAUDE_MAX_AGENTS)
+    .map((r) => `${r.name} (${access[String(r.model_access)] || 'cannot tell whether it runs'})`).join(', ')
+}
+
+/**
+ * The person's yes on a `use-claude` card: the instance switches exactly those
+ * agents, as the person, and answers which now use it. The line the assistant
+ * is told names them.
+ */
+export async function useClaude(http, card, label) {
+  try {
+    const { data } = await http.post('/api/enterprise/assistant/credential/use', { kind: card.kind, agents: card.agents })
+    const now = Array.isArray(data?.now_using) ? data.now_using : []
+    const missed = Array.isArray(data?.not_switched) ? data.not_switched : []
+    const onIt = now.length ? `Now on it: ${now.join(', ')}.` : 'None of them is on it yet.'
+    if (!missed.length) return { kind: 'done', reason: '', line: `${outcomeLine('done', label)} ${onIt}` }
+    const reason = `${onIt} Not switched: ${missed.map((m) => `${m.name} (${m.reason})`).join('; ')}`
+    return { kind: now.length ? 'unsure' : 'refused', reason, line: outcomeLine(now.length ? 'unsure' : 'refused', label, reason) }
+  } catch (error) {
+    const f = failure(error)
+    return { kind: f.refused ? 'refused' : 'unsure', reason: f.reason, line: outcomeLine(f.refused ? 'refused' : 'unsure', label, f.reason) }
+  }
 }
 
 const TOOL_NAME = /^[a-z0-9_]{2,80}$/
@@ -321,6 +379,7 @@ export function acceptCards(raw, fleet) {
     else if (item?.action === 'choice') card = validChoice(item)
     else if (item?.action === 'feedback') card = validFeedback(item)
     else if (item?.action === 'credential') card = validCredential(item, fleet)
+    else if (item?.action === 'use-claude') card = validUseClaude(item, fleet)
     else if (item?.action === 'upgrade' && Object.keys(item).length === 1) card = { action: 'upgrade' }
     else if (item?.action === 'local-move' && Object.keys(item).length === 1) card = { action: 'local-move' }
     else card = validCard(item, fleet)
@@ -339,6 +398,7 @@ export function cardLabel(card, fleet) {
   if (card.action === 'upgrade') return 'Subscribe to Trinity Pro'
   if (card.action === 'local-move') return 'Bring in the agents you run in Claude Code'
   if (card.action === 'credential') return `${card.name} for ${card.agent || 'this instance'}`
+  if (card.action === 'use-claude') return `Use ${CLAUDE_KINDS[card.kind]} on these agents: ${card.agents.join(', ')}`
   if (card.action === 'tool') {
     const { title, details } = toolWords(card)
     const first = details.find((d) => ['name', 'agent name', 'agent'].includes(d.key)) || details[0]
@@ -358,6 +418,9 @@ export function cardNote(card) {
   if (card.action === 'tool') return irreversibleTool(card) ? 'This cannot be undone. It runs as you.' : 'Changes this instance. It runs as you.'
   if (card.action === 'credential') {
     return `The assistant cannot see what you type. It is stored on ${credentialWhere(card)} as ${card.name}, and the assistant is only told whether it was provided.`
+  }
+  if (card.action === 'use-claude') {
+    return 'Switches only these agents, as you. A running one restarts, which takes about a minute. Nothing else changes.'
   }
   if (card.action === 'upgrade') return "A larger allowance and bigger teams. We email a code to this instance's registered address to confirm."
   return 'Runs as you, not as the assistant.'
