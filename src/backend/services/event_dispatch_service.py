@@ -169,7 +169,7 @@ def _get_internal_token(
     SECRET_KEY-signed on purpose: unlike ``INTERNAL_API_SECRET`` (C-003), which
     the scheduler and the MCP server also hold, only the backend can mint this.
     """
-    from jose import jwt
+    import jwt
     from config import SECRET_KEY, ALGORITHM
     from datetime import datetime, timedelta
     from dependencies import EVENT_LOOPBACK_SCOPE

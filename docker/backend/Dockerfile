@@ -67,6 +67,12 @@ RUN pip install --no-cache-dir \
     fastapi==0.115.6 \
     uvicorn[standard]==0.37.0 \
     "pydantic[email]>=2.10.4,<3" \
+    # pyjwt is the backend's JWT library (abilityai/trinity-enterprise#1124);
+    # tests/unit/test_ent1124_pyjwt_swap.py asserts this pin == the test
+    # requirements == the installed version. python-jose is no longer imported
+    # by the OSS backend; a private module still imports it, so its pin stays
+    # until that module moves, then that line goes.
+    pyjwt==2.15.1 \
     python-jose[cryptography]==3.3.0 \
     cryptography==44.0.1 \
     passlib[bcrypt]==1.7.4 \
@@ -125,10 +131,11 @@ RUN pip install --no-cache-dir \
     # the test venv resolved, so image and CI agree; Dependabot bumps them like
     # any other pin. The docs/test extras (black, mkdocs*, mike, pytest-asyncio)
     # are runtime deps in the sdist's METADATA, not an authoring choice of ours.
+    # pyjwt belongs to this set too; it is pinned above with the backend's own
+    # dependencies because it is the backend's JWT library (trinity-enterprise#1124).
     a2a-sdk==0.3.26 \
     mcp==1.30.0 \
     python-socketio==5.14.3 \
-    pyjwt==2.14.0 \
     jsonschema==4.26.0 \
     websocket-client==1.9.2 \
     helicone-helpers==1.2.1 \

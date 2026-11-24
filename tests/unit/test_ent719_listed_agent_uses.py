@@ -919,7 +919,7 @@ def test_a_person_edits_and_deletes_any_subscription_they_own(
 
 def _loopback_token(fleet) -> str:
     """A real, signed loopback JWT with no source agent, as the backend mints."""
-    from jose import jwt
+    import jwt
 
     deps = fleet.deps
     return jwt.encode(

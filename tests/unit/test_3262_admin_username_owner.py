@@ -248,7 +248,7 @@ def test_the_verdict_is_computed_once_the_owner_exists(monkeypatch):
 def test_the_event_loopback_token_is_minted_for_the_configured_admin():
     """EVT-001's loopback JWT is resolved by get_current_user through its `sub`;
     a literal "admin" 401s every event-subscription dispatch on a root install."""
-    from jose import jwt
+    import jwt
 
     from config import ALGORITHM, SECRET_KEY
     from services import event_dispatch_service as eds

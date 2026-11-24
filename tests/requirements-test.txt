@@ -50,6 +50,13 @@ pydantic[email]>=2.10.0
 # (it is 1 failed / 5860 passed at 0.140.13).
 fastapi>=0.115.0,<0.116
 pyyaml>=6.0.0
+# pyjwt is the backend's JWT library (abilityai/trinity-enterprise#1124); exact and equal
+# to docker/backend/Dockerfile — tests/unit/test_ent1124_pyjwt_swap.py and
+# tests/unit/test_ent679_payments_pin_parity.py both assert it.
+pyjwt==2.15.1
+# python-jose is no longer imported by the OSS backend or by any public test
+# (abilityai/trinity-enterprise#1124). A private module still imports it, so the
+# line stays until that module moves; drop it together with the image pin.
 python-jose[cryptography]>=3.3.0
 python-multipart>=0.0.20
 # OpenTelemetry for trace logging tests
@@ -138,10 +145,11 @@ payments-py==1.18.0
 # that test is that CI exercises the SDK stack production ships (an import
 # failure in any one of them flips NEVERMINED_AVAILABLE to False and both
 # payment doors answer 501 with a green build). Bump both files together.
+# (pyjwt is part of this set too; it is pinned above with the backend's own
+# dependencies because it is the backend's JWT library, trinity-enterprise#1124.)
 a2a-sdk==0.3.26
 mcp==1.30.0
 python-socketio==5.14.3
-pyjwt==2.14.0
 jsonschema==4.26.0
 websocket-client==1.9.2
 helicone-helpers==1.2.1

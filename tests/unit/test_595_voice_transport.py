@@ -180,7 +180,7 @@ def test_a_valid_session_jwt_in_the_url_no_longer_opens_the_socket(bridge):
     refused with reload words, and the session is never looked up."""
     import config
     import database
-    from jose import jwt
+    import jwt
     bridge.add(owner=1)
     bridge.monkeypatch.setattr(database.db, "get_user_by_username", lambda u: ROWS[1] if u == "alice" else None)
     bridge.monkeypatch.setattr(bridge.voice, "db", database.db)

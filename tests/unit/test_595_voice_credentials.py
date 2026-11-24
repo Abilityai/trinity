@@ -55,7 +55,7 @@ USERS = {
 
 def _jwt(sub, **extra):
     import config
-    from jose import jwt
+    import jwt
     claims = {"sub": sub, "exp": int(time.time()) + 300, **extra}
     return jwt.encode(claims, config.SECRET_KEY, algorithm=config.ALGORITHM)
 

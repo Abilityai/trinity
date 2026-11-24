@@ -557,7 +557,7 @@ def test_an_unvouched_loopback_jwt_is_refused_by_the_entry_fence(
     but the subscriber-task dispatch (ent#614). A pass would be a 2xx, not an
     incidental 401: the subject is a live admin and the token is not revoked."""
     from config import ALGORITHM, SECRET_KEY
-    from jose import jwt
+    import jwt
 
     before = _seed(route, world.schedule)
     monkeypatch.setattr(dependencies, "is_token_revoked", lambda *_a, **_k: False)
