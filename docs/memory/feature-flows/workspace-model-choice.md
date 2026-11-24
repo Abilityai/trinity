@@ -192,7 +192,7 @@ like `claude-sonnet-4-6[1m]` are in legitimate circulation, so the resolver is
 
 ```
   Workspace composer (platform user, Claude runtime, control rendered)
-        │  BaseSelect:  "" = Agent's default (Sonnet 4.6) | <curated id>
+        │  BaseSelect:  "" = Agent's default (Sonnet 5.5) | <curated id>
         ▼
   POST /client-portal/agents/{n}/chat[/stream]        body.model
         │  ① (body.model or "").strip() or None   ← BEFORE validation, or "" 422s

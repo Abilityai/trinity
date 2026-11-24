@@ -35,6 +35,7 @@ from .services import gemini_settings
 from .services.runtime_adapter import GEMINI_RUNTIMES
 from .auto_sync import schedule_auto_sync_if_enabled
 from .heartbeat import schedule_heartbeat
+from .guardrail_events import schedule_guardrail_forwarder
 from .services.result_callback import schedule_pending_result_resend
 from .services.orphan_sweeper import schedule_orphan_sweeper
 from .utils.thread_diagnostics import (
@@ -109,6 +110,11 @@ schedule_auto_sync_if_enabled(app)
 # RELIABILITY-004 / #307: liveness heartbeat loop. Gated on TRINITY_BACKEND_URL
 # + TRINITY_MCP_API_KEY both present, so old-image agents simply never beat.
 schedule_heartbeat(app)
+
+# trinity-enterprise#165: forward the guardrail hooks' spool
+# (/logs/guardrails.jsonl) to the platform under the agent's own key. Same gate
+# as the heartbeat; fails open, never touches an execution.
+schedule_guardrail_forwarder(app)
 
 # #1083 fire-and-forget: on startup re-send any result-callback envelope left on
 # disk by a crash/restart mid-callback, so completed work isn't lost to a phantom

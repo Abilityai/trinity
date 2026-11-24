@@ -30,7 +30,7 @@ Run all six probes. All must pass:
 | Frontend | `curl -s -o /dev/null -w '%{http_code}' http://localhost` | `200` |
 | Redis | `docker exec trinity-redis redis-cli ping` | `PONG` |
 | MCP Server | `curl -s http://localhost:8080/health` | HTTP 200 |
-| Vector | `docker exec trinity-vector wget -q -O - http://localhost:8686/health` | Non-empty response |
+| Vector | `docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health` | Non-empty response |
 
 Run as a block:
 
@@ -56,7 +56,7 @@ curl -s http://localhost:8080/health
 # Expected: 200 OK
 
 # 6. Vector (log aggregation)
-docker exec trinity-vector wget -q -O - http://localhost:8686/health
+docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health
 # Expected: non-empty response
 ```
 

@@ -50,7 +50,11 @@ export const useAgentsStore = defineStore('agents', {
     runningToggleLoading: {},  // Map of agent name -> boolean
     // #389 Sync health per agent (populated by fetchSyncHealth)
     syncHealth: {},  // Map of agent name -> { last_sync_status, consecutive_failures, behind_working, ... }
-    subscriptionPressure: {}  // #471: agent name -> { auth_mode, subscription_name, failure_events_24h, rate_limited_now, ... }
+    subscriptionPressure: {},  // #471: agent name -> { auth_mode, subscription_name, failure_events_24h, rate_limited_now, ... }
+    // #4537: agent name -> { sessionId, at } — a reply was written into that chat
+    // session outside a turn the open panel is waiting on (the thin
+    // `chat_response_ready` trigger). ChatPanel refetches the session it shows.
+    chatReplyAt: {}
   }),
 
   getters: {
@@ -334,6 +338,11 @@ export const useAgentsStore = defineStore('agents', {
         { headers: authStore.authHeader }
       )
       return response.data
+    },
+
+    noteChatReply(name, sessionId) {
+      if (!name || !sessionId) return
+      this.chatReplyAt = { ...this.chatReplyAt, [name]: { sessionId, at: Date.now() } }
     },
 
     async getChatHistory(name) {

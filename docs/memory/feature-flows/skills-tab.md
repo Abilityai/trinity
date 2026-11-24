@@ -162,6 +162,7 @@ Shown where the approval row is (owner or admin, not a ghost, not the system age
 | `ok`, `unknown`, `null` | nothing |
 | `unsupported_runtime` | This agent's runtime can't enforce gates inside the agent; requests that name a gated skill still wait for approval. |
 | `predates` | This agent's image predates the in-agent gate check; recreate the agent to enforce gates inside it. |
+| `skipped` (trinity-enterprise#1176) | Gates can't be checked inside this agent: Claude Code on this agent is using cached organization settings, so it skips Trinity's guardrails. Its turns run without skills. A shared person's turn is refused until that is fixed, and so is a visitor's while visitors may not run commands. |
 | `missing` / `not_root_owned` / `writable` | The in-agent gate check isn't intact on this agent (<value>); recreate the agent to restore it. |
 
 #### Self-approved marker (`ExecutionGateMarker.vue`)
@@ -286,7 +287,7 @@ Auth is unchanged (`get_skill_gate_readable_agent_by_name`). Models: `SkillGateA
 - **`hook`** with `?probe=true` (`skill_gate_map_service._read_health` + `hook_status`, `:253-280`):
   - honoured only when `is_person_principal(caller)` and `can_manage_agent_skills(caller, agent)` (the #3052 `probe` precedent); anyone else gets `null`;
   - one direct `agent_httpx_client` `GET /health`, capped at 3 s for the whole probe (`asyncio.wait_for`; httpx's own timeout is per phase), no circuit-breaker bookkeeping;
-  - the agent's `skill_gate_hook` (`agent_server/routers/info.py:135`) when it is one of `ok | missing | not_root_owned | writable | unsupported_runtime`; `predates` for a 200 without the field; `unknown` for no usable answer (stopped, timeout, non-200, not JSON, an unexpected value).
+  - the agent's `skill_gate_hook` (`agent_server/routers/info.py:135`) when it is one of `ok | missing | not_root_owned | writable | unsupported_runtime | skipped` (`skipped`: the files are intact but Claude Code is not applying them, trinity-enterprise#1176); `predates` for a 200 without the field; `unknown` for no usable answer (stopped, timeout, non-200, not JSON, an unexpected value).
 - MCP `list_skill_gates` (`src/mcp-server/src/tools/skills.ts:541-566`) passes the response through and sends no `probe`, so `hook` is `null` there.
 
 ### 3. "Ran without approval" flags — derived, no new column

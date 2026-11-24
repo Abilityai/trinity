@@ -169,6 +169,22 @@ def _skill_gate_hook() -> str:
     return "ok"
 
 
+# trinity-enterprise#1176: the files can be intact while Claude Code skips them
+# (a server-managed settings payload outranks the managed files). Applied after
+# the checks above, so a missing or loosened file keeps its own value first.
+MANAGED_HOOK_FIELDS = ("guardrails_registration", "skill_gate_hook")
+
+
+def _with_managed_hooks_state(body: Dict[str, Any]) -> Dict[str, Any]:
+    from ..services import managed_hooks
+
+    if managed_hooks.state() == managed_hooks.SKIPPED:
+        for field in MANAGED_HOOK_FIELDS:
+            if body.get(field) == "ok":
+                body[field] = managed_hooks.SKIPPED
+    return body
+
+
 VENDOR_TELEMETRY_OPT_OUT = "/etc/claude-code/managed-settings.d/70-vendor-telemetry.json"
 VENDOR_TELEMETRY_OPT_OUT_NAMES = (
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING",
@@ -281,7 +297,7 @@ async def health_check():
     running executions, history size) so a curl against /health is enough to
     spot accumulator leaks without strace or pprof. #333.
     """
-    return {
+    return _with_managed_hooks_state({
         "status": "healthy",
         "agent_name": agent_state.agent_name,
         "runtime": agent_state.agent_runtime,
@@ -303,7 +319,8 @@ async def health_check():
         # agent-controlled strings on this unauthenticated endpoint.
         "clone_status": _clone_status(),
         # #3105: "ok"|"missing"|"not_root_owned"|"writable" — stat of the
-        # guardrail registration on every request, not only at boot.
+        # guardrail registration on every request, not only at boot; and
+        # "skipped" (trinity-enterprise#1176) when Claude Code is not applying it.
         "guardrails_registration": _guardrails_registration(),
         # trinity-enterprise#752: the same, for the gated-skill hook, plus
         # "unsupported_runtime" (no hooks on Codex / Gemini).
@@ -315,7 +332,7 @@ async def health_check():
         # OpenCode only so the Claude/Codex payloads stay byte-identical.
         **_read_only_enforcement(),
         "diagnostics": _diagnostics(),
-    }
+    })
 
 
 @router.get("/api/template/info")

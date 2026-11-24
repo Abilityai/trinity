@@ -34,6 +34,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,9 @@ from services.event_bus import (
 from services.ws_identity_service import resolve_ws_identity
 
 _ClientSlot = event_bus_mod._ClientSlot
+_PAYLOAD_AGENT_KEYS = event_bus_mod._PAYLOAD_AGENT_KEYS
+_DATA_AGENT_KEYS = event_bus_mod._DATA_AGENT_KEYS
+_DETAILS_AGENT_KEYS = event_bus_mod._DETAILS_AGENT_KEYS
 _event_is_visible = event_bus_mod._event_is_visible
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -444,7 +448,8 @@ def test_connect_defaults_are_fail_closed():
 
 # Payloads the extractor cannot key, each with the reason it is fleet-visible.
 # An entry here is a decision, not an exemption to be copied: adding one means
-# asserting that the event names no agent a stranger should not learn about.
+# asserting that the event names no agent a stranger should not learn about,
+# and that it carries nothing about a PERSON (see `PERSON_KEY`).
 FLEET_LEVEL_ALLOWLIST = {
     # A bulk "clear resolved"/"dismiss all" reports a count for the acting
     # operator's own accessible set; it names no agent.
@@ -466,7 +471,36 @@ FLEET_LEVEL_ALLOWLIST = {
     # event for the room's own human participants. Scoping room events by room
     # membership is tracked separately — see the debt inbox entry for ent#467.
     ("shared_sessions/service.py", "<dynamic>"),
+    # trinity-enterprise#1341: `agent_name` is OPTIONAL here
+    # (`DismissAllRequest.agent_name: Optional[str] = None`). A clear for one
+    # agent is keyed; a fleet-wide clear carries `agent_name: None` and reaches
+    # every operator client. So this site is fleet-level, and the payload is a
+    # count and nothing else (#3392 dropped the clearer's identity). Listeners
+    # refetch the access-controlled list.
+    ("routers/notifications.py", "notifications_cleared"),
 }
+
+# Sites whose agent key the guard cannot PROVE is always a name (it reads a row
+# or a local rather than a `str` parameter or a required model field), each
+# with why it is. Reviewed, not exempt: the value named must be unable to be
+# empty. A site whose key is provably optional cannot be listed here — it is
+# fleet-level and belongs in FLEET_LEVEL_ALLOWLIST.
+KEYED_BY_REVIEW = {
+    # The row just written or read: `operator_queue.agent_name` is NOT NULL.
+    ("services/ask_service.py", "operator_queue_responded"): "updated['agent_name'], an operator_queue row",
+    ("services/ask_service.py", "operator_queue_cancelled"): (
+        "operator_queue rows (`updated`, `pred`), a `str` parameter, or a name taken from those rows"),
+    ("services/ask_service.py", "operator_queue_new"): "an operator_queue row, or a `str` parameter",
+    # `agent_loops.agent_name` is NOT NULL.
+    ("services/loop_service.py", "loop_run_completed"): "loop['agent_name'], an agent_loops row",
+    ("services/loop_service.py", "loop_completed"): "loop['agent_name'], an agent_loops row",
+    # `agent_reports.agent_name` is NOT NULL; the row was just inserted.
+    ("services/report_service.py", "agent_report"): "report['agent_name'], an agent_reports row",
+}
+
+# A key that says who a PERSON is. No fleet-level payload may carry one: that
+# is the half of the leak the scope filter cannot help with (#3392, ent#715).
+PERSON_KEY = re.compile(r"(^|_)(email|user|username|user_id|by|actor|owner|person|operator)($|_)")
 
 
 def _dict_keys(node: ast.Dict):
@@ -490,8 +524,93 @@ def _resolve_payload(node, assigns, depth=0):
     return None
 
 
+# --- how sure is the guard that an agent key holds a name? ------------------
+#
+# The first version of this guard filled every key with "x" and asked the
+# extractor. That reads `"agent_name": body.agent_name` as keyed, when the
+# field is `Optional[str] = None` and the event goes out with `None` on a
+# fleet-wide clear (trinity-enterprise#1341). A key's PRESENCE says nothing;
+# what matters is whether its value can be empty.
+#
+#   required  a non-empty string literal, a parameter annotated without
+#             `Optional`/`None` and without a `None` default, or a field the
+#             request/row model declares non-optional
+#   optional  a parameter or model field that admits `None`
+#   unknown   anything else (a row subscript, a local, an unresolved type)
+
+def _admits_none(annotation) -> bool:
+    if annotation is None:
+        return False
+    text = ast.unparse(annotation)
+    return "Optional" in text or "None" in text
+
+
+def _model_fields() -> dict:
+    """`{class name: {field: 'required' | 'optional'}}` for the model modules."""
+    out = {}
+    for module in ("models.py", "db_models.py"):
+        tree = ast.parse((_BACKEND / module).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            fields = {}
+            for stmt in node.body:
+                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                    none_default = isinstance(stmt.value, ast.Constant) and stmt.value.value is None
+                    fields[stmt.target.id] = (
+                        "optional" if none_default or _admits_none(stmt.annotation) else "required")
+            out[node.name] = fields
+    return out
+
+
+def _parameters(function) -> dict:
+    """`{name: (annotation, has a None default)}`; empty for module scope."""
+    if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return {}
+    args = function.args
+    positional = args.posonlyargs + args.args
+    defaults = [None] * (len(positional) - len(args.defaults)) + list(args.defaults)
+    pairs = list(zip(positional, defaults)) + list(zip(args.kwonlyargs, args.kw_defaults))
+    return {
+        p.arg: (p.annotation, isinstance(d, ast.Constant) and d.value is None)
+        for p, d in pairs
+    }
+
+
+def _certainty(value, function, models) -> str:
+    params = _parameters(function)
+    if isinstance(value, ast.Constant):
+        return "required" if isinstance(value.value, str) and value.value.strip() else "optional"
+    if isinstance(value, ast.Name) and value.id in params:
+        annotation, none_default = params[value.id]
+        if none_default or _admits_none(annotation):
+            return "optional"
+        # An unannotated parameter proves nothing about what it holds.
+        return "required" if annotation is not None else "unknown"
+    if (isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)
+            and value.value.id in params):
+        annotation, _ = params[value.value.id]
+        if annotation is not None:
+            cls = ast.unparse(annotation).strip("'\"").split(".")[-1]
+            field = models.get(cls, {}).get(value.attr)
+            if field:
+                return field
+    return "unknown"
+
+
+def _site_keying(agent_values, function, models) -> str:
+    """One word for a whole payload: is it certainly keyed by an agent?"""
+    states = [_certainty(v, function, models) for v in agent_values]
+    if "required" in states:
+        return "required"      # at least one name is always there
+    if not states:
+        return "none"
+    return "optional" if "optional" in states else "unknown"
+
+
 def _broadcast_payloads():
-    """Every `/ws` broadcast payload in the OSS tree, as (file, event, keys, line).
+    """Every `/ws` broadcast payload in the OSS tree, as
+    (file, event, keying, keys, line).
 
     Discovers by callee NAME (`*.broadcast(...)` and local `_broadcast({...})`
     wrappers) rather than from a list of known sites, so a new publisher is
@@ -504,7 +623,11 @@ def _broadcast_payloads():
     another and classify the wrong payload — the file has fourteen locals
     called `event`. Results are keyed by (file, line) so the two passes cannot
     double-count.
+
+    `keying` is `_site_keying` over the values of the agent-vocabulary keys;
+    `keys` is every key the payload carries, `data.x` / `details.x` included.
     """
+    models = _model_fields()
     found = {}
     for path in sorted(_BACKEND.rglob("*.py")):
         rel = path.relative_to(_BACKEND).as_posix()
@@ -518,7 +641,7 @@ def _broadcast_payloads():
             n for n in ast.walk(tree)
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         ]
-        scopes = [(tree, tree.body)] + [(fn, ast.walk(fn)) for fn in functions]
+        scopes = [(tree, tree.body)] + [(fn, list(ast.walk(fn))) for fn in functions]
         for scope, assign_source in scopes:
             assigns = {
                 n.targets[0].id: n.value
@@ -544,15 +667,21 @@ def _broadcast_payloads():
                      if k in ("event", "type") and isinstance(v, ast.Constant)),
                     "<dynamic>",
                 )
-                skeleton = {}
+                keys, agent_values = [], []
                 for key, value in items:
-                    if isinstance(value, ast.Dict):
-                        skeleton[key] = {kk: "x" for kk, _ in _dict_keys(value)}
-                    else:
-                        skeleton[key] = "x"
+                    keys.append(key)
+                    if key in _PAYLOAD_AGENT_KEYS:
+                        agent_values.append(value)
+                    nested = {"data": _DATA_AGENT_KEYS, "details": _DETAILS_AGENT_KEYS}.get(key)
+                    if nested is not None and isinstance(value, ast.Dict):
+                        for inner_key, inner_value in _dict_keys(value):
+                            keys.append(f"{key}.{inner_key}")
+                            if inner_key in nested:
+                                agent_values.append(inner_value)
                 # A function-scope hit supersedes the module-scope pass, which
                 # only sees module-level assignments and may not resolve at all.
-                found[(rel, node.lineno)] = (rel, event, skeleton, node.lineno)
+                found[(rel, node.lineno)] = (
+                    rel, event, _site_keying(agent_values, scope, models), keys, node.lineno)
     return [found[key] for key in sorted(found)]
 
 
@@ -560,31 +689,157 @@ def test_the_guard_actually_finds_the_broadcast_sites():
     """A discovery guard that discovers nothing is a green test that proves
     nothing — pin the floor and the known-loud events."""
     payloads = _broadcast_payloads()
-    assert len({(rel, line) for rel, _, _, line in payloads}) == len(payloads), (
+    assert len({(rel, line) for rel, _, _, _, line in payloads}) == len(payloads), (
         "the same call site was counted twice — the module and function passes "
         "are no longer deduped, which inflates the floor below into nonsense"
     )
-    # 36 sites today. A floor, not a snapshot: deleting a broadcast is normal,
+    # 47 sites today. A floor, not a snapshot: deleting a broadcast is normal,
     # discovery silently resolving nothing is not.
     assert len(payloads) >= 30, f"only found {len(payloads)} /ws payloads — discovery broke"
-    events = {event for _, event, _, _ in payloads}
+    events = {event for _, event, _, _, _ in payloads}
     for expected in ("agent_activity", "agent_created", "operator_queue_new", "agent_shared"):
         assert expected in events, f"{expected} is no longer discovered"
+    # The classifier must still PROVE most sites: if a refactor made every
+    # value "unknown", the review table would be asked to vouch for all of them.
+    proven = [p for p in payloads if p[2] == "required"]
+    assert len(proven) >= 25, f"only {len(proven)} sites are provably agent-keyed — the classifier broke"
 
 
 def test_every_ws_payload_is_agent_keyed_or_explicitly_fleet_level():
     unclassified = []
-    for rel, event, skeleton, lineno in _broadcast_payloads():
-        if agent_names_in_payload(skeleton):
+    for rel, event, keying, _keys, lineno in _broadcast_payloads():
+        if keying == "required":
             continue
         if (rel, event) in FLEET_LEVEL_ALLOWLIST:
             continue
-        unclassified.append(f"{rel}:{lineno} ({event})")
+        if keying == "unknown" and (rel, event) in KEYED_BY_REVIEW:
+            continue
+        unclassified.append(f"{rel}:{lineno} ({event}; agent key: {keying})")
     assert unclassified == [], (
-        "these /ws broadcasts name no agent the scope filter can read, so they "
-        "reach every authenticated client (ent#467): "
-        + ", ".join(unclassified)
-        + ". Either key the payload with one of the vocabulary keys in "
-        "services/event_bus.py, or add it to FLEET_LEVEL_ALLOWLIST with the "
-        "reason it is safe fleet-wide."
+        "these /ws broadcasts are not certain to name an agent the scope filter "
+        "can read, so they may reach every authenticated client (ent#467, "
+        "ent#1341): " + ", ".join(unclassified)
+        + ". `optional` or `none`: key the payload unconditionally, or add it to "
+        "FLEET_LEVEL_ALLOWLIST with the reason it is safe fleet-wide. `unknown`: "
+        "pass the name as a `str` parameter, or add it to KEYED_BY_REVIEW with "
+        "why the value cannot be empty."
     )
+
+
+def test_an_optional_agent_key_cannot_be_vouched_for():
+    """The review table is for values the guard cannot read, never for ones it
+    can read as optional: those go out agent-less some of the time."""
+    wrong = [
+        f"{rel}:{lineno} ({event})"
+        for rel, event, keying, _keys, lineno in _broadcast_payloads()
+        if keying in ("optional", "none") and (rel, event) in KEYED_BY_REVIEW
+        and (rel, event) not in FLEET_LEVEL_ALLOWLIST
+    ]
+    assert wrong == []
+
+
+def test_the_dismiss_all_site_is_read_as_optional():
+    """The case this guard was rebuilt for (ent#1341)."""
+    site = [p for p in _broadcast_payloads() if p[:2] == ("routers/notifications.py", "notifications_cleared")]
+    assert len(site) == 1 and site[0][2] == "optional"
+
+
+def test_no_fleet_level_payload_names_a_person():
+    """A payload that can reach every client carries no key saying who someone
+    is — not the actor, not an owner, not an email."""
+    leaks = []
+    for rel, event, keying, keys, lineno in _broadcast_payloads():
+        if keying == "required":
+            continue          # delivered only to clients who can see the agent
+        if (rel, event) not in FLEET_LEVEL_ALLOWLIST:
+            continue          # reviewed-as-keyed sites are covered by the rule above
+        for key in keys:
+            if PERSON_KEY.search(key.split(".")[-1]):
+                leaks.append(f"{rel}:{lineno} ({event}) carries `{key}`")
+    assert leaks == [], "fleet-visible /ws payloads name a person: " + "; ".join(leaks)
+
+
+def test_the_person_key_pattern_reads_the_names_that_have_leaked():
+    for key in ("cleared_by", "responded_by_email", "user_email", "email", "actor", "owner_email", "user_id"):
+        assert PERSON_KEY.search(key), key
+    for key in ("count", "scope", "agent_name", "name", "id", "batch_id", "room_id", "seq", "type"):
+        assert not PERSON_KEY.search(key), key
+
+
+def test_every_allowlist_and_review_entry_still_names_a_real_site():
+    live = {(rel, event) for rel, event, _, _, _ in _broadcast_payloads()}
+    stale = sorted((FLEET_LEVEL_ALLOWLIST | set(KEYED_BY_REVIEW)) - live)
+    assert stale == [], f"entries for sites that no longer exist: {stale}"
+
+
+@pytest.mark.parametrize("source, expected", [
+    ("async def f(agent_name: str):\n    x = {'type': 't', 'agent_name': agent_name}", "required"),
+    ("async def f(agent_name: Optional[str] = None):\n    x = {'type': 't', 'agent_name': agent_name}", "optional"),
+    ("async def f(agent_name: str | None):\n    x = {'type': 't', 'agent_name': agent_name}", "optional"),
+    ("async def f(agent_name: str = None):\n    x = {'type': 't', 'agent_name': agent_name}", "optional"),
+    ("async def f(agent_name):\n    x = {'type': 't', 'agent_name': agent_name}", "unknown"),
+    ("async def f(row):\n    x = {'type': 't', 'agent_name': row['agent_name']}", "unknown"),
+    ("async def f():\n    x = {'type': 't', 'agent_name': None}", "optional"),
+    ("async def f():\n    x = {'type': 't', 'agent_name': 'alpha'}", "required"),
+    ("async def f(body: DismissAllRequest):\n    x = {'type': 't', 'agent_name': body.agent_name}", "optional"),
+    ("async def f(n: 'Notification'):\n    x = {'type': 't', 'agent_name': n.agent_name}", "required"),
+    ("async def f(a: str, b: Optional[str]):\n    x = {'type': 't', 'source_agent': a, 'target_agent': b}", "required"),
+    ("async def f():\n    x = {'type': 't', 'count': 3}", "none"),
+])
+def test_how_an_agent_key_is_read(source, expected):
+    function = ast.parse(source).body[0]
+    payload = function.body[0].value
+    values = [v for k, v in _dict_keys(payload) if k in _PAYLOAD_AGENT_KEYS]
+    assert _site_keying(values, function, _model_fields()) == expected
+
+
+# ---------------------------------------------------------------------------
+# The fleet-wide clear, end to end (trinity-enterprise#1341, #3392)
+# ---------------------------------------------------------------------------
+
+def _dismiss_all(monkeypatch, agent_name):
+    """The real handler, with the database, audit and socket stubbed."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from models import DismissAllRequest
+    from routers import notifications as router
+
+    sent = []
+
+    class _Socket:
+        async def broadcast(self, message):
+            sent.append(json.loads(message))
+
+    class _Audit:
+        async def log(self, **kwargs):
+            return "evt"
+
+    monkeypatch.setattr(router, "_websocket_manager", _Socket())
+    monkeypatch.setattr(router, "platform_audit_service", _Audit())
+    monkeypatch.setattr(router, "get_accessible_agents", lambda user: [{"name": "alpha"}])
+    monkeypatch.setattr(router.db, "dismiss_all_notifications", lambda **kwargs: 3)
+    clearer = SimpleNamespace(id=7, email="clearer@example.com", username="clearer", role="operator")
+    request = SimpleNamespace(client=None, scope={"path": "/api/notifications/dismiss-all"})
+    result = asyncio.run(router.dismiss_all_notifications(
+        DismissAllRequest(agent_name=agent_name), request, clearer))
+    assert result == {"dismissed": 3}
+    return sent
+
+
+def test_a_fleet_wide_clear_reaches_a_stranger_and_tells_them_only_a_count(monkeypatch):
+    sent = _dismiss_all(monkeypatch, None)
+    assert sent == [{"type": "notifications_cleared", "data": {"count": 3, "agent_name": None}}]
+    payload = sent[0]
+    # It IS delivered to an operator who shares no agent with the clearer…
+    stranger = _slot(agents=set(), email="stranger@example.com")
+    assert _event_is_visible(stranger, SCOPE_ALL, None, agent_names_in_payload(payload)) is True
+    # …so nothing in it may say who cleared.
+    assert "clearer" not in json.dumps(payload)
+
+
+def test_a_clear_for_one_agent_is_keyed_and_withheld_from_a_stranger(monkeypatch):
+    sent = _dismiss_all(monkeypatch, "alpha")
+    assert sent == [{"type": "notifications_cleared", "data": {"count": 3, "agent_name": "alpha"}}]
+    stranger = _slot(agents={"beta"})
+    assert _event_is_visible(stranger, SCOPE_ALL, None, agent_names_in_payload(sent[0])) is False

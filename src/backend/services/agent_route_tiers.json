@@ -1129,6 +1129,17 @@
   "path": "/api/agents/{agent_name}/git/sync",
   "tier": "owner"
  },
+ "guardrail_events.py::get_guardrail_events": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/guardrail-events",
+  "tier": "owner"
+ },
+ "guardrail_events.py::post_guardrail_events": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/guardrail-events",
+  "reason": "the agent's own MCP key only (authorize_heartbeat); the in-container forwarder pushes its own guardrail events",
+  "tier": "self"
+ },
  "internal.py::internal_agent_brief_readiness": {
   "method": "GET",
   "path": "/api/internal/agents/{agent_name}/brief-readiness",
@@ -1494,6 +1505,12 @@
   "path": "/api/agents/{name}/schedules/{schedule_id}/webhook",
   "reason": "ent#875: the schedule's creator or the agent's owner (can_manage_webhook)",
   "tier": "resource"
+ },
+ "schedules.py::take_over_schedule": {
+  "method": "POST",
+  "path": "/api/agents/{name}/schedules/{schedule_id}/take-over",
+  "standing_work": true,
+  "tier": "owner"
  },
  "schedules.py::trigger_schedule": {
   "method": "POST",

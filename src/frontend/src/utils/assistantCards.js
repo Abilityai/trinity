@@ -13,8 +13,11 @@
  *
  * Some cards are not in the catalog because the panel handles them itself:
  * `build` (a design the person approves), `upgrade` (the subscription),
- * `choice` (a question answered with a click) and `feedback` (a note to the
- * makers of Trinity, sent on the person's click).
+ * `choice` (a question answered with a click), `feedback` (a note to the
+ * makers of Trinity, sent on the person's click) and `credential` (a masked
+ * field whose value goes to this instance and never to the assistant), and
+ * `local-move` (the steps that bring in agents run on the person's own machine,
+ * written by the page: trinity-enterprise#1353).
  */
 
 const enc = encodeURIComponent
@@ -216,6 +219,42 @@ export function validFeedback(raw) {
 
 export const feedbackKind = (card) => FEEDBACK_KINDS[card.kind] || 'Feedback'
 
+// Credentials the instance itself holds; the instance and Trinity's side hold the same list.
+export const INSTANCE_CREDENTIALS = Object.freeze(['ANTHROPIC_API_KEY', 'CLAUDE_SUBSCRIPTION'])
+const CREDENTIAL_NAME = /^[A-Z][A-Z0-9_]{1,63}$/
+
+/**
+ * A masked field for one credential, by name, for one of this instance's
+ * agents (or for the instance). The card carries no value and never will: the
+ * person types it into the field and it goes to this instance only.
+ */
+export function validCredential(raw, fleet) {
+  if (!raw || raw.action !== 'credential' || typeof raw.name !== 'string' || !CREDENTIAL_NAME.test(raw.name)) return null
+  if (Object.keys(raw).some((k) => !['action', 'name', 'why', 'agent'].includes(k))) return null
+  if (raw.agent !== undefined) {
+    if (!(fleet || []).some((a) => a.name === raw.agent)) return null
+  } else if (!INSTANCE_CREDENTIALS.includes(raw.name)) {
+    return null
+  }
+  // ent#1354: the card keeps the name the assistant asked under. This instance
+  // takes both Claude names as one card (a subscription token from
+  // `claude setup-token` or an API key, tested before it is saved), and the
+  // "Provided:" line must name what the assistant asked for, or it asks again.
+  const card = { action: 'credential', name: raw.name, why: String(raw.why ?? '').trim().slice(0, 300) }
+  if (raw.agent !== undefined) card.agent = raw.agent
+  return card
+}
+
+/** Where a credential is stored, in words: `the agent scout` or `this instance`. */
+export const credentialWhere = (card) => (card.agent ? `the agent ${card.agent}` : 'this instance')
+
+/** The only thing the assistant is told about a credential field: provided or not. */
+export function credentialLine(card, provided, { working = null } = {}) {
+  const line = `${provided ? 'Provided' : 'Not provided'}: ${card.name} for ${credentialWhere(card)}.`
+  // ent#1355: the instance checked its own Claude key after the save; a rejection is said, the value never.
+  return provided && working === false ? `${line} Anthropic did not accept it, so agents cannot run on it yet.` : line
+}
+
 const TOOL_NAME = /^[a-z0-9_]{2,80}$/
 
 /**
@@ -281,7 +320,9 @@ export function acceptCards(raw, fleet) {
     else if (item?.action === 'run') card = validRun(item, fleet)
     else if (item?.action === 'choice') card = validChoice(item)
     else if (item?.action === 'feedback') card = validFeedback(item)
+    else if (item?.action === 'credential') card = validCredential(item, fleet)
     else if (item?.action === 'upgrade' && Object.keys(item).length === 1) card = { action: 'upgrade' }
+    else if (item?.action === 'local-move' && Object.keys(item).length === 1) card = { action: 'local-move' }
     else card = validCard(item, fleet)
     const duplicate = card && cards.some((c) => JSON.stringify(c) === JSON.stringify(card))
     if (card && !duplicate && cards.length < MAX_CARDS_PER_REPLY) cards.push(card)
@@ -289,13 +330,25 @@ export function acceptCards(raw, fleet) {
   return cards
 }
 
-export function cardLabel(card, fleet) {
+/**
+ * ent#1355: in the first session the gateway sends an agent's first run as one
+ * `chat_with_agent` tool card. The page words it as that, in its own words.
+ */
+export function firstRunCard(card, firstSession) {
+  return Boolean(firstSession) && card?.action === 'tool' && card.tool === 'chat_with_agent'
+    && typeof card.args?.agent_name === 'string' && card.args.agent_name !== ''
+}
+
+export function cardLabel(card, fleet, { firstSession = false } = {}) {
+  if (firstRunCard(card, firstSession)) return `Run its first task: ${card.args.agent_name.slice(0, 80)}`
   if (card.action === 'job') return `Making "${card.title}"`
   if (card.action === 'run') return `${card.title} on ${card.agent}`
   if (card.action === 'choice') return card.question
   if (card.action === 'feedback') return `Send ${feedbackKind(card).toLowerCase()}: ${card.summary}`
   if (card.action === 'build') return `Build "${card.design.title}"`
   if (card.action === 'upgrade') return 'Subscribe to Trinity Pro'
+  if (card.action === 'local-move') return 'Bring in the agents you run in Claude Code'
+  if (card.action === 'credential') return `${card.name} for ${card.agent || 'this instance'}`
   if (card.action === 'tool') {
     const { title, details } = toolWords(card)
     const first = details.find((d) => ['name', 'agent name', 'agent'].includes(d.key)) || details[0]
@@ -305,13 +358,18 @@ export function cardLabel(card, fleet) {
 }
 
 /** The line under a card's title. Every change to an agent runs as the person. */
-export function cardNote(card) {
+export function cardNote(card, { firstSession = false } = {}) {
+  if (firstRunCard(card, firstSession)) return 'Starts your agent on this task now, as you.'
   if (card.action === 'job') return "Each agent is made with the standard tools and checked. This takes a few minutes. Keep talking or close this panel: I'll come back when they're ready."
   if (card.action === 'run') return "Running on the agent. Keep talking or close this panel: I'll come back with the result."
   if (card.action === 'choice') return ''
+  if (card.action === 'local-move') return 'You run these on your own machine. Nothing here changes until your agents arrive.'
   if (card.action === 'feedback') return 'Goes to the people who make Trinity, with the page you are on and your Trinity version. Nothing else is attached.'
   if (card.action === 'build') return 'Creates these agents on this instance, as you. Nothing is switched on.'
   if (card.action === 'tool') return irreversibleTool(card) ? 'This cannot be undone. It runs as you.' : 'Changes this instance. It runs as you.'
+  if (card.action === 'credential') {
+    return `The assistant cannot see what you type. It is stored on ${credentialWhere(card)} as ${card.name}, and the assistant is only told whether it was provided.`
+  }
   if (card.action === 'upgrade') return "A larger allowance and bigger teams. We email a code to this instance's registered address to confirm."
   return 'Runs as you, not as the assistant.'
 }

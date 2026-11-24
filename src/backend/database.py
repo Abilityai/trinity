@@ -168,6 +168,7 @@ from db.canary import CanaryOperations
 from db.compatibility import CompatibilityOperations
 from db.metric_definitions import MetricDefinitionOperations
 from db.metric_points import MetricPointOperations
+from db.guardrail_events import GuardrailEventOperations
 from db.sync_state import SyncStateOperations
 from db.terms import TermsOperations  # trinity-enterprise#1107 terms acceptances
 from db.idempotency import IdempotencyOperations
@@ -1101,6 +1102,7 @@ class DatabaseManager:
         self._compatibility_ops = CompatibilityOperations()  # #668 agent compatibility
         self._metric_definition_ops = MetricDefinitionOperations()  # ent#477 metric registry
         self._metric_point_ops = MetricPointOperations()  # ent#478 recorded points
+        self._guardrail_event_ops = GuardrailEventOperations()  # ent#165 guardrail events
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
         self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
         self._loop_ops = LoopOperations()  # #740 sequential agent loops
@@ -1118,6 +1120,9 @@ class DatabaseManager:
 
     def get_user_by_id(self, user_id: int):
         return self._user_ops.get_user_by_id(user_id)
+
+    def get_users_by_ids(self, user_ids):
+        return self._user_ops.get_users_by_ids(user_ids)
 
     def get_user_by_email(self, email: str):
         return self._user_ops.get_user_by_email(email)
@@ -1966,6 +1971,13 @@ class DatabaseManager:
     def purge_schedule(self, schedule_id: str):
         return self._schedule_ops.purge_schedule(schedule_id)
 
+    def reassign_schedule_creator(self, schedule_id: str, *, new_owner_id: int, expected_owner_id: int,
+                                  expected_updated_at, expected: dict, clear_delivery: bool):
+        """#4281: the take-over write (`db/schedules/crud.py`)."""
+        return self._schedule_ops.reassign_schedule_creator(
+            schedule_id, new_owner_id=new_owner_id, expected_owner_id=expected_owner_id,
+            expected_updated_at=expected_updated_at, expected=expected, clear_delivery=clear_delivery)
+
     def find_soft_deleted_schedules_past_retention(self, retention_days: int, limit: int = 5000):
         return self._schedule_ops.find_soft_deleted_schedules_past_retention(retention_days, limit)
 
@@ -1976,8 +1988,8 @@ class DatabaseManager:
         return self._schedule_ops.list_soft_deleted_schedules(agent_name, limit)
 
     # Webhook token management (WEBHOOK-001, #291)
-    def generate_webhook_token(self, schedule_id: str):
-        return self._schedule_ops.generate_webhook_token(schedule_id)
+    def generate_webhook_token(self, schedule_id: str, creator_id=None):
+        return self._schedule_ops.generate_webhook_token(schedule_id, creator_id)
 
     def get_schedule_by_webhook_token(self, token: str):
         return self._schedule_ops.get_schedule_by_webhook_token(token)
@@ -2027,6 +2039,10 @@ class DatabaseManager:
     def get_max_running_chain_depth(self, agent_name: str) -> int:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
         return self._schedule_ops.get_max_running_chain_depth(agent_name)
+
+    def has_execution_with_status(self, agent_name: str, statuses, triggered_by=None) -> bool:
+        """Whether the agent has a row in one of `statuses`, optionally of one trigger (#4733)."""
+        return self._schedule_ops.has_execution_with_status(agent_name, statuses, triggered_by)
 
     def get_deepest_running_chain_row(self, agent_name: str):
         """The running row that set that depth, for a refusal to name (#4357)."""
@@ -4813,6 +4829,46 @@ class DatabaseManager:
             retention_days, chunk_size
         )
 
+    # -------------------------------------------------------------------------
+    # Guardrail events (trinity-enterprise#165 — db/guardrail_events.py)
+    # -------------------------------------------------------------------------
+
+    def insert_guardrail_events(self, agent_name: str, rows):
+        """Insert normalized events; returns `(accepted, duplicates)`."""
+        return self._guardrail_event_ops.insert_events(agent_name, rows)
+
+    def list_guardrail_events(self, agent_name: str, **filters):
+        """Newest-first rows for one agent. See GuardrailEventOperations.list_events."""
+        return self._guardrail_event_ops.list_events(agent_name, **filters)
+
+    def latest_guardrail_event_received_at(self, agent_name: str):
+        """When the newest stored event for this agent arrived, or None."""
+        return self._guardrail_event_ops.latest_received_at(agent_name)
+
+    def earliest_guardrail_event_received_at(self, agent_name: str):
+        """When the oldest stored event for this agent arrived, or None."""
+        return self._guardrail_event_ops.earliest_received_at(agent_name)
+
+    def guardrail_event_received_bounds_by_agent(self, agent_names):
+        """`{agent: (oldest, newest received_at)}` for the named agents that have rows."""
+        return self._guardrail_event_ops.received_at_bounds_by_agent(agent_names)
+
+    def count_guardrail_events_by_execution(self, agent_name: str, execution_ids):
+        """`(execution_id, kind, hook, code, n)` groups for this agent's rows."""
+        return self._guardrail_event_ops.count_by_execution(agent_name, execution_ids)
+
+    def count_guardrail_events_by_agent(self, since: str, agent_names=None):
+        """`(agent_name, kind, n)` groups for rows at or after `since`."""
+        return self._guardrail_event_ops.count_by_agent(since, agent_names)
+
+    def count_guardrail_event_candidates(self, retention_days: int, limit: int) -> int:
+        """Bounded count of rows past the window (#1644 guard)."""
+        return self._guardrail_event_ops.count_guardrail_event_candidates(retention_days, limit)
+
+    def prune_guardrail_events(self, retention_days: int = 90, chunk_size: int = 5000) -> int:
+        """Delete rows past the window, bounded per call."""
+        return self._guardrail_event_ops.prune_guardrail_events(retention_days, chunk_size)
+
     # =========================================================================
     # Idempotency keys (RELIABILITY-006, #525 — delegated to db/idempotency.py)
     # =========================================================================
@@ -4820,6 +4876,10 @@ class DatabaseManager:
     def idempotency_claim(self, scope: str, key: str, ttl_hours: int = 24, **intent) -> dict:
         """Atomically claim (scope, key). See IdempotencyOperations.claim."""
         return self._idempotency_ops.claim(scope, key, ttl_hours=ttl_hours, **intent)
+
+    def idempotency_peek(self, scope: str, key: str, ttl_hours: int = 24):
+        """Read (scope, key) without claiming it. See IdempotencyOperations.peek."""
+        return self._idempotency_ops.peek(scope, key, ttl_hours=ttl_hours)
 
     def idempotency_attach_execution(self, scope: str, key: str, execution_id: str, *, claim_token=None) -> None:
         """Record the execution_id for an in-flight idempotency claim."""

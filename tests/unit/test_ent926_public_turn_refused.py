@@ -24,11 +24,15 @@ pytestmark = pytest.mark.unit
 
 
 def _refusals():
-    from agent_server.services import turn_scope
+    from agent_server.services import managed_hooks, turn_scope
     out = []
     for runtime in ("Gemini CLI", "Codex"):
         out.append(turn_scope.REFUSED.format(runtime=runtime))
         out.append(turn_scope.REFUSED_VISITOR.format(runtime=runtime))
+    # trinity-enterprise#1176: a Claude agent whose guardrails are not running.
+    out.append(managed_hooks.REFUSED)
+    out.append(managed_hooks.schedule_refusal({"cause": "creator_not_owner_tier", "schedule": "Daily",
+                                               "creator": "pat", "remedy": None}))
     return out
 
 

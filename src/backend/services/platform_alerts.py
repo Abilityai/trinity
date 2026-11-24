@@ -183,6 +183,10 @@ _BUILTIN_KINDS = (
     Kind("fleet_base_image_stale", "base-image-stale-fleet-", _N, CLEARS_HOOK,
          escalates=_a_new_agent_failed),
     Kind("circuit_dormant", "cb-dormant-", _N, CLEARS_HOOK),
+    # trinity-enterprise#1176: one row naming every agent whose Claude Code is
+    # not applying the managed hooks; a newly named agent breaks a snooze.
+    Kind("managed_hooks_skipped", "managed-hooks-skipped-", _N, CLEARS_HOOK,
+         escalates=_a_new_agent_failed),
     # -- every other in-repo platform emitter -----------------------------
     Kind("skills_reconcile_refused", "skills-reconcile-", _N, CLEARS_HOOK,
          escalates=_orphans_at_least_doubled),
@@ -214,6 +218,12 @@ _BUILTIN_KINDS = (
     # after the queue recovered carries a different marker and files.
     Kind("dispatch_queue_stalled", "queue-stall-", _D, CLEARS_HOOK,
          material_keys=("episode_started_at",)),
+    # #4281: one row per agent x creator whose enabled schedules run as a shared
+    # person. Bounded by the agent's share list (not budgeted: the cap would hide
+    # a sixth person). A person's ending is final per cause, because the
+    # condition keeps reading true for a schedule the owner decided to accept.
+    Kind("schedule_runs_restricted", "schedule-restricted-", _N, CLEARS_HOOK,
+         material_keys=("cause",), person_ending_is_final=True),
     Kind("alert_budget", "alert-budget-", _D, CLEARS_HOOK, material_keys=("filled_by",)),
     Kind("skill_not_found", "skill-not-found-", _D, CLEARS_HOOK, budgeted_type="skill_not_found"),
     Kind("effect_unguarded", "effect-unguarded-", _D, CLEARS_LIFETIME_ONLY,

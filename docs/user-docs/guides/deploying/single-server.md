@@ -294,7 +294,7 @@ docker exec trinity-redis redis-cli ping
 curl -s http://localhost:8080/health
 
 # Vector
-docker exec trinity-vector wget -q -O - http://localhost:8686/health
+docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health
 ```
 
 The scheduler's port 8001 is not published to the host by either server compose file — probe it from inside the container instead: `docker exec trinity-scheduler curl -sf http://localhost:8001/health`. See [monitoring.md](monitoring.md) for the full monitoring guide.
@@ -514,7 +514,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `ELEVENLABS_API_KEY` | dev · prod · hosted | Outbound voice replies on channels; empty = off. |
 | `ELEVENLABS_MODEL_ID` | dev · prod · hosted | ElevenLabs model (default `eleven_multilingual_v2`). |
 | `TTS_MAX_CHARS` | dev · prod · hosted | Replies longer than this are delivered as text instead of synthesized. |
-| `GEMINI_TEXT_MODEL` / `GEMINI_TRANSCRIPTION_MODEL` (commented) | dev · prod · hosted | Override the built-in Gemini model ids. Keep commented unless overriding — an empty value shadows the default. |
+| `GEMINI_TEXT_MODEL` / `GEMINI_TRANSCRIPTION_MODEL` / `GEMINI_IMAGE_MODEL` (commented) | dev · prod · hosted | Override the built-in Gemini model ids. Keep commented unless overriding — an empty value shadows the default. |
 | `VOICE_ENABLED` | dev · prod · hosted | Voice chat platform-wide (default on). |
 | `VOICE_MODEL` (commented) | dev · prod · hosted | Gemini Live model override. Keep commented unless overriding. |
 | `WORKSPACE_VOICE_MAX_DURATION` | dev · prod · hosted | Max length of one Workspace voice call, seconds (default 1800). |

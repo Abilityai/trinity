@@ -271,6 +271,7 @@ _RESERVED_ID_PREFIXES = (
                          # must not be able to pre-create, and through
                          # create_item's ON CONFLICT silently suppress, the row
                          # that says its own queue is not moving
+    "schedule-restricted-",  # schedule_tier_alerts (#4281): keyed by the creator's guessable id
     "poison-",           # lease_reaper_service poison-park (#1402)
     "cb-dormant-",       # agent_client circuit-breaker-dormant alert
     "sync-failing-",     # sync_health_service
@@ -286,7 +287,7 @@ _RESERVED_ID_PREFIXES = (
                          # bucketed id — reservation is what keeps the DB
                          # on-conflict dedup from being agent-pre-suppressible)
     "effect-unguarded-", # idempotency_service refused-effect alarm (#2392)
-    "db-backup-",        # db_backup_service failure/staleness alarms (#2216)
+    "db-backup-", "managed-hooks-skipped-",  # db_backup_service failure/staleness alarms (#2216); managed_hooks_check_service fleet alert (trinity-enterprise#1176)
     "log-archive-",      # archive_storage unwritable-directory alarm (#2205)
     "sub-headroom-",     # subscription_headroom_alerts weekly-window alarm (ent#434)
     # skills legacy-adoption refusal (#2744). The family prefix, so it covers
@@ -362,8 +363,7 @@ _LEADER_KEY = "opqueue:leader"
 # notice the person who decided; `gate-` covers `gate-note-`). A subset of
 # `_RESERVED_ID_PREFIXES`, so no agent can mint a row into it.
 _ABOUT_A_PERSON_ID_PREFIXES = ("workspace-problem-", "portal-inbox-collision-", "gate-",
-                               # trinity-enterprise#631: who tagged whom, in what
-                               "mention-")
+                               "mention-", "schedule-restricted-")  # mentions (ent#631), restricted schedules (#4281)
 
 
 # trinity-enterprise#815: the same tuple, public, for the SQL twin of
@@ -378,7 +378,7 @@ ABOUT_A_PERSON_ID_PREFIXES = _ABOUT_A_PERSON_ID_PREFIXES
 # and what they wrote — the facts `evaluations.py` already withholds from a
 # shared non-owner. Deliberately not the whole `_ABOUT_A_PERSON_ID_PREFIXES`:
 # a shared operator must still see and answer a skill gate's approval (`gate-`).
-OWNER_ONLY_ID_PREFIXES = ("workspace-problem-",)
+OWNER_ONLY_ID_PREFIXES = ("workspace-problem-", "schedule-restricted-")  # #4281: names a share holder
 
 # trinity-enterprise#980: the gate asks that are their ADDRESSEE's alone (and
 # admins'). A project steward's proposal names people and tasks of a project

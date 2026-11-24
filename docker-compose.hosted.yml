@@ -188,6 +188,7 @@ services:
       # lines the env knobs are inert in prod (#1039 packaging-gap class). Non-empty
       # defaults so an unset var doesn't inject "" (#1076).
       - GEMINI_TEXT_MODEL=${GEMINI_TEXT_MODEL:-gemini-3.5-flash}              # image-gen prompt refinement
+      - GEMINI_IMAGE_MODEL=${GEMINI_IMAGE_MODEL:-gemini-nano-banana-2.1}              # image-gen model
       - GEMINI_TRANSCRIPTION_MODEL=${GEMINI_TRANSCRIPTION_MODEL:-gemini-3.5-flash}  # Telegram voice transcription
       # Voice chat (VOICE-001) — mirrors docker-compose.yml so operators can
       # tune/disable voice in prod (code default is ON; without these lines the
@@ -911,8 +912,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./config/vector.yaml:/etc/vector/vector.yaml:ro
       - trinity-logs:/data/logs
-    ports:
-      - "8686:8686"  # Vector API (health checks)
+    # No published port. The API (the health endpoint) is for this
+    # container alone: the healthcheck below asks it over the container's own
+    # loopback, and `config/vector.yaml` binds it there. Nothing else needs it.
     networks:
       - trinity-platform   # Vector reads via Docker socket, not network — platform side
     security_opt:
@@ -1076,16 +1078,21 @@ services:
     container_name: trinity-otel-collector
     logging: *default-logging
     restart: unless-stopped
-    ports:
-      - "4317:4317"   # gRPC receiver (OTLP)
-      - "4318:4318"   # HTTP receiver (OTLP)
-      - "8889:8889"   # Prometheus metrics exporter
-      - "13133:13133" # Health check endpoint
+    # No published ports. Agents push OTLP to `trinity-otel-collector:4317`
+    # by Docker DNS on the agent network; nothing goes through the host.
     volumes:
       - ./config/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
     networks:
-      - trinity-platform
-      - trinity-agent      # Agents push metrics directly to the collector
+      # The alias exists on the platform network only, and it is what the
+      # Prometheus exporter listens on (config/otel-collector.yaml). So the
+      # read side, which carries fleet-wide usage data, is on the network
+      # agents are not on, and the backend reads it there as
+      # `trinity-otel-metrics:8889`. The container name resolves on both
+      # networks and must not be used for the read.
+      trinity-platform:
+        aliases:
+          - trinity-otel-metrics
+      trinity-agent: {}    # Agents push metrics directly to the collector
     labels:
       - "trinity.platform=infrastructure"
       - "trinity.service=otel-collector"
@@ -1094,7 +1101,7 @@ services:
     cap_drop:
       - ALL
     # NOTE: No healthcheck - distroless image has no shell/curl
-    # Collector health can be checked externally via :13133 if health_check extension is enabled
+    # Collector health is on :13133 inside the container (the health_check extension); it is not published
 
 volumes:
   agent-configs:

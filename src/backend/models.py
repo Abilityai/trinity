@@ -3310,6 +3310,85 @@ class HeartbeatPayload(BaseModel):
 
 
 # =============================================================================
+# Guardrail Event Models (routers/guardrail_events.py, trinity-enterprise#165)
+# =============================================================================
+
+
+class GuardrailEventBatch(BaseModel):
+    """The forwarder's envelope. Only the ENVELOPE is validated here: each event
+    is validated on its own by the service (one bad event never fails a batch),
+    so `events` is a plain list. Unknown top-level keys are ignored, and a newer
+    `schema` number is read event by event rather than refused (version skew).
+    """
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    schema_version: StrictInt = Field(alias="schema", ge=1)
+    runtime: Optional[str] = Field(default=None, max_length=64)
+    events: List[Any]
+    dropped: StrictInt = Field(default=0, ge=0, le=1_000_000_000)
+
+
+class GuardrailEventIngestResponse(BaseModel):
+    accepted: int
+    duplicates: int
+    rejected: int
+
+
+class GuardrailReportingState(BaseModel):
+    """`never` | `reporting` | `stale` — so "no events" is never mistaken for
+    "not reporting". `first_report_at` is the coverage start (ISO-8601 UTC,
+    `Z`): events before it were never reported, so history before it is not
+    "clean". Null exactly when `state` is `never`."""
+    state: str
+    last_report_at: Optional[str] = None
+    first_report_at: Optional[str] = None
+    runtime: Optional[str] = None
+    dropped_total: int = 0
+
+
+class GuardrailEventItem(BaseModel):
+    event_id: str
+    occurred_at: str
+    received_at: str
+    kind: str
+    hook: str
+    tool: Optional[str] = None
+    code: Optional[str] = None
+    execution_id: Optional[str] = None
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+class GuardrailEventsPage(BaseModel):
+    events: List[GuardrailEventItem]
+    next_cursor: Optional[str] = None
+    reporting: GuardrailReportingState
+
+
+class GuardrailStatsAgent(BaseModel):
+    """One agent in the fleet read. `coverage` is `no_hooks` | `never` |
+    `stale` | `reporting`: an agent with no events is still listed, so silence
+    is visible."""
+    agent_name: str
+    runtime: Optional[str] = None
+    coverage: str
+    events: int
+    by_kind: Dict[str, int] = Field(default_factory=dict)
+    reporting: GuardrailReportingState
+    # The system agent never reports by design (#1816); the UI words it so.
+    system: bool = False
+
+
+class GuardrailStatsResponse(BaseModel):
+    """`GET /api/ops/guardrail-stats` (trinity-enterprise#165 S4)."""
+    hours: int
+    since: str
+    events: int
+    by_kind: Dict[str, int] = Field(default_factory=dict)
+    coverage: Dict[str, int] = Field(default_factory=dict)
+    agents: List[GuardrailStatsAgent]
+
+
+# =============================================================================
 # Audit Log Models (routers/audit_log.py)
 # =============================================================================
 
@@ -4562,7 +4641,8 @@ class SkillGateMapResponse(BaseModel):
     trinity-enterprise#754: `approvers` is `approver_kinds` with each kind's
     reach and whether the caller fills it. `hook` is the in-agent gate check's
     state (`ok`, `missing`, `not_root_owned`, `writable`, `unsupported_runtime`,
-    `predates` or `unknown`), read only on `?probe=true` by a person who may
+    `skipped` — Claude Code is not applying the managed hooks,
+    trinity-enterprise#1176 — `predates` or `unknown`), read only on `?probe=true` by a person who may
     manage the agent's skills; null otherwise."""
     agent_name: str
     gates: List[SkillGateEntry]
@@ -4719,6 +4799,14 @@ class ScheduleUpdateRequest(BaseModel):
         return ScheduleCreate._normalize_delivery_email(v)
 
 
+class ScheduleRunsAsReason(BaseModel):
+    """Why a schedule's runs have the tier `runs_as` names (#4281)."""
+    # creator_owner_tier | no_recorded_creator | creator_not_owner_tier |
+    # agent_has_no_owner | creator_missing | unknown (the cause could not be read)
+    code: str
+    message: str
+
+
 class ScheduleResponse(BaseModel):
     """Response model for schedule data."""
     id: str
@@ -4753,9 +4841,50 @@ class ScheduleResponse(BaseModel):
     # and the creator's id is not exposed.
     # Defaults False: a response built without the predicate claims nothing.
     can_manage_webhook: bool = False
+    # #4281: the tier this schedule's runs get, computed live from its creator
+    # (`turn_tier_service.schedule_run_tier`). `shared_person` runs have no
+    # shell and no owner-added tools. None = not computed (a lookup failed),
+    # never a guessed `owner`.
+    runs_as: Optional[Literal["owner", "shared_person"]] = None
+    runs_as_reason: Optional[ScheduleRunsAsReason] = None
+    # Whether the caller created it. The creator's id stays unexposed.
+    created_by_you: bool = False
+    # The creator's display name, else username: only for the agent's owner
+    # tier and for an agent key that is not acting for a shared person.
+    created_by: Optional[str] = None
+    # Whether THIS caller may take the schedule over (#4281): a person at the
+    # agent's owner tier who did not create it, on a schedule whose runs are a
+    # shared person's because of its creator. Defaults False, like
+    # `can_manage_webhook`.
+    can_take_over: bool = False
 
     class Config:
         from_attributes = True
+
+
+class ScheduleReviewed(BaseModel):
+    """What a schedule's runs will do, as the person taking it over read it
+    (#4281). Every field is required, null included, and is echoed verbatim
+    from the `ScheduleResponse` the person reviewed: the take-over adopts
+    exactly this, or nothing."""
+    message: str
+    allowed_tools: Optional[List[str]]
+    model: Optional[str]
+    validation_enabled: bool
+    validation_prompt: Optional[str]
+
+
+class ScheduleTakeOverRequest(BaseModel):
+    """`POST /api/agents/{name}/schedules/{id}/take-over` (#4281).
+
+    `expected_updated_at` is the reviewed response's `updated_at`, compared as
+    an instant. `delivery` decides a delivery to another person's Workspace:
+    `clear` removes it; `keep` keeps it only when `keep_delivery_to` repeats
+    the address. A delivery to the taker's own Workspace needs neither."""
+    expected_updated_at: datetime
+    reviewed: ScheduleReviewed
+    delivery: Optional[Literal["clear", "keep"]] = None
+    keep_delivery_to: Optional[str] = None
 
 
 class ExecutionSummary(BaseModel):

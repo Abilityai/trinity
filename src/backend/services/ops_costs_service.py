@@ -21,7 +21,10 @@ from models import User
 logger = logging.getLogger(__name__)
 
 OTEL_ENABLED = os.getenv("OTEL_ENABLED", "1") == "1"
-OTEL_PROMETHEUS_ENDPOINT = os.getenv("OTEL_PROMETHEUS_ENDPOINT", "http://trinity-otel-collector:8889/metrics")
+# `trinity-otel-metrics` is the collector's alias on the platform network, the
+# only address its Prometheus exporter listens on. The container name resolves
+# on the agent network too, where nothing answers on this port.
+OTEL_PROMETHEUS_ENDPOINT = os.getenv("OTEL_PROMETHEUS_ENDPOINT", "http://trinity-otel-metrics:8889/metrics")
 
 
 def parse_prometheus_metrics(text: str) -> Dict[str, Any]:

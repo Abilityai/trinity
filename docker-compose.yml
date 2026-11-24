@@ -53,6 +53,7 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # For platform image generation (IMG-001)
       # Gemini model overrides (#1130) — non-empty defaults so an unset var doesn't inject "" (#1076)
       - GEMINI_TEXT_MODEL=${GEMINI_TEXT_MODEL:-gemini-3.5-flash}              # image-gen prompt refinement
+      - GEMINI_IMAGE_MODEL=${GEMINI_IMAGE_MODEL:-gemini-nano-banana-2.1}              # image-gen model
       - GEMINI_TRANSCRIPTION_MODEL=${GEMINI_TRANSCRIPTION_MODEL:-gemini-3.5-flash}  # Telegram voice transcription
       - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.8-live}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
@@ -236,6 +237,9 @@ services:
       - OTEL_METRIC_EXPORT_INTERVAL=${OTEL_METRIC_EXPORT_INTERVAL:-60000}
       # Email Service Configuration (for public link verification)
       - EMAIL_PROVIDER=${EMAIL_PROVIDER:-resend}
+      # Development only: print mail bodies in console mode (see .env.example).
+      # This file is the only compose stack that passes it through.
+      - EMAIL_CONSOLE_LOG_BODY=${EMAIL_CONSOLE_LOG_BODY:-}
       - RESEND_API_KEY=${RESEND_API_KEY:-}
       - SMTP_FROM=${SMTP_FROM:-noreply@trinity.example.com}
       # SMTP transport (EMAIL_PROVIDER=smtp) — read by src/backend/config.py (#771)
@@ -810,8 +814,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./config/vector.yaml:/etc/vector/vector.yaml:ro
       - trinity-logs:/data/logs
-    ports:
-      - "8686:8686"  # Vector API (health checks)
+    # No published port. The API (the health endpoint) is for this
+    # container alone: the healthcheck below asks it over the container's own
+    # loopback, and `config/vector.yaml` binds it there. Nothing else needs it.
     networks:
       - trinity-platform   # Vector reads via Docker socket, not network — platform side
     security_opt:
@@ -847,16 +852,21 @@ services:
     container_name: trinity-otel-collector
     logging: *default-logging
     restart: unless-stopped
-    ports:
-      - "4317:4317"   # gRPC receiver (OTLP)
-      - "4318:4318"   # HTTP receiver (OTLP)
-      - "8889:8889"   # Prometheus metrics exporter
-      - "13133:13133" # Health check endpoint
+    # No published ports. Agents push OTLP to `trinity-otel-collector:4317`
+    # by Docker DNS on the agent network; nothing goes through the host.
     volumes:
       - ./config/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
     networks:
-      - trinity-platform
-      - trinity-agent      # Agents push metrics directly to the collector
+      # The alias exists on the platform network only, and it is what the
+      # Prometheus exporter listens on (config/otel-collector.yaml). So the
+      # read side, which carries fleet-wide usage data, is on the network
+      # agents are not on, and the backend reads it there as
+      # `trinity-otel-metrics:8889`. The container name resolves on both
+      # networks and must not be used for the read.
+      trinity-platform:
+        aliases:
+          - trinity-otel-metrics
+      trinity-agent: {}    # Agents push metrics directly to the collector
     labels:
       - "trinity.platform=infrastructure"
       - "trinity.service=otel-collector"

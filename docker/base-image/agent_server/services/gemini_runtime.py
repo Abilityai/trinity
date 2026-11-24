@@ -619,7 +619,7 @@ class GeminiRuntime(AgentRuntime):
                     if tool_results and tool_results[-1].output:
                         # Use the last tool result output as the response
                         response_text = tool_results[-1].output
-                        logger.info(f"Using tool result as response: {response_text[:100]}...")
+                        logger.info(f"Using tool result as response ({len(response_text or '')} chars)")
                     else:
                         response_text = "(Task completed)"
                         logger.warning("Gemini returned empty response after tool execution")

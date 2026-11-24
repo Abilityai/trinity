@@ -21,9 +21,11 @@ import { defineStore } from 'pinia'
 import api from '../api'
 import { useOnboardingStore } from './onboarding'
 import { buildContext, buildFleet, describePage } from '../utils/assistantContext'
-import { acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, validBuild, webLink } from '../utils/assistantCards'
+import { acceptCards, buildOutcome, cardLabel, cardNote, credentialLine, outcomeLine, runCard, validBuild, webLink } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
 import { useAuthStore } from './auth'
+import { useFirstRunStore } from './firstRun'
+import { firstResultSeen, inFirstSession, markFirstResultSeen, resultPath } from '../utils/firstSession'
 
 export const FEATURE_ID = 'assistant'
 
@@ -188,6 +190,7 @@ export const useAssistantStore = defineStore('assistant', {
     account: closedAccount(),
     byCode: null,        // the module offers subscribing by code: null until Subscribe is first pressed (trinity-enterprise#1331)
     fleet: [],
+    openResult: '',      // ent#1355: a first result the page should open in front of the person (the panel does it)
   }),
 
   getters: {
@@ -212,12 +215,15 @@ export const useAssistantStore = defineStore('assistant', {
       const a = s.allowance
       if (s.plan === 'pro') return 'Trinity Pro'
       if (!a) return 'Free'
+      // The trial's other limit is its days (Abilityai/trinity-gateway#37); absent on an older gateway.
+      if (a.reached === 'days') return 'Free trial ended'
+      const days = typeof a.days_left === 'number' ? ` · ${a.days_left} ${a.days_left === 1 ? 'day' : 'days'} left` : ''
       const left = `Free · ${a.messages_left} ${a.messages_left === 1 ? 'message' : 'messages'} left`
       // Running low: say when more come back, before the limit says it for us.
       const back = a.messages_left <= LOW_MESSAGES ? backIn(a.resets_at) : ''
-      if (back) return `${left} · more ${back}`
+      if (back) return `${left} · more ${back}${days}`
       const period = a.period_hours === 24 ? 'today' : a.period_hours === 168 ? 'this week' : 'for now'
-      return `${left} ${period}`
+      return `${left} ${period}${days}`
     },
   },
 
@@ -290,10 +296,15 @@ export const useAssistantStore = defineStore('assistant', {
     greet(nudge) {
       const text = typeof nudge?.text === 'string' ? nudge.text.trim().slice(0, 400) : ''
       if (!text || this.sending) return
+      // ent#1355: the first session follows its own path; a stage line (connect a model in Settings) waits until it is over.
+      if (inFirstSession(this.status, this.fleet, useFirstRunStore().seededAgents || [])) return
+      const key = typeof nudge?.key === 'string' ? nudge.key : ''
+      // Already on screen (a reload, a second sign-in, a re-read): said once, not again (trinity-enterprise#1356).
+      if (this.messages.some((m) => m.opener && !m.local && ((key && m.key === key) || m.content === text))) return
       this.messages = this.messages.filter((m) => !m.local)      // its own line takes the place of the page's hello
-      this.messages.push({ id: newId(), role: 'assistant', content: text, opener: true })
+      this.messages.push({ id: newId(), role: 'assistant', content: text, opener: true, ...(key ? { key } : {}) })
       this.opening = text
-      this.openingKey = typeof nudge?.key === 'string' ? nudge.key : ''
+      this.openingKey = key
       if (!this.panelOpen) this.unread += 1
       else this.sawOpening()
     },
@@ -412,10 +423,13 @@ export const useAssistantStore = defineStore('assistant', {
       this.startedAt = Date.now()
       try {
         const fleet = await this.refreshFleet()
+        const firstSession = inFirstSession(this.status, fleet, useFirstRunStore().seededAgents || [])
         let { data } = await api.post(`${BASE}/turn`, {
           conversation_id: this.conversationId,
           message: clicked.length ? `${clicked.join('\n')}\n${message}` : message,
-          context: { ...buildContext(route, fleet), ...(said ? { said } : {}), ...setupSteps() },
+          context: { ...buildContext(route, fleet), ...(said ? { said } : {}), ...setupSteps(),
+            // trinity-enterprise#1355: the assistant leads this session and follows its script for it.
+            ...(firstSession ? { first_session: true } : {}) },
           counted,
         }, { timeout: STEP_TIMEOUT_MS })
 
@@ -450,10 +464,10 @@ export const useAssistantStore = defineStore('assistant', {
           role: 'assistant',
           content: data.text || (cards.length ? '' : 'Done.'),
           cards: cards.map((card) => ({
-            id: newId(), card, label: cardLabel(card, after), note: cardNote(card),
+            id: newId(), card, label: cardLabel(card, after, { firstSession }), note: cardNote(card, { firstSession }),
             state: FOLLOWED.includes(card.action) ? 'making' : 'open', reason: '', progress: '', picked: '',
             since: Date.now(), fraction: null,
-            auto: card.action === 'job',       // create the agents as soon as they are ready; the person can untick it
+            auto: false,       // a proposed build waits for the owner's click on Build; they can tick create-when-ready (ent#1343)
           })),
         }
         this.messages.push(reply)
@@ -515,11 +529,11 @@ export const useAssistantStore = defineStore('assistant', {
         entry.note = cardNote(design)
         entry.state = 'open'
         if (entry.auto) {
-          // They asked for these agents and left "create when ready" ticked: no second click.
+          // They ticked "create when ready" themselves: no second click.
           for (let i = 0; this.sending && i < 300; i++) await wait(1000)
           return this.answerCard(messageId, cardId, true, route)
         }
-        line = `The design "${design.design.title}" is made and passed the standard's check. The person chose to look first: they now see it with a Build button.`
+        line = `The design "${design.design.title}" is made and passed the standard's check. They now see it with a Build button; nothing is created until they click it, so it waits for their click.`
       } else {
         entry.state = 'refused'
         entry.reason = seen?.status === 'failed' ? 'It did not pass the check.' : 'It took too long.'
@@ -555,6 +569,12 @@ export const useAssistantStore = defineStore('assistant', {
       let line
       if (seen?.ended && seen.ok) {
         entry.state = 'done'
+        entry.result = resultPath(agent, runId)
+        // ent#1355: where the assistant leads, the first result opens in front of the person, once.
+        if (this.status?.leads_setup && !firstResultSeen()) {
+          markFirstResultSeen()
+          this.openResult = entry.result
+        }
         line = `The run "${title}" on ${agent} finished (execution ${runId}). Read its result and tell the person what it produced.`
       } else if (seen?.ended) {
         entry.state = 'refused'
@@ -567,6 +587,7 @@ export const useAssistantStore = defineStore('assistant', {
       }
       await this.comeBack(line, route)
     },
+
 
     /** Something being followed ended: tell the assistant once it is free to hear it. */
     async comeBack(line, route) {
@@ -755,6 +776,89 @@ export const useAssistantStore = defineStore('assistant', {
       entry.state = outcome.kind
       entry.reason = outcome.reason
       await this.send(outcome.line, route, { shown: false })
+    },
+
+    /**
+     * Whether the credential a field asks for is set already, so the field can
+     * say that sending replaces it. `{ set: true | false | null }`,
+     * never the value; null when it cannot be read. A 422 is the instance's
+     * own policy refusing the name (or agent) outright: `{ refused: words }`,
+     * so the field closes before anyone types a secret Save would refuse.
+     */
+    async credentialState(card) {
+      try {
+        const { data } = await api.get(`${BASE}/credential`, { params: { name: card.name, ...(card.agent ? { agent: card.agent } : {}) } })
+        return data || null
+      } catch (error) {
+        if (error?.response?.status === 422) return { refused: words(error, "It can't be set from here.") }
+        return null
+      }
+    },
+
+    /**
+     * Close a credential field the instance refused by name. No value was
+     * typed and no turn is sent: the card says why, and nothing else changes.
+     */
+    refuseCredential(messageId, cardId, reason) {
+      const entry = this.messages.find((m) => m.id === messageId)?.cards?.find((c) => c.id === cardId)
+      if (!entry || entry.card.action !== 'credential' || entry.state !== 'open') return
+      entry.state = 'refused'
+      entry.reason = reason
+    },
+
+    /**
+     * The person answered a credential field. `value` is what they
+     * typed, or null for Cancel. The value is posted once, to this instance,
+     * and is held nowhere here: not on the card, not in the conversation kept
+     * in this browser, not in the line the assistant is sent, which says only
+     * "Provided" or "Not provided". A refusal leaves the card open and sends
+     * nothing: the person can fix the value or cancel.
+     * Returns `{ ok }` or `{ ok: false, error, code }`.
+     */
+    async answerCredential(messageId, cardId, value, route) {
+      const entry = this.messages.find((m) => m.id === messageId)?.cards?.find((c) => c.id === cardId)
+      if (!entry || entry.card.action !== 'credential' || entry.state !== 'open' || this.sending) return { ok: false, error: '' }
+      if (value === null) {
+        entry.state = 'declined'
+        await this.send(credentialLine(entry.card, false), route, { shown: false })
+        return { ok: true }
+      }
+      entry.state = 'running'
+      try {
+        const { data } = await api.post(`${BASE}/credential`,
+          { agent: entry.card.agent || null, name: entry.card.name, value }, { timeout: STEP_TIMEOUT_MS })
+        entry.state = 'done'
+        entry.reason = data?.replaced ? 'replaced' : ''
+        // ent#1355: this instance's Claude key is checked after the save, on the
+        // instance, and the save counts the agents it connected. Never the value.
+        entry.connected = Number.isInteger(data?.connected_agents) ? data.connected_agents : null
+        entry.working = typeof data?.working === 'boolean' ? data.working : null
+        entry.problem = entry.working === false && typeof data?.problem === 'string' ? data.problem.slice(0, 300) : ''
+      } catch (error) {
+        entry.state = 'open'
+        const code = error?.response?.status
+        return {
+          ok: false,
+          code: detail(error)?.code || null,
+          error: words(error, code ? `Trinity refused it (${code}). Nothing was stored.` : "Couldn't reach Trinity, so it may or may not have been stored."),
+        }
+      }
+      await this.send(credentialLine(entry.card, true, { working: entry.working }), route, { shown: false })
+      return { ok: true }
+    },
+
+    /**
+     * Whether a client outside this server may reach its MCP endpoint
+     * (trinity-enterprise#1353: the first of the steps that bring local agents
+     * in). true / false, or null when it cannot be read.
+     */
+    async externalMcpAccess() {
+      try {
+        const { data } = await api.get('/api/settings/mcp-external-access')
+        return typeof data?.enabled === 'boolean' ? data.enabled : null
+      } catch {
+        return null
+      }
     },
 
     /** Build an approved design. The instance creates the agents as this person. */
