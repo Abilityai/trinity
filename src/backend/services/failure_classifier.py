@@ -117,6 +117,10 @@ def is_turn_limit(error_message: str) -> bool:
 # literal is the API's own sentence; Trinity does not author it.
 PROMPT_LENGTH_MARKERS = [
     "prompt is too long",
+    # #4258: the in-run variant. Claude Code gives up when every compact
+    # refills the context within a few turns. The run spent real tokens, but
+    # no credential changes the context window either. The CLI's sentence.
+    "autocompact is thrashing",
 ]
 
 # #4123: the agent's own auth answer (headless_executor.py, #285). It quotes the
