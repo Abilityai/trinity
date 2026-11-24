@@ -245,6 +245,16 @@ what sees links that only escape in combination. In-root links, dangling ones
 included, are kept as before. A `.mcp.json` that is a symlink is refused at
 validation, and `template_service.generate_credential_files` does not read one.
 
+**Templates stored before that check (trinity-enterprise#1363).** The store is
+read long after a deploy, so the same rule is applied to what is already on
+disk. Once per boot, in every worker and off the event loop,
+`remove_escaping_links_from_store` walks `/data/deployed-templates/` and unlinks
+any link whose `realpath` is outside its own `<name>/` directory (a sibling
+template counts as outside), plus any top-level entry that is itself a link.
+Only the link is removed, never its target or the rest of the template, and each
+removal is logged at WARNING with the template, path and target. In-root links
+are untouched. Idempotent and never raises.
+
 ### Deployment Flow (`deploy.py`)
 
 1. **Decode & Validate Archive**
