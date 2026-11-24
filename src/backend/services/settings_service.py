@@ -19,9 +19,12 @@ from database import db
 
 logger = logging.getLogger(__name__)
 
-# Platform default model (#831)
+# Platform default model (#831). Sonnet 5.5 since #4757 (was Sonnet 4.6): an
+# install with no `platform_default_model` row resolves this, so it moves on
+# upgrade; an admin's saved choice is a row and is kept. Mirrored as
+# `DEFAULT_CLAUDE_MODEL` in the agent image (claude_code.py), parity-tested.
 PLATFORM_DEFAULT_MODEL_KEY = "platform_default_model"
-PLATFORM_DEFAULT_MODEL_VALUE = "claude-sonnet-4-6"
+PLATFORM_DEFAULT_MODEL_VALUE = "claude-sonnet-5-5"
 _platform_model_cache: Optional[str] = None
 _platform_model_cache_ts: float = 0.0
 _PLATFORM_MODEL_CACHE_TTL = 60.0

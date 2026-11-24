@@ -270,9 +270,11 @@ def test_per_model_flags():
     # above, or a future entry is silently unchecked by this test. Before #2726
     # this named 9 of the catalog's 10 entries — `claude-sonnet-4-6` sat in no
     # group — so an 11th could be added and go entirely unasserted while green.
-    from services.settings_service import PLATFORM_DEFAULT_MODEL_VALUE
+    # #4757: the old default stays both-flags and becomes the step-down model.
+    old_default = by_id[model_catalog.OLD_CLI_DEFAULT_MODEL]
+    assert old_default.public_channel and old_default.admin_default_selectable
 
-    checked = {*haiku_ids, *legacy_ids, *current} | {PLATFORM_DEFAULT_MODEL_VALUE}
+    checked = {*haiku_ids, *legacy_ids, *current, model_catalog.OLD_CLI_DEFAULT_MODEL}
     assert checked == set(by_id), (
         f"models not covered by any flag group: {sorted(set(by_id) - checked)} — "
         "add each to the group that states its intended policy"
