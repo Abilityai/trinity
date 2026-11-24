@@ -215,12 +215,15 @@ export const useAssistantStore = defineStore('assistant', {
       const a = s.allowance
       if (s.plan === 'pro') return 'Trinity Pro'
       if (!a) return 'Free'
+      // The trial's other limit is its days (Abilityai/trinity-gateway#37); absent on an older gateway.
+      if (a.reached === 'days') return 'Free trial ended'
+      const days = typeof a.days_left === 'number' ? ` · ${a.days_left} ${a.days_left === 1 ? 'day' : 'days'} left` : ''
       const left = `Free · ${a.messages_left} ${a.messages_left === 1 ? 'message' : 'messages'} left`
       // Running low: say when more come back, before the limit says it for us.
       const back = a.messages_left <= LOW_MESSAGES ? backIn(a.resets_at) : ''
-      if (back) return `${left} · more ${back}`
+      if (back) return `${left} · more ${back}${days}`
       const period = a.period_hours === 24 ? 'today' : a.period_hours === 168 ? 'this week' : 'for now'
-      return `${left} ${period}`
+      return `${left} ${period}${days}`
     },
   },
 
