@@ -215,12 +215,15 @@ export const useAssistantStore = defineStore('assistant', {
       const a = s.allowance
       if (s.plan === 'pro') return 'Trinity Pro'
       if (!a) return 'Free'
+      // The trial's other limit is its days (Abilityai/trinity-gateway#37); absent on an older gateway.
+      if (a.reached === 'days') return 'Free trial ended'
+      const days = typeof a.days_left === 'number' ? ` · ${a.days_left} ${a.days_left === 1 ? 'day' : 'days'} left` : ''
       const left = `Free · ${a.messages_left} ${a.messages_left === 1 ? 'message' : 'messages'} left`
       // Running low: say when more come back, before the limit says it for us.
       const back = a.messages_left <= LOW_MESSAGES ? backIn(a.resets_at) : ''
-      if (back) return `${left} · more ${back}`
+      if (back) return `${left} · more ${back}${days}`
       const period = a.period_hours === 24 ? 'today' : a.period_hours === 168 ? 'this week' : 'for now'
-      return `${left} ${period}`
+      return `${left} ${period}${days}`
     },
   },
 
@@ -420,12 +423,13 @@ export const useAssistantStore = defineStore('assistant', {
       this.startedAt = Date.now()
       try {
         const fleet = await this.refreshFleet()
+        const firstSession = inFirstSession(this.status, fleet, useFirstRunStore().seededAgents || [])
         let { data } = await api.post(`${BASE}/turn`, {
           conversation_id: this.conversationId,
           message: clicked.length ? `${clicked.join('\n')}\n${message}` : message,
           context: { ...buildContext(route, fleet), ...(said ? { said } : {}), ...setupSteps(),
             // trinity-enterprise#1355: the assistant leads this session and follows its script for it.
-            ...(inFirstSession(this.status, fleet, useFirstRunStore().seededAgents || []) ? { first_session: true } : {}) },
+            ...(firstSession ? { first_session: true } : {}) },
           counted,
         }, { timeout: STEP_TIMEOUT_MS })
 
@@ -460,7 +464,7 @@ export const useAssistantStore = defineStore('assistant', {
           role: 'assistant',
           content: data.text || (cards.length ? '' : 'Done.'),
           cards: cards.map((card) => ({
-            id: newId(), card, label: cardLabel(card, after), note: cardNote(card),
+            id: newId(), card, label: cardLabel(card, after, { firstSession }), note: cardNote(card, { firstSession }),
             state: FOLLOWED.includes(card.action) ? 'making' : 'open', reason: '', progress: '', picked: '',
             since: Date.now(), fraction: null,
             auto: false,       // a proposed build waits for the owner's click on Build; they can tick create-when-ready (ent#1343)
