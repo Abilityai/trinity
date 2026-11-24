@@ -29,7 +29,7 @@ There is no separate Agents page — it is now the Dashboard's List mode, and `/
 
 The Dashboard gives you a bird's-eye view of your agent fleet in three interchangeable views:
 
-- **Timeline** (default) — Recent and live executions per agent, chronologically.
+- **Timeline** — Recent and live executions per agent, chronologically.
 - **Grid** — A draggable tile canvas, optionally overlaid with department zones and reporting lines.
 - **List** — A sortable, filterable row list with inline toggles and bulk tag actions.
 
