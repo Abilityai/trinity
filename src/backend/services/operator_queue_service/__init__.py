@@ -287,7 +287,7 @@ _RESERVED_ID_PREFIXES = (
                          # bucketed id — reservation is what keeps the DB
                          # on-conflict dedup from being agent-pre-suppressible)
     "effect-unguarded-", # idempotency_service refused-effect alarm (#2392)
-    "db-backup-",        # db_backup_service failure/staleness alarms (#2216)
+    "db-backup-", "managed-hooks-skipped-",  # db_backup_service failure/staleness alarms (#2216); managed_hooks_check_service fleet alert (trinity-enterprise#1176)
     "log-archive-",      # archive_storage unwritable-directory alarm (#2205)
     "sub-headroom-",     # subscription_headroom_alerts weekly-window alarm (ent#434)
     # skills legacy-adoption refusal (#2744). The family prefix, so it covers

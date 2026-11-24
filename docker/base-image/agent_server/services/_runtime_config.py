@@ -217,8 +217,8 @@ PLATFORM_KEPT_TOOLS = (
 AUDIT_CLI_VERSION = "2.1.235"
 
 
-def merged_disallowed_tools(guardrails: dict) -> list:
-    """GUARD-003's disallow list ∪ ``PLATFORM_DENIED_TOOLS``, order-stable.
+def merged_disallowed_tools(guardrails: dict, extra=()) -> list:
+    """GUARD-003's disallow list ∪ ``PLATFORM_DENIED_TOOLS`` ∪ ``extra``, order-stable.
 
     The single builder for every Claude spawn's ``--disallowedTools`` value, so
     an operator's guardrails edit can neither drop the platform denials nor
@@ -226,14 +226,19 @@ def merged_disallowed_tools(guardrails: dict) -> list:
     the ones a reader is looking for in the log line); non-string or blank
     entries are skipped rather than serialized. Never raises — a malformed
     config degrades to the platform denials alone, which is the safe direction:
-    the deny list only ever removes capability.
+    the deny list only ever removes capability. ``extra`` is the spawn site's
+    own addition (trinity-enterprise#1176: the skill tools while a gated
+    agent's skill-gate hook is skipped), passed in so this module stays
+    loadable standalone.
     """
     merged: list = []
     seen = set()
     configured = guardrails.get("disallowed_tools") if isinstance(guardrails, dict) else None
     if not isinstance(configured, (list, tuple)):
         configured = ()
-    for name in (*configured, *PLATFORM_DENIED_TOOLS):
+    if not isinstance(extra, (list, tuple)):
+        extra = ()
+    for name in (*configured, *PLATFORM_DENIED_TOOLS, *extra):
         if not isinstance(name, str):
             continue
         cleaned = name.strip()
