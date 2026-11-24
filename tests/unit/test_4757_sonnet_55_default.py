@@ -40,17 +40,20 @@ _ROOT = Path(__file__).resolve().parents[2]
 _DOCKERFILE = _ROOT / "docker" / "base-image" / "Dockerfile"
 
 
-def _settings(default):
-    return SimpleNamespace(get_platform_default_model=lambda runtime=None: default)
+def _settings(default, saved=False):
+    return SimpleNamespace(
+        get_platform_default_model=lambda runtime=None: default,
+        platform_default_model_is_saved=lambda: saved,
+    )
 
 
 def _db(stored=None):
     return SimpleNamespace(get_default_model_raw=lambda name: stored)
 
 
-def _resolve(*, stored=None, default=NEW, cli=None, runtime="claude-code"):
+def _resolve(*, stored=None, default=NEW, cli=None, runtime="claude-code", saved=False):
     return ams.resolve_default_model(
-        "agent-x", runtime=runtime, db_ops=_db(stored), settings=_settings(default),
+        "agent-x", runtime=runtime, db_ops=_db(stored), settings=_settings(default, saved),
         cli_version=lambda name: cli,
     )
 
@@ -146,6 +149,61 @@ class TestOlderImageKeepsARunnableModel:
             r'^LABEL trinity\.claude-code-version="\$\{CLAUDE_CODE_VERSION\}"$', text, re.M
         )
         assert text.index("ARG CLAUDE_CODE_VERSION=") < text.index("LABEL trinity.claude-code-version")
+
+
+# --------------------------------------------------------------------------- #
+# AC2 — an admin's saved default is used as saved, never stepped down
+# --------------------------------------------------------------------------- #
+class TestSavedDefaultIsNeverSteppedDown:
+    """The step-down exists only for installs that never chose a default. An
+    install whose admin saved a newer model runs that model today; it must run
+    the same model after the upgrade, restarted or not."""
+
+    @pytest.mark.parametrize("cli", [None, "2.1.278", "latest"])
+    def test_a_saved_new_default_runs_as_saved_on_any_image(self, cli):
+        r = _resolve(default=NEW, cli=cli, saved=True)
+        assert (r.model, r.source) == (NEW, ams.SOURCE_PLATFORM_DEFAULT)
+
+    def test_a_saved_default_never_reads_the_container(self):
+        def boom(name):
+            raise AssertionError("container read for an admin-saved default")
+        r = ams.resolve_default_model(
+            "agent-x", runtime="claude-code", db_ops=_db(None),
+            settings=_settings("claude-opus-5-5", saved=True), cli_version=boom,
+        )
+        assert r.model == "claude-opus-5-5"
+
+    def _real_settings(self, monkeypatch, row):
+        monkeypatch.setattr(ss, "db", types.SimpleNamespace(
+            get_setting_value=lambda key, default=None: (
+                row if (row is not None and key == ss.PLATFORM_DEFAULT_MODEL_KEY) else default
+            )
+        ))
+        monkeypatch.setattr(ss, "_platform_model_cache", None)
+        monkeypatch.setattr(ss, "_platform_model_cache_ts", 0.0)
+
+    def test_real_settings_a_saved_row_is_used_as_saved(self, monkeypatch):
+        """Through the real settings service: a saved row equal to the new
+        default runs on an unlabelled image instead of stepping down."""
+        self._real_settings(monkeypatch, row=NEW)
+        r = ams.resolve_default_model(
+            "agent-x", runtime="claude-code", db_ops=_db(None), settings=ss,
+            cli_version=lambda name: None,
+        )
+        assert r.model == NEW
+
+    def test_real_settings_no_row_still_steps_down(self, monkeypatch):
+        self._real_settings(monkeypatch, row=None)
+        assert ss.platform_default_model_is_saved() is False
+        r = ams.resolve_default_model(
+            "agent-x", runtime="claude-code", db_ops=_db(None), settings=ss,
+            cli_version=lambda name: None,
+        )
+        assert r.model == OLD
+
+    def test_real_settings_an_empty_row_counts_as_not_saved(self, monkeypatch):
+        self._real_settings(monkeypatch, row="")
+        assert ss.platform_default_model_is_saved() is False
 
 
 # --------------------------------------------------------------------------- #

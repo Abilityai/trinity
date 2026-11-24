@@ -27,6 +27,9 @@ PLATFORM_DEFAULT_MODEL_KEY = "platform_default_model"
 PLATFORM_DEFAULT_MODEL_VALUE = "claude-sonnet-5-5"
 _platform_model_cache: Optional[str] = None
 _platform_model_cache_ts: float = 0.0
+# Whether the cached value came from a saved row (#4757): refreshed in the same
+# block as `_platform_model_cache`, so resetting that cache resets this too.
+_platform_model_saved_cache: bool = False
 _PLATFORM_MODEL_CACHE_TTL = 60.0
 # Abilityai/lilu#652: OpenCode's platform default is its own setting, because
 # the fleet default above is a bare Claude id OpenCode refuses ("missing a
@@ -1019,10 +1022,21 @@ class SettingsService:
         now = time.monotonic()
         if _platform_model_cache is not None and (now - _platform_model_cache_ts) < _PLATFORM_MODEL_CACHE_TTL:
             return _platform_model_cache
-        value = self.get_setting(PLATFORM_DEFAULT_MODEL_KEY, PLATFORM_DEFAULT_MODEL_VALUE)
-        _platform_model_cache = value or PLATFORM_DEFAULT_MODEL_VALUE
+        global _platform_model_saved_cache
+        row = self.get_setting(PLATFORM_DEFAULT_MODEL_KEY, None)
+        _platform_model_saved_cache = bool(row)
+        _platform_model_cache = row or PLATFORM_DEFAULT_MODEL_VALUE
         _platform_model_cache_ts = now
         return _platform_model_cache
+
+    def platform_default_model_is_saved(self) -> bool:
+        """True when an admin saved a ``platform_default_model`` row (#4757).
+
+        The resolver's old-CLI step-down applies only when this is False: a
+        saved default is used as saved, exactly as before #4757.
+        """
+        self.get_platform_default_model()  # refreshes the flag with the value
+        return _platform_model_saved_cache
 
     def resolve_ops_setting(self, key: str):
         """`(value, source)` for one ops setting — the whole chain, once.
@@ -1877,3 +1891,8 @@ def is_template_registry_enabled() -> bool:
 def get_platform_default_model(runtime: Optional[str] = None) -> Optional[str]:
     """Return the platform-wide default model for ``runtime`` (#831, lilu#652)."""
     return settings_service.get_platform_default_model(runtime)
+
+
+def platform_default_model_is_saved() -> bool:
+    """True when an admin saved a platform default model (#4757)."""
+    return settings_service.platform_default_model_is_saved()

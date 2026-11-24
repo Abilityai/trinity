@@ -16,6 +16,7 @@ Code (the base image's ``trinity.claude-code-version`` label). When the default
 needs a newer CLI than the agent can be shown to have — an image older than the
 label, or an older version — the turn runs on ``OLD_CLI_DEFAULT_MODEL`` instead
 of failing ``model_unsupported``; the stale-image alert is the signal to restart.
+Only the code default steps down: an admin's saved default is used as saved.
 Higher rungs (an explicit model, the agent's own default) are not touched.
 
 The stored value is checked on every read with ``model_catalog.unrunnable_reason``
@@ -76,10 +77,18 @@ def _cli_version_of(agent_name: str) -> Optional[str]:
     return get_agent_claude_code_version(agent_name)
 
 
-def _runnable_platform_default(agent_name: str, resolved: ResolvedModel, cli_version) -> ResolvedModel:
-    """Step the platform-default rung down for a CLI too old to run it (#4757)."""
+def _runnable_platform_default(agent_name: str, resolved: ResolvedModel, cli_version,
+                               settings) -> ResolvedModel:
+    """Step the platform-default rung down for a CLI too old to run it (#4757).
+
+    Only the code default steps down: an admin's saved default is used as
+    saved, exactly as before #4757, so an install already running a newer
+    model keeps running it after the upgrade.
+    """
     if resolved.source != SOURCE_PLATFORM_DEFAULT or claude_code_can_run(resolved.model, "0.0.0"):
         return resolved  # not the platform rung, or a model every CLI runs: no container read
+    if settings.platform_default_model_is_saved():
+        return resolved  # an admin's choice: never substituted
     try:
         version = cli_version(agent_name)
     except Exception as e:  # noqa: BLE001 — unknown is "not proven", never a refused turn
@@ -132,7 +141,7 @@ def resolve_default_model(agent_name: str, *, runtime: Optional[str] = None,
         logger.warning("[ent#1202] default_model read failed for %s: %s", agent_name, type(e).__name__)
         stored = None
     resolved = choose(stored, runtime, settings.get_platform_default_model())
-    resolved = _runnable_platform_default(agent_name, resolved, cli_version or _cli_version_of)
+    resolved = _runnable_platform_default(agent_name, resolved, cli_version or _cli_version_of, settings)
     if resolved.refused_reason and (agent_name, resolved.stored) not in _warned:
         _warned.add((agent_name, resolved.stored))
         shown = resolved.stored if len(resolved.stored) <= 64 else resolved.stored[:64] + "…"
