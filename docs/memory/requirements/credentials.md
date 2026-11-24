@@ -274,8 +274,10 @@
 - **Routing by shape**: `sk-ant-oat01-…` is tested with `POST /api/subscriptions/test`
   and registered as `primary` through `POST /api/subscriptions` only once the
   test passes, so a bad paste leaves an existing subscription and its agents
-  untouched; `sk-ant-api…` is saved through `PUT /api/settings/api-keys/anthropic`
-  and checked after. A paste containing `#` (a sign-in code) is refused with a
+  untouched; `sk-ant-api…` is tested with `POST /api/settings/api-keys/anthropic/test`
+  and saved through `PUT /api/settings/api-keys/anthropic` only once it passes
+  (the Settings page itself is unchanged). A provider that cannot be reached
+  answers "check unavailable" (503), not a rejection. A paste containing `#` (a sign-in code) is refused with a
   plain message that a token is expected; any other value is refused the same
   way. Nothing is stored on a refusal.
 - **Record**: a registration through the card writes one audit row — the name
