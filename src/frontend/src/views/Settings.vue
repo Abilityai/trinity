@@ -2769,7 +2769,9 @@ const adminEmailCurrent = computed(() => {
 })
 
 // Platform default model (#831)
-const platformDefaultModelValue = ref('claude-sonnet-4-6')
+// Until the saved value loads, the catalog's recommended entry — the backend's
+// code default (#4757), so the two cannot drift.
+const platformDefaultModelValue = ref(MODEL_CATALOG.find((m) => m.recommended)?.id || '')
 // Admin fleet-default dropdown options — the catalog filtered to models an admin
 // may set as the platform default. Haiku is deliberately excluded (#1080). Order
 // follows the catalog; "(recommended)" rides the `recommended` flag in the template.
