@@ -9771,6 +9771,17 @@
         "credentials"
       ],
       "description": "The assistant panel's credential card, mounted: a masked field that says the assistant cannot see the value and where it is stored; Save posts the value once to the instance, empties the field and sends only 'Provided: NAME for ...'; Cancel sends 'Not provided' and stores nothing; a refusal is named and sends nothing; a value already set is said to be replaced, never shown; the value is in no turn, no kept message and no browser storage."
+    },
+    {
+      "file": "../src/frontend/tests/unit/assistantClaudeToken.mount.spec.js",
+      "feature": "trinity-enterprise#1354",
+      "added": "2026-11-24",
+      "categories": [
+        "frontend",
+        "unit",
+        "credentials"
+      ],
+      "description": "The assistant's Claude card, mounted (ruled 2026-11-24): three terminal steps naming claude setup-token and no sign-in link, the API key as the alternative in the same field; the paste goes once to the instance as CLAUDE_SUBSCRIPTION and the assistant hears only 'Provided'; a pasted sign-in code is refused in plain words and sends nothing; an agent's own ANTHROPIC_API_KEY is unchanged."
     }
   ]
 }
