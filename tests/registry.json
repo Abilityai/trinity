@@ -9747,6 +9747,28 @@
         "credentials"
       ],
       "description": "The assistant panel's credential card, mounted: a masked field that says the assistant cannot see the value and where it is stored; Save posts the value once to the instance, empties the field and sends only 'Provided: NAME for ...'; Cancel sends 'Not provided' and stores nothing; a refusal is named and sends nothing; a value already set is said to be replaced, never shown; the value is in no turn, no kept message and no browser storage."
+    },
+    {
+      "file": "unit/test_ent1354_claude_sign_in.py",
+      "feature": "trinity-enterprise#1354",
+      "added": "2026-11-24",
+      "categories": [
+        "backend",
+        "unit",
+        "credentials"
+      ],
+      "description": "Browser-only Claude subscription sign-in: the link carries Claude Code's sign-in parameters and an S256 challenge of a verifier kept on the instance for this person; a valid pasted code is exchanged with it and registered as 'primary' through the real registration path; half-copied, foreign, reused or expired codes and Anthropic refusals are named and store nothing; a missing encryption key is refused before the code is spent; person+admin only; no code or token in any log line."
+    },
+    {
+      "file": "../src/frontend/tests/unit/assistantClaudeSignIn.mount.spec.js",
+      "feature": "trinity-enterprise#1354",
+      "added": "2026-11-24",
+      "categories": [
+        "frontend",
+        "unit",
+        "credentials"
+      ],
+      "description": "The assistant's Claude card, mounted: three steps with a sign-in link the instance made, the API key as the alternative in the same field; the paste goes once to the instance as CLAUDE_SUBSCRIPTION and the assistant hears only 'Provided'; a refused paste is named and gets a fresh link; with no link the field still takes an API key; an agent's own ANTHROPIC_API_KEY is unchanged."
     }
   ]
 }

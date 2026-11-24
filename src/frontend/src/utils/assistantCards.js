@@ -17,6 +17,7 @@
  * makers of Trinity, sent on the person's click) and `credential` (a masked
  * field whose value goes to this instance and never to the assistant).
  */
+import { instanceCredentialName } from './firstSession'
 
 const enc = encodeURIComponent
 const agentPath = (name) => `/api/agents/${enc(name)}`
@@ -218,7 +219,7 @@ export function validFeedback(raw) {
 export const feedbackKind = (card) => FEEDBACK_KINDS[card.kind] || 'Feedback'
 
 // Credentials the instance itself holds; the instance and Trinity's side hold the same list.
-export const INSTANCE_CREDENTIALS = Object.freeze(['ANTHROPIC_API_KEY'])
+export const INSTANCE_CREDENTIALS = Object.freeze(['ANTHROPIC_API_KEY', 'CLAUDE_SUBSCRIPTION'])
 const CREDENTIAL_NAME = /^[A-Z][A-Z0-9_]{1,63}$/
 
 /**
@@ -234,7 +235,10 @@ export function validCredential(raw, fleet) {
   } else if (!INSTANCE_CREDENTIALS.includes(raw.name)) {
     return null
   }
-  const card = { action: 'credential', name: raw.name, why: String(raw.why ?? '').trim().slice(0, 300) }
+  // ent#1354: this instance's Claude card is held as the subscription credential,
+  // which takes the sign-in code, a subscription token or an API key.
+  const name = raw.agent === undefined ? instanceCredentialName({ name: raw.name }) : raw.name
+  const card = { action: 'credential', name, why: String(raw.why ?? '').trim().slice(0, 300) }
   if (raw.agent !== undefined) card.agent = raw.agent
   return card
 }

@@ -1561,13 +1561,14 @@ describe('assistant panel', () => {
       await say('run my agent')
       expect(wrapper.findAll('[data-testid="assistant-credential"]')).toHaveLength(1)
       expect(wrapper.get('[data-testid="assistant-credential-input"]').attributes('type')).toBe('password')
-      expect(wrapper.get('[data-testid="assistant-credential-help"] a').attributes('href')).toMatch(/^https:\/\/console\.anthropic\.com/)
+      expect(wrapper.get('[data-testid="assistant-credential-alternative"] a').attributes('href')).toMatch(/^https:\/\/console\.anthropic\.com/)
       await save('sk-ant-api03-SECRETVALUE')
       const stored = calls.filter((c) => c.url === '/api/enterprise/assistant/credential' && c.method === 'post')
-      expect(stored.map((c) => c.body)).toEqual([{ agent: null, name: 'ANTHROPIC_API_KEY', value: 'sk-ant-api03-SECRETVALUE' }])
+      // ent#1354: held as the subscription credential, which still takes an API key
+      expect(stored.map((c) => c.body)).toEqual([{ agent: null, name: 'CLAUDE_SUBSCRIPTION', value: 'sk-ant-api03-SECRETVALUE' }])
       expect(calls.some((c) => c.url.startsWith('/api/settings/api-keys'))).toBe(false)     // the instance saves and checks it, not the page
       expect(JSON.stringify(sent(TURN))).not.toContain('SECRETVALUE')
-      expect(sent(TURN)[1].body).toMatchObject({ counted: false, message: 'Provided: ANTHROPIC_API_KEY for this instance.' })
+      expect(sent(TURN)[1].body).toMatchObject({ counted: false, message: 'Provided: CLAUDE_SUBSCRIPTION for this instance.' })
       expect(wrapper.find('[data-testid="assistant-credential-input"]').exists()).toBe(false)
       expect(wrapper.get('[data-testid="assistant-credential-connected"]').text()).toContain('Connected 2 agents')
       expect(wrapper.find('[data-testid="assistant-credential-check"]').exists()).toBe(false)
@@ -1581,7 +1582,7 @@ describe('assistant panel', () => {
       await say('run my agent')
       await save('sk-ant-api03-SECRETVALUE')
       expect(sent(TURN)[1].body.message).toBe(
-        'Provided: ANTHROPIC_API_KEY for this instance. Anthropic did not accept it, so agents cannot run on it yet.')
+        'Provided: CLAUDE_SUBSCRIPTION for this instance. Anthropic did not accept it, so agents cannot run on it yet.')
       expect(wrapper.get('[data-testid="assistant-credential-check"]').text()).toContain('Anthropic rejected this key.')
       expect(JSON.stringify(sent(TURN))).not.toContain('SECRETVALUE')
     })

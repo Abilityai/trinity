@@ -104,26 +104,47 @@ export function inFirstSession(status, fleet = [], examples = []) {
  * assistant asks for it with the shared credential field (ent#1358,
  * `ask_credential` for this instance): the person pastes it into the masked
  * field, it is saved on this instance and the assistant hears only
- * "Provided" / "Not provided". Today what is pasted is an Anthropic API key.
+ * "Provided" / "Not provided".
  *
- * The one seam for the Claude step (trinity-enterprise#1354): when the
- * Claude Code sign-in exists, set this to `{ name, label, href }`. The same
- * field then shows that link instead of the API-key link; the person signs in
- * there, copies the code and pastes it into the same field, stored under
- * `name` (a credential the instance adds for it). Nothing else changes.
+ * The Claude step (trinity-enterprise#1354): the field shows three steps and a
+ * Claude sign-in link the INSTANCE makes for this person
+ * (`POST /api/subscriptions/claude-sign-in`, the sign-in `claude setup-token`
+ * runs). The person signs in there, copies the code the page shows and pastes
+ * it here; the instance exchanges it and registers the subscription. The same
+ * field still takes an Anthropic API key (or a token from
+ * `claude setup-token`). An instance Claude card is held under `name`, the
+ * credential the instance takes all three forms under.
  */
-export const CLAUDE_SIGN_IN = null
+export const CLAUDE_SIGN_IN = Object.freeze({ name: 'CLAUDE_SUBSCRIPTION', label: 'Sign in to Claude' })
 
-/** The instance's own Claude credentials: the API key, and the sign-in code once it exists. */
+/** The instance's own Claude credentials: the API key, and the subscription the sign-in connects. */
 export function isClaudeCredential(card, signIn = CLAUDE_SIGN_IN) {
   if (!card || card.agent) return false
   return card.name === 'ANTHROPIC_API_KEY' || Boolean(signIn && card.name === signIn.name)
 }
 
-/** Where the person gets what they paste: the sign-in when it exists, else an API key at Anthropic. */
+/** The name the instance holds a card under: an instance Claude card is the subscription credential. */
+export function instanceCredentialName(card, signIn = CLAUDE_SIGN_IN) {
+  return signIn && isClaudeCredential(card, signIn) ? signIn.name : card?.name
+}
+
+/**
+ * What the Claude field says. With the sign-in: three steps (the first holds
+ * the instance's link, `label`), and the API key as the alternative. Without
+ * it: where to create an API key.
+ */
 export function claudeHelp(signIn = CLAUDE_SIGN_IN) {
-  if (signIn) return { lead: 'Sign in, copy the code, and paste it here:', label: signIn.label, href: signIn.href }
-  return { lead: 'No key yet?', label: 'Create one at Anthropic', href: CLAUDE_TAB_COPY.api_key.providerUrl }
+  const apiKey = { label: 'Create one at Anthropic', href: CLAUDE_TAB_COPY.api_key.providerUrl }
+  if (!signIn) return { lead: 'No key yet?', ...apiKey }
+  return {
+    label: signIn.label,
+    steps: [
+      { before: 'Open', link: true, after: 'and sign in with your Claude account.' },
+      { before: 'Copy the code the page shows you.' },
+      { before: 'Paste it here and press Save.' },
+    ],
+    alternative: { lead: 'Using an Anthropic API key instead? Paste it here.', ...apiKey },
+  }
 }
 
 /**

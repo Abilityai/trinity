@@ -4996,6 +4996,19 @@ class SubscriptionTokenTest(BaseModel):
     token: str
 
 
+class ClaudeSignInLink(BaseModel):
+    """POST /api/subscriptions/claude-sign-in (trinity-enterprise#1354): a
+    fresh Claude sign-in link for this person, valid `expires_in` seconds."""
+    url: str
+    expires_in: int
+
+
+class ClaudeSignInExchange(BaseModel):
+    """Body for POST /api/subscriptions/claude-sign-in/exchange: the code the
+    Claude sign-in page showed (`<code>#<state>`). Never persisted, never echoed."""
+    code: str
+
+
 class SubscriptionRegistration(SubscriptionCredential):
     """POST /api/subscriptions response: the subscription plus how many agents
     it just connected as the install's FIRST Claude credential (ent#582; 0
