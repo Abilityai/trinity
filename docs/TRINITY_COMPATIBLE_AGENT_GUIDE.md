@@ -338,6 +338,41 @@ The workaround is to keep the file outside the excluded directory. When this
 bites you, the sync now **tells you**: its result carries
 `shadowed_negations`, e.g. `"!content/keep.md -> content/"`.
 
+**Documents people send you** (abilityai/trinity-enterprise#1373). The platform
+writes a person's Workspace drops to `inbox/<person>/` and chat, public-link
+and channel attachments to `uploads/<session>/`, inside your repository root.
+`/inbox/*/**` and `/uploads/*/**` keep them out of git — the subfolders only,
+so a file you write directly under `inbox/` still syncs. Being ignored also
+spares them from a force-replace pull, which deletes untracked files that are
+not ignored. These rules are contents-form, so a per-file negation works; write
+it **without** a leading slash, and for a file one folder deeper re-include the
+folder first:
+
+```gitignore
+!inbox/ada-1a2b3c4d/contract.pdf
+!inbox/ada-1a2b3c4d/signed/
+!inbox/ada-1a2b3c4d/signed/final.pdf
+```
+
+The simpler way to keep one is to copy it into a folder you commit (`docs/`,
+`knowledge/`, …). A folder of your own under `inbox/` or `uploads/` is ignored
+like any other. `uploads/` files live only on the agent's volume; they do not
+survive a re-clone onto a fresh host.
+
+*Documents committed before these rules.* On the agent's next **start**, if it
+auto-syncs, or its next **Push**, the platform untracks them (index only — the
+files stay on disk), and the next sync commits the deletion; the operator queue
+gets an alert naming the paths. The untrack at start covers these two patterns
+and nothing else: it is the one exception to the rule that starting an agent
+only merges `.gitignore` and leaves untracking to a Push (#2069), because a
+never-Pushed auto-sync agent would otherwise re-commit a re-dropped document of
+the same name on every cycle. A `git pull` in any other clone of the repo then
+deletes those files from that clone's working tree. **History is not
+rewritten**: copies already pushed stay in the repo's history. Removing them is
+the owner's call — rewrite the history (`git filter-repo` or BFG, then a
+force-push), or make the repository private — and Trinity never does it for
+you.
+
 **Recovering a file a sync already untracked.** The sweep only touches the
 index, so the file is still on disk. Two steps:
 
@@ -400,7 +435,8 @@ Three zones: **Ⓟ platform-owned** (the platform reads or writes it by path —
 │
 ├── data/                    Ⓟ Ⓥ   # runtime state; the export/import boundary (data_paths)
 ├── public/                  Ⓟ     # the only folder share_file reads
-├── uploads/                 Ⓟ     # files people attach in chat or through the API
+├── uploads/<session>/       Ⓟ     # files people attach in chat or through the API; gitignored
+├── inbox/<person>/          Ⓟ     # files people send from the Workspace; gitignored
 ├── shared-out/              Ⓟ     # shared folder you expose (when enabled)
 ├── shared-in/<agent>/       Ⓟ     # shared folders you consume (when enabled)
 ├── content/                 Ⓟ Ⓥ   # large generated media; created at start, gitignored
@@ -412,7 +448,7 @@ Three zones: **Ⓟ platform-owned** (the platform reads or writes it by path —
 
 | Zone | What lives there | Committed? | Who writes it |
 |------|------------------|------------|---------------|
-| Ⓟ Platform-owned | `data/`, `public/`, `uploads/`, `shared-out/`, `shared-in/<agent>/`, `content/`, `.trinity/` | `data/` never (gitignored once you declare `data_paths`); `content/` never. Of `.trinity/`, only the re-includes in the [`.gitignore` list](#5-gitignore-required) (`setup.sh`, `pipelines/`, `plugins.yaml`, …) | The platform and the agent. `.trinity/` is reserved by the platform, but the agent itself writes `operator-queue.json`, `persistent-state.yaml` and `pipelines/` there; people cannot edit it from the Files tab |
+| Ⓟ Platform-owned | `data/`, `public/`, `uploads/`, `inbox/<person>/`, `shared-out/`, `shared-in/<agent>/`, `content/`, `.trinity/` | `data/` never (gitignored once you declare `data_paths`); `content/`, `uploads/<session>/` and `inbox/<person>/` never ([documents people send you](#5-gitignore-required)). Of `.trinity/`, only the re-includes in the [`.gitignore` list](#5-gitignore-required) (`setup.sh`, `pipelines/`, `plugins.yaml`, …) | The platform and the agent. `.trinity/` is reserved by the platform, but the agent itself writes `operator-queue.json`, `persistent-state.yaml` and `pipelines/` there; people cannot edit it from the Files tab |
 | Ⓒ Committed workspace | Identity and config files at the root, `.claude/{skills,agents,commands}/`, `memory/`, `docs/`, `reports/<kind>/`, `project_files/<slug>/`, `scripts/` | Yes | The author and the agent |
 | Ⓥ Volume-only runtime | `data/`, `content/`, `$TMPDIR` (`~/.tmp/`), side clones | No — they persist on the volume, not in git | The agent |
 

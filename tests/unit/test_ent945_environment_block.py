@@ -121,7 +121,8 @@ class TestFacts:
          "noexec", "`$TMPDIR`", "`~/.tmp`", "UTC", "`.trinity/persistent-state.yaml`",
          "untracked", "`memory/`", "`setup.sh`", "never put secrets in it",
          "`template.yaml`", "refresh_metric_definitions",
-         "People cannot edit it from the Files tab; you can."],
+         "People cannot edit it from the Files tab; you can.",
+         "never committed"],  # ent#1373: uploaded documents are gitignored
     )
     def test_fact_present(self, token):
         assert token in _section(_render(PromptTier.VERBOSE, "claude-code"))
@@ -202,6 +203,7 @@ class TestReservedDirectories:
             ("services/agent_shared_files_service.py", "PUBLISH_DIR"),
             ("services/upload_service.py", "UPLOAD_BASE"),
             ("services/agent_service/helpers.py", "_SHARED_IN_PREFIX"),
+            ("client_portal/service.py", "_PORTAL_INBOX_ROOT"),  # ent#1373
         ],
     )
     def test_owning_constant_is_named(self, relpath, name):
