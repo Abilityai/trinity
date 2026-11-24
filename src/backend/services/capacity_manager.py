@@ -497,12 +497,33 @@ class CapacityManager:
         return True
 
     async def _on_slot_released(self, agent_name: str) -> None:
-        """SlotService callback. Drains one persistent backlog row if any."""
+        """SlotService callback. Drains one persistent backlog row if any,
+        then a caller wake parked for a free slot of this agent (#4538).
+
+        The backlog goes first: a queued run was waiting before the wake was
+        parked, and a wake that finds the slot taken again is parked again.
+        Each drain has its own guard, and the callback runs as its own task
+        (``SlotService.release_slot``), so neither can block or fail a release
+        or the other drain.
+        """
         try:
             await self._backlog.drain_next(agent_name)
         except Exception as e:  # pragma: no cover - defensive
             logger.error(
                 f"[Capacity] backlog drain on release failed for "
+                f"'{agent_name}': {e}",
+                exc_info=True,
+            )
+        try:
+            # #4538: this is the one place every slot release passes — the
+            # terminal fan-out is not (a terminate, a /chat, a cleanup release,
+            # and a run whose terminal lands before its own `finally`).
+            from services import caller_wake_service
+
+            await caller_wake_service.drain_on_slot_release(agent_name)
+        except Exception as e:
+            logger.error(
+                f"[Capacity] parked-wake drain on release failed for "
                 f"'{agent_name}': {e}",
                 exc_info=True,
             )

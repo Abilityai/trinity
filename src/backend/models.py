@@ -571,6 +571,13 @@ class ChatMessageRequest(BaseModel):
     # ent#1105: an edition may attribute this execution to a project. Checked
     # before the row exists; refused 422 project_attribution_unavailable in OSS.
     project_id: Optional[str] = Field(None, min_length=1, max_length=64)
+    # #4538: the caller's own word on its wake, read only for an agent's call.
+    # `wake: false` declines the turn started on the caller when this run ends;
+    # `true` or absent keep the default (it never forces a wake the owner
+    # switched off). `caller_wait_ms` is how long the caller waits for the
+    # reply: a run that ends inside it was answered inline and wakes nobody.
+    wake: Optional[bool] = None
+    caller_wait_ms: Optional[int] = Field(None, ge=1, le=86_400_000)
 
 
 class ReportBackRequest(BaseModel):
@@ -617,6 +624,11 @@ class ParallelTaskRequest(BaseModel):
     # ent#1105: an edition may attribute this execution to a project. Checked
     # before the row exists; refused 422 project_attribution_unavailable in OSS.
     project_id: Optional[str] = Field(None, min_length=1, max_length=64)
+    # #4538: as on ChatMessageRequest. `wake: false` works on a sync and an
+    # async call; `caller_wait_ms` is read on a sync call only (an async call
+    # answers with a receipt, never inline).
+    wake: Optional[bool] = None
+    caller_wait_ms: Optional[int] = Field(None, ge=1, le=86_400_000)
 
 
 # ============================================================================

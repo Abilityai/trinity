@@ -313,6 +313,30 @@
       "description": "#4733: one caller wake per caller at a time, whatever window it claimed: endings in later windows (also the wake's own callee, several windows on) park behind the running wake and one follow-on delivers the latest; an ending from before the claim folds in a later window, a late write back-dated before the claim parks. The hold is a DB fact (a live caller_wake row, or a claim younger than 120 s): a clean backend stop (holder cancelled, row FAILED, no fan-out) does not hold the caller past the grace and a later run's end delivers the parked ending; a wake row's terminal frees its own hold and never a later wake's (admission instant, not a re-stamped started_at); a holder whose wait gave up while its row is live lets no second wake in. At capacity no caller_wake row is written, the ending parks (reason at_capacity) and any run's end delivers it (schedule, chat, operator_response), not while a wake runs; a refusal racing the check parks too, except on a pilot; a 300-row sweep writes no row; the real slot check parks only on a full meter with a running run (pilot, stale slots, meter down and a free slot dispatch). A stale hold that cannot be reclaimed wakes without it instead of looping; a race park whose busy run ends before the marker lands takes the freed slot; a drained ending never folds; a push /chat delivers a parked wake from its slot release (run_chat_turn drains after release, driven through the real finally). Plus idempotency peek and has_execution_with_status. 30 tests on the #4536 harness."
     },
     {
+      "file": "unit/test_4538_wake_opt_out.py",
+      "feature": "#4538",
+      "added": "2026-11-24",
+      "categories": [
+        "unit",
+        "backend",
+        "agent-collaboration",
+        "reliability"
+      ],
+      "description": "A caller that waits is not woken, through the real /task dispatch and the real wake hook: wake:false on an async or sync call starts no wake and the receipt answers source 'call'; a sync run that ends inside the caller's declared wait (caller_wait_ms, less a 5 s margin) starts no wake and one that outlives it keeps its wake; a call that declares nothing, a person's call, a self-task, unreadable, half-written or unparsable terms all wake as before; a declined ending is never parked behind a running wake and still drains a wake parked for the callee; the sync long-poll that gives up moves the deadline before it re-reads the row; three tests on real threads."
+    },
+    {
+      "file": "unit/test_4538_parked_wake_release.py",
+      "feature": "#4538",
+      "added": "2026-11-24",
+      "categories": [
+        "unit",
+        "backend",
+        "agent-collaboration",
+        "reliability"
+      ],
+      "description": "The loose ends behind a wake parked for a free slot, over a real CapacityManager and SlotService: every slot release drains the parked wake after the backlog (a terminate of a running turn and of a turn parked in the backend queue included), a drain that raises costs neither the release nor the backlog drain, a release that frees nothing drains nothing; a wake refused while the ended run's slot is still held is parked again and delivered at the release; an unreadable or still-full meter never loops refused wakes; a delivery cancelled before it claims the caller puts its marker back (never over a newer one, never after the claim); release_admission releases, then drains."
+    },
+    {
       "file": "unit/test_4537_wake_conversation.py",
       "feature": "#4537",
       "added": "2026-11-16",
