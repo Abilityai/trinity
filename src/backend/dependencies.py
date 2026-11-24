@@ -11,7 +11,7 @@ from fastapi import Depends, HTTPException, status, Request, Path
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from models import TaskExecutionStatus, User
+from models import User
 from config import SECRET_KEY, ALGORITHM
 from database import db
 from redis_breaker_util import get_breaker_redis
@@ -3415,6 +3415,9 @@ def _acting_turn_narrowing(current_user: User) -> Tuple[Optional[int], Optional[
     agent = getattr(current_user, "agent_name", None)
     if getattr(current_user, "mcp_scope", None) != "agent" or not (isinstance(agent, str) and agent):
         return None, None
+    # Imported here, like `turn_tier_service`: this module's import surface
+    # stays `models.User`, which is all a test that stubs `models` provides.
+    from models import TaskExecutionStatus
     from services import turn_tier_service
     try:
         people = turn_tier_service.running_share_people(db, agent)
