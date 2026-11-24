@@ -223,6 +223,85 @@ def test_a_backlog_drain_that_raises_still_drains_the_parked_wake(world, full, s
     assert len(world.wakes) == 1
 
 
+def test_a_release_that_leaves_the_agent_full_does_not_churn_the_parked_wake(world, full, slots):
+    """The backlog's sentinel swap releases a slot it takes straight back, so
+    the callback fires with nothing freed. The drain must look at the meter
+    before it takes the marker: otherwise every such release re-runs the whole
+    hook and writes one more ``parked`` audit row."""
+    busy = H._busy_run()
+
+    async def go():
+        await slots.hold(BOSS, busy)
+        await slots.hold(BOSS, "sentinel")
+        ending = await _park_behind(world, busy)
+        await slots.manager.release(BOSS, "sentinel")     # world.free stays False
+        await _settle(world)
+        return ending
+
+    ending = asyncio.run(go())
+    assert world.redis.get(MISSED + BOSS) == ending
+    assert len(H._parked(world)) == 1, "a release that freed nothing re-parked the ending"
+    assert full.refused == []
+
+
+def test_a_reclaimed_stale_slot_delivers_a_parked_wake(world, full, slots):
+    """The cleanup sweep removes a leaked slot without the release callback;
+    it is still a slot that freed."""
+    busy = H._busy_run()
+
+    async def go():
+        await slots.hold(BOSS, busy)
+        ending = await _park_behind(world, busy)
+        T._end(busy)                                       # leaked: the row is long terminal
+        slots.redis.zadd(f"agent:slots:{BOSS}", {busy: 1.0})   # acquired at the epoch
+        slots.redis.delete(f"agent:slot:{BOSS}:{busy}")
+        world.free["slot"] = True
+        reclaimed = await slots.manager.reclaim_stale()
+        await _settle(world)
+        return ending, reclaimed
+
+    ending, reclaimed = asyncio.run(go())
+    assert reclaimed == {BOSS: [busy]}
+    assert len(world.wakes) == 1, "a reclaimed slot left the parked wake parked"
+    assert ending in world.wakes[0]["message"].splitlines()[0]
+
+
+def test_a_force_release_delivers_a_parked_wake(world, full, slots):
+    busy = H._busy_run()
+
+    async def go():
+        await slots.hold(BOSS, busy)
+        ending = await _park_behind(world, busy)
+        T._end(busy)
+        world.free["slot"] = True
+        await slots.manager.force_release(BOSS)
+        await _settle(world)
+        return ending
+
+    ending = asyncio.run(go())
+    assert len(world.wakes) == 1, "a force release left the parked wake parked"
+    assert ending in world.wakes[0]["message"].splitlines()[0]
+
+
+def test_a_reclaim_whose_wake_drain_raises_still_returns_what_it_reclaimed(
+        world, slots, monkeypatch):
+    async def _boom(_agent):
+        raise RuntimeError("wake drain broke")
+
+    monkeypatch.setattr(_WAKE, "drain_on_slot_release", _boom)
+
+    async def go():
+        await slots.hold(BOSS, "old")
+        slots.redis.zadd(f"agent:slots:{BOSS}", {"old": 1.0})
+        slots.redis.delete(f"agent:slot:{BOSS}:old")
+        reclaimed = await slots.manager.reclaim_stale()
+        await slots.hold(BOSS, "e2")
+        cleared = await slots.manager.force_release(BOSS)
+        return reclaimed, cleared.slots_cleared
+
+    assert asyncio.run(go()) == ({BOSS: ["old"]}, 1)
+
+
 # ---------------------------------------------------------------------------
 # F5 — a terminate releases the slot without the terminal fan-out
 # ---------------------------------------------------------------------------
@@ -380,6 +459,35 @@ def test_a_follow_on_cancelled_before_it_runs_leaves_the_parked_ending(world, mo
     assert world.wakes == []
     assert world.redis.get(MISSED + BOSS) == ending, "a cancelled delivery lost the parked ending"
     assert 0 < world.redis.ttl(MISSED + BOSS) <= _WAKE._MISSED_TTL_SECONDS
+
+
+def test_a_follow_on_cancelled_between_the_claim_and_the_dispatch_leaves_the_parked_ending(
+        world, monkeypatch):
+    """It holds the caller but no wake row exists yet (the budget check and the
+    reads before the dispatch are still ahead): cancelled there, nothing else
+    would ever deliver the ending."""
+    monkeypatch.setattr(_WAKE, "_spawn_followon", T._REAL_SPAWN)
+    ending = H._one_ending()
+    world.redis.set(MISSED + BOSS, ending, ex=3600)
+    reached = asyncio.Event()
+
+    async def _stuck_budget(_callee, _caller):
+        reached.set()
+        await asyncio.Event().wait()                      # never returns
+
+    monkeypatch.setattr(_WAKE, "_within_wake_budget", _stuck_budget)
+
+    async def go():
+        await _WAKE._drain_missed(BOSS)
+        (task,) = list(_WAKE._FOLLOW_ONS)
+        await asyncio.wait_for(reached.wait(), 30)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
+
+    asyncio.run(go())
+    assert world.wakes == []
+    assert world.redis.get(MISSED + BOSS) == ending, "cancelled before its wake row existed, and lost"
 
 
 def test_a_cancelled_follow_on_never_overwrites_a_newer_parked_ending(world, monkeypatch):

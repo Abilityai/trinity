@@ -135,21 +135,34 @@ def _skips(world) -> list:
             if a["status"] == "skipped_declined"]
 
 
-def _later(monkeypatch, seconds: float) -> None:
-    """The hook's clock runs ``seconds`` ahead."""
-    monkeypatch.setattr(
-        _WAKE, "_now", lambda: datetime.now(timezone.utc) + timedelta(seconds=seconds))
+class _Clock:
+    """The wake service's clock, frozen: the dispatch stamps the deadline and
+    the hook reads "now" off the same hands, so no assertion depends on how
+    fast the test ran."""
+
+    def __init__(self, monkeypatch):
+        self.now = datetime.now(timezone.utc)
+        monkeypatch.setattr(_WAKE, "_now", lambda: self.now)
+
+    def advance(self, seconds: float) -> None:
+        self.now = self.now + timedelta(seconds=seconds)
+
+
+@pytest.fixture
+def clock(world, monkeypatch):
+    return _Clock(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
 # (a) a sync call answered inline starts no wake
 # ---------------------------------------------------------------------------
 
-def test_a_sync_call_answered_inside_the_callers_wait_starts_no_wake(world, calls):
+def test_a_sync_call_answered_inside_the_callers_wait_starts_no_wake(world, calls, clock):
     """The issue's case: `parallel: true` without `async`, the callee answers in
     four seconds, the caller already holds the reply."""
     async def go():
         child, _answer = await _call(calls, async_mode=False, caller_wait_ms=25_000)
+        clock.advance(4)
         return await _ends(child)
 
     assert asyncio.run(go()) is None
@@ -161,12 +174,12 @@ def test_a_sync_call_answered_inside_the_callers_wait_starts_no_wake(world, call
 # (c) a sync call that outlived the caller's wait keeps its wake
 # ---------------------------------------------------------------------------
 
-def test_a_sync_call_that_outlived_the_callers_wait_keeps_its_wake(world, calls, monkeypatch):
+def test_a_sync_call_that_outlived_the_callers_wait_keeps_its_wake(world, calls, clock):
     """The MCP server stopped waiting at 25 s and handed back a receipt; the run
     ended later. That caller has no answer and is owed the wake."""
     async def go():
         child, _answer = await _call(calls, async_mode=False, caller_wait_ms=25_000)
-        _later(monkeypatch, 40)
+        clock.advance(40)
         return await _ends(child)
 
     assert asyncio.run(go())
@@ -174,20 +187,29 @@ def test_a_sync_call_that_outlived_the_callers_wait_keeps_its_wake(world, calls,
     assert _skips(world) == []
 
 
-@pytest.mark.parametrize("ends_before_deadline, woken", [(6.0, False), (4.0, True)])
+@pytest.mark.parametrize("ends_before_deadline, woken", [(10.0, False), (9.999, True), (0.0, True)])
 def test_the_margin_decides_a_run_that_ends_close_to_the_deadline(
-        world, calls, monkeypatch, ends_before_deadline, woken):
+        world, calls, clock, ends_before_deadline, woken):
     """Inside the last ``INLINE_MARGIN_SECONDS`` the answer may not reach the
     caller in time, so the wake stands (a visible double, never a silence)."""
-    assert _WAKE.INLINE_MARGIN_SECONDS == 5
+    assert _WAKE.INLINE_MARGIN_SECONDS == 10
 
     async def go():
         child, _answer = await _call(calls, async_mode=False, caller_wait_ms=25_000)
-        _later(monkeypatch, 25 - ends_before_deadline)
+        clock.advance(25 - ends_before_deadline)
         return await _ends(child)
 
     assert bool(asyncio.run(go())) is woken
     assert _wake_rows() == (1 if woken else 0)
+
+
+def test_the_margin_covers_the_sync_waiters_poll():
+    """A sync call whose run ends on another worker reaches its waiting handler
+    only on the waiter's database poll. A margin no larger than that poll would
+    stand the wake down for a reply that leaves after the caller gave up."""
+    from services.sync_waiter import SYNC_WAITER_POLL_INTERVAL
+
+    assert _WAKE.INLINE_MARGIN_SECONDS >= SYNC_WAITER_POLL_INTERVAL + 5
 
 
 # ---------------------------------------------------------------------------
@@ -208,10 +230,10 @@ def test_a_declined_async_call_starts_no_wake_and_its_receipt_says_so(world, cal
     assert _skips(world) == [("skipped_declined", "caller_declined")]
 
 
-def test_a_declined_sync_call_starts_no_wake_even_past_the_wait(world, calls, monkeypatch):
+def test_a_declined_sync_call_starts_no_wake_even_past_the_wait(world, calls, clock):
     async def go():
         child, _answer = await _call(calls, async_mode=False, wake=False, caller_wait_ms=25_000)
-        _later(monkeypatch, 3600)
+        clock.advance(3600)
         return await _ends(child)
 
     assert asyncio.run(go()) is None
@@ -321,21 +343,27 @@ def test_a_half_written_terms_row_wakes(world):
     assert asyncio.run(_ends(run))
 
 
-def test_a_terms_write_that_fails_does_not_fail_the_dispatch(world, calls, monkeypatch):
-    def _boom(*_a, **_k):
-        raise RuntimeError("db down")
+def test_a_terms_write_that_fails_does_not_fail_the_dispatch_and_the_wake_fires(
+        world, calls, monkeypatch):
+    """Fail-open: terms that were not kept are a wake, as before."""
+    real_begin, attempts = _WAKE._begin_idempotency, []
 
-    monkeypatch.setattr(_WAKE, "_begin_idempotency", _boom)
+    def _begin(scope, key):
+        if key.startswith("caller_wake:terms:"):
+            attempts.append(key)
+            raise RuntimeError("db down")
+        return real_begin(scope, key)                     # the caller's hold still works
+
+    monkeypatch.setattr(_WAKE, "_begin_idempotency", _begin)
 
     async def go():
         child, answer = await _call(calls, async_mode=True, wake=False)
-        # The hold is claimed through the same seam; give it back for the hook.
-        monkeypatch.undo()
-        return child, answer
+        return child, answer, await _ends(child)
 
-    child, answer = asyncio.run(go())
+    child, answer, woken = asyncio.run(go())
+    assert attempts == [f"caller_wake:terms:{child}"], "the dispatch never tried to keep the terms"
     assert answer["status"] == "accepted"
-    assert child
+    assert woken, "terms that were not kept stood the wake down"
 
 
 # ---------------------------------------------------------------------------
@@ -510,19 +538,24 @@ def test_on_a_real_thread_an_inline_answer_starts_no_wake(threads, calls):
     assert _skips(threads) == [("skipped_declined", "answered_inline")]
 
 
-def test_on_real_threads_two_endings_at_once_are_one_wake_and_one_parked(threads):
-    """The hold is one database claim; the reads around it now cross threads."""
+def test_on_real_threads_two_endings_at_once_never_run_two_wakes(threads):
+    """The hold is one database claim; the reads around it now cross threads.
+    Two hooks race for it: one wake runs, and the other ending either folds
+    into it or is parked — it never starts a second wake beside it."""
     async def go():
-        threads.gate["event"] = asyncio.Event()
+        threads.gate["event"] = asyncio.Event()           # a wake, once started, keeps running
         first, second = T._callee_run(), T._callee_run()
         T._end(first)
         T._end(second)
         a = asyncio.create_task(_WAKE.maybe_wake_caller(first))
         b = asyncio.create_task(_WAKE.maybe_wake_caller(second))
-        for _ in range(200):
-            await asyncio.sleep(0.01)
-            if threads.wakes and (b.done() or a.done()):
+        _done, pending = await asyncio.wait({a, b}, return_when=asyncio.FIRST_COMPLETED, timeout=60)
+        assert len(pending) == 1, "both hooks returned: neither is holding the caller"
+        for _ in range(6000):                             # the winner's wake starts
+            if threads.wakes:
                 break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.2)                          # ...and a second one would by now
         running = len(threads.wakes)
         threads.gate["event"] = None
         for ev in threads.held:
@@ -533,4 +566,30 @@ def test_on_real_threads_two_endings_at_once_are_one_wake_and_one_parked(threads
         return running
 
     assert asyncio.run(go()) == 1, "two wakes of one caller ran at the same time"
-    assert len(threads.wakes) <= 2
+
+
+def test_on_real_threads_an_ending_during_a_wake_is_parked_and_delivered(threads):
+    async def go():
+        threads.gate["event"] = asyncio.Event()
+        first = T._callee_run()
+        T._end(first, datetime.now(timezone.utc) - timedelta(seconds=1))
+        holder = asyncio.create_task(_WAKE.maybe_wake_caller(first))
+        for _ in range(6000):
+            if threads.wakes:
+                break
+            await asyncio.sleep(0.01)
+        assert len(threads.wakes) == 1
+
+        late = T._callee_run()                            # ends after the wake claimed
+        T._end(late)
+        assert await _WAKE.maybe_wake_caller(late) is None
+        parked = threads.redis.get(MISSED + BOSS)
+
+        threads.gate["event"] = None
+        await T._wake_turn_ends(threads, threads.wakes[0]["id"])
+        await T._finish(threads, holder)
+        return late, parked
+
+    late, parked = asyncio.run(go())
+    assert parked == late
+    assert len(threads.wakes) == 2 and late in threads.wakes[1]["message"]

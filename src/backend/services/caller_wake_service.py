@@ -174,7 +174,7 @@ backlog drain, the pull claim and every other re-dispatch from the row):
 
 * ``wake: false`` — the caller declined this run's wake, sync or async;
 * ``caller_wait_ms`` — how long a sync caller waits for the reply. A run that
-  ends ``INLINE_MARGIN_SECONDS`` or more before that deadline was answered
+  ends ``INLINE_MARGIN_SECONDS`` (10 s) or more before that deadline was answered
   inline. One that ends later did not reach the caller, and its wake stands.
   When the backend stops waiting first it moves the deadline to that instant
   (``caller_stopped_waiting``).
@@ -248,10 +248,13 @@ _MISSED_KEY_PREFIX = "trinity:wake_missed:"
 _MISSED_TTL_SECONDS = 86400
 
 # #4538: a sync run that ends this close to the caller's declared deadline may
-# not reach it in time (the handler's own work after the terminal, then the
-# way back), so its wake stands: a wake beside an inline answer, never a
-# caller left with neither.
-INLINE_MARGIN_SECONDS = 5
+# not reach it in time, so its wake stands: a wake beside an inline answer,
+# never a caller left with neither. What has to fit in the margin: the sync
+# waiter's database poll (`sync_waiter.SYNC_WAITER_POLL_INTERVAL`, 5 s — how a
+# handler learns of a terminal written by another worker), the handler's own
+# work after the terminal, the way back, and the time the request spent before
+# the deadline was stamped. Pinned against the poll in the tests.
+INLINE_MARGIN_SECONDS = 10
 _TERMS_KEY_PREFIX = "caller_wake:terms:"
 
 # Strong references to follow-on wakes until they finish.
@@ -828,8 +831,20 @@ async def drain_on_slot_release(agent_name: Optional[str]) -> None:
     """A slot of ``agent_name`` was released (#4538): deliver a wake parked for
     a free slot. Called from the slot-release callback
     (``CapacityManager._on_slot_released``), the one place every release
-    passes whether or not the row's terminal fanned out. Never raises."""
+    passes whether or not the row's terminal fanned out. Never raises.
+
+    The marker is taken only when one is there (one Redis read per release)
+    and the meter shows a free slot: the callback also fires for a release
+    that frees nothing net (the backlog's sentinel swap), and draining there
+    would re-run the whole hook and park the ending again on every release."""
+    if not agent_name:
+        return
     try:
+        client = _wake_budget_redis()
+        if client is None or not client.exists(f"{_MISSED_KEY_PREFIX}{agent_name}"):
+            return
+        if not await _slot_freed(agent_name):
+            return
         await _drain_if_idle(agent_name)
     except Exception as e:  # noqa: BLE001 — the next release or run end delivers it
         logger.warning("#4538: parked-wake drain for %s failed (%s)", agent_name,
@@ -1155,14 +1170,19 @@ async def maybe_wake_caller(
 
     ``_expect_caller`` is the drain's: a parked ending is woken only for the
     caller it was parked for. ``_claimed`` is the drain's too: it is marked
-    once this call holds the caller and is about to dispatch, the point after
-    which a cancelled delivery must not put its marker back (#4538).
+    when this call's wake is about to be dispatched, the point after which a
+    cancelled delivery must not put the marker back (#4538). A delivery that
+    parks its ending again and is cancelled inside that park puts it back with
+    ``SET NX``, a no-op while the marker is there.
     """
     if not execution_id:
         return None
 
-    # Database reads and the claim below run off the event loop (#4674): this
-    # hook runs for every terminal, and a 300-row sweep runs it 300 times.
+    # The row read, the subscription read, the claim, the live-wake read, the
+    # pending-ask read and the standing depth run off the event loop (#4674):
+    # this hook runs for every terminal, and a 300-row sweep runs it 300 times.
+    # Still on the loop: the policy read, the idempotency releases and the
+    # ent#1216 standing read, which the ratchet does not count.
     try:
         row = await asyncio.to_thread(_read_row, execution_id)
     except Exception as e:  # noqa: BLE001 — fail-open on the billed terminal path
@@ -1269,11 +1289,10 @@ async def maybe_wake_caller(
         await _park_at_capacity(caller, callee, execution_id, idem, verdict.source)
         return None
 
-    if _claimed is not None:
-        _claimed.append(True)
     wake_id = None
     try:
-        wake_id = await _claimed_wake(row, caller, callee, execution_id, verdict, idem)
+        wake_id = await _claimed_wake(row, caller, callee, execution_id, verdict, idem,
+                                      _claimed)
     except asyncio.CancelledError:
         # #4536: a stopping loop would never run the follow-on, and GETDEL
         # would lose the marker. Leave it for the wake row's terminal.
@@ -1294,7 +1313,7 @@ async def maybe_wake_caller(
     return wake_id
 
 
-async def _claimed_wake(row, caller, callee, execution_id, verdict, idem):
+async def _claimed_wake(row, caller, callee, execution_id, verdict, idem, claimed=None):
     capped_at = await _within_wake_budget(callee, caller)
     if capped_at is not None:
         # Released, not completed: no turn ran, so the hold covers nothing. An
@@ -1332,6 +1351,11 @@ async def _claimed_wake(row, caller, callee, execution_id, verdict, idem):
     replies_to_chat = await asyncio.to_thread(_reply_thread, caller, root) is not None
     conversation = _conversation_lines(turn, root, replies_to_chat)
 
+    # #4538: from here the wake row owns the outcome. Marked at the dispatch,
+    # not at the claim: every await above is a point a stopping backend can
+    # cancel at, with no wake row yet to deliver the ending.
+    if claimed is not None:
+        claimed.append(True)
     try:
         result = await _dispatch_wake(
             agent_name=caller,

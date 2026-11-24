@@ -514,17 +514,22 @@ class CapacityManager:
                 f"'{agent_name}': {e}",
                 exc_info=True,
             )
+        # #4538: this is the one place every slot release passes — the
+        # terminal fan-out is not (a terminate, a /chat, and a run whose
+        # terminal lands before its own `finally`).
+        await self._drain_parked_wake(agent_name)
+
+    async def _drain_parked_wake(self, agent_name: str) -> None:
+        """Deliver a caller wake parked for a free slot of ``agent_name``
+        (#4538). Its own guard: it never fails a release, a reclaim or the
+        backlog drain beside it."""
         try:
-            # #4538: this is the one place every slot release passes — the
-            # terminal fan-out is not (a terminate, a /chat, a cleanup release,
-            # and a run whose terminal lands before its own `finally`).
             from services import caller_wake_service
 
             await caller_wake_service.drain_on_slot_release(agent_name)
         except Exception as e:
             logger.error(
-                f"[Capacity] parked-wake drain on release failed for "
-                f"'{agent_name}': {e}",
+                f"[Capacity] parked-wake drain failed for '{agent_name}': {e}",
                 exc_info=True,
             )
 
@@ -661,7 +666,13 @@ class CapacityManager:
         `agent_timeouts` lets the watchdog supply per-agent execution timeouts
         so each agent's slots are cleaned with the right TTL+buffer (#226).
         """
-        return await self._slots.cleanup_stale_slots(agent_timeouts=agent_timeouts)
+        reclaimed = await self._slots.cleanup_stale_slots(agent_timeouts=agent_timeouts)
+        # #4538: a reclaim removes slots without the release callback; a wake
+        # parked for one of them would otherwise wait for an unrelated run.
+        for agent_name, stale_ids in (reclaimed or {}).items():
+            if stale_ids:
+                await self._drain_parked_wake(agent_name)
+        return reclaimed
 
     async def force_release(self, agent_name: str) -> ForceReleaseResult:
         """Emergency: clear all running slots and the in-memory queue."""
@@ -673,6 +684,8 @@ class CapacityManager:
         )
         if self._redis.exists(mem_key):
             self._redis.delete(mem_key)
+        if slots_cleared > 0:
+            await self._drain_parked_wake(agent_name)   # #4538, as in reclaim_stale
         return ForceReleaseResult(
             was_running=was_running_or_queued,
             slots_cleared=slots_cleared,
