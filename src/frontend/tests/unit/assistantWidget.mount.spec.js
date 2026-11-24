@@ -1633,9 +1633,10 @@ describe('assistant panel', () => {
       await say('run my agent')
       expect(wrapper.findAll('[data-testid="assistant-credential"]')).toHaveLength(1)
       expect(wrapper.get('[data-testid="assistant-credential-input"]').attributes('type')).toBe('password')
-      expect(wrapper.get('[data-testid="assistant-credential-help"] a').attributes('href')).toMatch(/^https:\/\/console\.anthropic\.com/)
+      expect(wrapper.get('[data-testid="assistant-credential-alternative"] a').attributes('href')).toMatch(/^https:\/\/console\.anthropic\.com/)
       await save('sk-ant-api03-SECRETVALUE')
       const stored = calls.filter((c) => c.url === '/api/enterprise/assistant/credential' && c.method === 'post')
+      // ent#1354: under the name the assistant asked for; the instance takes it as the Claude card
       expect(stored.map((c) => c.body)).toEqual([{ agent: null, name: 'ANTHROPIC_API_KEY', value: 'sk-ant-api03-SECRETVALUE' }])
       expect(calls.some((c) => c.url.startsWith('/api/settings/api-keys'))).toBe(false)     // the instance saves and checks it, not the page
       expect(JSON.stringify(sent(TURN))).not.toContain('SECRETVALUE')

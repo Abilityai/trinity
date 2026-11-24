@@ -78,7 +78,7 @@ On a claimed droplet, `.env` keeps `ADMIN_PASSWORD` blank on purpose — the pas
 
 **Admin login:** Enter username `admin` **or the admin's registered email**, plus the password.
 
-**Email login (passwordless):** Enter your email address, receive a 6-digit verification code, and submit it to log in. This requires email service configuration. On an install that cannot send email — the default `console` provider, or a provider missing its key or SMTP settings — the code step says so instead of "We sent a code": *No email provider is configured on this install, so no email was sent.* The code for an allowed address is in the backend log (`docker compose logs backend`, the `EMAIL (console mode)` block), and an **Admin Login** button there switches to the password form. The admin manages allowed email addresses under **Settings → Access → Email Whitelist**. Each entry is one full email address, matched without regard to case — there are no domain or wildcard entries. An entry that is not one address (empty, containing spaces, without exactly one `@` with text on both sides, or over 254 characters) is refused with the reason shown beside the field, and the API answers `422` with the same one-sentence reason. Intranet addresses such as `user@localhost` are accepted. **Remove** works on every row, including older entries that contain unusual characters such as `/`.
+**Email login (passwordless):** Enter your email address, receive a 6-digit verification code, and submit it to log in. This requires email service configuration. On an install that cannot send email — the default `console` provider, or a provider missing its key or SMTP settings — the code step says so instead of "We sent a code": *No email provider is configured on this install, so no email was sent.* The code is not written anywhere you can read, and an **Admin Login** button there switches to the password form. Only a development install that sets `EMAIL_CONSOLE_LOG_BODY=true` prints the code to the backend log, and the page names the log (`docker compose logs backend`, the `EMAIL (console mode)` block) only then. The admin manages allowed email addresses under **Settings → Access → Email Whitelist**. Each entry is one full email address, matched without regard to case — there are no domain or wildcard entries. An entry that is not one address (empty, containing spaces, without exactly one `@` with text on both sides, or over 254 characters) is refused with the reason shown beside the field, and the API answers `422` with the same one-sentence reason. Intranet addresses such as `user@localhost` are accepted. **Remove** works on every row, including older entries that contain unusual characters such as `/`.
 
 Password login is rate-limited: five failed attempts on one account within 15 minutes lock that account out until the window passes (a looser per-address limit — 30 failures in 5 minutes — guards shared networks without locking out everyone behind one address).
 
@@ -208,7 +208,7 @@ curl -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
 
 The following endpoints do not require authentication:
 
-- `GET /api/auth/mode` -- Returns the current authentication mode and whether setup is complete. `email_delivery_available` is `false` when the install cannot send email (the login page then says the code is in the backend log); it is install-level and never varies per address.
+- `GET /api/auth/mode` -- Returns the current authentication mode and whether setup is complete. `email_delivery_available` is `false` when the install cannot send email (the login page then says no email was sent); `email_code_in_log` is `true` only on a development install that prints codes to the backend log. Both are install-level and never vary per address.
 - `GET /api/setup/status` -- Returns whether initial setup is complete, and `claim_required: "instance-id"` when the first-run form must also be given the EC2 instance ID (otherwise `null`).
 - `POST /api/setup/admin-password` -- The first-run form's endpoint; refuses (403) once a usable admin exists, and on a hosted compose whose blank password was not marked for browser claim. On success it also schedules the system-agent deploy and first-run seeding.
 - `POST /api/token` -- The login endpoint itself.
@@ -245,7 +245,7 @@ Until a person accepts, every other call from their signed-in session answers `4
 ## Limitations
 
 - Backend restarts invalidate all active JWT tokens. All users and integrations must re-authenticate.
-- Email login requires a configured email service. Without one, codes are written to the backend log and the login page says so; admin password login always works.
+- Email login requires a configured email service. Without one no code is sent, none is written to the log, and the login page says so; admin password login always works.
 - Trinity requires Docker. It cannot run without it.
 - Seeding Cornelius needs outbound access to GitHub at first boot; a failed pass is retried on the next start.
 - PostgreSQL is the database backend. See [Single-Server Deployment → Database backend](../guides/deploying/single-server.md#database-backend).

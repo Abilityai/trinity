@@ -48,6 +48,7 @@ from .error_classifier import (
 from . import chat_session_marker
 from . import jsonl_recovery as _jsonl_recovery
 from .headless_executor import (
+    DEFAULT_CLAUDE_MODEL,
     _attempt_empty_result_recovery,
     _recover_completed_turn_into,
     _valid_session_id,
@@ -121,7 +122,7 @@ class ClaudeCodeRuntime(AgentRuntime):
 
     def get_default_model(self) -> str:
         """Get default Claude model."""
-        return "claude-sonnet-4-6"
+        return DEFAULT_CLAUDE_MODEL
 
     def get_context_window(self, model: Optional[str] = None) -> int:
         """Fallback context window for Claude models (#1521).
@@ -822,7 +823,7 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         # No --resume, no capture, no shared-model or session-counter change,
         # and no cold retry (there is no resume to fall back from). The turn's
         # model is its own: the request's, else the chat's current one.
-        turn_model = model or agent_state.current_model or "claude-sonnet-4-6"
+        turn_model = model or agent_state.current_model or DEFAULT_CLAUDE_MODEL
         return await _execute_claude_code_once(
             prompt, stream, model, system_prompt, execution_id or str(uuid.uuid4()), None, {},
             cli_model=turn_model, auth_override=auth_override,
@@ -832,8 +833,8 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
     # Safety-net fallback: backend always resolves model before calling the agent
     # (#831), so this branch should only fire for direct agent-server calls.
     if not model and not agent_state.current_model:
-        model = "claude-sonnet-4-6"
-        logger.debug("[Chat] No model specified, defaulting to 'claude-sonnet-4-6'")
+        model = DEFAULT_CLAUDE_MODEL
+        logger.debug("[Chat] No model specified, defaulting to %r", DEFAULT_CLAUDE_MODEL)
 
     # Update model if specified (persists for session)
     if model:

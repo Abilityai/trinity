@@ -96,7 +96,7 @@ async def chat(request: ChatRequest, response: Response = None):
     # reached the body, so an inner `finally` could not drop its entry.
     try:
         async with get_execution_lock():
-            logger.info(f"[Chat] Execution lock acquired for message: {request.message[:50]}...")
+            logger.info(f"[Chat] Execution lock acquired for a message of {len(request.message)} chars")
 
             # Add user message to history
             agent_state.add_message("user", request.message)
@@ -219,9 +219,9 @@ async def execute_task(request: ParallelTaskRequest, response: Response = None):
     Note: Does NOT update conversation history or session state.
     """
     if request.resume_session_id:
-        logger.info(f"[Task] Resuming session {request.resume_session_id}: {request.message[:50]}...")
+        logger.info(f"[Task] Resuming session {request.resume_session_id} ({len(request.message)} chars)")
     else:
-        logger.info(f"[Task] Executing parallel task: {request.message[:50]}...")
+        logger.info(f"[Task] Executing parallel task ({len(request.message)} chars)")
 
     # #1083 fire-and-forget: when the backend requests async AND this is the
     # Claude runtime, accept with 202 and run the turn in a detached task that

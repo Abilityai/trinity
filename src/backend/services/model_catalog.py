@@ -172,7 +172,7 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         "Fast + smart, 1M context (latest)",
         True,
         True,
-        False,
+        True,  # the recommended fleet default (PLATFORM_DEFAULT_MODEL_VALUE, #4757)
         workspace=True,
         workspace_tier="Balanced \u2014 fast and smart",
         min_claude_code="2.1.284",
@@ -195,9 +195,11 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
     ),
     ModelEntry("claude-opus-4-7", "Claude Opus 4.7", "Legacy", True, True, False),
     ModelEntry("claude-opus-4-6", "Claude Opus 4.6", "Legacy", True, True, False),
-    # The recommended fleet default (PLATFORM_DEFAULT_MODEL_VALUE, #831).
+    # The fleet default until #4757, and still the step-down default for an
+    # agent whose Claude Code is too old for the current one
+    # (OLD_CLI_DEFAULT_MODEL below). It needs no minimum CLI.
     ModelEntry(
-        "claude-sonnet-4-6", "Claude Sonnet 4.6", "Fast + smart", True, True, True
+        "claude-sonnet-4-6", "Claude Sonnet 4.6", "Fast + smart", True, True, False
     ),
     # Public-channel-selectable but NOT an admin default (#1080) — the rule is
     # about the cheap tier, so it holds for every Haiku. Haiku 5.5 (#4528) is the
@@ -244,6 +246,40 @@ assert _recommended[0].admin_default_selectable, (
     "the recommended model must be admin_default_selectable "
     "(you cannot recommend a model the admin cannot pick)"
 )
+
+# #4757: the platform-default rung for an agent whose Claude Code cannot be
+# shown to run the configured default. The default moved to a model with a
+# `min_claude_code`; an agent still on an older base image would otherwise
+# start failing `model_unsupported` on every turn that names no model. This is
+# the old default: it has no minimum, so every CLI the platform ever shipped
+# accepts it, and it is admin-default-selectable, so it is a model the admin
+# could have chosen anyway.
+OLD_CLI_DEFAULT_MODEL = "claude-sonnet-4-6"
+_old_cli_default = next(m for m in MODEL_CATALOG if m.id == OLD_CLI_DEFAULT_MODEL)
+assert _old_cli_default.min_claude_code == "" and _old_cli_default.admin_default_selectable, (
+    "OLD_CLI_DEFAULT_MODEL must need no minimum Claude Code and be admin-default-selectable"
+)
+
+_CLI_VERSION_RX = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
+
+
+def claude_code_can_run(model_id: str | None, cli_version: str | None) -> bool:
+    """Can a Claude Code at ``cli_version`` run ``model_id`` (#4757)?
+
+    A model with no recorded ``min_claude_code`` (or one outside the catalog,
+    e.g. an alias or a ``[1m]`` id) is runnable by any CLI. Otherwise the CLI
+    must be at least that version; an absent or unparseable version is NOT
+    proof, so it answers False — the caller steps down rather than guess.
+    """
+    entry = next((m for m in MODEL_CATALOG if m.id == model_id), None)
+    if entry is None or not entry.min_claude_code:
+        return True
+    have = _CLI_VERSION_RX.match((cli_version or "").strip())
+    if have is None:
+        return False
+    need = tuple(int(p) for p in entry.min_claude_code.split("."))
+    return tuple(int(g) for g in have.groups()) >= need
+
 
 # ent#403: the Workspace dimension IS a subset lattice, unlike the two above.
 # The Workspace turn route validates against WORKSPACE_MODELS, and the value it
