@@ -155,6 +155,25 @@ describe('isFirstRunOverlayVisible', () => {
     expect(isFirstRunOverlayVisible({ ...freshMarketplace, ...override, forced: true })).toBe(false)
   })
 
+  // trinity-enterprise#1355: where the assistant leads the first session, the
+  // setup dialog does not open by itself; it waits until the corner is known.
+  it('stays hidden while it is not yet known whether the assistant is offered', () => {
+    expect(isFirstRunOverlayVisible({ ...freshMarketplace, assistantDecided: false })).toBe(false)
+    expect(isFirstRunOverlayVisible({ ...freshMarketplace, assistantDecided: true })).toBe(true)
+  })
+
+  it('does not open by itself where the assistant leads the first session', () => {
+    expect(isFirstRunOverlayVisible({ ...freshMarketplace, assistantDecided: true, assistantLeads: true })).toBe(false)
+  })
+
+  it('still opens on request where the assistant leads (Re-run setup)', () => {
+    expect(isFirstRunOverlayVisible({ ...freshMarketplace, assistantDecided: true, assistantLeads: true, forced: true })).toBe(true)
+  })
+
+  it('a self-hosted install (assistant not leading) is unchanged', () => {
+    expect(isFirstRunOverlayVisible({ ...freshMarketplace, assistantDecided: true, assistantLeads: false })).toBe(true)
+  })
+
   it('stays hidden on an established fleet (the spec correction)', () => {
     // `keys` still applies to every admin here, and would open the overlay on
     // every new browser if a ride-along step could open it on its own.

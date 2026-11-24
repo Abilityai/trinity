@@ -168,7 +168,7 @@
       the person has said not to show it.
     -->
     <section
-      v-if="setup.visible"
+      v-if="setup.visible && !firstSessionOn"
       class="shrink-0 border-b border-action-primary-200 dark:border-action-primary-500/40 bg-action-primary-50 dark:bg-action-primary-500/16 text-action-primary-700 dark:text-action-primary-200"
       data-testid="assistant-setup"
     >
@@ -263,15 +263,17 @@
         <!-- On the ground colour, so each reply (a surface) reads as its own box. -->
         <div ref="messagesEl" class="flex-1 min-h-0 overflow-y-auto p-4 space-y-3 text-sm bg-gray-50 dark:bg-gray-900" aria-live="polite">
           <!-- The opening is not decided yet (trinity-enterprise#1356): nothing is shown that could be replaced a moment later -->
+          <!-- No statusError guard here: the retry error shows only while there is no status (the branch above), so this
+               placeholder can never pulse under it; a failed re-read with the status on screen keeps it, never a blank panel -->
           <div
-            v-if="store.messages.length === 0 && !openingDecided && !store.statusError"
+            v-if="store.messages.length === 0 && !openingDecided"
             class="space-y-2 animate-pulse motion-reduce:animate-none"
             aria-busy="true"
             data-testid="assistant-opening-pending"
           >
             <span class="sr-only">Loading the assistant</span>
-            <div class="h-3 w-3/4 rounded bg-gray-200 dark:bg-gray-700" />
-            <div class="h-3 w-1/2 rounded bg-gray-200 dark:bg-gray-700" />
+            <div class="h-3 w-3/4 rounded bg-gray-100 dark:bg-gray-750" />
+            <div class="h-3 w-1/2 rounded bg-gray-100 dark:bg-gray-750" />
           </div>
           <div v-else-if="store.messages.length === 0 && openingDecided" class="space-y-3" data-testid="assistant-welcome">
             <p class="text-gray-900 dark:text-gray-100">
@@ -347,6 +349,14 @@
               </dl>
               <p v-if="!(FOLLOWED.includes(c.card.action) && c.state !== 'making')" class="text-[12.5px] text-gray-600 dark:text-gray-300">{{ c.note }}</p>
 
+              <!-- A run that ended well: its result, one click away (ent#1355) -->
+              <a
+                v-if="c.result"
+                :href="c.result"
+                class="inline-block text-[12.5px] font-medium underline text-action-primary-600 dark:text-action-primary-400"
+                data-testid="assistant-result"
+                @click.prevent="openResult(c.result)"
+              >Open the result</a>
               <div v-if="c.state === 'making'" class="space-y-1.5" data-testid="assistant-job">
                 <!-- Steps known (a build): how far. Not known (a run): that it is alive. -->
                 <div
@@ -704,7 +714,7 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import BaseButton from '../base/BaseButton.vue'
 import BaseInput from '../base/BaseInput.vue'
 import BaseSegmented from '../base/BaseSegmented.vue'
@@ -719,6 +729,7 @@ import { useFirstRunStore } from '../../stores/firstRun'
 import { irreversibleTool, toolWords, webLink } from '../../utils/assistantCards'
 import { describePage } from '../../utils/assistantContext'
 import { starterGroups } from '../../utils/assistantStarters'
+import { OPENING, OPENING_GROUP, inFirstSession, isFirstSession, localHandOff } from '../../utils/firstSession'
 import { renderMarkdown } from '../../utils/markdown'
 
 defineProps({
@@ -766,6 +777,11 @@ const messagesEl = ref(null)
 
 // What the empty screen offers, for this page and this fleet.
 const starters = computed(() => {
+  // trinity-enterprise#1355: the assistant-led first session asks one question, with two answers.
+  if (firstSession.value) {
+    const last = store.messages.at(-1)
+    return last?.local && last.handOff ? [{ heading: OPENING_GROUP.heading, items: last.handOff }] : [OPENING_GROUP]
+  }
   const groups = starterGroups(describePage(route), store.fleet, { known: Boolean(store.status?.profile_known) })
   // Under its own hello there is one question to answer, not a menu: the rest comes once they have.
   return store.messages.length === 1 && store.messages[0].local ? groups.slice(0, 1) : groups
@@ -788,16 +804,24 @@ function hello() {
     : ''
   return `Hi, I'm Trinity's assistant 👋\n\nLet's get you **an agent of your own** working in a few minutes: tell me a little about your work, I'll suggest one, build it and run it once so you see what it produces.${shown}`
 }
+// trinity-enterprise#1355: while the first session runs, no settings steps are raised (checkpoint 4).
+const firstSessionOn = computed(() => inFirstSession(store.status, store.fleet, firstRun.seededAgents || []))
+// trinity-enterprise#1355: the instance says the assistant leads, and the person has no agent of their own yet.
+const firstSession = computed(() => isFirstSession(store.status, store.fleet, firstRun.seededAgents || []))
 // trinity-enterprise#1356: the opening is decided once, when there is nothing
 // left to learn that would change it: the reads the hello is written from are
 // in, and the status has settled. Right after setup the first status is read
 // before the instance's account report lands and carries no line from Trinity;
 // a hello written then was replaced by Trinity's own line when the re-read
 // brought it, so the first thing a new person read changed under them.
+// The first-session opening waits on the same gate: decided on an early,
+// incomplete status it could ask the first-session question of the wrong person.
 const prepared = ref(false)      // open() has read the fleet and which agents are examples
 const openingDecided = computed(() => prepared.value && Boolean(store.status) && !store.settling)
 function startTalking() {
-  if (!isOpen.value || !openingDecided.value || store.status.profile_known || store.messages.length) return
+  if (!isOpen.value || !openingDecided.value || store.messages.length) return
+  if (firstSession.value) return store.welcome(OPENING)
+  if (store.status.profile_known) return
   store.welcome(hello())
 }
 watch(openingDecided, (now) => { if (now) startTalking() })
@@ -999,10 +1023,28 @@ function send(text) {
 
 // A starter: sent as it stands, or put in the box for the person to finish.
 function pick(starter) {
+  // Agents already run elsewhere: the hand-off is said on the page (its own work, trinity-enterprise#1353).
+  if (starter.path === 'local') {
+    const { reply, offer } = localHandOff()
+    store.messages.push({ id: `h${Date.now()}`, role: 'user', content: starter.text, opener: true, local: true })
+    store.messages.push({ id: `h${Date.now()}r`, role: 'assistant', content: reply, opener: true, local: true, handOff: offer })
+    return
+  }
   if (!starter.fill) return send(starter.text)
   draft.value = starter.text
   focusInput()
 }
+
+// A result opens beside the panel; the first one in an assistant-led session opens by itself (ent#1355).
+const router = useRouter()
+function openResult(path) {
+  router.push(path).catch?.(() => {})
+}
+watch(() => store.openResult, (path) => {
+  if (!path) return
+  store.openResult = ''
+  openResult(path)
+})
 
 function answer(messageId, cardId, confirm) {
   store.answerCard(messageId, cardId, confirm, route)
@@ -1031,6 +1073,19 @@ onMounted(() => {
   firstRun.fetchState()
   if (wide.value && chosen !== 'false' && !firstRun.overlayOpen) open({ quiet: true })
 })
+
+// trinity-enterprise#1355: where the assistant leads the first session it opens by
+// itself, whatever the width, unless the person closed it before.
+watch(() => store.status?.leads_setup, async (leads) => {
+  if (!leads || isOpen.value) return
+  let chosen = null
+  try {
+    chosen = localStorage.getItem(OPEN_KEY)
+  } catch { /* no choice known */ }
+  if (chosen === 'false' || firstRun.overlayOpen) return
+  await Promise.all([store.refreshFleet().catch(() => {}), firstRun.fetchState()])
+  if (firstSession.value && !isOpen.value) open({ quiet: true })
+}, { immediate: true })
 onBeforeUnmount(() => {
   stopKeeping?.()
   wideQuery?.removeEventListener?.('change', onWide)
