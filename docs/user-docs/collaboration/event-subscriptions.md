@@ -78,6 +78,7 @@ Subscriptions wake an *agent*. Independently of them, a job that started from a 
 | A Slack channel or thread | A note in that channel/thread — see [Slack](../integrations/slack-integration.md#completion-report-back) |
 | A Telegram chat | A reply threaded to your message, from the bot you talked to — see [Telegram](../integrations/telegram-integration.md#completion-report-back) |
 | A [Workspace](../sharing-and-access/workspace.md) chat | A message from the agent in that chat. It is filed under the agent you were talking to and names the agent that did the work when that differs; it opens with **Finished** or **Didn't finish** and the status, so a failure never vanishes. The chat moves to the top of the sidebar as any new message would, and the report waits up to two minutes for a reply already in progress before landing |
+| An agent's **Chat** tab, when the agent delegated to another agent | The delegating agent's own reply in that conversation, written when its [wake](agent-network.md) on the delegated run's ending succeeds. An open Chat tab shows it without a reload |
 | A scheduled run addressed to someone | That person's **Main** chat — see [Scheduling](../automation/scheduling.md#delivering-a-runs-output-to-someones-workspace) |
 
 An ordinary turn that already answered inline is never reported a second time. Each finished job reports at most once, and a report is never sent to a conversation the work was not started from. The Workspace does not push the report while you watch: it is there on the next load or chat switch.

@@ -112,6 +112,14 @@ def world(db_backend, monkeypatch):
         lambda scope, key: SimpleNamespace(replay=False, enabled=True, in_flight=False),
     )
     monkeypatch.setattr(_WAKE, "_fail_idempotency", lambda *a, **k: None)
+    # #4733: the caller's hold (live-row read, slot check) has its own tests;
+    # the wake rows here stay RUNNING on purpose.
+    monkeypatch.setattr(_WAKE, "_wake_row_live", lambda caller: False)
+
+    async def _free(caller):
+        return True
+
+    monkeypatch.setattr(_WAKE, "_has_free_slot", _free)
     redis = fakeredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(_WAKE, "_wake_budget_redis", lambda: redis)
 
