@@ -497,16 +497,14 @@ def test_a_run_end_while_a_wake_runs_leaves_the_parked_ending_for_that_wake(worl
 
 
 def _refuse_after_the_check(world, monkeypatch):
-    """The slot check passes, then the last slot goes before admission."""
+    """The slot check passes, then the last slot goes before admission (and
+    stays taken: that is the race)."""
     world.free["slot"] = True
     refusing = _WAKE._dispatch_wake
 
     async def _refuse(**kw):
         world.free["slot"] = False
-        try:
-            return await refusing(**kw)
-        finally:
-            world.free["slot"] = True
+        return await refusing(**kw)
 
     monkeypatch.setattr(_WAKE, "_dispatch_wake", _refuse)
 
@@ -521,6 +519,103 @@ def test_a_refusal_that_races_the_slot_check_is_parked_too(world, full, monkeypa
     assert len(full.refused) == 1
     assert world.redis.get(MISSED + BOSS) == ending
     assert world.spawned == [], "the holder drained the refused ending into a retry at once"
+
+
+def test_a_refused_ending_is_delivered_if_the_busy_run_ended_before_the_marker(world, full, monkeypatch):
+    """The run holding the slot ends between the refusal and the marker's SET:
+    its own drain found nothing parked, so the park itself takes the freed slot."""
+    admitting = _WAKE._dispatch_wake
+    _refuse_after_the_check(world, monkeypatch)
+    busy = _busy_run()
+    real_set = world.redis.set
+
+    def _set(name, value, *a, **k):
+        if name.startswith(MISSED):
+            T._end(busy)                                    # the slot frees right here
+            world.free["slot"] = True
+            monkeypatch.setattr(_WAKE, "_dispatch_wake", admitting)   # the race is over
+        return real_set(name, value, *a, **k)
+
+    monkeypatch.setattr(world.redis, "set", _set)
+    ending = _one_ending()
+
+    async def go():
+        assert await _WAKE.maybe_wake_caller(ending) is None
+        assert world.spawned, "the freed slot was not taken: the ending is stranded"
+        while world.spawned:
+            await world.spawned.pop(0)
+
+    asyncio.run(go())
+    assert len(full.refused) == 1
+    assert len(world.wakes) == 1 and ending in world.wakes[0]["message"].splitlines()[0]
+
+
+def test_a_drained_ending_never_folds_into_a_claim_that_may_not_dispatch(world):
+    """A parked ending reaches its follow-on while a fresh claim holds the
+    caller, a claim taken just after the ending ended. Folding would leave it
+    with that claim, which a budget cap or an error can still drop; it parks."""
+    from services import idempotency_service
+
+    ending = T._callee_run()
+    T._end(ending, datetime.now(timezone.utc) - timedelta(seconds=1))
+    idempotency_service.begin(_WAKE._agent_scope(BOSS), _WAKE._hold_key(BOSS))   # the new claim
+    assert asyncio.run(_WAKE.maybe_wake_caller(ending, _expect_caller=BOSS)) is None
+    assert world.redis.get(MISSED + BOSS) == ending, "the drained ending folded"
+
+
+def test_a_push_chat_slot_release_delivers_a_parked_wake(world, full):
+    """A push /chat writes its terminal without the fan-out, so no hook runs
+    for it; its slot release drains the parked wake instead."""
+    busy = db.create_task_execution(agent_name=BOSS, message="a /chat turn", triggered_by="chat").id
+    ending = _one_ending()
+
+    async def go():
+        assert await _WAKE.maybe_wake_caller(ending) is None
+        world.free["slot"] = True
+        T._end(busy)                                       # no maybe_wake_caller(busy)
+        _WAKE.drain_after_slot_release(BOSS)
+        while world.spawned:
+            await world.spawned.pop(0)
+
+    asyncio.run(go())
+    assert full.refused == []
+    assert len(world.wakes) == 1 and ending in world.wakes[0]["message"].splitlines()[0]
+
+
+def test_run_chat_turn_drains_after_it_releases_its_slot(monkeypatch):
+    """The production hand-off: ``run_chat_turn``'s ``finally`` releases the
+    /chat slot, then asks the wake service to drain — on a failed turn too."""
+    import httpx
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import services.chat_execution_service as _CE
+    from models import ChatMessageRequest
+    from services.chat_signals import ChatDispatchError
+    from test_chat_admission import _env, _idem, _user
+
+    order = []
+    monkeypatch.setattr(_CE.caller_wake_service, "drain_after_slot_release",
+                        lambda name: order.append(("drain", name)))
+    with _env(_idem(replay=False)) as m, \
+         patch.object(_CE, "activity_service", MagicMock(complete_activity=AsyncMock())), \
+         patch.object(_CE, "agent_post_with_retry", AsyncMock(side_effect=httpx.ConnectError("boom"))), \
+         patch.object(_CE, "compose_system_prompt", return_value="sys"), \
+         patch.object(_CE, "is_execution_context_enabled", return_value=False), \
+         patch("services.subscription_auto_switch.is_auth_failure", return_value=False), \
+         patch("services.subscription_auto_switch.handle_subscription_failure",
+               AsyncMock(return_value=None)):
+        m["cap"].release.side_effect = lambda name, eid: order.append(("release", name))
+        with pytest.raises(ChatDispatchError):
+            asyncio.run(_CE.run_chat_turn(
+                name="agent1", request=ChatMessageRequest(message="hi"),
+                current_user=_user(), x_source_agent=None,
+                triggered_by="chat", task_execution_id="te1", _chat_subscription_id=None,
+                chat_activity_id="ca1", collaboration_activity_id=None,
+                session=MagicMock(id="s1"), execution=MagicMock(id="cex1"),
+                queue_result="running", is_queued=False, chat_timeout=3600,
+                idem=m["isvc"].begin.return_value, capacity=m["cap"],
+            ))
+    assert order == [("release", "agent1"), ("drain", "agent1")]
 
 
 def test_a_300_row_sweep_at_capacity_writes_no_wake_row(world, full):

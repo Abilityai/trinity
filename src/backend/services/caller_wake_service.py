@@ -68,12 +68,15 @@ pending per caller. Redis trouble on the park is audited ``skipped_window``.
 **At capacity the wake is parked, not a failed row (#4733).** Before the wake
 row exists, the caller's slots are read: full, and one of its runs is running,
 means admission would refuse, so the ending is parked (``parked``,
-``reason="at_capacity"``) and delivered when any run of the caller ends — every
-terminal reaches this hook, a person's or a platform turn's included. A full
-meter with no running run is expired slots admission cleans first, so that
-dispatches. A pilot is never refused for a slot (its wake queues), so it is not
-checked. A refusal that races the check is the one FAILED row left; its ending
-is parked too, except on a pilot, where a refusal means a full backlog.
+``reason="at_capacity"``) and delivered when any run of the caller ends: every
+terminal fan-out reaches this hook (a person's run and a platform turn
+included), and a push ``/chat``, which writes its terminal without one, drains
+it where its slot is released (``drain_after_slot_release``). A full meter with
+no running run is a slot no run holds (expired, or leaked until it is
+reclaimed), so that dispatches and admission decides. A pilot is never refused
+for a slot (its wake queues), so it is not checked. A refusal that races the
+check is the one FAILED row left; its ending is parked too, except on a pilot,
+where a refusal means a full backlog.
 
 **The wake stands where the delegator stood (#4357).** A wake continues the
 delegator's own work, so it carries the delegator's standing, not one more hop:
@@ -618,8 +621,29 @@ async def _park_at_capacity(caller: str, callee: str, execution_id: str, idem,
             logger.exception("#4733: idempotency release failed")
     if not await _mark_parked(caller, callee, execution_id, policy_source, reason="at_capacity"):
         return
+    await _deliver_if_a_slot_freed(caller)
+
+
+async def _deliver_if_a_slot_freed(caller: str) -> None:
+    """After a capacity park: the run that held the slot may have ended between
+    the check and the SET, and its own drain then found no marker. Take the
+    slot it freed. Each pass needs the meter to change, so this cannot spin."""
     if await _has_free_slot(caller) and not await asyncio.to_thread(_caller_busy, caller):
         await _drain_missed(caller)
+
+
+def drain_after_slot_release(agent_name: Optional[str]) -> None:
+    """A slot of ``agent_name`` was released by a turn that writes its terminal
+    without the fan-out — a push ``/chat`` (#4733, E1). Deliver a wake parked
+    for a free slot, as any other run's end does. Fire-and-forget; never raises."""
+    if not agent_name:
+        return
+    coro = _drain_if_idle(agent_name)
+    try:
+        _spawn_followon(coro)
+    except Exception:  # noqa: BLE001 — no running loop: the next end delivers it
+        coro.close()
+        logger.debug("#4733: no loop to drain a parked wake of %s", agent_name)
 
 
 async def _drain_if_idle(agent_name: Optional[str]) -> None:
@@ -735,7 +759,7 @@ def _framed_wake(row, ask_ids: List[str]) -> str:
     lines += [
         "",
         f"Read the full result with `get_execution_result('{callee}', '{execution_id}')`. "
-        "Other delegated runs may have ended in the same window as this one — "
+        "Other delegated runs may have ended around the same time as this one — "
         "`list_recent_executions` is the complete list.",
     ]
     return "\n".join(lines)
@@ -830,9 +854,12 @@ async def maybe_wake_caller(
         logger.exception("ent#1102: idempotency begin failed — dispatching anyway")
 
     if idem is not None and getattr(idem, "replay", False):
-        if getattr(idem, "in_flight", False) and not _covered(row, idem):
+        if getattr(idem, "in_flight", False) and (
+                _expect_caller is not None or not _covered(row, idem)):
             # #4536/#4733: a wake of this caller is still running and this run
             # ended after it claimed — it may never see it. Park, never drop.
+            # A drained ending was owed delivery by name, so it never folds
+            # into a claim that may yet not dispatch (a budget cap, an error).
             await _park(caller, callee, execution_id, verdict.source)
             return None
         logger.info(
@@ -862,7 +889,10 @@ async def maybe_wake_caller(
         await _drain_missed(caller)
         raise
     if wake_id is _PARKED_AT_CAPACITY:
-        return None     # #4733: a run's end delivers it, not this holder
+        # #4733: a run's end delivers it, not this holder — unless that run
+        # ended before the marker landed, when its drain found nothing.
+        await _deliver_if_a_slot_freed(caller)
+        return None
     # #4536: deliver what was parked while this claim was held (the wake
     # row's terminal drains it too).
     await _drain_missed(caller)
@@ -872,8 +902,8 @@ async def maybe_wake_caller(
 async def _claimed_wake(row, caller, callee, execution_id, verdict, idem):
     capped_at = await _within_wake_budget(callee, caller)
     if capped_at is not None:
-        # Released, not completed: no turn ran, so the hold covers nothing —
-        # a later ending is skipped by the same budget anyway.
+        # Released, not completed: no turn ran, so the hold covers nothing. An
+        # ending that folded into it meanwhile is not woken (a stated limit).
         if idem is not None:
             try:
                 _fail_idempotency(idem)
