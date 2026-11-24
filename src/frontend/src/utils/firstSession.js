@@ -44,16 +44,23 @@ export const OPENING_GROUP = Object.freeze({
 })
 
 /**
- * The hand-off for agents the person already runs elsewhere. Moving them in is
- * its own piece of work (trinity-enterprise#1353); until it lands this is the
- * one place the button leads, and it says so plainly, with the other path open.
+ * Agents the person already runs elsewhere (trinity-enterprise#1353). The
+ * answer goes to the assistant like the other one; it answers with the steps
+ * card (`local-move`, written by utils/localMove.js with this instance's
+ * address). The assistant keeps, per person, that the steps were given or
+ * that they said no, and the status says so (`local_agents`): the opening
+ * then leaves out the answer already given. Steps already given: it asks
+ * whether the agents are here instead.
  */
-export const LOCAL_HANDOFF =
-  "Bringing in agents you already run is coming soon. Meanwhile I can build you a new one from scratch in a few minutes: press **Start from scratch** below, or tell me about your business."
+export const PATH_HERE = 'My agents are here'
 
-/** The seam for that hand-off: one function to replace when it exists. */
-export function localHandOff() {
-  return { reply: LOCAL_HANDOFF, offer: [OPENING_GROUP.items[1]] }
+export function openingGroup(status) {
+  const [local, scratch] = OPENING_GROUP.items
+  if (status?.local_agents === 'no') return { ...OPENING_GROUP, items: [scratch] }
+  if (status?.local_agents === 'offered') {
+    return { ...OPENING_GROUP, items: [{ label: PATH_HERE, text: PATH_HERE, path: 'here' }, scratch] }
+  }
+  return { ...OPENING_GROUP, items: [local, scratch] }
 }
 
 /**

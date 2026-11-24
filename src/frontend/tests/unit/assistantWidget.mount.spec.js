@@ -31,6 +31,7 @@ let codeVersion          // the terms version /subscription/code names; undefine
 let agentsList = null    // what /api/agents answers when set (ent#1355: an instance with no agent of the person's own)
 let credentialAnswer     // what POST /credential answers (ent#1355: the instance's save, count and check)
 let agentsWait = null    // when set, /api/agents answers only once this settles (a slow agent list)
+let externalAccess       // what GET /api/settings/mcp-external-access answers (ent#1353); a `fails` key throws
 
 vi.mock('@/api', () => {
   const respond = (method, url, body) => {
@@ -84,6 +85,10 @@ vi.mock('@/api', () => {
       throw { response: { status: 409, data: { detail: { code: 'sign_in_first', message: 'Accept the current terms first.' } } } }
     }
     if (url === '/api/enterprise/assistant/subscription/start') return { plan: 'pro', billing: 'unbilled', checkout_url: null, email: 'ada@example.com' }
+    if (url === '/api/settings/mcp-external-access') {
+      if (externalAccess?.fails) throw { response: { status: 500, data: { detail: 'unreadable' } } }
+      return externalAccess
+    }
     if (url === '/api/agents' && agentsList) return agentsList
     if (url === '/api/agents') return [{ name: 'trinity-system', status: 'running', is_system: true }, { name: 'issue-digest', status: 'running' }]
     if (url === '/api/agents/autonomy-status') return { 'issue-digest': { autonomy_enabled: false } }
@@ -146,6 +151,7 @@ describe('assistant panel', () => {
     agentsList = null
     credentialAnswer = { provided: true, agent: null, name: 'ANTHROPIC_API_KEY', replaced: false, connected_agents: 2, working: true }
     agentsWait = null
+    externalAccess = { enabled: false, source: 'default', advertised_url: 'https://trinity.example/mcp' }
     pushed.length = 0
     subTerms = { version: 's1', title: 'Subscription terms', url: '', text: '# Subscription terms\n\nYou pay monthly.' }
     status = { available: true, contacted: true, reachable: true, plan: 'free', email: null, allowance: null, trial_terms: { version: 't0', url: '', accepted: 't0' }, profile_known: true }
@@ -1511,14 +1517,80 @@ describe('assistant panel', () => {
       expect(sent(TURN)[0].body.context.said).toContain('Where are you starting from?')
     })
 
-    it('agents already run elsewhere: a hand-off said on the page, nothing sent, the other path still open', async () => {
+    // trinity-enterprise#1353: the hand-off for agents already run elsewhere.
+    it('agents already run elsewhere: the answer goes to the assistant, as the first-session answer it is', async () => {
       await leads()
+      turns = [final('Here is how to bring them in.', [{ action: 'local-move' }])]
       await button('I already run agents in Claude Code').trigger('click')
       await flushPromises()
-      expect(sent(TURN)).toEqual([])
-      const said = wrapper.findAll('.bubble').map((b) => b.text())
-      expect(said.at(-1)).toContain('coming soon')
-      expect(button('Start from scratch')).toBeTruthy()
+      expect(sent(TURN)).toHaveLength(1)
+      expect(sent(TURN)[0].body.message).toBe('I already run agents in Claude Code')
+      expect(sent(TURN)[0].body.context.first_session).toBe(true)
+      expect(sent(TURN)[0].body.context.said).toContain('Where are you starting from?')
+    })
+
+    it('the steps carry this instance\'s address, and the outside-access step while it is off', async () => {
+      await leads()
+      turns = [final('Here is how to bring them in.', [{ action: 'local-move' }])]
+      await button('I already run agents in Claude Code').trigger('click')
+      await flushPromises()
+      const card = wrapper.get('[data-testid="assistant-local-move"]')
+      expect(card.text()).toContain(window.location.origin)
+      expect(card.text()).toContain('/trinity:connect')
+      expect(card.text()).toContain('/agent-dev:agent-fleet-analysis')
+      expect(card.text()).toContain('/agent-dev:agent-fleet-migrate')
+      expect(card.find('[data-testid="local-move-access"]').exists()).toBe(true)
+      expect(card.find('[data-testid="local-move-access"] a').attributes('href')).toBe('/settings?tab=mcp-keys')
+      expect(card.findAll('button').map((b) => b.text())).not.toContain('Confirm')     // nothing to confirm: it changes nothing here
+    })
+
+    it('outside access already on: that step is left out', async () => {
+      externalAccess = { enabled: true, source: 'settings', advertised_url: 'https://trinity.example/mcp' }
+      await leads()
+      turns = [final('Here is how.', [{ action: 'local-move' }])]
+      await button('I already run agents in Claude Code').trigger('click')
+      await flushPromises()
+      const card = wrapper.get('[data-testid="assistant-local-move"]')
+      expect(card.find('[data-testid="local-move-access"]').exists()).toBe(false)
+      expect(card.text()).toContain('/trinity:connect')
+    })
+
+    it('outside access unreadable: the steps still show, with the place to look if connecting is refused', async () => {
+      externalAccess = { fails: true }
+      await leads()
+      turns = [final('Here is how.', [{ action: 'local-move' }])]
+      await button('I already run agents in Claude Code').trigger('click')
+      await flushPromises()
+      const card = wrapper.get('[data-testid="assistant-local-move"]')
+      expect(card.get('[data-testid="local-move-access"]').text()).toContain('external_mcp_access_off')
+      expect(card.text()).toContain('/trinity:connect')
+    })
+
+    it('a "no" the assistant kept is not asked again: the opening offers only the other path', async () => {
+      status = { ...status, local_agents: 'no' }
+      await leads()
+      const offered = wrapper.findAll('[data-testid="assistant-starters"] button').map((b) => b.text())
+      expect(offered).toEqual(['Start from scratch'])
+    })
+
+    it('steps already given: the opening asks whether the agents are here instead of offering the steps again', async () => {
+      status = { ...status, local_agents: 'offered' }
+      await leads()
+      const offered = wrapper.findAll('[data-testid="assistant-starters"] button').map((b) => b.text())
+      expect(offered).toEqual(['My agents are here', 'Start from scratch'])
+      await button('My agents are here').trigger('click')
+      await flushPromises()
+      expect(sent(TURN)[0].body.message).toBe('My agents are here')
+    })
+
+    it('steps already given: "My agents are here" stays once the moved agents have arrived', async () => {
+      status = { ...status, local_agents: 'offered' }
+      await leads()
+      const { useAssistantStore } = await import('@/stores/assistant')
+      useAssistantStore().fleet = [{ name: 'trinity-system', status: 'running', is_system: true }, { name: 'moved-in', status: 'running' }]
+      await flushPromises()
+      const offered = wrapper.findAll('[data-testid="assistant-starters"] button').map((b) => b.text())
+      expect(offered).toContain('My agents are here')
     })
 
     it('raises no settings step in the first session: no getting-started list, no settings nudge', async () => {
