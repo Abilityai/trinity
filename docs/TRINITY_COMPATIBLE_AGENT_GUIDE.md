@@ -206,6 +206,12 @@ credentials.json
 # Large generated content - DO NOT COMMIT
 content/
 
+# Documents people hand the agent - DO NOT COMMIT (abilityai/trinity-enterprise#1373)
+# One folder per person under inbox/, one per session under uploads/.
+# Subfolders only. Keep one with !inbox/<folder>/<file> (no leading slash).
+/inbox/*/**
+/uploads/*/**
+
 # Bulk data / deps / cache / index dirs - DO NOT COMMIT (#1596)
 # These churn on every run and bloat .git unboundedly under auto-sync.
 # Git sync is for code + state, not datasets/indexes/deps — those belong
