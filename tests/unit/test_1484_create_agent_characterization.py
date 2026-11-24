@@ -252,6 +252,7 @@ def _load_crud(monkeypatch, docker_available=True):
     db.add_agent_permission.return_value = None
     db.assign_subscription_to_agent.return_value = None
     db.set_default_avatar.return_value = None
+    db.set_avatar_identity.return_value = None
     db.set_git_auto_sync_enabled.return_value = None
     db.delete_git_config.return_value = None
     db.delete_agent_mcp_api_key.return_value = None
@@ -1073,10 +1074,11 @@ def _png_bytes(size=64):
 
 
 @pytest.mark.asyncio
-async def test_2693_bundled_avatar_installed_as_default(crud_env, monkeypatch, tmp_path):
-    """#2693: a template's bundled avatar lands in the avatar store as WebP and the
-    row is still written as a DEFAULT avatar, so Generate Default Avatars can
-    overwrite it once a Gemini key exists."""
+async def test_4750_bundled_avatar_installed_as_kept(crud_env, monkeypatch, tmp_path):
+    """#2693: a template's bundled avatar lands in the avatar store as WebP.
+    #4750: the row is written as a KEPT avatar (`set_avatar_identity`,
+    is_default_avatar=0), never a default — a shipped image is the author's
+    choice, so Generate Default Avatars must not overwrite it."""
     crud, ctx = crud_env
     tpl = tmp_path / "tpls" / "avtpl"
     tpl.mkdir(parents=True)
@@ -1090,8 +1092,102 @@ async def test_2693_bundled_avatar_installed_as_default(crud_env, monkeypatch, t
 
     installed = (tmp_path / "avatars" / "bundled-av.webp").read_bytes()
     assert installed[:4] == b"RIFF" and installed[8:12] == b"WEBP"
+    ctx["db"].set_avatar_identity.assert_called_once()
+    assert ctx["db"].set_avatar_identity.call_args.args[:2] == ("bundled-av", "a wizard")
+    ctx["db"].set_default_avatar.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_4750_prompt_only_template_still_seeds_a_default(crud_env, monkeypatch, tmp_path):
+    """#4750: a template that declares `avatar_prompt` but ships no image keeps
+    today's behaviour — a DEFAULT seed. Stamping it as kept would hand every
+    surface a URL to a file that was never written."""
+    crud, ctx = crud_env
+    tpl = tmp_path / "tpls" / "avtpl"
+    tpl.mkdir(parents=True)
+    (tpl / "template.yaml").write_text("type: business-assistant\navatar_prompt: a wizard\n")
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
+    monkeypatch.setattr(crud.avatar_paths, "AVATAR_DIR", tmp_path / "avatars")
+
+    await crud.create_agent_internal(
+        AgentConfig(name="prompt-only", template="local:avtpl"), _user(), None)
+
+    assert not (tmp_path / "avatars" / "prompt-only.webp").exists()
     ctx["db"].set_default_avatar.assert_called_once()
-    assert ctx["db"].set_default_avatar.call_args.args[:2] == ("bundled-av", "a wizard")
+    assert ctx["db"].set_default_avatar.call_args.args[:2] == ("prompt-only", "a wizard")
+    ctx["db"].set_avatar_identity.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_4750_oversized_bundled_avatar_seeds_a_default(crud_env, monkeypatch, tmp_path):
+    """#4750: a bundled image over the 2 MB cap installs nothing, so the row stays
+    a DEFAULT seed — kept is reserved for a file that is actually on disk."""
+    crud, ctx = crud_env
+    tpl = tmp_path / "tpls" / "avtpl"
+    tpl.mkdir(parents=True)
+    (tpl / "template.yaml").write_text("type: business-assistant\navatar_prompt: a wizard\n")
+    (tpl / "avatar.png").write_bytes(b"\0" * (crud._BUNDLED_AVATAR_MAX_BYTES + 1))
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
+    monkeypatch.setattr(crud.avatar_paths, "AVATAR_DIR", tmp_path / "avatars")
+
+    await crud.create_agent_internal(
+        AgentConfig(name="big-av", template="local:avtpl"), _user(), None)
+
+    assert not (tmp_path / "avatars" / "big-av.webp").exists()
+    ctx["db"].set_default_avatar.assert_called_once()
+    ctx["db"].set_avatar_identity.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_4750_nonfatal_kept_stamp_failure(crud_env, monkeypatch, tmp_path):
+    """The kept stamp is log-and-continue like the default seed it replaces."""
+    crud, ctx = crud_env
+    tpl = tmp_path / "tpls" / "avtpl"
+    tpl.mkdir(parents=True)
+    (tpl / "template.yaml").write_text("type: business-assistant\navatar_prompt: a wizard\n")
+    (tpl / "avatar.png").write_bytes(_png_bytes())
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
+    monkeypatch.setattr(crud.avatar_paths, "AVATAR_DIR", tmp_path / "avatars")
+    ctx["db"].set_avatar_identity.side_effect = Exception("boom")
+
+    await crud.create_agent_internal(
+        AgentConfig(name="nf-kept", template="local:avtpl"), _user(), None)
+    ctx["db"].set_avatar_identity.assert_called_once()
+    ctx["docker_utils"].containers_run.assert_awaited()
+
+
+def _make_reencode_fail(monkeypatch):
+    """A header that decodes but a re-encode that raises — the window where the
+    destination used to be opened (and truncated to 0 bytes) before the bytes
+    to write existed."""
+    import utils.image_optimize as image_optimize
+
+    def _boom(data):
+        raise OSError("re-encode failed")
+
+    monkeypatch.setattr(image_optimize, "optimize_avatar", _boom)
+
+
+@pytest.mark.asyncio
+async def test_4750_failed_reencode_leaves_no_empty_local_avatar(crud_env, monkeypatch, tmp_path):
+    """#4750 (2b): a re-encode failure must not leave a 0-byte `{name}.webp`
+    behind — the file is written only after `optimize_avatar` returned."""
+    crud, ctx = crud_env
+    tpl = tmp_path / "tpls" / "avtpl"
+    tpl.mkdir(parents=True)
+    (tpl / "template.yaml").write_text("type: business-assistant\navatar_prompt: a wizard\n")
+    (tpl / "avatar.png").write_bytes(_png_bytes())
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
+    monkeypatch.setattr(crud.avatar_paths, "AVATAR_DIR", tmp_path / "avatars")
+    _make_reencode_fail(monkeypatch)
+
+    await crud.create_agent_internal(
+        AgentConfig(name="empty-av", template="local:avtpl"), _user(), None)
+
+    assert not (tmp_path / "avatars" / "empty-av.webp").exists()
+    ctx["db"].set_default_avatar.assert_called_once()
+    ctx["db"].set_avatar_identity.assert_not_called()
+    ctx["docker_utils"].containers_run.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -1109,6 +1205,7 @@ async def test_2693_corrupt_bundled_avatar_keeps_prompt_seed(crud_env, monkeypat
 
     assert not (tmp_path / "avatars" / "bad-av.webp").exists()
     ctx["db"].set_default_avatar.assert_called_once()
+    ctx["db"].set_avatar_identity.assert_not_called()
     ctx["docker_utils"].containers_run.assert_awaited()
 
 
@@ -1130,19 +1227,21 @@ async def _create_github_with_bundled_avatar(crud, ctx, monkeypatch, tmp_path, n
 
 
 @pytest.mark.asyncio
-async def test_4570_github_bundled_avatar_is_stamped_as_default(crud_env, monkeypatch, tmp_path):
+async def test_4570_github_bundled_avatar_is_stamped_as_kept(crud_env, monkeypatch, tmp_path):
     """#4570: the bundled file was installed but nothing pointed at it, so
     `avatar_url` stayed null and every surface showed initials. The install must
-    be followed by the same default-avatar stamp a `local:` template gets, seeded
-    with the template's own `avatar_prompt`."""
+    be followed by a stamp seeded with the template's own `avatar_prompt` —
+    #4750: a KEPT stamp (is_default_avatar=0), the same one a `local:` shipped
+    image gets, so Generate Default Avatars leaves it alone."""
     crud, ctx = crud_env
     await _create_github_with_bundled_avatar(
         crud, ctx, monkeypatch, tmp_path, "gh-av", {"avatar_prompt": "a small owl"}, _png_bytes())
 
     installed = (tmp_path / "avatars" / "gh-av.webp").read_bytes()
     assert installed[:4] == b"RIFF" and installed[8:12] == b"WEBP"
-    ctx["db"].set_default_avatar.assert_called_once()
-    assert ctx["db"].set_default_avatar.call_args.args[:2] == ("gh-av", "a small owl")
+    ctx["db"].set_avatar_identity.assert_called_once()
+    assert ctx["db"].set_avatar_identity.call_args.args[:2] == ("gh-av", "a small owl")
+    ctx["db"].set_default_avatar.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1155,8 +1254,9 @@ async def test_4570_github_bundled_avatar_without_prompt_still_stamped(crud_env,
         crud, ctx, monkeypatch, tmp_path, "gh-noprompt", {}, _png_bytes())
 
     assert (tmp_path / "avatars" / "gh-noprompt.webp").exists()
-    ctx["db"].set_default_avatar.assert_called_once()
-    name, prompt = ctx["db"].set_default_avatar.call_args.args[:2]
+    ctx["db"].set_avatar_identity.assert_called_once()
+    ctx["db"].set_default_avatar.assert_not_called()
+    name, prompt = ctx["db"].set_avatar_identity.call_args.args[:2]
     assert name == "gh-noprompt"
     assert isinstance(prompt, str) and prompt.strip()
 
@@ -1172,7 +1272,23 @@ async def test_4570_failed_github_avatar_install_is_not_stamped(crud_env, monkey
 
     assert not (tmp_path / "avatars" / "gh-badav.webp").exists()
     ctx["db"].set_default_avatar.assert_not_called()
+    ctx["db"].set_avatar_identity.assert_not_called()
     ctx["docker_utils"].containers_run.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_4750_failed_reencode_leaves_no_empty_github_avatar(crud_env, monkeypatch, tmp_path):
+    """#4750 (2b): the `github:` installer had the same open-before-encode
+    order; a re-encode failure leaves no file and no stamp."""
+    crud, ctx = crud_env
+    _make_reencode_fail(monkeypatch)
+    await _create_github_with_bundled_avatar(
+        crud, ctx, monkeypatch, tmp_path, "gh-empty", {"avatar_prompt": "a small owl"},
+        _png_bytes())
+
+    assert not (tmp_path / "avatars" / "gh-empty.webp").exists()
+    ctx["db"].set_avatar_identity.assert_not_called()
+    ctx["db"].set_default_avatar.assert_not_called()
 
 
 def test_2693_first_run_fleet_ships_bundled_avatars():
