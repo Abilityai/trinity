@@ -2,6 +2,7 @@
 Authentication routes for the Trinity backend.
 """
 import asyncio
+import contextlib
 import logging
 from datetime import timedelta
 from typing import Optional
@@ -241,6 +242,107 @@ def record_login_attempt(client_ip: str, success: bool, account: Optional[str] =
         logger.warning(f"Failed to record login attempt: {e}")
 
 
+# Password verification runs in a thread (#4674), so the handler now awaits
+# between the limit check and the failure record. Without the two guards below
+# every concurrent request for one account passes the check before any failure
+# is counted, and the 5-per-15-min lockout stops bounding guesses.
+#
+# * `_account_verify_lock` — check → verify → record is one critical section per
+#   account, so attempts on an account are counted one at a time, as they were
+#   when bcrypt held the event loop. Other accounts are not delayed.
+# * `_verify_slots` — at most LOGIN_VERIFY_CONCURRENCY bcrypt runs at once per
+#   worker, so a login flood spread over many accounts cannot occupy the shared
+#   default thread pool that every other `asyncio.to_thread` caller uses.
+#
+# Both are per worker process, the same scope the lockout had before #4674.
+LOGIN_VERIFY_CONCURRENCY = 4
+
+_verify_locks: dict = {}   # account -> [asyncio.Lock, holders + waiters]
+_verify_slots_state: Optional[tuple] = None   # (loop, asyncio.Semaphore)
+
+
+@contextlib.asynccontextmanager
+async def _account_verify_lock(account: str):
+    """Serialise check → verify → record for one account.
+
+    Entries are reference-counted and dropped when the last holder leaves, so
+    the table cannot grow with attacker-chosen usernames.
+    """
+    entry = _verify_locks.get(account)
+    if entry is None:
+        entry = _verify_locks[account] = [asyncio.Lock(), 0]
+    entry[1] += 1
+    try:
+        async with entry[0]:
+            yield
+    finally:
+        entry[1] -= 1
+        if entry[1] == 0 and _verify_locks.get(account) is entry:
+            del _verify_locks[account]
+
+
+# The account lock above says nothing about the per-IP bucket: requests from one
+# address for DIFFERENT accounts each hold their own lock, so all of them would
+# pass the IP check before any failure was recorded. A lock per address would
+# fix that by queueing everyone behind a shared NAT, which is what #591 took
+# out. Instead a verify is COUNTED against its address from the moment it is
+# admitted until its outcome is recorded: the check below reads recorded
+# failures plus verifies still in flight. Between the read and the increment
+# there is no await, so two requests cannot both take the last place.
+_ip_verifies_pending: dict = {}   # client ip -> verifies admitted, outcome not yet recorded
+
+
+def _admit_ip_verify(client_ip: str) -> None:
+    """Take a place in this address's budget, or raise 429.
+
+    `check_login_rate_limit` has already refused an address whose RECORDED
+    failures reached the limit. This adds the ones on their way. A verify that
+    succeeds gives its place back without ever counting as a failure.
+    """
+    pending = _ip_verifies_pending.get(client_ip, 0)
+    if pending:
+        r = get_redis_client()
+        recorded = 0
+        if r is not None:
+            try:
+                recorded = int(r.get(_ip_key(client_ip)) or 0)
+            except Exception as e:  # the limiter fails open, as everywhere here
+                logger.warning(f"Rate limit check failed: {e}")
+                recorded = None
+        if recorded is not None and r is not None and recorded + pending >= LOGIN_IP_LIMIT:
+            logger.warning(
+                "[Auth] Per-IP login lockout triggered: ip=%s attempts=%s in_flight=%s",
+                client_ip, recorded, pending,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many login attempts from this network. Try again shortly.",
+            )
+    _ip_verifies_pending[client_ip] = pending + 1
+
+
+def _release_ip_verify(client_ip: str) -> None:
+    left = _ip_verifies_pending.get(client_ip, 0) - 1
+    if left > 0:
+        _ip_verifies_pending[client_ip] = left
+    else:
+        _ip_verifies_pending.pop(client_ip, None)
+
+
+def _verify_slots() -> asyncio.Semaphore:
+    """The bcrypt concurrency cap for the running loop (one loop per worker)."""
+    global _verify_slots_state
+    loop = asyncio.get_running_loop()
+    if _verify_slots_state is None or _verify_slots_state[0] is not loop:
+        _verify_slots_state = (loop, asyncio.Semaphore(LOGIN_VERIFY_CONCURRENCY))
+    return _verify_slots_state[1]
+
+
+async def _verify_password_off_loop(username: str, password: str):
+    async with _verify_slots():
+        return await asyncio.to_thread(authenticate_user, username, password)
+
+
 def check_otp_rate_limit(email: str) -> bool:
     """
     Check if OTP verification attempts for this email are within rate limit.
@@ -394,20 +496,36 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     client_ip = request.client.host if request.client else "unknown"
     account = (form_data.username or "").strip().lower()
 
-    # Check rate limit before processing (#591)
-    check_login_rate_limit(client_ip, account=account)
+    # The limit check, the password verify and the attempt record are one
+    # critical section per account: the verify is awaited, so without the lock
+    # concurrent requests would all pass the check before any failure counted.
+    async with _account_verify_lock(account):
+        # Check rate limit before processing (#591)
+        check_login_rate_limit(client_ip, account=account)
 
-    # Block login if setup is not completed
-    if not is_setup_completed():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="setup_required"
-        )
+        # Block login if setup is not completed
+        if not is_setup_completed():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="setup_required"
+            )
 
-    user = authenticate_user(form_data.username, form_data.password)
+        # The per-IP bucket, counted across accounts (see `_admit_ip_verify`).
+        _admit_ip_verify(client_ip)
+        try:
+            # #4674: bcrypt is ~200 ms of CPU by design. Verified on the event loop it
+            # stalled the whole worker for every login — and for every failed attempt,
+            # which anyone can send (measured: 176–200 ms per login on a live instance).
+            user = await _verify_password_off_loop(form_data.username, form_data.password)
+            # Record the outcome before the lock is released: a failure increments
+            # the counters the next waiter checks, a success clears them.
+            record_login_attempt(client_ip, success=bool(user), account=account)
+        finally:
+            # After the record, with no await between: the failure is in Redis
+            # before this request stops being counted as in flight.
+            _release_ip_verify(client_ip)
+
     if not user:
-        # Record failed attempt
-        record_login_attempt(client_ip, success=False, account=account)
         # SEC-001: audit failed admin login
         await platform_audit_service.log(
             event_type=AuditEventType.AUTHENTICATION,
@@ -423,9 +541,6 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-    # Record successful login (clears attempt counter)
-    record_login_attempt(client_ip, success=True, account=account)
 
     # Update last login timestamp
     db.update_last_login(user["username"])

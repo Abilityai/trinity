@@ -70,6 +70,17 @@ def _invalidate_agent_stats_for(container) -> None:
 # Container Operations
 # =============================================================================
 
+async def run_blocking(fn, *args):
+    """Run a blocking, Docker-touching callable on the Docker executor.
+
+    For a sync function that cannot be made async cheaply — one that mixes a
+    Docker listing with other sync reads. Awaited from a background loop, it
+    keeps that work off the event loop (#4674) without borrowing the default
+    executor the request handlers share."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_docker_executor, lambda: fn(*args))
+
+
 async def container_stop(container, timeout: int = 10) -> None:
     """Stop a container without blocking the event loop.
 
