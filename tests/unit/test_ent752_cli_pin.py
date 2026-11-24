@@ -46,5 +46,6 @@ def test_the_reaudit_list_names_what_to_check():
     facts = _module_constant("CLI_FACTS_TO_REAUDIT")
     assert isinstance(facts, tuple) and len(facts) >= 8
     text = " ".join(facts).lower()
-    for topic in ("exec form", "matcher", "skill", "exit 2", "managed-settings.d", "env", "parent"):
+    for topic in ("exec form", "matcher", "skill", "exit 2", "managed-settings.d", "env", "parent",
+                  "remote-settings.json", "managedsourcesbehavior"):
         assert topic in text, topic

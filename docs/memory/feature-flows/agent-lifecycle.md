@@ -548,6 +548,15 @@ not `X.Y.Z[-rcN]` — files nothing and ends nothing. `FleetImageCheckService` r
 every 10 minutes under the `fleetimage:leader` lease (fail-open); started in
 `main.py::_schedule_watch_loops`. Adoption is still the cold start only.
 
+**Managed-hooks report (trinity-enterprise#1176):** the same leased cycle then runs
+`services/managed_hooks_check_service.run_once()`, whose failure never breaks the image check. It reads
+`/health` of every running, non-ephemeral agent (the system agent included; 3 s cap, 8 at a time, no
+breaker bookkeeping) and keeps **one** alert, `managed_hooks_skipped:fleet` (high), naming the agents whose
+`guardrails_registration` reads `skipped`: Claude Code is not applying the managed hooks, so the agent
+refuses restricted turns ([agent-runtime.md](../architecture/agent-runtime.md)). Docker unreadable leaves
+the alert as it is; an agent with no answer holds it only if the last reading named it (or before this
+process's first reading). An image from before the field reads clean.
+
 Related: `409 env_unreadable` (credential sink, Nevermined delegation) names the older agent image and
 the restart when the agent's read answer carries no `missing` list (`agent_env_read.image_predates_missing`).
 

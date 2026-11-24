@@ -1,0 +1,38 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-23",
+  "mode": "diff",
+  "scope": "all (diff-constrained), daily gate 8/10",
+  "base": "dev@d481847cc",
+  "issue": "trinity-enterprise#1176",
+  "phases_run": [0, 1, 2, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "phases_not_applicable": {"3": "no dependency change", "4": "no workflow change", "5": "no Docker or compose change"},
+  "stack_cve_quicklist": [
+    {"component": "Claude Code in the base image", "verdict": "patched", "note": "pin 2.1.322 unchanged by this diff"},
+    {"component": "Starlette, Vite, Vitest, axios, Redis, runc, Node CLIs", "verdict": "not in diff"}
+  ],
+  "attack_surface": {
+    "endpoints_added": 0,
+    "endpoints_removed": 0,
+    "health_fields_changed": ["guardrails_registration", "skill_gate_hook"],
+    "new_background_reads": ["agent /health per running agent, every 600 s, via agent_auth.agent_httpx_client"],
+    "new_alert_kinds": ["managed_hooks_skipped (reserved prefix managed-hooks-skipped-)"],
+    "new_agent_context_ingress": 0
+  },
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [
+    {"id": "image-not-rebuilt", "detail": "agent-server change exercised by host unit tests only; CI image build or one /verify-local run covers it"},
+    {"id": "no-live-organization", "detail": "not run against a real organization with a server-managed policy key on the pinned 2.1.322; checked on 2.1.322 through a local stub and on a subscription login with no organization settings"}
+  ],
+  "supply_chain_summary": {"scanner": "not run: no dependency change in the diff"},
+  "guards_run": [
+    "test_agent_auth_header_guard", "test_1310_auth_wiring", "test_2996_human_only_routes",
+    "test_186_enumeration_uniformity", "test_ent435_settings_sink_guard", "test_292_cmdline_credential_leak",
+    "test_ent614_source_agent_attribution"
+  ],
+  "guards_result": "284 passed",
+  "filter_stats": {"candidates": 0, "below_gate": 0, "verifier": "not needed: no finding reached the gate"},
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+  "trend": "no prior finding at the changed files"
+}

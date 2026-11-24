@@ -22,6 +22,8 @@ const LINES = {
   writable: 'its in-agent skill check can be changed from inside it. Recreate the agent to restore it.',
   unsupported_runtime: "its runtime can't run an in-agent skill check.",
   predates: 'its image predates the in-agent skill check. Recreate the agent to enforce grants inside it.',
+  // trinity-enterprise#1176: the files are intact, Claude Code is not applying them.
+  skipped: "Claude Code on this agent is using cached organization settings, so it skips Trinity's guardrails.",
   something_new: "its in-agent skill check isn't intact. Recreate the agent to restore it.",
 }
 
