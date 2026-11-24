@@ -1,0 +1,156 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-24",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/978-narrowed-read-marker",
+  "merge_base": "65a2fa586",
+  "issue": "abilityai/trinity-enterprise#978 (items 1 and 6)",
+  "counts_as_full_run": false,
+  "docker_available": false,
+  "docker_note": "Diff run: no image, compose, dependency or workflow file changed, so no Docker pass was needed.",
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    9,
+    10,
+    12,
+    13,
+    14
+  ],
+  "phases_skipped_no_overlap": [
+    3,
+    4,
+    5,
+    6,
+    8,
+    11
+  ],
+  "stack_cve_quicklist": [
+    {
+      "component": "Starlette (BadHost)",
+      "verdict": "not reachable in the diff",
+      "why": "The new middleware reads scope['path'], for a log line only; no added line reads request.url.path."
+    },
+    {
+      "component": "all other rows",
+      "verdict": "not in diff",
+      "why": "No pin, lockfile, image or compose file changed."
+    }
+  ],
+  "attack_surface": {
+    "new_public_endpoints": 0,
+    "new_authenticated_endpoints": 0,
+    "changed_authenticated_endpoints": 2,
+    "changed": [
+      "GET /api/agents/{name}/executions/{id} and /log: the viewer scope is computed before the row lookup",
+      "every response under a narrowed view gains one response header (agent keys only)",
+      "the 403 text of a route refused in a restricted turn has a second variant",
+      "six MCP read tools add a `narrowed` field; two return a marked 404 instead of throwing"
+    ],
+    "new_agent_context_ingress": "The `narrowed` message an MCP tool returns: fixed platform text chosen by a code that must match ^[a-z_]{1,64}$. No third-party text."
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "LOW",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "state": "fixed on branch",
+      "category": "enumeration-via-marker",
+      "owasp_2025": "A01",
+      "asi": "ASI03",
+      "llm": null,
+      "phase": 9,
+      "file": "src/backend/dependencies.py",
+      "title": "The narrowed-read code varied with the turn id a caller sent",
+      "description": "A first version said `turn_person` for any share-tier execution id of the agent, running or not, and `running_turn` for an unknown id, so the response header told a caller holding the agent's key whether an id it chose was a share turn of that agent.",
+      "exploit_scenario": "A turn sends X-Trinity-Execution-Id with candidate ids on any narrowed read and compares the header value across answers.",
+      "impact": "Existence and tier of an execution id on the key's own agent. Not new in practice: the turn-tier read already answers this to the same key.",
+      "recommendation": "Say `turn_person` only of a share turn that is itself RUNNING; any other id reads `running_turn` while a share turn runs and `unverified` otherwise.",
+      "regression_test": "tests/unit/test_ent978_narrowed_read_marker.py::test_the_code_does_not_vary_with_the_turn_id_sent_while_a_shared_turn_runs"
+    },
+    {
+      "id": 2,
+      "severity": "LOW",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "state": "fixed on branch",
+      "category": "header-integrity",
+      "owasp_2025": "A08",
+      "asi": null,
+      "llm": null,
+      "phase": 9,
+      "file": "src/backend/utils/read_narrowing.py",
+      "title": "A value a handler set for the marker header reached the client when no code was noted",
+      "description": "The middleware removed a pre-existing X-Trinity-Read-Narrowed only when it had a code of its own to send.",
+      "exploit_scenario": "A route that forwards an upstream response's headers would pass an upstream-chosen marker to an MCP tool, which shows it to an agent. No such route exists today.",
+      "impact": "A forged 'narrowed' note in a tool answer. Not reachable today.",
+      "recommendation": "Strip the header on every response start, then append when a code was noted.",
+      "regression_test": "tests/unit/test_ent978_narrowed_read_marker.py::test_a_handler_cannot_set_the_header_itself"
+    },
+    {
+      "id": 3,
+      "severity": "LOW",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "state": "fixed on branch",
+      "category": "guard-rule-gap",
+      "owasp_2025": "A01",
+      "asi": "ASI03",
+      "llm": null,
+      "phase": 7,
+      "file": "tests/unit/test_ent926_agent_route_census.py",
+      "title": "The new `self` census rule accepted assert_own_agent alone",
+      "description": "`assert_own_agent` holds an agent's key to its own agent and is a no-op for a person, so a route gated by it alone is open to any signed-in person, yet it would have passed as `self`, a tier the runtime fence leaves open in a restricted turn.",
+      "exploit_scenario": "A future route declared `self` with only assert_own_agent passes CI and is callable by any signed-in person for any agent name.",
+      "impact": "A guard that would bless a mis-gated route. No live row is affected.",
+      "recommendation": "Count assert_own_agent as a self gate only beside an access check; the self-only helpers stand alone.",
+      "regression_test": "tests/unit/test_ent926_agent_route_census.py::test_a_route_that_does_not_show_its_tiers_gate_is_reported[own-self-lets every signed-in person through]"
+    }
+  ],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "Guards that import the assembled app (the runtime route census, the ops-write sweep) could not run on the audit host: a Python package is missing there, on the merge-base too. CI runs them, and CI is the first real import of main.py with the new middleware.",
+    "The MCP transport-level visibility tests (tool-visibility.test.ts) were cancelled on the audit host, identically on the merge-base. The 2,048-character description cap was checked by measuring the six changed descriptions instead (longest 1,086).",
+    "An optional module's reader of the narrowing seam was not read (the private submodule is not mounted). It inherits the header through the shared seam.",
+    "No dependency scanner ran, because no dependency changed."
+  ],
+  "supply_chain_summary": {
+    "scanner": "none (no dependency, lockfile, image or workflow change in the diff)"
+  },
+  "checks": {
+    "secrets": "No known-prefix hit in added lines; no .env tracked.",
+    "enterprise_docs_guard": "No hit on added doc lines or on the main.py seam file.",
+    "hidden_characters": "None in any changed file.",
+    "guards": "1,084 tests green: admin gate, human-only routes, auth wiring, enumeration uniformity, source-agent attribution, agent-auth header, settings sink, cmdline credential leak, the vendored-copy parities, the route census and the new marker file.",
+    "failure_direction": "Stated for each new guard: the marker is a no-op outside a request; the refusal-text picker only chooses words and keeps the original text on any error; an unreadable ledger still narrows to nothing and still refuses.",
+    "logging": "One info line per marked response with the code, method and path (no query string, no credential).",
+    "mutation_proof": "24 single-line breaks each turned a named test red, files restored byte-identical."
+  },
+  "filter_stats": {
+    "candidates": 6,
+    "reported": 3,
+    "dropped": 3,
+    "dropped_reasons": [
+      "resource rule matches the DB writer's name (accepted: the predicate lives in the writer; the tier is fenced at runtime)",
+      "MCP 'tool must show the field' guard is per file (a stated limit)",
+      "log volume (denial of service is excluded)"
+    ]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 3,
+    "open": 0,
+    "fixed_on_branch": 3
+  },
+  "verifier": "An independent fresh-context reviewer read the diff before commit and produced findings 1 to 3; each fix has a mutation that turns its test red.",
+  "trend": "Diff run: no trend."
+}
