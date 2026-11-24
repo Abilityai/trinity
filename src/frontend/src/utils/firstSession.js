@@ -117,9 +117,10 @@ export function inFirstSession(status, fleet = [], examples = []) {
  * three short steps — open a terminal on your own computer, run Claude's own
  * `claude setup-token`, paste the token it prints here — with an Anthropic API
  * key as the alternative in the same field. The instance starts no sign-in and
- * exchanges no code; it tests the token before registering it. An instance
- * Claude card is held under `name`, the credential the instance takes both
- * forms under.
+ * exchanges no code; it tests the token before registering it. The card keeps
+ * the name the assistant asked under (the gateway's script asks for
+ * ANTHROPIC_API_KEY; a card kept from an older conversation may carry either):
+ * the instance takes both names as this one card.
  */
 export const CLAUDE_TOKEN_CARD = Object.freeze({ name: 'CLAUDE_SUBSCRIPTION', command: 'claude setup-token' })
 
@@ -127,11 +128,6 @@ export const CLAUDE_TOKEN_CARD = Object.freeze({ name: 'CLAUDE_SUBSCRIPTION', co
 export function isClaudeCredential(card, tokenCard = CLAUDE_TOKEN_CARD) {
   if (!card || card.agent) return false
   return card.name === 'ANTHROPIC_API_KEY' || Boolean(tokenCard && card.name === tokenCard.name)
-}
-
-/** The name the instance holds a card under: an instance Claude card is the subscription credential. */
-export function instanceCredentialName(card, tokenCard = CLAUDE_TOKEN_CARD) {
-  return tokenCard && isClaudeCredential(card, tokenCard) ? tokenCard.name : card?.name
 }
 
 /**
