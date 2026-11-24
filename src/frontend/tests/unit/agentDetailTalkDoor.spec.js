@@ -47,6 +47,7 @@ const SOURCES = {
   DETAIL: ['../../src/views/AgentDetail.vue', 'sessionsStore.loadFeatureFlags'],
   BUBBLE: ['../../src/components/chat/ChatBubble.vue', "source === 'voice'"],
   CONVERSATION: ['../../src/components/portal/PortalConversation.vue', 'defineExpose('],
+  MERGE: ['../../src/utils/chatSessionMerge.js', 'export function panelMessage('],
 }
 
 const RAW = Object.fromEntries(Object.entries(SOURCES).map(([k, [rel]]) => [k, read(rel)]))
@@ -56,8 +57,9 @@ const COMPOSABLE = stripComments(RAW.COMPOSABLE)
 const HEADER = stripComments(RAW.HEADER)
 const DETAIL = stripComments(RAW.DETAIL)
 const BUBBLE = stripComments(RAW.BUBBLE)
+const MERGE = stripComments(RAW.MERGE)
 const CONVERSATION = stripComments(RAW.CONVERSATION)
-const STRIPPED = { PANEL, INPUT, COMPOSABLE, HEADER, DETAIL, BUBBLE, CONVERSATION }
+const STRIPPED = { PANEL, INPUT, COMPOSABLE, HEADER, DETAIL, BUBBLE, CONVERSATION, MERGE }
 
 describe('the guard can still see the code it guards', () => {
   it.each(Object.keys(SOURCES))('%s survives comment-stripping intact', (key) => {
@@ -94,7 +96,10 @@ describe('ChatPanel no longer runs a voice call', () => {
   it('STILL renders historic voice rows — the badge is their only reader', () => {
     // Removing the ability to create new `source: 'voice'` rows here must not
     // un-render the ones already in these chats.
-    expect(PANEL).toContain("source: msg.source || 'text',")
+    // The mapping moved to `utils/chatSessionMerge.js` (#4537); the panel maps
+    // every loaded row through it.
+    expect(PANEL).toContain('.map(panelMessage)')
+    expect(MERGE).toContain("source: msg.source || 'text',")
     expect(BUBBLE).toContain("source === 'voice'")
   })
 })

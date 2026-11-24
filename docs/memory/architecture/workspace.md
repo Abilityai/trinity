@@ -136,7 +136,13 @@ flight it reads the newest rows (`unread + 8`, capped at the server's 50), adopt
 id onto its own id-less local question (or that question renders twice), appends the unseen
 ids through `historyRow` as an arrival (#2624), and emits `thread-caught-up` — a distinct
 event, because `sessions-changed` also drives the #2579 title-settle cycle — which the shell
-answers with mark-read only if the thread is the one on screen. The ent#747 ask-result poll
+answers with mark-read only if the thread is the one on screen. **One move is not read
+(#4671): the person's own turn.** Its reply poll already returned the thread's newest rows,
+so `settleOwnTail` folds them in the way `reconcileTail` would and marks the thread settled;
+while that mark stands and the row's newest instant is one the transcript already holds
+(`portalThreadTail.tailHeld`) the watcher skips the read, and it reads again the moment the
+row is ahead. Missing rows, a thread switch mid-turn or a gap deeper than the poll's window
+settle nothing, and the watcher fetches as before. The ent#747 ask-result poll
 rides the same `reconcileTail`. `startAsksPoll` also runs the tick body on
 `visibilitychange` → visible. See
 [workspace-open-thread-catch-up.md](../feature-flows/workspace-open-thread-catch-up.md).

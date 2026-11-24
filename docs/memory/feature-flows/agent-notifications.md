@@ -438,11 +438,15 @@ Emitted once per successful dismiss-all (only when `dismissed > 0`), main WebSoc
   "type": "notifications_cleared",
   "data": {
     "count": 12,
-    "agent_name": null,
-    "cleared_by": "user@example.com"
+    "agent_name": null
   }
 }
 ```
+
+A thin trigger: a count, and the agent when the clear was for one. With `agent_name: null`
+the `/ws` scope filter has nothing to key on, so the event reaches every operator client;
+it therefore names nobody (#3392). It is listed in `FLEET_LEVEL_ALLOWLIST`
+(`tests/unit/test_ent467_ws_agent_scope.py`) for that reason.
 
 Frontend handler (`src/frontend/src/utils/websocket.js:151-154`): routes `notifications_cleared` → `notificationsStore.fetchPendingCount()` + `fetchNotifications()` so every connected client's badge and loaded list refresh, not just the operator who clicked.
 
