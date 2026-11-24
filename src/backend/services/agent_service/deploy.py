@@ -504,6 +504,105 @@ def _refuse_escaping_symlinks(root: Path, stage: str) -> None:
     )
 
 
+def remove_escaping_links_from_store(
+    base: Optional[Path] = None,
+) -> List[Tuple[str, str, str]]:
+    """Remove links in the deployed-templates store that leave their own
+    template directory (trinity-enterprise#1363). Returns what was removed as
+    `(template, relative path, link target)`.
+
+    `_refuse_escaping_symlinks` keeps new archives out. It does nothing for a
+    template stored before that check existed, and the store is read long after
+    a deploy: creating an agent from `local:<name>` reads files out of it. So
+    the same rule is applied to what is already on disk, once per boot.
+
+    A hit is REMOVED, not reported and left. The rule a deploy now enforces is
+    that no link in a template resolves outside it, so such a link has no
+    legitimate reader, and leaving it in place leaves whatever it points at one
+    read away. Only the link is unlinked: `os.unlink` on a symlink never
+    touches its target, and the rest of the template is left as it was. The
+    log line carries the template, the path and the target, which is the
+    record an operator needs to judge whether the link was ever used.
+
+    Two shapes are covered:
+      * a link anywhere inside `<store>/<name>/` whose `realpath` is outside
+        `<store>/<name>/`. Another template in the same store counts as
+        outside: that is the cross-tenant case.
+      * a top-level entry `<store>/<name>` that is itself a link. A deploy
+        never creates one, and `contained_template_dir` would accept it when it
+        points at a sibling template.
+
+    Never raises: this runs at boot, and a store that cannot be walked must
+    not stop the backend from starting.
+    """
+    store = Path(base) if base is not None else Path(DEPLOYED_TEMPLATES_DIR_IN_BACKEND)
+    removed: List[Tuple[str, str, str]] = []
+    try:
+        children = sorted(os.scandir(store), key=lambda e: e.name)
+    except OSError:
+        return removed  # no store yet (nothing was ever deployed), or unreadable
+
+    def _unlink(template: str, rel: str, full: Path, target: str) -> None:
+        try:
+            os.unlink(full)
+        except FileNotFoundError:
+            return  # another worker's scan got there first
+        except OSError as e:
+            logger.error(
+                "deployed-templates scan: could not remove link %s/%s -> %s: %s",
+                template, rel, target, e)
+            return
+        removed.append((template, rel, target))
+        logger.warning(
+            "deployed-templates scan: removed link %s/%s -> %s, which resolved "
+            "outside its template directory", template, rel, target)
+
+    for child in children:
+        path = Path(child.path)
+        try:
+            if child.is_symlink():
+                try:
+                    target = os.readlink(path)
+                except OSError:
+                    target = "?"
+                _unlink(child.name, ".", path, target)
+                continue
+            if not child.is_dir(follow_symlinks=False):
+                continue
+            for rel, target in _escaping_symlinks(path):
+                _unlink(child.name, rel, path / rel, target)
+        except OSError as e:
+            logger.error("deployed-templates scan: could not scan %s: %s", child.name, e)
+    return removed
+
+
+_store_link_scan_task = None
+
+
+def schedule_store_link_scan() -> None:
+    """Run `remove_escaping_links_from_store` once, off the event loop.
+
+    Every worker schedules it: the scan is idempotent, and a link two workers
+    both see is removed by one and found already gone by the other. The task
+    reference is held so the loop cannot collect it mid-run.
+    """
+    global _store_link_scan_task
+    import asyncio
+
+    async def _run() -> None:
+        try:
+            removed = await asyncio.to_thread(remove_escaping_links_from_store)
+        except Exception as e:  # the scan already fences itself; this is the thread hop
+            logger.error("deployed-templates scan failed: %s", e)
+            return
+        if removed:
+            logger.warning(
+                "deployed-templates scan: removed %d link(s) that resolved outside "
+                "their template directory; see the lines above", len(removed))
+
+    _store_link_scan_task = asyncio.create_task(_run())
+
+
 def _count_deployed(root: Path) -> Tuple[int, int]:
     """(regular files excluding the manifest member, symlinks) under root."""
     files = 0
