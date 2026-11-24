@@ -43,6 +43,7 @@ from ._runtime_config import (
     merged_disallowed_tools,
 )
 from .execution_env import build_execution_env, auth_override_env_layers, auto_memory_env_layer
+from . import managed_hooks
 from .error_classifier import (
     _classify_empty_result,
     _classify_signal_exit,
@@ -839,9 +840,11 @@ def _setup_headless_command(
         cmd.extend(["--allowedTools", tools_str])
         logger.info(f"[Headless Task] Restricting tools to: {tools_str}")
 
-    # GUARD-003 guardrails deny-list, unioned with the platform denials (#2454).
+    # GUARD-003 guardrails deny-list, unioned with the platform denials (#2454) and,
+    # on a gated agent whose skill-gate hook is skipped, the skill tools
+    # (trinity-enterprise#1176).
     guardrails = _load_guardrails()
-    disallowed_tools = merged_disallowed_tools(guardrails)
+    disallowed_tools = merged_disallowed_tools(guardrails, extra=managed_hooks.gated_fallback_denials())
     if disallowed_tools:
         cmd.extend(["--disallowedTools", ",".join(disallowed_tools)])
         logger.info(f"[Headless Task] Disallowed tools: {disallowed_tools}")

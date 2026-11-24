@@ -272,7 +272,10 @@ def annotate_self_approved_turns(agent_name: str, messages: List[Dict[str, Any]]
 # 200 /health without the field, i.e. an image built before the hook, the
 # common case the owner's warning exists for — and `unknown` — no usable
 # answer at all, which is NOT "not ok" and warns nobody.
-HOOK_STATES = frozenset({"ok", "missing", "not_root_owned", "writable", "unsupported_runtime"})
+# `skipped` (trinity-enterprise#1176): the files are intact but Claude Code is
+# not applying them (an organization's server-managed settings outrank them).
+HOOK_STATES = frozenset({"ok", "missing", "not_root_owned", "writable", "unsupported_runtime",
+                         "skipped"})
 HOOK_PREDATES = "predates"
 HOOK_UNKNOWN = "unknown"
 HOOK_PROBE_TIMEOUT_SECONDS = 3.0

@@ -625,6 +625,40 @@ class TestTheTaskPathWalksThePool:
         assert titles == ["No subscription could serve a turn"]
         assert db._state["current"] == "sub-a"
 
+    def test_a_turn_the_agent_refused_is_one_failure_and_walks_nothing(self, wired):
+        """trinity-enterprise#1176: a Claude agent whose guardrails are not
+        running refuses a shared person's turn with a typed 403. No credential
+        changes that; walking the pool would record an auth refusal against
+        every subscription and re-send the refused turn on each."""
+        refused = {"detail": {"message": "This agent cannot limit what this turn may do right now, "
+                                         "because its guardrails are not running.",
+                              "error_code": "turn_refused"}}
+        result, db, ex_db, sent, Status = _run_task(
+            wired, responses=[_resp(403, refused)], viable=[_sub("sub-b"), _sub("sub-c")])
+        assert result.status == Status.FAILED
+        assert result.error_code.value == "turn_refused"
+        assert len(sent) == 1 and sent[0].get("auth_override") is None
+        assert wired.performed == [] and db._state["current"] == "sub-a"
+
+    def test_a_refusal_whose_words_name_an_auth_term_switches_nothing(self, wired):
+        """trinity-enterprise#1176: a schedule run's refusal carries the schedule's
+        name, which a share holder chose ("Refresh OAuth token"). The except
+        handler's legacy SUB-003 check reads the error TEXT for auth words, so a
+        typed refusal must be exempt there too, not only in the walk."""
+        import services.subscription_auto_switch as sas
+        legacy = AsyncMock(return_value=None)
+        wired.monkeypatch.setattr(sas, "handle_subscription_failure", legacy)
+        refused = {"detail": {"message": "This run is the scheduled task 'Refresh OAuth token', not a "
+                                         "chat. It runs with the access of the person who created it, "
+                                         "and this agent's guardrails are not running right now, so it "
+                                         "did not run.",
+                              "error_code": "turn_refused"}}
+        result, db, ex_db, sent, Status = _run_task(
+            wired, responses=[_resp(403, refused)], viable=[_sub("sub-b")])
+        assert result.status == Status.FAILED and result.error_code.value == "turn_refused"
+        legacy.assert_not_awaited()
+        assert wired.performed == [] and len(sent) == 1
+
     def test_the_key_rung_serves_without_moving_the_assignment(self, wired):
         """AC Part2 (b): subscription exhausted + healthy key ⇒ served; the
         assignment is preserved; the row's spend is not a subscription's."""
@@ -731,6 +765,16 @@ class TestTheChatPathReissues:
             _await(ces._apply_sub003_autoswitch("scribe", "usage limit", 429, walk=walk))
         assert exc.value.detail["retry_after"] == 15
         assert "Please retry" in exc.value.detail["message"]
+
+    def test_a_refused_chat_turn_is_not_walked(self, wired):
+        """trinity-enterprise#1176: the sequential chat path (an MCP chat) does
+        not walk the pool over a typed turn refusal either."""
+        refused = {"detail": {"message": "This agent cannot limit what this turn may do right now, "
+                                         "because its guardrails are not running.",
+                              "error_code": "turn_refused"}}
+        ces, response, walk, kind, sent = self._run_chat(wired, [_resp(403, refused)])
+        assert response.status_code == 403 and kind is None
+        assert len(sent) == 1 and wired.performed == []
 
     def test_without_a_walk_the_pre_3470_behaviour_is_untouched(self, wired):
         """test_2889/test_3012 stub the module with exactly two names; the

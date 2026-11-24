@@ -1,15 +1,30 @@
 {
-  "last_run": "2026-11-23",
-  "commit_sha": "a40b0670a",
+  "last_run": "2026-11-24",
+  "commit_sha": "c62030cf9",
   "hotspot_top3": [
-    {"file": "src/backend/client_portal/service.py", "churn": 86, "complexity": 287, "score": 24682},
-    {"file": "src/backend/services/system_service.py", "churn": 28, "complexity": 693, "score": 19404},
-    {"file": "src/backend/services/task_execution_service.py", "churn": 58, "complexity": 271, "score": 15718}
+    {
+      "file": "src/backend/client_portal/service.py",
+      "complexity": 287,
+      "churn": 83,
+      "score": 23821
+    },
+    {
+      "file": "src/backend/services/system_service.py",
+      "complexity": 693,
+      "churn": 28,
+      "score": 19404
+    },
+    {
+      "file": "src/backend/services/task_execution_service.py",
+      "complexity": 272,
+      "churn": 59,
+      "score": 16048
+    }
   ],
   "hotspot_scores": {
-    "src/backend/client_portal/service.py": 24682,
+    "src/backend/client_portal/service.py": 23821,
     "src/backend/services/system_service.py": 19404,
-    "src/backend/services/task_execution_service.py": 15718,
+    "src/backend/services/task_execution_service.py": 16048,
     "src/backend/services/chat_execution_service.py": 13916,
     "src/backend/services/ask_service.py": 10804,
     "src/backend/services/agent_service/crud.py": 10373,
@@ -19,17 +34,27 @@
     "src/backend/dependencies.py": 5353,
     "src/backend/db/operator_queue.py": 5134,
     "src/backend/services/agent_service/lifecycle.py": 4325,
-    "src/backend/routers/agents.py": 3740,
-    "src/backend/services/platform_prompt_service.py": 3510,
+    "src/backend/routers/agents.py": 3850,
+    "src/backend/services/platform_prompt_service.py": 3432,
     "src/backend/main.py": 3074,
     "src/backend/routers/chat.py": 2046,
     "src/backend/database.py": 1664,
     "src/backend/db/schedules/executions.py": 1628,
-    "src/backend/db/migrations.py": 1144,
-    "src/backend/routers/operator_queue.py": 810
+    "src/backend/db/migrations.py": 1131,
+    "src/backend/routers/operator_queue.py": 810,
+    "src/backend/db_models.py": 726,
+    "src/backend/client_portal/router.py": 612,
+    "src/backend/config.py": 276,
+    "src/backend/models.py": 138,
+    "src/backend/db/tables.py": 73,
+    "src/backend/db/schema.py": 72,
+    "src/backend/client_portal/models.py": 44,
+    "src/backend/services/operator_queue_service.py": 31,
+    "src/backend/routers/agent_files.py": 29,
+    "src/backend/services/settings_service.py": 23
   },
   "size_violations_count": 301,
   "stale_todo_count": 10,
-  "high_coupling_count": 23,
+  "high_coupling_count": 20,
   "circular_import_count": 0
 }
