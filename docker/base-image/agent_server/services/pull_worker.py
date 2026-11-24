@@ -852,18 +852,24 @@ def schedule_pending_pull_result_resend(app) -> None:
 
     @app.on_event("startup")
     async def _resend_pull_on_startup() -> None:
-        try:
-            await resend_pending_pull_results()
-        except Exception:  # noqa: BLE001 — never block startup
-            logger.debug("[#1081] startup pending pull-result resend failed", exc_info=True)
-
         # #4257: and again every `_RESEND_TICK_SECONDS`, because the bounded
         # in-loop delivery now gives up on purpose. Boot-only, a terminal the
         # worker stopped retrying would wait for the next restart (or for the
         # backend lease reaper to re-RUN the turn, paying for spent work
         # twice). One task per process; it swallows everything and is
         # cancelled with the app.
+        #
+        # #4643: the boot sweep runs inside this task, ahead of the first tick,
+        # so its 0-60 s jitter delays only the resend — uvicorn serves nothing
+        # (`/health` included) until this startup handler returns.
         async def _resend_pull_periodically() -> None:
+            try:
+                await resend_pending_pull_results()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — never break the tick
+                logger.debug("[#1081] startup pending pull-result resend failed",
+                             exc_info=True)
             while True:
                 await asyncio.sleep(_RESEND_TICK_SECONDS)
                 try:

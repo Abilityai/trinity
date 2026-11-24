@@ -508,7 +508,17 @@ def schedule_pending_result_resend(app) -> None:
 
     @app.on_event("startup")
     async def _resend_on_startup() -> None:
-        try:
-            await resend_pending_results()
-        except Exception:  # noqa: BLE001 — never block startup
-            logger.debug("[#1083] startup pending-result resend failed", exc_info=True)
+        # #4643: a background task, not an await — the sweep sleeps a 0-60 s
+        # jitter first, and uvicorn serves nothing (`/health` included) until
+        # every startup handler has returned.
+        async def _sweep() -> None:
+            try:
+                await resend_pending_results()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — never break the agent server
+                logger.debug("[#1083] startup pending-result resend failed", exc_info=True)
+
+        task = asyncio.create_task(_sweep())
+        _inflight.add(task)
+        task.add_done_callback(_inflight.discard)

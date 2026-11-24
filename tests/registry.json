@@ -1,6 +1,16 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4643_boot_sweeps_do_not_block_startup.py",
+      "feature": "#4643",
+      "added": "2026-11-24",
+      "categories": [
+        "agent-server",
+        "reliability"
+      ],
+      "description": "#4643: the boot result sweeps (result_callback and pull_worker) run as background tasks, so their 0-60 s jitter delays only the resend and not agent-server startup or /health; the sweep still runs, the pull periodic tick still follows it, and shutdown still cancels it."
+    },
+    {
       "file": "unit/test_4674_loop_health.py",
       "feature": "#4674",
       "added": "2026-11-20",
