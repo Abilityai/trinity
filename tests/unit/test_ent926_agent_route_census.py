@@ -13,6 +13,13 @@ The table is read against the code, not trusted:
     the helper named in ``via``; a row declared ``accessor`` must NOT. A gate is
     read from the code's identifiers (names and attributes on the AST), so a
     gate name in a comment, docstring or message string does not count;
+  * the other four tiers are held to the code too (trinity-enterprise#978): a
+    ``self`` row shows a self gate and no owner gate, an ``internal`` row sits
+    on a router that requires the internal secret, a ``resource`` row shows its
+    resource predicate, and a ``public`` row shows no user or agent gate and is
+    on the reviewed list ``PUBLIC_ROUTES``. The runtime fence leaves ``self``,
+    ``public`` and ``internal`` rows open to an agent's key in a restricted
+    turn, so a row that claims one of them without enforcing it is a hole;
   * the accessor rows tagged ``legacy`` are the debt list - a shrink-only
     ratchet. A new accessor row needs a real reason, and the legacy count may
     only fall (lower ``LEGACY_ACCESSOR_BASELINE`` when you tighten a route).
@@ -30,6 +37,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -54,6 +62,34 @@ ACCESSOR_GATE = re.compile(
     r"get_authorized_agent\w*|can_user_access_agent|get_accessible_agents|"
     r"accessible_agent_names|_assert_agent_accessible)\b")
 
+# The gate each of the other tiers shows (trinity-enterprise#978).
+# These refuse everyone but the agent itself...
+SELF_ONLY_GATE = re.compile(r"\b(get_self_acting_agent|get_self_agent|authorize_heartbeat)\b")
+# ...while this one holds an agent's key to its own agent and is a no-op for a
+# person, so a route that self-gates with it must check the person's access too.
+OWN_AGENT_GATE = re.compile(r"\b(assert_own_agent)\b")
+INTERNAL_GATE = re.compile(r"\b(verify_internal_secret)\b")
+RESOURCE_GATE = re.compile(
+    r"\b(_assert_can_manage_webhook|_can_manage_webhook|update_schedule|delete_schedule|"
+    r"set_allow_proactive)\b")
+# Anything that resolves a signed-in principal: a public route shows none.
+USER_AUTH_GATE = re.compile(
+    r"\b(get_current_user\w*|CurrentUser|get_optional_user|get_user_or_anonymous|"
+    r"require_\w+|decode_token|get_portal_principal\w*)\b")
+# Every route declared `public`, reviewed one by one. An agent's key in a
+# restricted turn may call these, and "shows no gate" cannot tell an open route
+# from one gated by a helper this file has never heard of, so a new public
+# route is added HERE as well as to the table.
+PUBLIC_ROUTES = frozenset({
+    "a2a.py::a2a_well_known_card",
+    "avatar.py::get_avatar",
+    "avatar.py::get_avatar_emotion",
+    "avatar.py::get_avatar_emotions",
+    "avatar.py::get_avatar_reference",
+    "paid.py::get_paid_agent_info",
+    "paid.py::paid_chat",
+})
+
 _HOW_TO = (
     "Declare it in src/backend/services/agent_route_tiers.json: tier 'owner' (default - use an "
     "OwnedAgent dependency or assert_agent_owner), or another tier with a reason a "
@@ -73,6 +109,23 @@ def _prefixes(tree: ast.AST) -> dict[str, str]:
             for t in n.targets:
                 if isinstance(t, ast.Name):
                     out[t.id] = pre
+    return out
+
+
+def _router_gates(tree: ast.AST) -> dict[str, frozenset[str]]:
+    """router variable -> the identifiers in its `APIRouter(dependencies=...)`:
+    a gate declared once for every route on the router (`routers/internal.py`)."""
+    out: dict[str, frozenset[str]] = {}
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+                and getattr(n.value.func, "id", "") == "APIRouter"):
+            names: frozenset[str] = frozenset()
+            for kw in n.value.keywords:
+                if kw.arg == "dependencies":
+                    names = identifiers(kw.value)
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    out[t.id] = names
     return out
 
 
@@ -102,6 +155,7 @@ def scan_source(src: str, fname: str) -> dict[str, dict]:
     """key -> {method, path, segment} for every agent-naming route in one file."""
     tree = ast.parse(src)
     pre = _prefixes(tree)
+    gates = _router_gates(tree)
     found: dict[str, dict] = {}
     for n in ast.walk(tree):
         if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -110,11 +164,13 @@ def scan_source(src: str, fname: str) -> dict[str, dict]:
             if not (isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
                     and d.func.attr in HTTP and d.args and isinstance(d.args[0], ast.Constant)):
                 continue
-            full = pre.get(getattr(d.func.value, "id", ""), "") + d.args[0].value
+            router = getattr(d.func.value, "id", "")
+            full = pre.get(router, "") + d.args[0].value
             if not _names_an_agent(full):
                 continue
             found[f"{fname}::{n.name}"] = {"method": d.func.attr.upper(), "path": full,
-                                           "names": identifiers(n)}
+                                           "names": identifiers(n),
+                                           "router_names": gates.get(router, frozenset())}
     return found
 
 
@@ -190,20 +246,87 @@ def test_the_row_describes_the_route(key):
     assert (TABLE[key]["method"], TABLE[key]["path"]) == (LIVE[key]["method"], LIVE[key]["path"])
 
 
-@pytest.mark.parametrize("key", sorted(k for k in set(TABLE) & set(LIVE)
-                                        if TABLE[k]["tier"] in ("owner", "accessor")))
+def _owner_rule(key, row, names, live):
+    if not shows(OWNER_GATE, names):
+        return "is declared owner but shows no owner/admin gate (add one, or re-declare)"
+
+
+def _accessor_rule(key, row, names, live):
+    if not shows(ACCESSOR_GATE, names):
+        return "is declared accessor but shows no accessor gate"
+    # `mentions_owner` marks a read that only COMPUTES an owner flag
+    # (e.g. `can_share`) for the response; it does not gate on it.
+    if shows(OWNER_GATE, names) and not row.get("mentions_owner"):
+        return ("is declared accessor but now shows an owner/admin gate - re-declare "
+                "it owner and lower LEGACY_ACCESSOR_BASELINE")
+
+
+def _self_rule(key, row, names, live):
+    # Read from the handler alone: a route that also has a person path behind
+    # an owner gate is an owner route, and stays fenced in a restricted turn.
+    if row.get("via"):
+        return "is declared self with a `via`: a self gate is read from the handler itself"
+    if shows(OWNER_GATE, live["names"]):
+        return "is declared self but shows an owner/admin gate - re-declare it owner"
+    if not shows(SELF_ONLY_GATE, live["names"]):
+        if not shows(OWN_AGENT_GATE, live["names"]):
+            return ("is declared self but shows no self gate (assert_own_agent, "
+                    "get_self_acting_agent, authorize_heartbeat)")
+        if not shows(ACCESSOR_GATE, live["names"]):
+            return ("is declared self but gates with assert_own_agent alone, which lets every "
+                    "signed-in person through: check the person's access too")
+
+
+def _internal_rule(key, row, names, live):
+    if not shows(INTERNAL_GATE, live["router_names"]):
+        return ("is declared internal but its router does not require the internal secret "
+                "(`APIRouter(dependencies=[Depends(verify_internal_secret)])`)")
+
+
+def _public_rule(key, row, names, live):
+    if key not in PUBLIC_ROUTES:
+        return ("is declared public but is not on the reviewed list PUBLIC_ROUTES in "
+                "tests/unit/test_ent926_agent_route_census.py")
+    seen = names | live["router_names"]
+    for label, gate in (("owner/admin", OWNER_GATE), ("accessor", ACCESSOR_GATE),
+                        ("signed-in user", USER_AUTH_GATE), ("internal-secret", INTERNAL_GATE)):
+        if shows(gate, seen):
+            return f"is declared public but shows a {label} gate - re-declare it"
+
+
+def _resource_rule(key, row, names, live):
+    if not shows(RESOURCE_GATE, names):
+        return ("is declared resource but shows none of the resource predicates "
+                "(webhook manager, the schedule's creator, the share row's owner)")
+
+
+TIER_RULES = {"owner": _owner_rule, "accessor": _accessor_rule, "self": _self_rule,
+              "internal": _internal_rule, "public": _public_rule, "resource": _resource_rule}
+
+
+def tier_gate_problem(key: str, row: dict, live: dict) -> str | None:
+    """What is wrong with `row`'s declared tier given the route's code, or None.
+    The one function the live table and the synthetic cases below both go through."""
+    rule = TIER_RULES.get(row.get("tier"))
+    if rule is None:
+        return f"{key} declares tier {row.get('tier')!r}, which has no gate rule"
+    problem = rule(key, row, _gate_names(live, row), live)
+    return f"{key} {problem}" if problem else None
+
+
+@pytest.mark.parametrize("key", sorted(set(TABLE) & set(LIVE)))
 def test_a_declared_tier_matches_the_gate_in_the_code(key):
-    row, names = TABLE[key], _gate_names(LIVE[key], TABLE[key])
-    owner, accessor = shows(OWNER_GATE, names), shows(ACCESSOR_GATE, names)
-    if row["tier"] == "owner":
-        assert owner, f"{key} is declared owner but shows no owner/admin gate (add one, or re-declare)"
-    else:
-        assert accessor, f"{key} is declared accessor but shows no accessor gate"
-        # `mentions_owner` marks a read that only COMPUTES an owner flag
-        # (e.g. `can_share`) for the response; it does not gate on it.
-        assert row.get("mentions_owner") or not owner, (
-            f"{key} is declared accessor but now shows an owner/admin gate - re-declare "
-            "it owner and lower LEGACY_ACCESSOR_BASELINE")
+    assert tier_gate_problem(key, TABLE[key], LIVE[key]) is None
+
+
+def test_every_tier_has_a_gate_rule():
+    """A seventh tier cannot arrive unchecked."""
+    assert set(TIER_RULES) == TIERS
+    assert "no gate rule" in tier_gate_problem("x.py::y", {"tier": "brand_new"}, {"names": frozenset()})
+
+
+def test_the_public_list_is_exactly_the_public_rows():
+    assert PUBLIC_ROUTES == {k for k, r in TABLE.items() if r["tier"] == "public"}
 
 
 def test_legacy_accessor_debt_only_shrinks():
@@ -382,3 +505,96 @@ def test_the_runtime_reads_the_same_agent_naming_test_as_the_census():
 def test_an_undeclared_synthetic_route_would_be_reported():
     undeclared = set(scan_source(_SYNTH, "synth.py")) - set(TABLE)
     assert undeclared == {"synth.py::thing", "synth.py::danger"}
+
+
+# ---- the gate rules of the other four tiers (trinity-enterprise#978) ----------------------
+
+_SYNTH_TIERS = '''
+from fastapi import APIRouter, Depends
+router = APIRouter(prefix="/api/internal", dependencies=[Depends(verify_internal_secret)])
+pull_router = APIRouter(prefix="/api/internal")
+open_router = APIRouter(prefix="/api/agents")
+
+@router.post("/agents/{name}/sealed")
+async def sealed(name: str):
+    return 1
+
+@pull_router.post("/agents/{name}/claim")
+async def claim(name: str):
+    return 2
+
+@open_router.post("/{agent_name}/own")
+async def own(agent_name: str, current_user=Depends(get_current_user)):
+    assert_own_agent(current_user, agent_name)
+
+@open_router.post("/{agent_name}/own-and-access")
+async def own_and_access(agent_name: str, current_user=Depends(get_current_user)):
+    assert_own_agent(current_user, agent_name)
+    assert_agent_access(current_user, agent_name)
+
+@open_router.get("/{agent_name}/mine")
+async def mine(agent: str = Depends(get_self_acting_agent)):
+    return 5
+
+@open_router.post("/{agent_name}/own-or-owner")
+async def own_or_owner(agent_name: str, current_user=Depends(get_current_user)):
+    assert_own_agent(current_user, agent_name)
+    assert_agent_owner(current_user, agent_name)
+
+@open_router.get("/{agent_name}/card")
+async def card(agent_name: str):
+    return 3
+
+@open_router.get("/{agent_name}/secret-card")
+async def secret_card(agent_name: str, current_user=Depends(get_current_user)):
+    return 4
+
+@open_router.put("/{agent_name}/hook")
+async def hook(agent_name: str, current_user=Depends(get_current_user)):
+    _assert_can_manage_webhook(current_user, agent_name)
+'''
+
+
+def _synth_problem(handler, tier, **row):
+    live = scan_source(_SYNTH_TIERS, "synth.py")[f"synth.py::{handler}"]
+    return tier_gate_problem(f"synth.py::{handler}", {"tier": tier, "reason": "x" * 20, **row}, live)
+
+
+@pytest.mark.parametrize("handler,tier", [
+    ("sealed", "internal"), ("own_and_access", "self"), ("mine", "self"), ("hook", "resource"),
+])
+def test_a_route_that_shows_its_tiers_gate_passes(handler, tier):
+    assert _synth_problem(handler, tier) is None
+
+
+@pytest.mark.parametrize("handler,tier,says", [
+    ("claim", "internal", "does not require the internal secret"),   # on the router with no blanket secret
+    ("card", "internal", "does not require the internal secret"),
+    ("card", "self", "shows no self gate"),
+    ("secret_card", "self", "shows no self gate"),                   # signed in is not a self gate
+    ("own", "self", "lets every signed-in person through"),          # a no-op for a person, and no access check
+    ("own_or_owner", "self", "shows an owner/admin gate"),           # a person path makes it owner tier
+    ("card", "resource", "none of the resource predicates"),
+    ("own", "resource", "none of the resource predicates"),
+    ("card", "public", "not on the reviewed list"),                  # open, but nobody reviewed it
+])
+def test_a_route_that_does_not_show_its_tiers_gate_is_reported(handler, tier, says):
+    assert says in (_synth_problem(handler, tier) or "")
+
+
+def test_a_self_row_cannot_borrow_its_gate_through_via():
+    assert "a self gate is read from the handler itself" in _synth_problem("card", "self", via="assert_own_agent")
+
+
+@pytest.mark.parametrize("handler,says", [
+    ("card", None),
+    ("secret_card", "signed-in user gate"),
+    ("own_or_owner", "owner/admin gate"),
+    ("sealed", "internal-secret gate"),
+])
+def test_a_reviewed_public_route_must_still_show_no_gate(monkeypatch, handler, says):
+    """On the list AND gate-free: the list alone would keep blessing a route
+    that later grew a gate and should have been re-declared."""
+    monkeypatch.setattr(sys.modules[__name__], "PUBLIC_ROUTES", PUBLIC_ROUTES | {f"synth.py::{handler}"})
+    problem = _synth_problem(handler, "public")
+    assert problem is None if says is None else says in problem

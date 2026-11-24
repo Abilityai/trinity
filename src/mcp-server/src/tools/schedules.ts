@@ -8,6 +8,7 @@ import { z } from "zod";
 import { ApiError, TrinityClient, depthRefusalFromError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import { accessDenied } from "../access.js";
+import { NARROWED_DESCRIPTION, narrowedField } from "../read-narrowing.js";
 
 /**
  * #4281: the `detail` the backend's trigger route sends on its running-lock 409
@@ -770,6 +771,7 @@ export function createScheduleTools(
       description:
         "Get execution history for a specific schedule or all schedules on an agent. " +
         "Returns status, timing, cost, and context usage for each execution. " +
+        NARROWED_DESCRIPTION + " " +
         "Access control: agents can only view executions on self or permitted agents.",
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),
@@ -814,6 +816,7 @@ export function createScheduleTools(
           schedule_id: schedule_id || null,
           execution_count: executions.length,
           executions,
+          ...narrowedField(),
         }, null, 2);
       },
     },
