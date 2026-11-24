@@ -709,9 +709,11 @@ def test_the_trigger_literal_is_discovered_by_the_ws_guard():
 
     _, start = inspect.getsourcelines(svc.readdress_role)
     end = start + len(inspect.getsource(svc.readdress_role).splitlines())
-    hits = [(rel, event, skeleton, line) for rel, event, skeleton, line in _broadcast_payloads()
+    hits = [(rel, event, keying, keys, line) for rel, event, keying, keys, line in _broadcast_payloads()
             if rel == "services/ask_service.py" and start <= line < end]
     assert hits, "no /ws payload literal found inside readdress_role"
-    (rel, event, skeleton, line), = hits
+    (rel, event, keying, keys, line), = hits
     assert event == "operator_queue_new"
-    assert skeleton == {"type": "x", "data": {"id": "x", "agent_name": "x"}}
+    # Proven agent-keyed: `agent_name` is a `str` parameter here (ent#1341).
+    assert keying == "required"
+    assert keys == ["type", "data", "data.id", "data.agent_name"]

@@ -26,6 +26,11 @@
       data-testid="assistant-credential-replaces"
     >{{ entry.card.name }} is already set on {{ where }}. Saving replaces it; the current value is never shown.</p>
 
+    <!-- This instance's Claude credential: where to get it (ent#1355; the sign-in seam, ent#1354) -->
+    <p v-if="isOpen && checked && claude" class="text-[12.5px] text-gray-600 dark:text-gray-300" data-testid="assistant-credential-help">
+      {{ claude.lead }} <a :href="claude.href" target="_blank" rel="noopener" class="underline text-action-primary-600 dark:text-action-primary-400">{{ claude.label }}</a>
+    </p>
+
     <!-- The field opens only once the instance has said it may take this name. -->
     <template v-if="isOpen && checked">
       <label :for="inputId" class="sr-only">{{ entry.card.name }}</label>
@@ -81,6 +86,11 @@
       class="text-[12.5px] font-medium text-gray-900 dark:text-gray-100"
       data-testid="assistant-credential-outcome"
     >{{ outcome }}</p>
+    <!-- After the instance's Claude key is saved: the agents it connected, and the instance's own check (ent#1355) -->
+    <p v-if="claude && entry.state === 'done'" class="text-[12.5px] text-gray-600 dark:text-gray-300" data-testid="assistant-credential-connected">{{ connectedText }}</p>
+    <p v-if="claude && entry.state === 'done' && entry.working === false" class="text-[12.5px] font-medium text-status-danger-700 dark:text-status-danger-400" data-testid="assistant-credential-check">
+      Saved, but Anthropic did not accept it{{ entry.problem ? `: ${entry.problem}` : '.' }}
+    </p>
   </form>
 </template>
 
@@ -91,6 +101,8 @@ import BaseInput from '../base/BaseInput.vue'
 import InlineError from '../InlineError.vue'
 import { useAssistantStore } from '../../stores/assistant'
 import { credentialWhere } from '../../utils/assistantCards'
+import { claudeHelp, isClaudeCredential } from '../../utils/firstSession'
+import { claudeSavedText } from '../onboarding/steps/credentialSteps'
 
 const props = defineProps({
   // The message holding the card, and the card's entry ({ id, card, state, reason }).
@@ -109,6 +121,8 @@ const current = ref(null)     // whether it is set already: true / false / null 
 const checked = ref(false)    // the instance has answered whether it takes this name
 
 const where = computed(() => credentialWhere(props.entry.card))
+const claude = computed(() => (isClaudeCredential(props.entry.card) ? claudeHelp() : null))
+const connectedText = computed(() => claudeSavedText(props.entry.connected))
 const running = computed(() => props.entry.state === 'running')
 const isOpen = computed(() => ['open', 'running'].includes(props.entry.state))
 const outcome = computed(() => {

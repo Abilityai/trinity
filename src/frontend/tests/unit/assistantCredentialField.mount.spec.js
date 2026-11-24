@@ -54,7 +54,7 @@ vi.mock('@/api', () => {
   }
   return { default: client }
 })
-vi.mock('vue-router', () => ({ useRoute: () => ({ path: '/', params: {}, query: {} }) }))
+vi.mock('vue-router', () => ({ useRoute: () => ({ path: '/', params: {}, query: {} }), useRouter: () => ({ push: async () => {} }) }))
 vi.mock('@/stores/agents', () => ({ useAgentsStore: () => ({ fetchAgents: async () => {} }) }))
 
 import AssistantWidget from '@/components/assistant/AssistantWidget.vue'
