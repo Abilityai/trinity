@@ -643,6 +643,9 @@ class _SharingDb:
     def get_user_by_username(self, *_a, **_k):
         return {"id": 1, "username": "owner", "email": "owner@example.com"}
 
+    def get_agent_owner_email(self, *_a, **_k):
+        return "owner@example.com"
+
     def share_agent(self, agent_name, owner, email):
         from datetime import datetime, timezone
         from database import AgentShare
