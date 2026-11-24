@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { useClientPortalStore } from './clientPortal'
+import { markChanged } from '../utils/inflight'
 
 /**
  * The Workspace rail's feed store (trinity-enterprise#475): the canvases and
@@ -109,6 +110,10 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
     const names = participants.value
     const wants = feeds.value
     if (!names.length || (!wants.canvas && !wants.files)) return
+    // #4671: this read answers whatever a pending push-driven one was waiting
+    // to ask — it is issued AFTER the push arrived. Without the cancel a turn
+    // end read the feed here and again 2 s later from the debounce.
+    if (_debounceTimer) { clearTimeout(_debounceTimer); _debounceTimer = null }
     const portal = useClientPortalStore()
     const token = ++_fetchToken
     // Snapshot the per-agent inbox epochs BEFORE the awaits. An upload noted
@@ -249,7 +254,10 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
     const isLoop = data.type === 'loop_run_completed' || data.type === 'loop_completed'
     const isTerminalActivity = data.type === 'agent_activity'
       && typeof data.activity_state === 'string' && data.activity_state !== 'started'
-    if (isLoop || isTerminalActivity) scheduleRefresh()
+    if (isLoop || isTerminalActivity) {
+      markChanged()   // #4671: see `portalWork.js` — a push is a change
+      scheduleRefresh()
+    }
   }
 
   function clear() {
