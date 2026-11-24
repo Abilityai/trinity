@@ -9784,6 +9784,27 @@
       "description": "The assistant's Claude card, mounted (ruled 2026-11-24): three terminal steps naming claude setup-token and no sign-in link, the API key as the alternative in the same field; the paste goes once to the instance under the name the assistant asked for (ANTHROPIC_API_KEY or CLAUDE_SUBSCRIPTION, and a card kept from an earlier conversation) and the assistant hears only 'Provided' for that name; a pasted sign-in code is refused in plain words and sends nothing; an agent's own ANTHROPIC_API_KEY is unchanged."
     },
     {
+      "file": "unit/test_4757_sonnet_55_default.py",
+      "feature": "#4757",
+      "added": "2026-11-24",
+      "categories": [
+        "backend",
+        "agent",
+        "unit"
+      ],
+      "description": "#4757: Sonnet 5.5 is the platform default (no row → 5.5, an admin row kept, catalog recommends it); the platform-default rung steps down to Sonnet 4.6 (only when no admin saved a default — a saved default is never stepped down) for an agent whose trinity.claude-code-version label is absent, unparseable or below min_claude_code, read through the real docker_service seam; the agent's own model and non-Claude runtimes untouched; the agent image's headless argv and get_default_model use DEFAULT_CLAUDE_MODEL."
+    },
+    {
+      "file": "../src/frontend/tests/unit/tasksPanelModelDefault4757.spec.js",
+      "feature": "#4757",
+      "added": "2026-11-24",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "TasksPanel mounted: a task with no model chosen posts no model (the backend resolves it); a remembered choice is still posted."
+    },
+    {
       "file": "unit/test_ent1176_managed_hooks.py",
       "feature": "trinity-enterprise#1176",
       "added": "2026-11-23",
