@@ -385,6 +385,8 @@
               </div>
               <!-- A credential: a masked field whose value goes to this instance, never to the assistant -->
               <AssistantCredentialField v-else-if="c.card.action === 'credential'" :message-id="m.id" :entry="c" :route="route" />
+              <!-- Agents run on the person's own machine: the steps, written by the page (ent#1353) -->
+              <AssistantLocalMove v-else-if="c.card.action === 'local-move'" />
               <div v-else-if="c.state === 'open' || c.state === 'running'" class="flex flex-wrap gap-2 pt-1">
                 <BaseButton
                   size="sm"
@@ -722,6 +724,7 @@ import BaseTextarea from '../base/BaseTextarea.vue'
 import InlineError from '../InlineError.vue'
 import ChatBubble from '../chat/ChatBubble.vue'
 import AssistantCredentialField from './AssistantCredentialField.vue'
+import AssistantLocalMove from './AssistantLocalMove.vue'
 import HelpChatWidget from '../HelpChatWidget.vue'
 import { maskAddress, useAssistantStore } from '../../stores/assistant'
 import { useOnboardingStore } from '../../stores/onboarding'
@@ -729,7 +732,7 @@ import { useFirstRunStore } from '../../stores/firstRun'
 import { irreversibleTool, toolWords, webLink } from '../../utils/assistantCards'
 import { describePage } from '../../utils/assistantContext'
 import { starterGroups } from '../../utils/assistantStarters'
-import { OPENING, OPENING_GROUP, inFirstSession, isFirstSession, localHandOff } from '../../utils/firstSession'
+import { OPENING, inFirstSession, isFirstSession, openingGroup } from '../../utils/firstSession'
 import { renderMarkdown } from '../../utils/markdown'
 
 defineProps({
@@ -750,7 +753,7 @@ const OUTCOME = Object.freeze({
 })
 const CONFIRM = Object.freeze({ build: 'Build', upgrade: 'Continue', feedback: 'Send' })
 const LOADING = Object.freeze({ build: 'Building…', feedback: 'Sending…' })
-const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running', feedback: 'For the Trinity team', credential: 'A credential, kept from the assistant' })
+const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running', feedback: 'For the Trinity team', credential: 'A credential, kept from the assistant', 'local-move': 'On your machine' })
 const SHOWN_STEPS = 4
 const FOLLOWED = ['job', 'run']
 // A followed card's heading follows what happened to it.
@@ -779,8 +782,7 @@ const messagesEl = ref(null)
 const starters = computed(() => {
   // trinity-enterprise#1355: the assistant-led first session asks one question, with two answers.
   if (firstSession.value) {
-    const last = store.messages.at(-1)
-    return last?.local && last.handOff ? [{ heading: OPENING_GROUP.heading, items: last.handOff }] : [OPENING_GROUP]
+    return [openingGroup(store.status)]
   }
   const groups = starterGroups(describePage(route), store.fleet, { known: Boolean(store.status?.profile_known) })
   // Under its own hello there is one question to answer, not a menu: the rest comes once they have.
@@ -1023,13 +1025,6 @@ function send(text) {
 
 // A starter: sent as it stands, or put in the box for the person to finish.
 function pick(starter) {
-  // Agents already run elsewhere: the hand-off is said on the page (its own work, trinity-enterprise#1353).
-  if (starter.path === 'local') {
-    const { reply, offer } = localHandOff()
-    store.messages.push({ id: `h${Date.now()}`, role: 'user', content: starter.text, opener: true, local: true })
-    store.messages.push({ id: `h${Date.now()}r`, role: 'assistant', content: reply, opener: true, local: true, handOff: offer })
-    return
-  }
   if (!starter.fill) return send(starter.text)
   draft.value = starter.text
   focusInput()
