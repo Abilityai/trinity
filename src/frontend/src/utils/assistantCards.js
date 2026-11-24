@@ -238,7 +238,7 @@ export function validCredential(raw, fleet) {
     return null
   }
   // ent#1354: this instance's Claude card is held as the subscription credential,
-  // which takes the sign-in code, a subscription token or an API key.
+  // which takes a subscription token from `claude setup-token` or an API key.
   const name = raw.agent === undefined ? instanceCredentialName({ name: raw.name }) : raw.name
   const card = { action: 'credential', name, why: String(raw.why ?? '').trim().slice(0, 300) }
   if (raw.agent !== undefined) card.agent = raw.agent

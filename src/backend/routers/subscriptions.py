@@ -16,14 +16,11 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from typing import Optional, List
 
-from models import (
-    ClaudeSignInExchange, ClaudeSignInLink, SubscriptionHeadroomHistory, SubscriptionRegistration,
-    SubscriptionTokenTest, User,
-)
+from models import SubscriptionHeadroomHistory, SubscriptionRegistration, SubscriptionTokenTest, User
 from database import db
 from utils.log_masking import masked_traceback
 from dependencies import (
-    get_current_user, assert_admin, assert_agent_access, assert_agent_owner, assert_person,
+    get_current_user, assert_admin, assert_agent_access, assert_agent_owner,
     is_fleet_admin, principal_reach, require_interactive, require_person,
 )
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -215,83 +212,6 @@ async def test_subscription_token(
     return {"valid": False, "status": status, "error": (
         "Couldn't reach Anthropic to check the token — try again in a moment."
     )}
-
-
-# ============================================================================
-# Claude sign-in from a browser (trinity-enterprise#1354)
-# ============================================================================
-
-# The name a first-run subscription is registered under; the frontend twin is
-# `credentialSteps.js::FIRST_RUN_SUBSCRIPTION_NAME`.
-FIRST_RUN_SUBSCRIPTION_NAME = "primary"
-
-
-def _sign_in_refusal(e) -> HTTPException:
-    return HTTPException(status_code=e.status, detail={"code": e.code, "message": e.message})
-
-
-@router.post("/claude-sign-in", response_model=ClaudeSignInLink)
-async def start_claude_sign_in(current_user: User = Depends(get_current_user)):
-    """A fresh Claude sign-in link: the person signs in at Claude, copies the
-    code the page shows and pastes it into the exchange below. A person who is
-    an admin only (registering a subscription is)."""
-    assert_person(current_user)
-    assert_admin(current_user)
-    from services import claude_sign_in_service as sign_in
-    try:
-        return sign_in.start(current_user.id)
-    except sign_in.SignInError as e:
-        raise _sign_in_refusal(e) from None
-
-
-async def _register_token(payload: SubscriptionCredentialCreate, http_request: Request, current_user: User):
-    """The one registration path, so a signed-in subscription is stored,
-    encrypted and connected to waiting agents exactly as a pasted token is."""
-    return await register_subscription(payload, http_request, current_user)
-
-
-@router.post("/claude-sign-in/exchange", response_model=SubscriptionRegistration)
-async def exchange_claude_sign_in(
-    body: ClaudeSignInExchange,
-    http_request: Request,
-    current_user: User = Depends(get_current_user),
-):
-    """Exchange the pasted sign-in code for the subscription token, on this
-    instance, and register it as the first-run subscription. The token is
-    never returned; a refusal names its reason and nothing is stored."""
-    assert_person(current_user)
-    assert_admin(current_user)
-    if not os.getenv("CREDENTIAL_ENCRYPTION_KEY"):
-        # Before the exchange, so the person's code is not spent on a 503.
-        raise HTTPException(status_code=503, detail={
-            "code": "encryption_not_configured",
-            "message": "This instance cannot store a subscription until CREDENTIAL_ENCRYPTION_KEY is set.",
-        })
-    from services import claude_sign_in_service as sign_in
-    try:
-        token = await sign_in.exchange(current_user.id, body.code)
-    except sign_in.SignInError as e:
-        raise _sign_in_refusal(e) from None
-    registered = await _register_token(
-        SubscriptionCredentialCreate(name=FIRST_RUN_SUBSCRIPTION_NAME, token=token),
-        http_request, current_user,
-    )
-    # SEC-001: who connected which subscription through the sign-in. Name and
-    # actor only — never the token or the code (Invariant #12). Best-effort:
-    # `platform_audit_service.log` never raises into the caller.
-    await platform_audit_service.log(
-        event_type=AuditEventType.CREDENTIALS,
-        event_action="subscription_signed_in",
-        source="api",
-        actor_user=current_user,
-        actor_ip=http_request.client.host if http_request.client else None,
-        target_type="subscription",
-        target_id=FIRST_RUN_SUBSCRIPTION_NAME,
-        endpoint=http_request.scope["path"],
-        request_id=getattr(http_request.state, "request_id", None),
-        details={"name": FIRST_RUN_SUBSCRIPTION_NAME},
-    )
-    return registered
 
 
 @router.get("", response_model=List[SubscriptionWithAgents])

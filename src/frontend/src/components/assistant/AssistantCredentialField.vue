@@ -26,12 +26,12 @@
       data-testid="assistant-credential-replaces"
     >{{ entry.card.name }} is already set on {{ where }}. Saving replaces it; the current value is never shown.</p>
 
-    <!-- This instance's Claude credential: where to get it (ent#1355), the sign-in link and its three steps (ent#1354) -->
+    <!-- This instance's Claude credential: where to get it (ent#1355), the three terminal steps (ent#1354) -->
     <template v-if="isOpen && checked && claude">
-      <ol v-if="claude.steps && signInUrl" class="list-decimal pl-5 space-y-0.5 text-[12.5px] text-gray-900 dark:text-gray-100" data-testid="assistant-credential-steps">
+      <ol v-if="claude.steps" class="list-decimal pl-5 space-y-0.5 text-[12.5px] text-gray-900 dark:text-gray-100" data-testid="assistant-credential-steps">
         <li v-for="(step, i) in claude.steps" :key="i">
           {{ step.before }}
-          <a v-if="step.link" :href="signInUrl" target="_blank" rel="noopener noreferrer" class="underline text-action-primary-600 dark:text-action-primary-400" data-testid="assistant-credential-sign-in">{{ claude.label }}</a>
+          <code v-if="step.command" class="font-mono" data-testid="assistant-credential-command">{{ step.command }}</code>
           {{ step.after || '' }}
         </li>
       </ol>
@@ -59,7 +59,7 @@
           data-1p-ignore="true"
           data-lpignore="true"
           :disabled="running"
-          :placeholder="claude && claude.steps ? 'Paste the code (or an API key)' : 'Type or paste the value'"
+          :placeholder="claude && claude.steps ? 'Paste the token (or an API key)' : 'Type or paste the value'"
           data-testid="assistant-credential-input"
         />
         <BaseButton
@@ -131,7 +131,6 @@ const revealed = ref(false)
 const error = ref('')
 const current = ref(null)     // whether it is set already: true / false / null (unknown)
 const checked = ref(false)    // the instance has answered whether it takes this name
-const signInUrl = ref('')     // ent#1354: this person's Claude sign-in link, made by the instance
 
 const where = computed(() => credentialWhere(props.entry.card))
 const claude = computed(() => (isClaudeCredential(props.entry.card) ? claudeHelp() : null))
@@ -162,14 +161,7 @@ onMounted(async () => {
   }
   current.value = state ? state.set : null
   checked.value = true
-  await freshLink()
 })
-
-// A sign-in code works once: every open and every refused paste gets a new link.
-async function freshLink() {
-  if (!claude.value?.steps) return
-  signInUrl.value = (await store.claudeSignInLink()) || ''
-}
 
 async function submit() {
   if (running.value || !value.value || store.sending) return
@@ -180,7 +172,6 @@ async function submit() {
   error.value = ''
   const result = await store.answerCredential(props.messageId, props.entry.id, secret, props.route)
   if (!result.ok && result.error) error.value = result.error
-  if (!result.ok) await freshLink()
 }
 
 async function cancel() {

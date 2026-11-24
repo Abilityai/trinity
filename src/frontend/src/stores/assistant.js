@@ -792,20 +792,6 @@ export const useAssistantStore = defineStore('assistant', {
     },
 
     /**
-     * A fresh Claude sign-in link for this person (trinity-enterprise#1354),
-     * made by the instance, which keeps the sign-in's secret half. The URL, or
-     * null when the instance cannot make one (the field then takes an API key).
-     */
-    async claudeSignInLink() {
-      try {
-        const { data } = await api.post('/api/subscriptions/claude-sign-in')
-        return typeof data?.url === 'string' && data.url.startsWith('https://') ? data.url : null
-      } catch {
-        return null
-      }
-    },
-
-    /**
      * Close a credential field the instance refused by name. No value was
      * typed and no turn is sent: the card says why, and nothing else changes.
      */

@@ -264,35 +264,24 @@
 
 ---
 
-### 3.8a Connect a Claude Subscription From the Browser (trinity-enterprise#1354)
+### 3.8a Connect a Claude Subscription by Pasting a Token (trinity-enterprise#1354)
 - **Status**: ✅ Implemented
-- **Description**: A person with only a browser can connect their Claude
-  subscription — no terminal, no `claude setup-token`. The instance runs the same
-  OAuth sign-in `claude setup-token` runs (PKCE, Claude Code's public client id,
-  the manual redirect `platform.claude.com/oauth/code/callback`, scope
-  `user:inference`, a one-year token) with the **instance** as the client:
-  1. `POST /api/subscriptions/claude-sign-in` makes a fresh sign-in link for the
-     caller. The PKCE verifier stays on the instance (Redis, bound to the caller,
-     15 minutes, single use) and is never sent to the browser.
-  2. The person opens the link, signs in to Claude and copies the code the page
-     shows (`<code>#<state>`).
-  3. `POST /api/subscriptions/claude-sign-in/exchange` takes that code, spends
-     the link, exchanges the code with the kept verifier and registers the
-     resulting `sk-ant-oat01-` token as the `primary` subscription through
-     `POST /api/subscriptions`' own handler — so encryption at rest, the
-     first-credential connect of waiting agents (§3.8) and the #2572 adoption
-     sweep all hold unchanged. The token is never returned.
-- **Refusals are named and store nothing**: `code_incomplete` (half-copied: no
-  `#` part), `sign_in_expired` (unknown, used, expired, or another person's link),
-  `code_rejected` (Claude refused the code), `anthropic_unavailable`,
-  `unexpected_answer`, `store_unavailable`, and `encryption_not_configured` —
-  checked **before** the exchange so the person's code is not spent on a 503.
-  Every message tells the person to open the link again for a fresh code.
-- **Gate**: both routes are `assert_person` + `assert_admin` (the registration
-  they lead to is admin-only; an agent key can neither start nor finish one).
-- **Never logged**: neither the code, the state nor the token reaches a log line
-  or a response body.
-- **Tests**: `tests/unit/test_ent1354_claude_sign_in.py`.
+- **Description**: When an agent first needs Claude, the credential card
+  shows three short steps: open a terminal on your own computer, run Claude's
+  own `claude setup-token`, paste the token it prints into the card. The same
+  field takes an Anthropic API key instead. The instance starts no sign-in with
+  the provider and exchanges no code.
+- **Routing by shape**: `sk-ant-oat01-…` is tested with `POST /api/subscriptions/test`
+  and registered as `primary` through `POST /api/subscriptions` only once the
+  test passes, so a bad paste leaves an existing subscription and its agents
+  untouched; `sk-ant-api…` is saved through `PUT /api/settings/api-keys/anthropic`
+  and checked after. A paste containing `#` (a sign-in code) is refused with a
+  plain message that a token is expected; any other value is refused the same
+  way. Nothing is stored on a refusal.
+- **Record**: a registration through the card writes one audit row — the name
+  and the actor, never the value. The value never reaches the chat, a model, a
+  log line or an execution record.
+- **Gate**: the routes it calls are admin-only, as on the Settings page.
 
 ---
 

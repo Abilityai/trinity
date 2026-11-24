@@ -119,8 +119,6 @@ create_agent_internal()
 | **Settings Page: Claude Subscriptions** | `GET /api/subscriptions` | List subscriptions (Settings UI) |
 | **Settings Page: Add Subscription** | `POST /api/subscriptions` | Register via token input (returns 503 if encryption key missing); **also runs the #2572 credential-less adoption sweep** |
 | **Settings Page: Delete Button** | `DELETE /api/subscriptions/{id}` | Delete with cascade confirmation |
-| Browser sign-in (trinity-enterprise#1354) | `POST /api/subscriptions/claude-sign-in` | A fresh Claude sign-in link for the caller (PKCE verifier kept on the instance, 15 min, single use). Person + admin |
-| Browser sign-in (trinity-enterprise#1354) | `POST /api/subscriptions/claude-sign-in/exchange` | Exchange the pasted `<code>#<state>` on the instance and register the token as `primary` through the `POST /api/subscriptions` handler. Person + admin; the token is never returned. A pasted API key is answered `api_key_not_code` without spending the link; the provider call times out at 8 s (well under the assistant's 30 s loopback wait); a successful exchange writes a `credentials`/`subscription_signed_in` audit row (name and actor only) |
 | MCP Tool: `register_subscription` | `POST /api/subscriptions` | Register new subscription — the SAME endpoint, so the #2572 sweep fires here too |
 | MCP Tool: `list_subscriptions` | `GET /api/subscriptions` | List all subscriptions with agents |
 | MCP Tool: `assign_subscription` | `PUT /api/subscriptions/agents/{agent_name}` | Assign subscription to agent. The route takes a signed-in session, so the tool is listed to no MCP key (trinity-enterprise#719) |

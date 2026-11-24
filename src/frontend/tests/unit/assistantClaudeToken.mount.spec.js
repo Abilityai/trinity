@@ -1,22 +1,22 @@
 // @vitest-environment jsdom
 /**
- * ent#1354 — connecting Claude in the assistant panel with a sign-in link.
- * Mounted through the real AssistantWidget and the real store.
+ * ent#1354 (ruled 2026-11-24) — connecting Claude in the assistant panel with a
+ * token the person makes in a terminal. Mounted through the real
+ * AssistantWidget and the real store.
  *
  * When the assistant asks for this instance's Claude credential, the card
- * shows three steps and a sign-in link the INSTANCE made for this person
- * (`POST /api/subscriptions/claude-sign-in`), with the API key as the
- * alternative in the same field. What is pasted goes once to this instance
- * under CLAUDE_SUBSCRIPTION, never into a turn; a refused paste gets a fresh
- * link and sends the assistant nothing.
+ * shows three steps — open a terminal on your own computer, run
+ * `claude setup-token`, paste the token it prints here — with the API key as
+ * the alternative in the same field. The page makes no sign-in link and asks
+ * the instance for none. What is pasted goes once to this instance under
+ * CLAUDE_SUBSCRIPTION, never into a turn; a refused paste is named in the
+ * instance's words and sends the assistant nothing.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
-const VALUE = 'the-code-from-claude#the-state-1354'
-let links
-let linkFails
+const VALUE = 'sk-ant-oat01-' + 't'.repeat(40)
 const ALLOWANCE = { plan: 'free', period_hours: 24, messages_left: 24, messages_limit: 25, builds_left: 1, builds_limit: 1, reached: null, resets_at: null }
 const calls = []
 let turns
@@ -45,11 +45,6 @@ vi.mock('@/api', () => {
       }
       return { provided: true, agent: body.agent, name: body.name, replaced: credentialSet === true }
     }
-    if (url === '/api/subscriptions/claude-sign-in' && method === 'post') {
-      if (linkFails) throw { response: { status: 503, data: { detail: { code: 'store_unavailable', message: 'x' } } } }
-      links += 1
-      return { url: `https://claude.com/cai/oauth/authorize?state=link-${links}`, expires_in: 900 }
-    }
     if (url === '/api/agents') return [{ name: 'scout', status: 'running' }]
     if (url === '/api/agents/autonomy-status') return {}
     if (url === '/api/ops/schedules') return { schedules: [] }
@@ -74,7 +69,7 @@ const ASK = { action: 'credential', name: 'ANTHROPIC_API_KEY', why: 'Your first 
 const final = (text, cards = []) => ({ status: 'final', conversation_id: 'c1', text, cards, allowance: ALLOWANCE })
 const posted = (url) => calls.filter((c) => c.url === url && c.method === 'post')
 
-describe('connecting Claude with a sign-in link', () => {
+describe('connecting Claude with a token made in a terminal', () => {
   let wrapper
 
   const openAndAsk = async (card = ASK) => {
@@ -90,7 +85,6 @@ describe('connecting Claude with a sign-in link', () => {
     await wrapper.get('[data-testid="assistant-credential"]').trigger('submit')
     await flushPromises()
   }
-  const link = () => wrapper.get('[data-testid="assistant-credential-sign-in"]')
 
   beforeEach(() => {
     calls.length = 0
@@ -98,8 +92,6 @@ describe('connecting Claude with a sign-in link', () => {
     credentialSet = false
     refuse = null
     refuseState = null
-    links = 0
-    linkFails = false
     localStorage.clear()
     sessionStorage.clear()
     setActivePinia(createPinia())
@@ -114,18 +106,20 @@ describe('connecting Claude with a sign-in link', () => {
 
   afterEach(() => wrapper.unmount())
 
-  it('shows the three steps with a sign-in link the instance made, and the API key as the alternative', async () => {
+  it('shows three terminal steps naming claude setup-token, the API key as the alternative, and no sign-in link', async () => {
     await openAndAsk()
     const steps = wrapper.get('[data-testid="assistant-credential-steps"]').findAll('li')
     expect(steps).toHaveLength(3)
-    expect(steps[0].text()).toMatch(/sign in/i)
-    expect(steps[1].text()).toMatch(/copy the code/i)
-    expect(steps[2].text()).toMatch(/paste it/i)
-    expect(posted('/api/subscriptions/claude-sign-in')).toHaveLength(1)
-    expect(link().attributes('href')).toBe('https://claude.com/cai/oauth/authorize?state=link-1')
-    expect(link().attributes('target')).toBe('_blank')
+    expect(steps[0].text()).toMatch(/open a terminal on your own computer/i)
+    expect(steps[1].text()).toMatch(/^Run claude setup-token/)
+    expect(wrapper.get('[data-testid="assistant-credential-command"]').text()).toBe('claude setup-token')
+    expect(steps[2].text()).toMatch(/paste the token it prints here/i)
     expect(wrapper.get('[data-testid="assistant-credential-alternative"]').text()).toMatch(/API key/)
     expect(wrapper.get('[data-testid="assistant-credential-input"]').attributes('type')).toBe('password')
+    expect(wrapper.get('[data-testid="assistant-credential-input"]').attributes('placeholder')).toBe('Paste the token (or an API key)')
+    // no link out to a sign-in, and no request for one
+    expect(wrapper.get('[data-testid="assistant-credential-steps"]').find('a').exists()).toBe(false)
+    expect(calls.some((c) => c.url.includes('sign-in'))).toBe(false)
     // the instance is asked about the subscription credential, not the API key
     const state = calls.find((c) => c.url === CRED && c.method === 'get')
     expect(state.params.name).toBe('CLAUDE_SUBSCRIPTION')
@@ -145,28 +139,19 @@ describe('connecting Claude with a sign-in link', () => {
     expect(JSON.stringify(localStorage)).not.toContain(VALUE)
   })
 
-  it('a refused paste is named, gets a fresh link, and sends the assistant nothing', async () => {
+  it('a pasted sign-in code is refused in plain words and sends the assistant nothing', async () => {
     await openAndAsk()
-    refuse = { status: 422, detail: { code: 'instance_refused', message: 'That is not the whole code. Open the sign-in link again for a fresh code.' } }
-    await paste('half-a-code')
-    expect(wrapper.get('[data-testid="assistant-credential-error"]').text()).toMatch(/not the whole code/)
-    expect(link().attributes('href')).toBe('https://claude.com/cai/oauth/authorize?state=link-2')
+    refuse = { status: 422, detail: { code: 'token_expected', message: 'That looks like a sign-in code, not a token. Run claude setup-token in a terminal on your own computer and paste the token it prints (it starts with sk-ant-oat01-), or paste an Anthropic API key (sk-ant-api…). Nothing was stored.' } }
+    await paste('a-code-from-a-page#its-state')
+    expect(wrapper.get('[data-testid="assistant-credential-error"]').text()).toMatch(/sign-in code, not a token/)
     expect(posted(TURN)).toHaveLength(1)
     expect(wrapper.find('[data-testid="assistant-credential-input"]').exists()).toBe(true)
+    expect(JSON.stringify(calls.filter((c) => c.url === TURN))).not.toContain('its-state')
   })
 
-  it('when the instance cannot make a link, the field still takes an API key', async () => {
-    linkFails = true
-    await openAndAsk()
-    expect(wrapper.find('[data-testid="assistant-credential-sign-in"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="assistant-credential-alternative"]').text()).toMatch(/API key/)
-    expect(wrapper.find('[data-testid="assistant-credential-input"]').exists()).toBe(true)
-  })
-
-  it("an agent's own ANTHROPIC_API_KEY stays an agent credential, with no sign-in", async () => {
+  it("an agent's own ANTHROPIC_API_KEY stays an agent credential, with no token steps", async () => {
     await openAndAsk({ action: 'credential', name: 'ANTHROPIC_API_KEY', why: 'Scout calls Claude itself.', agent: 'scout' })
     expect(wrapper.find('[data-testid="assistant-credential-steps"]').exists()).toBe(false)
-    expect(posted('/api/subscriptions/claude-sign-in')).toHaveLength(0)
     expect(calls.find((c) => c.url === CRED && c.method === 'get').params.name).toBe('ANTHROPIC_API_KEY')
   })
 })
