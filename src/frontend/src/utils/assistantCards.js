@@ -359,7 +359,7 @@ export function cardLabel(card, fleet, { firstSession = false } = {}) {
 
 /** The line under a card's title. Every change to an agent runs as the person. */
 export function cardNote(card, { firstSession = false } = {}) {
-  if (firstRunCard(card, firstSession)) return 'Starts your agent on this task now, as you. It counts as one of your messages.'
+  if (firstRunCard(card, firstSession)) return 'Starts your agent on this task now, as you.'
   if (card.action === 'job') return "Each agent is made with the standard tools and checked. This takes a few minutes. Keep talking or close this panel: I'll come back when they're ready."
   if (card.action === 'run') return "Running on the agent. Keep talking or close this panel: I'll come back with the result."
   if (card.action === 'choice') return ''

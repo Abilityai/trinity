@@ -80,7 +80,8 @@ describe('the first run, from the assistant panel', () => {
   it('is one card titled "Run its first task" that runs on the click and tells the assistant the run id', async () => {
     const card = await offered()
     expect(card.text()).toContain('Run its first task: scout')
-    expect(card.text()).toContain('counts as one of your messages')
+    expect(card.text()).toContain('Starts your agent on this task now, as you.')
+    expect(card.text()).not.toContain('counts as one of your messages')   // the click is free (Abilityai/trinity-gateway#37)
     expect(posted(CONFIRM)).toEqual([])                     // nothing ran before the click
 
     await card.findAll('button').find((b) => b.text() === 'Confirm').trigger('click')
