@@ -420,12 +420,13 @@ export const useAssistantStore = defineStore('assistant', {
       this.startedAt = Date.now()
       try {
         const fleet = await this.refreshFleet()
+        const firstSession = inFirstSession(this.status, fleet, useFirstRunStore().seededAgents || [])
         let { data } = await api.post(`${BASE}/turn`, {
           conversation_id: this.conversationId,
           message: clicked.length ? `${clicked.join('\n')}\n${message}` : message,
           context: { ...buildContext(route, fleet), ...(said ? { said } : {}), ...setupSteps(),
             // trinity-enterprise#1355: the assistant leads this session and follows its script for it.
-            ...(inFirstSession(this.status, fleet, useFirstRunStore().seededAgents || []) ? { first_session: true } : {}) },
+            ...(firstSession ? { first_session: true } : {}) },
           counted,
         }, { timeout: STEP_TIMEOUT_MS })
 
@@ -460,7 +461,7 @@ export const useAssistantStore = defineStore('assistant', {
           role: 'assistant',
           content: data.text || (cards.length ? '' : 'Done.'),
           cards: cards.map((card) => ({
-            id: newId(), card, label: cardLabel(card, after), note: cardNote(card),
+            id: newId(), card, label: cardLabel(card, after, { firstSession }), note: cardNote(card, { firstSession }),
             state: FOLLOWED.includes(card.action) ? 'making' : 'open', reason: '', progress: '', picked: '',
             since: Date.now(), fraction: null,
             auto: false,       // a proposed build waits for the owner's click on Build; they can tick create-when-ready (ent#1343)
