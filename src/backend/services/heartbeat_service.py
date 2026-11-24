@@ -353,11 +353,11 @@ def process_watch_tick() -> List[Tuple[str, str]]:
         if state == "stale":
             misses_key = _misses_key(name)
             try:
-                # The 3-miss threshold assumes a single backend process
-                # (confirmed today — docker-compose runs one worker; see
-                # docker-compose.yml:292). With multiple workers each tick
-                # INCRs, so the threshold is reached in fewer wall-clock ticks,
-                # though the atomic INCR still makes exactly one caller observe
+                # This tick runs in EVERY backend worker (`BACKEND_WORKERS`,
+                # 2 by default on the prod and hosted stacks), with no leader
+                # lease, and each one INCRs. So the 3-miss threshold is
+                # reached in about 3/N wall-clock ticks, not 3. The atomic
+                # INCR still makes exactly one caller observe
                 # ``== THRESHOLD``, so the transition stays single-fire.
                 misses = redis.incr(misses_key)
                 redis.expire(misses_key, _MISS_COUNTER_TTL_SECONDS)

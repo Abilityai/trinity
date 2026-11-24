@@ -213,6 +213,10 @@ async def _statuses(coros):
     return sorted(r.status_code for r in results)
 
 
+async def _statuses_or_errors(coros):
+    return await asyncio.gather(*coros, return_exceptions=True)
+
+
 class TestLoginLockoutUnderConcurrency:
     """The verify is awaited now, so the lockout must hold without the event
     loop serialising the handler."""
@@ -281,6 +285,92 @@ class TestLoginLockoutUnderConcurrency:
         auth, _, attempt = _login_rig(monkeypatch, wrong)
         asyncio.run(_statuses(attempt(f"user{i}", ip=f"10.0.3.{i}") for i in range(12)))
         assert running.peak == auth.LOGIN_VERIFY_CONCURRENCY
+
+    def test_one_address_trying_many_accounts_is_held_to_the_ip_limit(self, monkeypatch):
+        """The per-account lock does not cover this: every request is for a
+        different account, so each holds its own lock."""
+        verified = []
+
+        def wrong(username, password):
+            verified.append(username)
+            time.sleep(0.02)
+            return None
+
+        auth, fake, attempt = _login_rig(monkeypatch, wrong)
+        codes = asyncio.run(_statuses(attempt(f"user{i}", ip="203.0.113.7") for i in range(200)))
+
+        limit = auth.LOGIN_IP_LIMIT
+        assert len(verified) == limit, f"{len(verified)} passwords were verified, the per-IP limit is {limit}"
+        assert codes == [401] * limit + [429] * (200 - limit)
+        assert fake.data["login_attempts_ip:203.0.113.7"] == str(limit)
+        assert auth._ip_verifies_pending == {}, "no in-flight count outlives its requests"
+
+    def test_failures_already_recorded_count_with_the_ones_in_flight(self, monkeypatch):
+        verified = []
+
+        def wrong(username, password):
+            verified.append(username)
+            time.sleep(0.02)
+            return None
+
+        auth, fake, attempt = _login_rig(monkeypatch, wrong)
+        fake.data["login_attempts_ip:203.0.113.8"] = str(auth.LOGIN_IP_LIMIT - 5)
+        asyncio.run(_statuses(attempt(f"user{i}", ip="203.0.113.8") for i in range(40)))
+        assert len(verified) == 5
+
+    def test_other_addresses_are_not_held_back(self, monkeypatch):
+        verified = []
+
+        def wrong(username, password):
+            verified.append(username)
+            time.sleep(0.01)
+            return None
+
+        auth, _, attempt = _login_rig(monkeypatch, wrong)
+        busy = [attempt(f"user{i}", ip="203.0.113.9") for i in range(60)]
+        other = [attempt(f"other{i}", ip=f"198.51.100.{i}") for i in range(10)]
+        asyncio.run(_statuses(busy + other))
+        assert sum(1 for u in verified if u.startswith("other")) == 10
+        assert sum(1 for u in verified if u.startswith("user")) == auth.LOGIN_IP_LIMIT
+
+    def test_correct_passwords_in_flight_give_their_place_back(self, monkeypatch):
+        """A success never becomes a failure: once it lands, the address has
+        its whole budget again."""
+        def right(username, password):
+            time.sleep(0.01)
+            return None if username.startswith("bad") else {"username": username, "role": "admin", "id": 1}
+
+        auth, fake, attempt = _login_rig(monkeypatch, right)
+
+        class _Stop(Exception):
+            pass
+
+        def after_login(*a, **k):
+            raise _Stop
+
+        monkeypatch.setattr(auth.db, "update_last_login", after_login)
+
+        async def scenario():
+            first = await asyncio.gather(*(attempt(f"good{i}", ip="203.0.113.10") for i in range(10)),
+                                         return_exceptions=True)
+            second = await asyncio.gather(*(attempt(f"bad{i}", ip="203.0.113.10") for i in range(3)),
+                                          return_exceptions=True)
+            return first, second
+
+        first, second = asyncio.run(scenario())
+        assert all(isinstance(r, _Stop) for r in first), "ten correct logins from one address all got in"
+        assert sorted(r.status_code for r in second) == [401, 401, 401]
+        assert auth._ip_verifies_pending == {}
+
+    def test_a_verify_that_raises_still_gives_its_place_back(self, monkeypatch):
+        def broken(username, password):
+            raise RuntimeError("database down")
+
+        auth, _, attempt = _login_rig(monkeypatch, broken)
+        results = asyncio.run(_statuses_or_errors(attempt(f"user{i}", ip="203.0.113.11") for i in range(5)))
+        assert all(isinstance(r, RuntimeError) for r in results)
+        assert auth._ip_verifies_pending == {}
+        assert auth._verify_locks == {}
 
     def test_a_correct_password_clears_the_counter_and_logs_in(self, monkeypatch):
         from routers import auth as auth_module

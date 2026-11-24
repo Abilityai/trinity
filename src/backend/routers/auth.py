@@ -281,6 +281,54 @@ async def _account_verify_lock(account: str):
             del _verify_locks[account]
 
 
+# The account lock above says nothing about the per-IP bucket: requests from one
+# address for DIFFERENT accounts each hold their own lock, so all of them would
+# pass the IP check before any failure was recorded. A lock per address would
+# fix that by queueing everyone behind a shared NAT, which is what #591 took
+# out. Instead a verify is COUNTED against its address from the moment it is
+# admitted until its outcome is recorded: the check below reads recorded
+# failures plus verifies still in flight. Between the read and the increment
+# there is no await, so two requests cannot both take the last place.
+_ip_verifies_pending: dict = {}   # client ip -> verifies admitted, outcome not yet recorded
+
+
+def _admit_ip_verify(client_ip: str) -> None:
+    """Take a place in this address's budget, or raise 429.
+
+    `check_login_rate_limit` has already refused an address whose RECORDED
+    failures reached the limit. This adds the ones on their way. A verify that
+    succeeds gives its place back without ever counting as a failure.
+    """
+    pending = _ip_verifies_pending.get(client_ip, 0)
+    if pending:
+        r = get_redis_client()
+        recorded = 0
+        if r is not None:
+            try:
+                recorded = int(r.get(_ip_key(client_ip)) or 0)
+            except Exception as e:  # the limiter fails open, as everywhere here
+                logger.warning(f"Rate limit check failed: {e}")
+                recorded = None
+        if recorded is not None and r is not None and recorded + pending >= LOGIN_IP_LIMIT:
+            logger.warning(
+                "[Auth] Per-IP login lockout triggered: ip=%s attempts=%s in_flight=%s",
+                client_ip, recorded, pending,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many login attempts from this network. Try again shortly.",
+            )
+    _ip_verifies_pending[client_ip] = pending + 1
+
+
+def _release_ip_verify(client_ip: str) -> None:
+    left = _ip_verifies_pending.get(client_ip, 0) - 1
+    if left > 0:
+        _ip_verifies_pending[client_ip] = left
+    else:
+        _ip_verifies_pending.pop(client_ip, None)
+
+
 def _verify_slots() -> asyncio.Semaphore:
     """The bcrypt concurrency cap for the running loop (one loop per worker)."""
     global _verify_slots_state
@@ -458,13 +506,20 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
                 detail="setup_required"
             )
 
-        # #4674: bcrypt is ~200 ms of CPU by design. Verified on the event loop it
-        # stalled the whole worker for every login — and for every failed attempt,
-        # which anyone can send (measured: 176–200 ms per login on a live instance).
-        user = await _verify_password_off_loop(form_data.username, form_data.password)
-        # Record the outcome before the lock is released: a failure increments
-        # the counters the next waiter checks, a success clears them.
-        record_login_attempt(client_ip, success=bool(user), account=account)
+        # The per-IP bucket, counted across accounts (see `_admit_ip_verify`).
+        _admit_ip_verify(client_ip)
+        try:
+            # #4674: bcrypt is ~200 ms of CPU by design. Verified on the event loop it
+            # stalled the whole worker for every login — and for every failed attempt,
+            # which anyone can send (measured: 176–200 ms per login on a live instance).
+            user = await _verify_password_off_loop(form_data.username, form_data.password)
+            # Record the outcome before the lock is released: a failure increments
+            # the counters the next waiter checks, a success clears them.
+            record_login_attempt(client_ip, success=bool(user), account=account)
+        finally:
+            # After the record, with no await between: the failure is in Redis
+            # before this request stops being counted as in flight.
+            _release_ip_verify(client_ip)
 
     if not user:
         # SEC-001: audit failed admin login
