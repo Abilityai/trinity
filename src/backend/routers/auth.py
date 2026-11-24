@@ -435,9 +435,12 @@ async def get_auth_mode():
         - email_auth_enabled: Whether email-based login is enabled
         - email_code_login_enabled: Whether the email-code form may be used (ent#849)
         - email_delivery_available: Whether this install can deliver email (#3655).
-          Install-level, like the flag above: with no provider configured the
-          code goes to the backend log, and the Login page says so instead of
-          "we sent a code". Never on the per-request response (#186).
+          Install-level, like the flag above: with no provider configured no
+          code is sent, and the Login page says so instead of "we sent a
+          code". Never on the per-request response (#186).
+        - email_code_in_log: Whether an undelivered code can be read from the
+          backend log. True only on a development install (`console` provider
+          with `EMAIL_CONSOLE_LOG_BODY`); the Login page names the log only then.
         - setup_completed: Whether first-time setup is complete
     """
     from services.email_service import email_service
@@ -451,6 +454,7 @@ async def get_auth_mode():
         # ent#849: false when the login policy turned email-code sign-in off.
         "email_code_login_enabled": email_auth_enabled and login_policy_gate.email_code_allowed(),
         "email_delivery_available": email_service.can_deliver(),
+        "email_code_in_log": email_service.code_is_logged(),
         "setup_completed": is_setup_completed()
     }
 

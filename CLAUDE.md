@@ -210,7 +210,7 @@ docker-compose logs -f backend
 - **Web UI**: http://localhost
 - **Backend API**: http://localhost:8000/docs
 - **MCP Server**: http://localhost:8080/mcp
-- **Vector (logs)**: http://localhost:8686/health
+- **Vector (logs)**: not on the host — `docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health`
 
 ---
 

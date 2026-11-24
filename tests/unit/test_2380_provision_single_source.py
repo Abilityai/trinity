@@ -119,10 +119,13 @@ def test_firewall_has_no_port_list() -> None:
 
 
 def _firewall_rules() -> list[str]:
+    """The chain's rules in order. They are an ``iptables-restore`` block now,
+    so each is a bare ``-A TRINITY-FW ...`` line; the ``iptables `` prefix is
+    put back so the assertions below read as they always did."""
     return [
-        line.strip()
+        "iptables " + line.strip()
         for line in _FIREWALL.read_text().splitlines()
-        if re.match(r"^\s*iptables -A TRINITY-FW\b", line)
+        if re.match(r"^\s*-A TRINITY-FW\b", line)
     ]
 
 

@@ -109,13 +109,111 @@ export function once(key, fn, { force = false } = {}) {
   })
 }
 
+// A join that never hands back a STALE answer (#4671).
+//
+// `dedupe` is right for a read nothing else is changing. The Workspace's lists
+// are not that: a turn ends, an ask is answered, a chat is marked read — and
+// the refresh that follows exists to show exactly that change. Joining a read
+// that LEFT BEFORE the change would resolve the refresh with the old list:
+// the unread badge the mark-read just cleared comes back, the reply's thread
+// keeps its old place, and nothing corrects it until the next 20 s tick.
+//
+// So a flight remembers the change epoch it left under. `markChanged()` moves
+// the epoch — the Workspace store calls it when a write is sent and again when
+// it settles, and when a turn ends. Then:
+//
+//   • same epoch  → JOIN: nothing the caller could be asking about has
+//     happened since the flight left. This is the turn-end burst, the 20 s
+//     tick meeting a tab-focus refresh, a title-settle tick meeting either.
+//   • older epoch → WAIT for that flight, then read again ONCE — and every
+//     caller that arrives meanwhile shares that one read. Waiting rather than
+//     racing a second request also keeps the answers in order: the older one
+//     can no longer land last and overwrite the newer.
+//
+// A SCOPE narrows a change to the reads it can affect. Marking a chat read
+// moves unread counts and nothing else, and it is sent on every turn end: if
+// it moved the one shared epoch, the thread list and the rooms list would be
+// re-read behind it for no reason. `markChanged('chat-state')` moves only the
+// reads issued under that scope; `markChanged()` moves all of them.
+//
+// A flight is only worth joining, or waiting behind, while it is YOUNG. The
+// Workspace transport sets no request timeout, so a request the network has
+// swallowed can stay "in flight" for minutes; without a bound, every later
+// read of that list would join it or queue behind it and the list would stop
+// refreshing until the browser gave up. Past `MAX_FLIGHT_AGE_MS` a flight is
+// left to finish on its own and the next read simply goes out.
+//
+// A rejection reaches every joiner and nothing is kept, exactly as `dedupe`.
+export const MAX_FLIGHT_AGE_MS = 8000
+let changeEpoch = 0
+const scopeEpochs = new Map()
+const freshFlights = new Map()   // key → { promise, epoch, next, nextEpoch }
+
+const epochOf = (scope) => (scope ? `${changeEpoch}/${scopeEpochs.get(scope) || 0}` : `${changeEpoch}`)
+
+/**
+ * Something the Workspace's reads describe has changed (or is changing).
+ * @param {string|null} [scope]  only the reads issued under this scope; omit for all
+ */
+export function markChanged(scope = null) {
+  if (scope) scopeEpochs.set(scope, (scopeEpochs.get(scope) || 0) + 1)
+  else changeEpoch += 1
+}
+
+/**
+ * Run `fn()` unless a read under the same key left after the latest change,
+ * in which case join it. See the note above.
+ *
+ * @param {string} key  identity of the read — endpoint + parameters + session
+ * @param {() => Promise<T>} fn
+ * @param {string|null} [scope]  the scope whose changes also make this read stale
+ * @returns {Promise<T>}
+ */
+export function joinFresh(key, fn, scope = null) {
+  const current = freshFlights.get(key)
+  const age = current ? Date.now() - current.startedAt : 0
+  if (!current || age >= MAX_FLIGHT_AGE_MS) return startFresh(key, fn, scope)
+  const now = epochOf(scope)
+  if (current.epoch === now) return current.promise
+  if (current.next && current.nextEpoch === now) return current.next
+  current.nextEpoch = now
+  // The older flight's own outcome is its callers' business, not ours — and
+  // if it has not settled by the time it is too old to wait for, we stop
+  // waiting (the re-entry below then finds it aged out and reads).
+  current.next = settledOrAged(current.promise, MAX_FLIGHT_AGE_MS - age)
+    .then(() => joinFresh(key, fn, scope))
+  return current.next
+}
+
+function settledOrAged(promise, ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    const done = () => { clearTimeout(timer); resolve() }
+    promise.then(done, done)
+  })
+}
+
+function startFresh(key, fn, scope) {
+  const entry = { epoch: epochOf(scope), next: null, nextEpoch: null, startedAt: Date.now() }
+  entry.promise = Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      if (freshFlights.get(key) === entry) freshFlights.delete(key)
+    })
+  freshFlights.set(key, entry)
+  return entry.promise
+}
+
 /** Test/diagnostic helper — the number of calls currently in flight. */
 export function inFlightCount() {
-  return inFlight.size
+  return inFlight.size + freshFlights.size
 }
 
 /** Test helper — drop all entries. Never call this from product code. */
 export function resetInFlight() {
   inFlight.clear()
   settled.clear()
+  freshFlights.clear()
+  scopeEpochs.clear()
+  changeEpoch = 0
 }

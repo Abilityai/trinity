@@ -217,12 +217,15 @@ async def dismiss_all_notifications(
             details={"dismissed": dismissed, "agent_name": body.agent_name},
         )
         if _websocket_manager:
+            # A thin trigger (#918): a count, and the agent when the clear was
+            # for one. With no `agent_name` the scope filter has nothing to
+            # key on and this reaches every operator `/ws` client, so it
+            # carries nothing about WHO cleared (#3392). Listeners only refetch.
             await _websocket_manager.broadcast(json.dumps({
                 "type": "notifications_cleared",
                 "data": {
                     "count": dismissed,
                     "agent_name": body.agent_name,
-                    "cleared_by": current_user.email or current_user.username,
                 }
             }))
 

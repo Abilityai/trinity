@@ -170,7 +170,7 @@ describe('assistant credential field', () => {
     expect(wrapper.get('[data-testid="assistant-credential-outcome"]').text()).toBe('NOTION_API_KEY replaced on the agent scout.')
   })
 
-  it("the instance's own Claude key is asked for with no agent", async () => {
+  it("the instance's own Claude key is asked for with no agent, and an API key still goes in it (ent#1354)", async () => {
     await openAndAsk({ action: 'credential', name: 'ANTHROPIC_API_KEY', why: 'Your agents run on Claude.' })
     expect(wrapper.get('[data-testid="assistant-card"]').text()).toContain('stored on this instance as ANTHROPIC_API_KEY')
     await type('sk-ant-api03-example')

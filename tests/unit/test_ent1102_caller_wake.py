@@ -15,8 +15,8 @@ safe:
   caller), 0)`` — not one hop more (#4357; it was ``callee + 1``, which added
   two per delegate→wake round). The rounds themselves are driven through the
   real guard in ``test_4357_wake_chain_depth.py``;
-* one wake per caller per 15 s bucket, so a cleanup sweep that terminates 200
-  stale rows cannot become 200 billed turns;
+* one hold per caller, never per callee (#4733), so a cleanup sweep that
+  terminates 200 stale rows cannot become 200 billed turns;
 * a stopped caller is audited, not dispatched at.
 
 Everything runs through the real ``maybe_wake_caller`` with the dispatch and
@@ -89,6 +89,15 @@ def wake(monkeypatch):
     monkeypatch.setattr(mod, "_pending_ask_ids", lambda execution_id: calls.get("ask_ids", []))
     monkeypatch.setattr(mod, "_caller_subscribes_to", lambda caller, callee, status: False)
     monkeypatch.setattr(mod, "_running_depth", lambda agent_name: calls.get("running_depth", 0))
+    # #4733: the hold's row reads and the slot check, at their own seams.
+    monkeypatch.setattr(mod, "_wake_row_live", lambda caller: False)
+    monkeypatch.setattr(mod, "_caller_running", lambda caller: False)
+    monkeypatch.setattr(mod, "_peek_idempotency", lambda scope, key: None)
+
+    async def _free(caller):
+        return True
+
+    monkeypatch.setattr(mod, "_has_free_slot", _free)
 
     def _policy(agent_name):
         from services.wake_policy import WakeVerdict
@@ -190,28 +199,17 @@ class TestSafety:
         assert _run(wake.maybe_wake_caller("exec-callee")) is None
         assert wake._calls["dispatch"] == []
 
-    def test_one_wake_per_caller_per_bucket(self, wake):
-        """The storm bound: the key is the CALLER and a 15 s bucket, not the
-        callee's id — so 200 rows swept at once claim one key, not 200."""
+    def test_one_hold_per_caller(self, wake):
+        """The storm bound: the key is the CALLER's one hold, not the callee's
+        id and not a time window (#4733) — so 200 rows swept at once claim one
+        key, and a wake that outlives 15 s still holds it."""
         _run(wake.maybe_wake_caller("exec-callee"))
         scope, key = wake._calls["idem"][0]
         assert "caller" in scope
-        assert key.startswith("caller_wake:caller:")
-        bucket = key.rsplit(":", 1)[-1]
-        assert bucket.isdigit()
+        assert key == "caller_wake:caller:running"
         # The callee's id is deliberately NOT in the key: keying on it is what
         # would turn a 200-row sweep into 200 turns.
         assert "exec-callee" not in key
-
-    def test_the_bucket_is_stable_within_a_window_and_moves_between_them(self, wake):
-        width = wake.WAKE_BUCKET_SECONDS
-        start = 1_000_000 - (1_000_000 % width)   # a real window boundary
-        # Three probes, not two at the one point where both bounds coincide:
-        # the start, a mid-window instant, and the last instant still inside.
-        assert wake._bucket_for(start) == wake._bucket_for(start + width / 2)
-        assert wake._bucket_for(start) == wake._bucket_for(start + width - 0.001)
-        assert wake._bucket_for(start) != wake._bucket_for(start + width)
-        assert wake._bucket_for(start) != wake._bucket_for(start - 0.001)
 
     def test_a_dispatch_that_raises_is_released_and_audited(self, wake, monkeypatch):
         async def _boom(**kwargs):
