@@ -311,6 +311,12 @@ export function useWebSocket() {
           if (operatorStores) skillsStore.noteSkillsChanged(data.agent_name)
           clientPortalStore.revalidateBriefing(data.agent_name)
         }
+        // #4537: a reply landed in an agent chat session (thin trigger: ids
+        // only). The open ChatPanel refetches that session over REST; a no-op
+        // when it shows another session or is mid-turn.
+        if (data.type === 'chat_response_ready' && data.agent_name) {
+          agentsStore.noteChatReply(data.agent_name, data.chat_session_id)
+        }
         // #918: agent report thin trigger (broadcast fleet-wide, keyed by type).
         // The agent store filters by the agent on screen; the fleet store does a
         // guarded refresh. Each is a no-op when its panel isn't mounted.
