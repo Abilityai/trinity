@@ -79,8 +79,9 @@ else
 fi
 
 # Vector
-if curl -sf http://localhost:8686/health | grep -q "ok\|healthy"; then
-    echo -e "${GREEN}✓ Vector log aggregator (localhost:8686)${NC}"
+# Vector's API is not published on the host: ask it inside its own container.
+if docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health 2>/dev/null | grep -q "ok\|healthy"; then
+    echo -e "${GREEN}✓ Vector log aggregator (in-container health)${NC}"
 else
     echo -e "${YELLOW}⚠ Vector health check failed${NC}"
 fi
@@ -145,7 +146,7 @@ if [ "$all_running" = true ]; then
             echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
     esac
     echo "  - Scheduler:    http://localhost:8001/health"
-    echo "  - Vector logs:  http://localhost:8686/health"
+    echo "  - Vector logs:  docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health"
     echo ""
     if [ "${admin_in_browser:-0}" = 1 ] && ! grep -qE '^ADMIN_PASSWORD=.+' .env 2>/dev/null; then
         echo "Login: the admin account created in the browser (none yet? open the Web UI and create it)"

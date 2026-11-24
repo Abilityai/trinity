@@ -5,10 +5,9 @@
 #   - 80: Trinity frontend (standard HTTP)
 #   - 8080: Trinity MCP server
 #   - 8001: Scheduler service (internal health check)
-#   - 8686: Vector log aggregator
-#   - 4317: OTel Collector gRPC (OTLP)
-#   - 4318: OTel Collector HTTP (OTLP)
-#   - 8889: OTel Prometheus metrics
+#
+# Not published on the host: Vector's API (8686, container loopback only) and
+# the OTel Collector (4317 / 4318 / 8889 / 13133, reached by Docker DNS).
 #
 # THIS IS A COMPLETE, STANDALONE FILE — NOT an overlay on docker-compose.yml (#2528).
 # Run it on its own:
@@ -851,8 +850,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./config/vector.yaml:/etc/vector/vector.yaml:ro
       - trinity-logs:/data/logs
-    ports:
-      - "8686:8686"  # Vector API (health checks)
+    # No published port. The API (the health endpoint) is for this
+    # container alone: the healthcheck below asks it over the container's own
+    # loopback, and `config/vector.yaml` binds it there. Nothing else needs it.
     networks:
       - trinity-platform   # Vector reads via Docker socket, not network — platform side
     security_opt:
@@ -1015,11 +1015,9 @@ services:
     container_name: trinity-otel-collector
     logging: *default-logging
     restart: unless-stopped
-    ports:
-      - "4317:4317"   # gRPC receiver (OTLP)
-      - "4318:4318"   # HTTP receiver (OTLP)
-      - "8889:8889"   # Prometheus metrics exporter
-      - "13133:13133" # Health check endpoint
+    # No published ports. Agents push OTLP to `trinity-otel-collector:4317`
+    # and the backend reads `:8889/metrics`, both by Docker DNS on the networks
+    # below; neither goes through the host.
     volumes:
       - ./config/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
     networks:
@@ -1033,7 +1031,7 @@ services:
     cap_drop:
       - ALL
     # NOTE: No healthcheck - distroless image has no shell/curl
-    # Collector health can be checked externally via :13133 if health_check extension is enabled
+    # Collector health is on :13133 inside the container (the health_check extension); it is not published
 
 volumes:
   agent-configs:

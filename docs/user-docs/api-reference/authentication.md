@@ -220,7 +220,7 @@ Two real-time endpoints, two credentials:
 | `/api/auth/email/request` | POST | None | Request email verification code |
 | `/api/auth/email/verify` | POST | None | Verify email code, returns token |
 | `/api/auth/email/handoff` | POST | None | Finish a sign-in the Workspace code page started — body `{email, handoff}`. Redeems the one-time token the Workspace returns after a correct code for a platform account, in place of a second emailed code; otherwise the same checks, rate limits and 2FA step as `/api/auth/email/verify` |
-| `/api/auth/mode` | GET | None | Get auth mode configuration — `email_auth_enabled`, `email_code_login_enabled`, `email_delivery_available` (`false` when no email provider can send; the login page then says the code is in the backend log), `setup_completed` |
+| `/api/auth/mode` | GET | None | Get auth mode configuration — `email_auth_enabled`, `email_code_login_enabled`, `email_delivery_available` (`false` when no email provider can send; the login page then says no email was sent), `email_code_in_log` (`true` only on a development install that prints codes to the backend log), `setup_completed` |
 | `/api/auth/logout` | POST | JWT | Revoke the current token immediately (idempotent; no-op for MCP keys) |
 | `/api/auth/validate` | GET | JWT | Validate current token (rejects revoked tokens) |
 | `/api/users/me` | GET | JWT | Get current user info, including `has_password` |
