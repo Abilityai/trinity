@@ -13,6 +13,7 @@ went dark exactly that way mid-split.
 """
 import asyncio
 import os
+import shlex
 import logging
 from typing import Optional, Dict, Any
 
@@ -99,7 +100,50 @@ async def _container_has_git_dir(container_name: str) -> bool:
     return result.get("exit_code") == 0
 
 
-async def merge_gitignore_after_clone(agent_name: str) -> None:
+def _build_untrack_dropped_documents_command(git_dir: str) -> str:
+    """Untrack committed uploaded documents, and only those, at agent start
+    (abilityai/trinity-enterprise#1373).
+
+    THE ONE EXCEPTION to #2069's rule that the start path PREVENTS and only a
+    Push REMEDIATES. An auto-sync agent that is never Pushed would otherwise
+    keep every document committed before the fix tracked, and its next 15-min
+    cycle commits a re-dropped document of the same name all over again — the
+    ignore rule cannot stop a file git already tracks. Documents people hand
+    an agent are never the agent's source, so untracking them unasked is safe
+    in a way a broad sweep at start is not; every other managed rule stays the
+    Push's job.
+
+    Narrow by construction: the pathspecs are derived from
+    ``gitignore._DROPPED_DOCUMENT_PATTERNS``, and ``ls-files -ci --exclude-standard``
+    still asks git whether each file is ignored, so an agent's own negation
+    (``!inbox/<folder>/<file>``) keeps a document tracked. Index only — the
+    working tree is untouched. Reports in the sweep's ``removed`` tags so
+    ``gitignore_sweep._parse_gitignore_sweep`` reads it, and only AFTER a
+    successful ``git rm`` (the ``&&`` chain), as the Push sweep does.
+    """
+    q = shlex.quote
+    specs = " ".join(
+        q(f":(glob){p.lstrip('/')}") for p in gitignore._DROPPED_DOCUMENT_PATTERNS
+    )
+    script = (
+        f"cd {q(git_dir)} && "
+        f"ignored=$(git ls-files -ci --exclude-standard -- {specs}) && "
+        'if [ -n "$ignored" ]; then '
+        f"git ls-files -ci -z --exclude-standard -- {specs} | "
+        "xargs -0 git rm --cached --quiet -r --; "
+        "fi && "
+        '{ [ -z "$ignored" ] || { printf \'%s\\n\' "$ignored" | wc -l | tr -d " " | '
+        f"sed 's#^#{gitignore.gitignore_sweep._SWEEP_TAG_REMOVED_COUNT}#'; "
+        'printf \'%s\\n\' "$ignored" | '
+        f"head -n {gitignore.gitignore_sweep._SWEEP_PROBE_LINE_CAP} | "
+        f"sed 's#^#{gitignore.gitignore_sweep._SWEEP_TAG_REMOVED}#'; }}; }}"
+    )
+    return f"bash -c {shlex.quote(script)}"
+
+
+async def merge_gitignore_after_clone(
+    agent_name: str, *, untrack_dropped_documents: bool = False
+) -> None:
     """Readiness-gated fire-and-forget merge of `gitignore._GITIGNORE_PATTERNS` into a
     fresh `github:` agent's `.gitignore`, so the first in-container auto-sync
     cycle stages none of the ignored runtime/credential paths (#2069).
@@ -115,6 +159,13 @@ async def merge_gitignore_after_clone(agent_name: str) -> None:
         + retired by #1703.
       * **Push = REMEDIATE** — `gitignore._migrate_workspace_gitignore` still does
         merge + untrack, unchanged (AC#5: no behaviour change on `sync_to_github`).
+      * **Start, uploaded documents only** — ``untrack_dropped_documents=True``
+        (passed by the start/recreate path, never by creation) adds the ONE
+        exception to "start = prevent": after the merge it untracks committed
+        uploaded documents (`_build_untrack_dropped_documents_command`)
+        and files the same operator alert a Push sweep files
+        (abilityai/trinity-enterprise#1373). An auto-sync agent that is never
+        Pushed would otherwise re-commit a re-dropped document forever.
 
     Merge point — the central correctness question. The merge must run AFTER
     startup.sh finishes ALL of its git setup and BEFORE the first auto-sync
@@ -151,6 +202,7 @@ async def merge_gitignore_after_clone(agent_name: str) -> None:
     #1703 is the structural fix.
     """
     container_name = f"agent-{agent_name}"
+    sweep = None
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _MERGE_READY_TIMEOUT_SECONDS
     ready = False
@@ -238,6 +290,28 @@ async def merge_gitignore_after_clone(agent_name: str) -> None:
                 agent_name,
                 git_dir,
             )
+
+            if untrack_dropped_documents:
+                result = await asyncio.wait_for(
+                    execute_command_in_container(
+                        container_name=container_name,
+                        command=_build_untrack_dropped_documents_command(git_dir),
+                        timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
+                    ),
+                    timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
+                )
+                # A failed exec reports nothing: never alert on paths that
+                # may still be tracked.
+                if isinstance(result, dict) and result.get("exit_code") == 0:
+                    sweep = gitignore.gitignore_sweep._parse_gitignore_sweep(
+                        "", result.get("output")
+                    )
+
+        # Outside the Docker-pool cap: the alert touches no container.
+        if sweep is not None:
+            await gitignore.gitignore_sweep._emit_gitignore_untracked_alert(
+                agent_name, sweep
+            )
     except Exception as exc:
         logger.warning(
             "[#2069] creation .gitignore merge failed for %s: %s. "
@@ -247,7 +321,9 @@ async def merge_gitignore_after_clone(agent_name: str) -> None:
         )
 
 
-def spawn_gitignore_merge_after_clone(agent_name: str) -> None:
+def spawn_gitignore_merge_after_clone(
+    agent_name: str, *, untrack_dropped_documents: bool = False
+) -> None:
     """Fire ``merge_gitignore_after_clone`` fire-and-forget (mirrors
     `activity_service.spawn_close_execution_activity`): zero creation latency;
     the merge lands within one poll interval of agent-server readiness.
@@ -261,7 +337,9 @@ def spawn_gitignore_merge_after_clone(agent_name: str) -> None:
     the spawn is skipped (logged), never raised — the Push migration is the
     backstop.
     """
-    coro = merge_gitignore_after_clone(agent_name)
+    coro = merge_gitignore_after_clone(
+        agent_name, untrack_dropped_documents=untrack_dropped_documents
+    )
     try:
         task = asyncio.create_task(coro)
         _inflight_gitignore_merge_tasks.add(task)

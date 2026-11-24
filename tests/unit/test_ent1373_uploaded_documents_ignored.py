@@ -246,3 +246,162 @@ def test_shadow_probe_survives_an_anchored_negation(tmp_path, monkeypatch):
     sweep_out = _run_shell(gs._build_rm_cached_ignored_command(str(tmp_path)), tmp_path)
     report = gs.gitignore_sweep._parse_gitignore_sweep("", sweep_out)
     assert "!.ssh/config -> .ssh/" in report.shadowed, report
+
+
+# --- (e) the start-path untrack ----------------------------------------------
+#
+# The one exception to #2069's "start = prevent only": an auto-sync agent that
+# never Pushes would otherwise keep committing a re-dropped document under the
+# same name, because the Push sweep is the only other place that untracks.
+
+def _load_clone(monkeypatch):
+    gs = _load_gitignore(monkeypatch)
+    monkeypatch.setitem(sys.modules, "services.agent_auth", Mock())
+    import services.git_service.gitignore_clone as gc
+    return gs, gc
+
+
+def test_start_untrack_is_narrow(tmp_path, monkeypatch):
+    """Untracks committed documents only: not the agent's root `inbox/` file,
+    not a kept (negated) document, and not a file another managed rule would
+    sweep on Push (`node_modules/`) — that stays the Push's job."""
+    gs, gc = _load_clone(monkeypatch)
+    git = _init_repo(tmp_path)
+    _write(tmp_path, "node_modules/pkg/index.js")
+    git("add", "node_modules/pkg/index.js")
+    git("commit", "-q", "-m", "an old commit of a dependency dir")
+    _commit_everything_pre_fix(
+        gs, tmp_path, git, monkeypatch, extra_user_lines=f"!{LEGACY_PERSON_DOC}\n"
+    )
+
+    _merge(gs, tmp_path)
+    out = _run_shell(gc._build_untrack_dropped_documents_command(str(tmp_path)), tmp_path)
+
+    tracked = set(git("ls-files").stdout.splitlines())
+    swept = set(DOCS) - {LEGACY_PERSON_DOC}
+    assert not (swept & tracked), sorted(swept & tracked)
+    assert LEGACY_PERSON_DOC in tracked, "a negated document was untracked"
+    assert set(AUTHORED) <= tracked, sorted(set(AUTHORED) - tracked)
+    assert "node_modules/pkg/index.js" in tracked, "start untrack is not narrow"
+    for rel in DOCS:
+        assert (tmp_path / rel).exists()
+
+    report = gs.gitignore_sweep._parse_gitignore_sweep("", out)
+    assert set(report.removed) == swept, report
+    assert report.removed_count == len(swept)
+    # Idempotent: nothing left to report the second time.
+    again = _run_shell(gc._build_untrack_dropped_documents_command(str(tmp_path)), tmp_path)
+    assert not gs.gitignore_sweep._parse_gitignore_sweep("", again).changed_tracking
+
+
+def _ready(gc, gs, monkeypatch, exec_mock):
+    from unittest.mock import AsyncMock
+    import asyncio
+    monkeypatch.setattr(gc, "_MERGE_READY_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(gc, "_MERGE_READY_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(gc, "_MERGE_EXEC_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(gc, "_gitignore_merge_semaphore", asyncio.Semaphore(8))
+    monkeypatch.setattr(gc, "_probe_agent_server_ready", AsyncMock(return_value=True))
+    monkeypatch.setattr(gc, "_container_has_git_dir", AsyncMock(return_value=True))
+    monkeypatch.setattr(gs, "_git_toplevel", AsyncMock(return_value="/home/developer"))
+    monkeypatch.setattr(gc, "execute_command_in_container", exec_mock)
+    alert = AsyncMock()
+    monkeypatch.setattr(gs.gitignore_sweep, "_emit_gitignore_untracked_alert", alert)
+    return alert
+
+
+def test_start_merge_untracks_and_alerts(monkeypatch):
+    from unittest.mock import AsyncMock
+    import asyncio
+    gs, gc = _load_clone(monkeypatch)
+    tag = gs.gitignore_sweep
+    sweep_out = (
+        f"{tag._SWEEP_TAG_REMOVED_COUNT}1\n{tag._SWEEP_TAG_REMOVED}{PERSON_DOC}\n"
+    )
+    exec_mock = AsyncMock(side_effect=[
+        {"exit_code": 0, "output": ""},
+        {"exit_code": 0, "output": sweep_out},
+    ])
+    alert = _ready(gc, gs, monkeypatch, exec_mock)
+
+    asyncio.run(gc.merge_gitignore_after_clone("a1", untrack_dropped_documents=True))
+
+    commands = [c.kwargs["command"] for c in exec_mock.await_args_list]
+    assert commands == [
+        gs._build_gitignore_merge_command("/home/developer"),
+        gc._build_untrack_dropped_documents_command("/home/developer"),
+    ]
+    alert.assert_awaited_once()
+    name, sweep = alert.await_args.args
+    assert name == "a1" and sweep.removed == (PERSON_DOC,)
+
+
+def test_start_merge_does_not_alert_on_a_failed_untrack(monkeypatch):
+    from unittest.mock import AsyncMock
+    import asyncio
+    gs, gc = _load_clone(monkeypatch)
+    tag = gs.gitignore_sweep
+    exec_mock = AsyncMock(side_effect=[
+        {"exit_code": 0, "output": ""},
+        {"exit_code": 1, "output": f"{tag._SWEEP_TAG_REMOVED}{PERSON_DOC}\n"},
+    ])
+    alert = _ready(gc, gs, monkeypatch, exec_mock)
+    asyncio.run(gc.merge_gitignore_after_clone("a1", untrack_dropped_documents=True))
+    alert.assert_not_awaited()
+
+
+def test_creation_merge_never_untracks(monkeypatch):
+    from unittest.mock import AsyncMock
+    import asyncio
+    gs, gc = _load_clone(monkeypatch)
+    exec_mock = AsyncMock(return_value={"exit_code": 0, "output": ""})
+    alert = _ready(gc, gs, monkeypatch, exec_mock)
+    asyncio.run(gc.merge_gitignore_after_clone("a1"))
+    assert exec_mock.await_count == 1
+    alert.assert_not_awaited()
+
+
+def test_spawn_forwards_the_flag(monkeypatch):
+    from unittest.mock import AsyncMock
+    import asyncio
+    gs, gc = _load_clone(monkeypatch)
+    merge = AsyncMock()
+    monkeypatch.setattr(gc, "merge_gitignore_after_clone", merge)
+
+    async def go():
+        gc.spawn_gitignore_merge_after_clone("a1", untrack_dropped_documents=True)
+        await asyncio.gather(*list(gc._inflight_gitignore_merge_tasks))
+
+    asyncio.run(go())
+    merge.assert_awaited_once_with("a1", untrack_dropped_documents=True)
+
+
+def _spawn_calls(path: Path, fn_name: str):
+    import ast
+    tree = ast.parse(path.read_text())
+    fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn_name
+    )
+    return [
+        n for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "spawn_gitignore_merge_after_clone"
+    ]
+
+
+def _flag(call):
+    for kw in call.keywords:
+        if kw.arg == "untrack_dropped_documents":
+            return getattr(kw.value, "value", None)
+    return False
+
+
+def test_start_path_asks_for_the_untrack_and_creation_does_not():
+    """The production call sites: start/recreate passes the flag, creation
+    (PREVENT only, #2069) does not."""
+    svc = _project_root / "src" / "backend" / "services" / "agent_service"
+    start = _spawn_calls(svc / "lifecycle.py", "start_agent_internal")
+    assert start and all(_flag(c) is True for c in start), "start path lost the untrack"
+    creation = _spawn_calls(svc / "crud.py", "_materialize_agent_files")
+    assert creation and all(_flag(c) is False for c in creation), "creation must not untrack"

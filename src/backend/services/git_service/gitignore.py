@@ -123,6 +123,16 @@ CONTAINER_ONLY_SETTINGS_GUARD = (
 )
 
 
+# abilityai/trinity-enterprise#1373: the folders the platform writes uploaded
+# documents into (see the comment where `_GITIGNORE_PATTERNS` takes them). A
+# named constant because the start path untracks exactly these and nothing
+# else (`gitignore_clone._build_untrack_dropped_documents_command`).
+_DROPPED_DOCUMENT_PATTERNS: Tuple[str, ...] = (
+    "/inbox/*/**",
+    "/uploads/*/**",
+)
+
+
 _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     # Shell init / history (instance-specific)
     ".bash_logout",
@@ -165,8 +175,7 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     # own rules works: `!inbox/<folder>/<file>` (no leading slash). Merged into
     # existing agents on sync, which also untracks already-committed matches
     # (history is not rewritten).
-    "/inbox/*/**",
-    "/uploads/*/**",
+    *_DROPPED_DOCUMENT_PATTERNS,
     # #1596: bulk data / dependency / cache / index dirs that churn on every
     # run and bloat `.git` unboundedly under auto-sync. Git sync is for code +
     # state, not datasets/indexes/deps — those belong in `data_paths` (#1169) or
