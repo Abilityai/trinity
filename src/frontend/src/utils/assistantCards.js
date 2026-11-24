@@ -430,7 +430,17 @@ export function acceptCards(raw, fleet) {
   return cards
 }
 
-export function cardLabel(card, fleet) {
+/**
+ * ent#1355: in the first session the gateway sends an agent's first run as one
+ * `chat_with_agent` tool card. The page words it as that, in its own words.
+ */
+export function firstRunCard(card, firstSession) {
+  return Boolean(firstSession) && card?.action === 'tool' && card.tool === 'chat_with_agent'
+    && typeof card.args?.agent_name === 'string' && card.args.agent_name !== ''
+}
+
+export function cardLabel(card, fleet, { firstSession = false } = {}) {
+  if (firstRunCard(card, firstSession)) return `Run its first task: ${card.args.agent_name.slice(0, 80)}`
   if (card.action === 'job') return `Making "${card.title}"`
   if (card.action === 'run') return `${card.title} on ${card.agent}`
   if (card.action === 'choice') return card.question
@@ -449,7 +459,8 @@ export function cardLabel(card, fleet) {
 }
 
 /** The line under a card's title. Every change to an agent runs as the person. */
-export function cardNote(card) {
+export function cardNote(card, { firstSession = false } = {}) {
+  if (firstRunCard(card, firstSession)) return 'Starts your agent on this task now, as you.'
   if (card.action === 'job') return "Each agent is made with the standard tools and checked. This takes a few minutes. Keep talking or close this panel: I'll come back when they're ready."
   if (card.action === 'run') return "Running on the agent. Keep talking or close this panel: I'll come back with the result."
   if (card.action === 'choice') return ''

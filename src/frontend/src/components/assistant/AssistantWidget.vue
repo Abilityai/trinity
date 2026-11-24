@@ -449,12 +449,13 @@
           class="mx-4 mb-2 rounded-lg border p-3 space-y-2 border-action-primary-200 dark:border-action-primary-500/40 bg-action-primary-50 dark:bg-action-primary-500/16"
           data-testid="assistant-limit"
         >
-          <p class="font-medium text-gray-900 dark:text-gray-100">
-            {{ store.subscribed ? "You've reached this period's allowance." : "You've used the free allowance." }}
-          </p>
+          <p class="font-medium text-gray-900 dark:text-gray-100">{{ limitWords }}</p>
           <p class="text-[12.5px] text-gray-600 dark:text-gray-300">
-            <template v-if="resetWords">It comes back {{ resetWords }}. </template>
-            <template v-if="!store.subscribed">Trinity Pro gives you much more, and bigger teams. Ask stays free either way.</template>
+            <template v-if="trialEnded">Subscribe to Trinity Pro to keep using the assistant; nothing you built is stopped. Ask stays free either way.</template>
+            <template v-else>
+              <template v-if="resetWords">It comes back {{ resetWords }}. </template>
+              <template v-if="!store.subscribed">Trinity Pro gives you much more, and bigger teams. Ask stays free either way.</template>
+            </template>
           </p>
           <BaseButton v-if="!store.subscribed" size="sm" data-testid="assistant-upgrade" @click="store.openAccount()">Subscribe to Trinity Pro</BaseButton>
         </div>
@@ -911,6 +912,17 @@ function elapsed(since) {
   const s = Math.max(0, Math.round((now.value - since) / 1000))
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`
 }
+
+// Which limit was reached, in one sentence (Abilityai/trinity-gateway#37): the trial's days
+// end it for good, so nothing "comes back"; messages name their number and period.
+const trialEnded = computed(() => store.limit?.reached === 'days')
+const limitWords = computed(() => {
+  const l = store.limit || {}
+  if (trialEnded.value) return l.days_limit ? `Your ${l.days_limit}-day free trial has ended.` : 'Your free trial has ended.'
+  if (store.subscribed) return "You've reached this period's allowance."
+  const period = l.period_hours === 24 ? "today's" : l.period_hours === 168 ? "this week's" : 'the'
+  return l.messages_limit ? `You've used ${period} ${l.messages_limit} free messages.` : "You've used the free allowance."
+})
 
 // When the allowance comes back, in the person's own words for time.
 const resetWords = computed(() => {
