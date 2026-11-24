@@ -108,6 +108,30 @@ owner tier, a visitor's stays a visitor's. The person rule above is the
 fallback for a callee row with no link (one written before the column, or by
 a key that named no running turn).
 
+**The wake is the next step of a conversation (#4537).** A person asks an
+agent in chat to "ask X and tell me what it said"; the agent delegates and
+replies that it will report back. The wake then ran cut off from that
+conversation at both ends, and this closes both:
+
+* *what it knows* — the frame carries the delegating turn: what the agent was
+  asked and what it replied then (its plan), read off the turn the callee row
+  links (``continues_execution_id``). A wake that delegates again links the
+  next callee to the wake itself, so the request is read from the head of that
+  chain — the first turn that is not a platform continuation — and the reply
+  from the turn that delegated last. Both are the delegator's own rows
+  (``agent_name`` is checked at every hop), sanitized and capped.
+* *where its reply goes* — when the head of the chain is a person's turn in an
+  agent chat thread (the row names it, ``chat_session_id``), the wake's reply is
+  written into that thread as the agent's next message. It is written at the
+  wake row's own terminal, the hook every terminal writer reaches, so a wake
+  that outlives its dispatcher (pull, restart, timeout) still reports; once per
+  wake (an idempotency claim on the wake id); SUCCESS only — a failed wake stays
+  on the execution row for the operator.
+
+Workspace, Slack and Telegram conversations are not written here: a delegated
+run already reports back into those through the inherited channel context
+(``channel_completion_report``).
+
 Never raises: this runs on the path of an already-billed terminal.
 """
 
@@ -148,6 +172,11 @@ _WAKE_KEY_PREFIX = "trinity:wake_fires:"
 # The same cap and chokepoint the #1578 event payload uses, for the same reason.
 SUMMARY_MAX = 2000
 ASK_IDS_MAX = 10
+
+# #4537: how much of the delegating turn the frame quotes (each of the request
+# and the reply), and how far back a chain of continuations is followed.
+ORIGIN_TEXT_MAX = 1500
+ORIGIN_HOPS_MAX = 8
 
 
 # #4536: an ending that collides with a running wake's window is parked here
@@ -486,6 +515,146 @@ async def _audit(**details) -> None:
 
 # --- the frame -------------------------------------------------------------
 
+# --- the conversation the wake belongs to (#4537) ---------------------------
+
+def _delegating_turns(caller: str, origin_id: Any) -> Tuple[Any, Any]:
+    """``(origin, root)`` for a wake of ``caller``: the caller's turn that
+    delegated, and the turn at the head of the continuation chain — the first
+    one a platform continuation did not start. Either is None when it cannot be
+    read; every row on the way must be the caller's own. Never raises."""
+    origin = root = None
+    seen: set = set()
+    current = origin_id
+    for _ in range(ORIGIN_HOPS_MAX):
+        if not isinstance(current, str) or not current or current in seen:
+            break
+        seen.add(current)
+        try:
+            turn = _read_row(current)
+        except Exception as e:  # noqa: BLE001 — context is optional, the wake is not
+            logger.debug("#4537: reading turn %s failed: %s", current, e)
+            break
+        if turn is None or getattr(turn, "agent_name", None) != caller:
+            break
+        if origin is None:
+            origin = turn
+        if str(getattr(turn, "triggered_by", None) or "") not in RESERVED_TRIGGERS:
+            root = turn
+            break
+        current = getattr(turn, "continues_execution_id", None)
+    return origin, root
+
+
+def _thread_id_of(execution_id: str) -> Optional[str]:
+    from database import db
+
+    return db.get_execution_chat_session_id(execution_id)
+
+
+def _thread(session_id: str):
+    from database import db
+
+    return db.get_chat_session(session_id)
+
+
+def _reply_thread(caller: str, root: Any):
+    """The agent chat thread a wake's reply belongs in, or None.
+
+    Only a person's own turn in a thread of this agent: the row names the
+    thread, no agent started the turn, and the thread is that person's."""
+    if root is None or getattr(root, "source_agent_name", None):
+        return None
+    person = getattr(root, "source_user_id", None)
+    if person is None:
+        return None
+    try:
+        session_id = _thread_id_of(root.id)
+        if not session_id:
+            return None
+        session = _thread(session_id)
+    except Exception as e:  # noqa: BLE001 — no thread is the old behaviour
+        logger.debug("#4537: thread lookup for %s failed: %s", getattr(root, "id", None), e)
+        return None
+    if session is None or getattr(session, "agent_name", None) != caller:
+        return None
+    if str(getattr(session, "user_id", "")) != str(person):
+        return None
+    return session
+
+
+def _quoted(text: Any) -> str:
+    """A turn's text for the frame: sanitized, then capped, keeping the END —
+    a chat request that carries earlier turns as context ends with the
+    person's newest words."""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    clean = sanitize_text(raw[-ORIGIN_TEXT_MAX * 2:])
+    if len(clean) > ORIGIN_TEXT_MAX or len(raw) > ORIGIN_TEXT_MAX * 2:
+        return "[…] " + clean[-ORIGIN_TEXT_MAX:]
+    return clean
+
+
+def _conversation_lines(origin: Any, root: Any, to_thread: bool) -> List[str]:
+    asked = _quoted(getattr(root, "message", None)) if root is not None else ""
+    replied = _quoted(getattr(origin, "response", None)) if origin is not None else ""
+    lines: List[str] = []
+    if asked or replied:
+        lines += ["", "This run was delegated from a turn of your own. Continue that work — "
+                      "the wake is its next step, not a new request."]
+    if asked:
+        lines += ["", "What you were asked in that conversation (quoted, the request you "
+                      "were already working on):", "", asked]
+    if replied:
+        lines += ["", "What you replied when you delegated (your plan then):", "", replied]
+    if to_thread:
+        lines += ["", "Your reply to this wake is posted, verbatim, as your next message in "
+                      "the chat where you were asked. Write it for the person reading that chat."]
+    return lines
+
+
+async def _post_wake_reply(wake_row: Any) -> bool:
+    """Write a finished wake's reply into the chat thread its delegation came
+    from (#4537). Once per wake; SUCCESS only. Never raises."""
+    try:
+        caller = getattr(wake_row, "agent_name", None)
+        wake_id = getattr(wake_row, "id", None)
+        status = getattr(wake_row, "status", None)
+        status = status.value if hasattr(status, "value") else str(status)
+        if not caller or not wake_id or status != "success":
+            return False
+        if not (getattr(wake_row, "response", None) or "").strip():
+            return False
+        # Database reads: off the event loop (#4674).
+        _origin, root = await asyncio.to_thread(
+            _delegating_turns, caller, getattr(wake_row, "continues_execution_id", None))
+        session = await asyncio.to_thread(_reply_thread, caller, root)
+        if session is None:
+            return False
+        claim = _begin_idempotency(_agent_scope(caller), f"caller_wake_reply:{wake_id}")
+        if getattr(claim, "replay", False):
+            return False
+        try:
+            from services import chat_persistence_service
+
+            written = await chat_persistence_service.post_platform_turn_reply(
+                agent_name=caller, session=session, row=wake_row)
+        except Exception:
+            _fail_idempotency(claim)
+            raise
+        if written:
+            from services import idempotency_service
+
+            idempotency_service.complete(claim, wake_id, {"chat_session_id": session.id})
+        else:
+            _fail_idempotency(claim)
+        return bool(written)
+    except Exception as e:  # noqa: BLE001 — the wake's terminal already stands
+        logger.warning("#4537: posting the wake reply for %s failed (%s)",
+                       getattr(wake_row, "id", None), type(e).__name__)
+        return False
+
+
 def _summary_of(row) -> Tuple[str, Optional[int]]:
     """The callee's words, redacted and capped — and, only when the cap cut
     them, the length of the full text (ent#1216), so the frame can say so."""
@@ -501,7 +670,7 @@ def _summary_of(row) -> Tuple[str, Optional[int]]:
     return clean[:SUMMARY_MAX], (len(text) if cut else None)
 
 
-def _framed_wake(row, ask_ids: List[str]) -> str:
+def _framed_wake(row, ask_ids: List[str], conversation: Optional[List[str]] = None) -> str:
     callee = getattr(row, "agent_name", "?")
     execution_id = getattr(row, "id", "?")
     status = getattr(row, "status", "?")
@@ -527,6 +696,7 @@ def _framed_wake(row, ask_ids: List[str]) -> str:
         if full_length is not None:
             # ent#1216: a silent cut read as the run's own answer stopping there.
             lines += ["", f"[cut here: the first {len(summary):,} of {full_length:,} characters]"]
+    lines += conversation or []
     lines += [
         "",
         f"Read the full result with `get_execution_result('{callee}', '{execution_id}')`. "
@@ -569,6 +739,8 @@ async def maybe_wake_caller(
     if triggered_by and str(triggered_by) == TRIGGERED_BY_CALLER_WAKE:
         # #4536: a wake's own end delivers what was parked while it ran. It
         # wakes nobody for itself (the recursion break below still holds).
+        # #4537: and its reply goes back to the chat the delegation came from.
+        await _post_wake_reply(row)
         if getattr(row, "agent_name", None):
             await _drain_missed(row.agent_name, getattr(row, "id", None))
         return None
@@ -680,10 +852,18 @@ async def _claimed_wake(row, caller, callee, execution_id, verdict, idem):
         standing = "owner" if person is not None else "none"
         attribution = {"source_user_id": person} if person is not None else {}
 
+    # #4537: the wake carries the turn that delegated, and is told when its
+    # reply goes back to that chat. Read from the link only — the ent#1216
+    # fallback names a person, not a turn.
+    # Database reads: off the event loop (#4674).
+    turn, root = await asyncio.to_thread(_delegating_turns, caller, origin)
+    replies_to_chat = await asyncio.to_thread(_reply_thread, caller, root) is not None
+    conversation = _conversation_lines(turn, root, replies_to_chat)
+
     try:
         result = await _dispatch_wake(
             agent_name=caller,
-            message=_framed_wake(row, ask_ids),
+            message=_framed_wake(row, ask_ids, conversation),
             # ent#751: the skill gate reads person text only, and no person
             # wrote this — the platform did. ent#886/#715: no source_user_email.
             request_text="",

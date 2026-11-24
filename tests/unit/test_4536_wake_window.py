@@ -64,6 +64,13 @@ NOW = 1_800_000_000 - (1_800_000_000 % _WAKE.WAKE_BUCKET_SECONDS) + 5
 
 @pytest.fixture
 def world(db_backend, monkeypatch):
+    # #4537: the wake reads the delegating turn in a thread before it dispatches.
+    # These tests step the window one loop tick at a time (`await asyncio.sleep(0)`
+    # then assert), so that read runs inline here: the choreography under test is
+    # the window's, not the thread pool's.
+    async def _inline(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+    monkeypatch.setattr(_WAKE.asyncio, "to_thread", _inline)
     wakes = []
     spawned = []
     audits = []
