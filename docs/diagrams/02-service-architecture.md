@@ -39,7 +39,7 @@ This document visualizes Trinity's containerized service architecture:
 |  |  |   Vue.js    |  |   FastAPI   |  |   FastMCP   |  | Log Aggreg. |     |    |
 |  |  |   Nginx     |  |   Python    |  |   Node.js   |  |   (Rust)    |     |    |
 |  |  |             |  |             |  |             |  |             |     |    |
-|  |  |  Port 3000  |  |  Port 8000  |  |  Port 8080  |  |  Port 8686  |     |    |
+|  |  |  Port 3000  |  |  Port 8000  |  |  Port 8080  |  |  internal   |     |    |
 |  |  +------+------+  +------+------+  +------+------+  +------+------+     |    |
 |  |         |                |                |                |            |    |
 |  |         |    REST/WS     |    REST        |    Docker      |            |    |
@@ -283,7 +283,7 @@ This document visualizes Trinity's containerized service architecture:
 - Platform: `trinity-*` (backend, frontend, redis, mcp-server, vector)
 - Agents: `agent-*` (all Trinity-managed agent containers)
 
-**Health Check:** `GET http://localhost:8686/health`
+**Health Check:** `docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health` (the API is not published on the host)
 
 ---
 

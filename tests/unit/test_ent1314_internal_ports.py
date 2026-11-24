@@ -191,6 +191,58 @@ def test_a_verification_code_goes_through_the_same_door(monkeypatch, caplog, cap
     assert CODE not in caplog.text + out.out + out.err
 
 
+def _service(monkeypatch, provider):
+    from services import email_service as module
+
+    service = module.EmailService()
+    monkeypatch.setattr(service, "_runtime_config", lambda: (provider, "", "noreply@example.com"))
+    return service
+
+
+@pytest.mark.parametrize("provider, flag, expected", [
+    ("console", "true", True),      # a development install that asked for it
+    ("console", "", False),         # console mode as shipped
+    ("console", "false", False),
+    ("resend", "true", False),      # the opt-in is for console mode only
+    ("smtp", "true", False),
+    ("postmark", "true", False),
+])
+def test_the_login_page_is_told_the_code_is_in_the_log_only_when_it_is(monkeypatch, provider, flag, expected):
+    monkeypatch.setenv("EMAIL_CONSOLE_LOG_BODY", flag)
+    assert _service(monkeypatch, provider).code_is_logged() is expected
+
+
+def test_an_unreadable_config_never_claims_the_code_is_in_the_log(monkeypatch):
+    from services import email_service as module
+
+    service = module.EmailService()
+
+    def broken():
+        raise RuntimeError("settings unavailable")
+
+    monkeypatch.setattr(service, "_runtime_config", broken)
+    monkeypatch.setenv("EMAIL_CONSOLE_LOG_BODY", "true")
+    assert service.code_is_logged() is False
+
+
+def test_what_the_flag_says_is_what_the_sender_does(monkeypatch, caplog, capsys):
+    """The page's claim and the log's content come from the same two inputs."""
+    caplog.set_level(logging.DEBUG)
+    for provider, flag in (("console", "true"), ("console", ""), ("resend", "true")):
+        monkeypatch.setenv("EMAIL_CONSOLE_LOG_BODY", flag)
+        service = _service(monkeypatch, provider)
+        caplog.clear()
+        asyncio.run(service.send_email("person@example.com", "Your code", BODY))
+        out = capsys.readouterr()
+        in_log = CODE in caplog.text + out.out + out.err
+        assert in_log is service.code_is_logged(), (provider, flag)
+
+
+def test_the_auth_mode_response_carries_the_flag():
+    source = (_REPO / "src/backend/routers/auth.py").read_text(encoding="utf-8")
+    assert '"email_code_in_log": email_service.code_is_logged(),' in source
+
+
 # ---------------------------------------------------------------------------
 # Message content in info logs
 # ---------------------------------------------------------------------------
@@ -199,6 +251,7 @@ def test_a_verification_code_goes_through_the_same_door(monkeypatch, caplog, cap
     ("docker/base-image/agent_server/routers/chat.py", r"logger\.\w+\(.*request\.message\["),
     ("src/backend/adapters/message_router.py", r"logger\.\w+\(.*voice_text\["),
     ("src/backend/services/gemini_voice.py", r"logger\.\w+\(.*prompt\["),
+    ("docker/base-image/agent_server/services/gemini_runtime.py", r"logger\.\w+\(.*response_text\["),
 ])
 def test_these_log_lines_carry_a_length_not_the_words(path, forbidden):
     source = (_REPO / path).read_text(encoding="utf-8")

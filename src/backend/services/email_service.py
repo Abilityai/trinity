@@ -87,6 +87,21 @@ class EmailService:
             settings_service.get_email_from_address(),
         )
 
+    def code_is_logged(self) -> bool:
+        """Is a sign-in code readable in the backend log on this install?
+
+        Only when an operator chose the `console` provider AND asked for mail
+        bodies to be printed (`EMAIL_CONSOLE_LOG_BODY`, a development setting).
+        Everywhere else a code that was not delivered is not written anywhere.
+        The Login page reads this (via `GET /api/auth/mode`) so it never sends
+        someone to the log for a code that is not there.
+        """
+        try:
+            provider, _, _ = self._runtime_config()
+        except Exception:  # noqa: BLE001 — copy only; never fail the mode read
+            return False
+        return provider == "console" and _console_body_allowed()
+
     def can_deliver(self) -> bool:
         """Can this install deliver an email right now, by a provider of its own
         or through a registered relay?"""
@@ -120,10 +135,11 @@ class EmailService:
         """Can a provider of this install's own deliver an email right now? (#3655)
 
         False when the provider resolved per send is `console`, unknown, or
-        missing what it needs — every one of those falls back to printing the
-        message to the backend log while the send reports success. The Login
-        page reads it (install-level, via `GET /api/auth/mode`) to stop saying
-        "we sent a code" when nothing was sent. An unreadable config answers
+        missing what it needs. None of those sends anything: `console` logs
+        who and what (the body only when `EMAIL_CONSOLE_LOG_BODY` is set), and
+        a provider missing its configuration reports the mail as not sent. The
+        Login page reads it (install-level, via `GET /api/auth/mode`) to stop
+        saying "we sent a code" when nothing was sent. An unreadable config answers
         True, so the page behaves exactly as it did before.
         """
         try:
@@ -168,8 +184,8 @@ class EmailService:
         if relayed is not None:
             if not relayed:
                 # Say it was not sent, and nothing more: a sign-in code written to the log is one
-                # hop from whoever reads the logs. (The `console` provider prints codes because an
-                # operator chose it; a relay that refused is not that choice.)
+                # hop from whoever reads the logs. (The `console` provider prints one only when a
+                # developer set EMAIL_CONSOLE_LOG_BODY; a relay that refused is not that choice.)
                 logger.warning("Verification code not sent: the mail relay refused or did not answer.")
             return relayed
 

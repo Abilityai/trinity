@@ -155,8 +155,10 @@
             <!-- Step 2: Enter Code -->
             <div v-else>
               <div class="mb-4">
-                <!-- #3655: with no email provider the code is only in the backend
-                     log. Say so, and never render the code itself. -->
+                <!-- #3655: with no email provider no code is sent. Say so, and never
+                     render the code itself. The backend log holds it only on a
+                     development install that asked for that (`emailCodeInLog`);
+                     anywhere else the page must not send people to look there. -->
                 <div
                   v-if="authStore.emailDeliveryAvailable === false"
                   class="rounded-lg px-3 py-2 text-sm bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-500/15 dark:text-status-warning-300"
@@ -164,9 +166,13 @@
                   role="status"
                 >
                   <p class="font-medium">No email provider is configured on this install, so no email was sent.</p>
-                  <p class="mt-1">
+                  <p v-if="authStore.emailCodeInLog" class="mt-1" data-testid="login-code-in-log">
                     If {{ emailInput }} may sign in here, its code was written to the backend
                     log. Read it with <code class="font-mono">docker compose logs backend</code>.
+                  </p>
+                  <p v-else class="mt-1" data-testid="login-code-nowhere">
+                    The code for {{ emailInput }} was not delivered and is not stored anywhere
+                    you can read, so it cannot be used to sign in.
                   </p>
                   <p class="mt-1">
                     An admin can sign in with Admin Login and a password, and add an email

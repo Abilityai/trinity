@@ -362,7 +362,7 @@ Users enter email → receive 6-digit code → login. Configure email provider:
 EMAIL_PROVIDER=console  # console (dev: sends nothing, logs recipient and subject only), smtp, sendgrid, resend
 ```
 
-For local development, use `console` - codes are printed to backend logs.
+For local development, use `console`. It sends nothing and logs the recipient and subject only; to read sign-in codes from the backend log, also set `EMAIL_CONSOLE_LOG_BODY=true` in `.env` (it is passed through by `docker-compose.yml` only).
 
 Manage allowed emails in Settings → Email Whitelist.
 

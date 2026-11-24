@@ -1,9 +1,10 @@
 """#3655 — the Login page knows whether this install can deliver email.
 
 With no email provider configured (the default for a localhost install that
-skipped the Resend key) the sender falls back to console mode: the code goes to
-the backend log and the send reports success. The page said "We sent a 6-digit
-code" and the person waited for an email that never came.
+skipped the Resend key) nothing is sent. The page said "We sent a 6-digit
+code" and the person waited for an email that never came. (Until
+trinity-enterprise#1314 the code was also printed to the backend log; it no
+longer is, except on a development install that sets EMAIL_CONSOLE_LOG_BODY.)
 
 Pinned here:
 
