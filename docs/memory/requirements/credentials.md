@@ -280,6 +280,11 @@
   answers "check unavailable" (503), not a rejection. A paste containing `#` (a sign-in code) is refused with a
   plain message that a token is expected; any other value is refused the same
   way. Nothing is stored on a refusal.
+- **One card, either name**: the assistant's first-session key step asks under
+  `ANTHROPIC_API_KEY`; the instance treats `ANTHROPIC_API_KEY` and
+  `CLAUDE_SUBSCRIPTION` (no agent) as this same card, and the panel posts the
+  name the assistant asked under, so its "Provided:" line names what was asked.
+  A card kept from an earlier conversation behaves the same.
 - **Record**: a registration through the card writes one audit row — the name
   and the actor, never the value. The value never reaches the chat, a model, a
   log line or an execution record.

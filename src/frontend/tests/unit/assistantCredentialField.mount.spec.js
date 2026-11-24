@@ -172,11 +172,11 @@ describe('assistant credential field', () => {
 
   it("the instance's own Claude key is asked for with no agent, and an API key still goes in it (ent#1354)", async () => {
     await openAndAsk({ action: 'credential', name: 'ANTHROPIC_API_KEY', why: 'Your agents run on Claude.' })
-    expect(wrapper.get('[data-testid="assistant-card"]').text()).toContain('stored on this instance as CLAUDE_SUBSCRIPTION')
+    expect(wrapper.get('[data-testid="assistant-card"]').text()).toContain('stored on this instance as ANTHROPIC_API_KEY')
     await type('sk-ant-api03-example')
     await save()
-    expect(posted(CRED)[0].body).toEqual({ agent: null, name: 'CLAUDE_SUBSCRIPTION', value: 'sk-ant-api03-example' })
-    expect(posted(TURN).at(-1).body.message).toBe('Provided: CLAUDE_SUBSCRIPTION for this instance.')
+    expect(posted(CRED)[0].body).toEqual({ agent: null, name: 'ANTHROPIC_API_KEY', value: 'sk-ant-api03-example' })
+    expect(posted(TURN).at(-1).body.message).toBe('Provided: ANTHROPIC_API_KEY for this instance.')
   })
 
   it('a card that carries anything but a name, a reason and a known agent is not shown', async () => {

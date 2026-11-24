@@ -9781,7 +9781,7 @@
         "unit",
         "credentials"
       ],
-      "description": "The assistant's Claude card, mounted (ruled 2026-11-24): three terminal steps naming claude setup-token and no sign-in link, the API key as the alternative in the same field; the paste goes once to the instance as CLAUDE_SUBSCRIPTION and the assistant hears only 'Provided'; a pasted sign-in code is refused in plain words and sends nothing; an agent's own ANTHROPIC_API_KEY is unchanged."
+      "description": "The assistant's Claude card, mounted (ruled 2026-11-24): three terminal steps naming claude setup-token and no sign-in link, the API key as the alternative in the same field; the paste goes once to the instance under the name the assistant asked for (ANTHROPIC_API_KEY or CLAUDE_SUBSCRIPTION, and a card kept from an earlier conversation) and the assistant hears only 'Provided' for that name; a pasted sign-in code is refused in plain words and sends nothing; an agent's own ANTHROPIC_API_KEY is unchanged."
     },
     {
       "file": "unit/test_4757_sonnet_55_default.py",

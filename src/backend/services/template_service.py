@@ -2173,6 +2173,15 @@ def generate_credential_files(
             if fallback_root is not None:
                 mcp_template_path = fallback_root / ".mcp.json"
 
+        # Never read through a link (trinity-enterprise#1328). This file's
+        # content is written into the new agent's credential files, so it has
+        # to be the template's own file: a link here could point at any
+        # document the backend can read. Treated as absent, and said.
+        if mcp_template_path is not None and mcp_template_path.is_symlink():
+            logger.warning(
+                "Template .mcp.json at %s is a symlink; it is not read", mcp_template_path)
+            mcp_template_path = None
+
         if mcp_template_path is not None and mcp_template_path.exists():
             with open(mcp_template_path) as f:
                 mcp_config = json.load(f)
