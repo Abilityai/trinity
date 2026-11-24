@@ -28,6 +28,7 @@ const ALLOWANCE = { plan: 'free', period_hours: 24, messages_left: 24, messages_
 const calls = []
 let turns
 let credentialSet
+let credentialCurrent
 let refuse
 let refuseState
 
@@ -42,7 +43,7 @@ vi.mock('@/api', () => {
     }
     if (url === '/api/enterprise/assistant/credential' && method === 'get') {
       if (refuseState) throw { response: { status: refuseState.status, data: { detail: refuseState.detail } } }
-      return { agent: config?.params?.agent ?? null, name: config?.params?.name, set: credentialSet, use: '' }
+      return { agent: config?.params?.agent ?? null, name: config?.params?.name, set: credentialSet, current: credentialCurrent, use: '' }
     }
     if (url === '/api/enterprise/assistant/credential' && method === 'post') {
       if (refuse) {
@@ -97,6 +98,7 @@ describe('connecting Claude with a token made in a terminal', () => {
     calls.length = 0
     turns = []
     credentialSet = false
+    credentialCurrent = null
     refuse = null
     refuseState = null
     localStorage.clear()
@@ -145,6 +147,24 @@ describe('connecting Claude with a token made in a terminal', () => {
     expect(told[0].body.message).toBe(`Provided: ${name} for this instance.`)
     expect(JSON.stringify(sessionStorage)).not.toContain(VALUE)
     expect(JSON.stringify(localStorage)).not.toContain(VALUE)
+  })
+
+  it.each(['ANTHROPIC_API_KEY', 'CLAUDE_SUBSCRIPTION'])('on an instance holding only an API key, the %s card says so and never that a subscription is set', async (name) => {
+    // The walk (2026-11-24 14:50Z): "CLAUDE_SUBSCRIPTION is already set on this
+    // instance" before any subscription existed; only a bad API key did.
+    credentialSet = true
+    credentialCurrent = 'api_key'
+    await openAndAsk({ ...ASK, name })
+    const note = wrapper.get('[data-testid="assistant-credential-replaces"]').text()
+    expect(note).toMatch(/^This instance already has an Anthropic API key\./)
+    expect(note).not.toMatch(/subscription is|is already set/)
+  })
+
+  it('names a subscription the instance does hold', async () => {
+    credentialSet = true
+    credentialCurrent = 'subscription'
+    await openAndAsk({ ...ASK, name: 'CLAUDE_SUBSCRIPTION' })
+    expect(wrapper.get('[data-testid="assistant-credential-replaces"]').text()).toMatch(/^This instance already has a Claude subscription\./)
   })
 
   it('a pasted sign-in code is refused in plain words and sends the assistant nothing', async () => {
