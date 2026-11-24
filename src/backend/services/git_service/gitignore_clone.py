@@ -108,10 +108,13 @@ def _build_untrack_dropped_documents_command(git_dir: str) -> str:
     Push REMEDIATES. An auto-sync agent that is never Pushed would otherwise
     keep every document committed before the fix tracked, and its next 15-min
     cycle commits a re-dropped document of the same name all over again — the
-    ignore rule cannot stop a file git already tracks. Documents people hand
-    an agent are never the agent's source, so untracking them unasked is safe
-    in a way a broad sweep at start is not; every other managed rule stays the
-    Push's job.
+    ignore rule cannot stop a file git already tracks. The two patterns cover
+    only the folders the platform writes people's documents into, so this is
+    narrower than a broad sweep at start; every other managed rule stays the
+    Push's job. It is not free: a subfolder the AGENT keeps under `inbox/` or
+    `uploads/` (or, in a repo rooted at `~/workspace`, its own `inbox/<x>/`)
+    matches too, and is untracked here with an alert naming it — the agent's
+    own negation is the way to keep it, and the next sync commits the removal.
 
     Narrow by construction: the pathspecs are derived from
     ``gitignore._DROPPED_DOCUMENT_PATTERNS``, and ``ls-files -ci --exclude-standard``

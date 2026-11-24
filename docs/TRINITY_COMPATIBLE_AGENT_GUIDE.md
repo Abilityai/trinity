@@ -356,8 +356,9 @@ folder first:
 
 The simpler way to keep one is to copy it into a folder you commit (`docs/`,
 `knowledge/`, …). A folder of your own under `inbox/` or `uploads/` is ignored
-like any other. `uploads/` files live only on the agent's volume; they do not
-survive a re-clone onto a fresh host.
+too, and if it was committed it is untracked like a person's drop (see below),
+with an alert naming it; negate it as above to keep it. `uploads/` files live
+only on the agent's volume; they do not survive a re-clone onto a fresh host.
 
 *Documents committed before these rules.* On the agent's next **start**, if it
 auto-syncs, or its next **Push**, the platform untracks them (index only — the
