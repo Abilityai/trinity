@@ -248,9 +248,14 @@ def _coerce_sweep(value: Any) -> GitignoreSweep:
 
 
 async def _emit_gitignore_untracked_alert(
-    agent_name: str, sweep: GitignoreSweep
+    agent_name: str, sweep: GitignoreSweep, *, trigger: str = "Push"
 ) -> None:
     """File an operator-queue entry naming the paths a Push untracked (#2529).
+
+    ``trigger="start"`` is the agent-start untrack (abilityai/trinity-enterprise#1373):
+    there the removal is only staged, and the next auto-sync commits and pushes
+    it, so that alert names the start and never claims a Push. The Push wording
+    is unchanged.
 
     THE surface that outlives the session. Every other one — the API response,
     the MCP result, the toast, the commit message — is read by whoever ran the
@@ -302,12 +307,19 @@ async def _emit_gitignore_untracked_alert(
         # Both directions, named separately, because the operator response
         # differs: a removal is recoverable from disk, an addition is already
         # in the remote's history and may need a credential rotated.
+        at_start = trigger == "start"
+        landed = (
+            "the working tree is untouched; the next auto-sync commits and "
+            "pushes the removal"
+            if at_start else
+            "the working tree is untouched, but the deletion is committed and "
+            "pushed"
+        )
         parts = []
         if sweep.removed:
             parts.append(
                 f"removed {sweep.removed_count} file(s) from the index because "
-                "they match an ignore rule (the working tree is untouched, but "
-                "the deletion is committed and pushed) — if one was meant to "
+                f"they match an ignore rule ({landed}) — if one was meant to "
                 "stay, negate it in the agent's own `.gitignore`, below the "
                 "managed defaults block, and re-add it with `git add -f`"
             )
@@ -318,7 +330,9 @@ async def _emit_gitignore_untracked_alert(
                 "that previously hid them; if any is a secret, ROTATE it and "
                 "remove the rule, because it is already in the remote's history"
             )
-        if sweep.removed and sweep.unignored:
+        if at_start:
+            title = "Agent start untracked uploaded documents that match .gitignore"
+        elif sweep.removed and sweep.unignored:
             title = "Push changed which files are tracked (.gitignore sweep)"
         elif sweep.removed:
             title = "Push untracked files that now match .gitignore"
@@ -338,7 +352,11 @@ async def _emit_gitignore_untracked_alert(
         outcome = platform_alerts.observe(
             agent_name, "gitignore_untracked", key,
             title=title,
-            question=f"{agent_name}: this Push " + "; and it ".join(parts) + ".",
+            question=(
+                f"{agent_name}: "
+                + ("starting the agent " if at_start else "this Push ")
+                + "; and it ".join(parts) + "."
+            ),
             priority=priority,
             context={
                 "removed_paths": shown,
