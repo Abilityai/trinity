@@ -2954,12 +2954,14 @@ def _stamp_bundled_avatar(agent_name: str, prompt: Optional[str]) -> None:
         logger.warning(f"[AVATAR-003] Failed to stamp GitHub bundled avatar for {agent_name}: {e}")
 
 
-def _install_bundled_avatar_bytes(agent_name: str, data: bytes) -> None:
+def _install_bundled_avatar_bytes(agent_name: str, data: bytes) -> bool:
     """ent#1173 (AC-2): install a GitHub template's bundled avatar from raw bytes.
 
     Unlike the `local:` path (which reads from a filesystem path), the GitHub
     path delivers raw bytes fetched from the API. Same size/pixel caps as the
-    local version. The caller stamps it as kept (`_stamp_bundled_avatar`, #4750).
+    local version. Returns True only when a file was written, like the `local:`
+    installer; the caller stamps it as kept (`_stamp_bundled_avatar`, #4750)
+    only on True, so a refused destination leaves the row unstamped.
     """
     import io as _io
     from PIL import Image
@@ -2967,7 +2969,7 @@ def _install_bundled_avatar_bytes(agent_name: str, data: bytes) -> None:
 
     dest = avatar_paths.avatar_path_or_none(agent_name, ".webp")
     if dest is None:
-        return
+        return False
     with Image.open(_io.BytesIO(data)) as img:
         if img.width * img.height > 4096 * 4096:
             raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
@@ -2977,6 +2979,7 @@ def _install_bundled_avatar_bytes(agent_name: str, data: bytes) -> None:
     with open(dest, "wb") as f:
         f.write(out)
     logger.info(f"[AVATAR-003] Installed GitHub bundled avatar for {agent_name}")
+    return True
 
 
 def _register_agent(
@@ -4417,10 +4420,11 @@ async def create_agent_internal(
             # already registered and fully functional without an avatar.
             if tr.bundled_avatar_bytes and not config.ephemeral:
                 try:
-                    _install_bundled_avatar_bytes(config.name, tr.bundled_avatar_bytes)
+                    _gh_installed = _install_bundled_avatar_bytes(config.name, tr.bundled_avatar_bytes)
                 except Exception as _e:
+                    _gh_installed = False
                     logger.warning(f"[AVATAR-003] Failed to install GitHub avatar for {config.name}: {_e}")
-                else:
+                if _gh_installed:
                     # #4570: the file alone is invisible — `avatar_url` is built
                     # only from a row with a non-empty identity prompt and a
                     # timestamp. Stamp it as KEPT, like the `local:` path

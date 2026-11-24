@@ -1291,6 +1291,39 @@ async def test_4750_failed_reencode_leaves_no_empty_github_avatar(crud_env, monk
     ctx["db"].set_default_avatar.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_4750_refused_github_avatar_path_is_not_stamped(crud_env, monkeypatch, tmp_path):
+    """#4750 (review I2): when the avatar store's path barrier refuses the
+    destination, `_install_bundled_avatar_bytes` writes nothing and says so, and
+    the `github:` caller leaves the row unstamped. A kept stamp there would hand
+    the Workspace card a URL to a file that was never written."""
+    crud, ctx = crud_env
+    monkeypatch.setattr(crud.avatar_paths, "avatar_path_or_none", lambda name, ext: None)
+    await _create_github_with_bundled_avatar(
+        crud, ctx, monkeypatch, tmp_path, "gh-refused", {"avatar_prompt": "a small owl"},
+        _png_bytes())
+
+    assert not (tmp_path / "avatars" / "gh-refused.webp").exists()
+    ctx["db"].set_avatar_identity.assert_not_called()
+    ctx["db"].set_default_avatar.assert_not_called()
+    ctx["docker_utils"].containers_run.assert_awaited()
+
+
+def test_4750_github_installer_reports_whether_it_wrote(monkeypatch, tmp_path):
+    """The `github:` installer answers like its `local:` twin: True only when
+    the file is on disk, False when the path barrier refused it."""
+    crud, ctx = _load_crud(monkeypatch, docker_available=True)
+    try:
+        monkeypatch.setattr(crud.avatar_paths, "AVATAR_DIR", tmp_path / "avatars")
+        assert crud._install_bundled_avatar_bytes("gh-ok", _png_bytes()) is True
+        assert (tmp_path / "avatars" / "gh-ok.webp").exists()
+        monkeypatch.setattr(crud.avatar_paths, "avatar_path_or_none", lambda name, ext: None)
+        assert crud._install_bundled_avatar_bytes("gh-no", _png_bytes()) is False
+        assert not (tmp_path / "avatars" / "gh-no.webp").exists()
+    finally:
+        ctx["patcher"].stop()
+
+
 def test_2693_first_run_fleet_ships_bundled_avatars():
     """AC4: every agent in the bundled first-run manifest carries both a bundled
     image and the `avatar_prompt` that makes it installable + regenerable."""
