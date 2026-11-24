@@ -254,7 +254,7 @@ You run as `developer` (UID 1000) in your own container. `/home/developer` is yo
 Paths the platform creates or reads in your home:
 - `data/` — runtime data; the export/import boundary, gitignored once you declare `data_paths`
 - `public/` — the only folder `share_file` reads
-- `uploads/`, `inbox/<who>/` — files people send; never committed
+- `uploads/<session>/`, `inbox/<who>/`: people's files; uncommitted
 - `shared-out/`, `shared-in/<agent>/` — shared folders, when enabled
 - `content/` — media your canvas references
 - `.trinity/` — shared with the platform: `setup.sh` (runs at every start; never put secrets in it), `plugins.yaml`, `persistent-state.yaml`, `operator-queue.json`, `pipelines/`. People cannot edit it from the Files tab; you can.

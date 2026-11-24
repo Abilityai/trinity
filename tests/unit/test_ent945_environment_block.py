@@ -122,10 +122,18 @@ class TestFacts:
          "untracked", "`memory/`", "`setup.sh`", "never put secrets in it",
          "`template.yaml`", "refresh_metric_definitions",
          "People cannot edit it from the Files tab; you can.",
-         "never committed"],  # ent#1373: uploaded documents are gitignored
+         # ent#1373: the folders people's files land in are gitignored
+         "`uploads/<session>/`, `inbox/<who>/`: people's files; uncommitted"],
     )
     def test_fact_present(self, token):
         assert token in _section(_render(PromptTier.VERBOSE, "claude-code"))
+
+    @pytest.mark.parametrize("bare", ["`uploads/`", "`inbox/`"])
+    def test_never_claims_a_whole_drop_folder_is_uncommitted(self, bare):
+        """ent#1373: only the per-session / per-person SUBFOLDERS are ignored;
+        a file the agent writes directly under `inbox/` is still committed, so
+        the block must not name the bare folder as uncommitted."""
+        assert bare not in _section(_render(PromptTier.VERBOSE, "claude-code"))
 
 
 # T3 — no marker ever ships unfilled.
