@@ -93,6 +93,7 @@ from services.event_dispatch_service import (
 )
 from services import idempotency_service
 from services import channel_completion_report
+from services import caller_wake_service  # #4733: a /chat slot release drains a parked wake
 from services import dispatch_admission_service
 from services import chat_persistence_service
 from services import skill_gate_service
@@ -166,6 +167,8 @@ async def release_admission(name: str, *, execution_id: str, capacity, idem) -> 
         except Exception:  # noqa: BLE001 — the caller re-raises the real error
             logger.exception("[Chat] releasing the slot of %s after a failed setup raised",
                              execution_id)
+        else:
+            caller_wake_service.drain_after_slot_release(name)   # #4733, as above
     idempotency_service.fail(idem)
 
 
@@ -1282,6 +1285,9 @@ async def run_chat_turn(
         # CAPACITY-CONSOLIDATE (#428): single release covers both the SlotService
         # counter and the in-memory overflow bookkeeping.
         await capacity.release(name, execution.id)
+        # #4733: this path writes its terminal without the fan-out, so a caller
+        # wake parked for a free slot of this agent is drained where it frees.
+        caller_wake_service.drain_after_slot_release(name)
         # RELIABILITY-006 (#525): on any non-success exit, release the in-flight
         # idempotency claim so the caller can legitimately retry (no-op on the
         # success path, where complete() already finalized it).

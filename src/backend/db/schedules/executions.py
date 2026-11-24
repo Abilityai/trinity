@@ -213,6 +213,27 @@ class ScheduleExecutionsMixin:
             ).scalar()
         return int(value or 0)
 
+    def has_execution_with_status(
+        self, agent_name: str, statuses, triggered_by: Optional[str] = None,
+    ) -> bool:
+        """True when `agent_name` has a row in one of `statuses` (#4733).
+
+        Optionally only rows of one trigger. One indexed EXISTS — the caller
+        wake reads "is a wake of this agent still queued or running?" and "is
+        any run of it running?" from the rows, never from a Redis hint.
+        """
+        conditions = [
+            schedule_executions.c.agent_name == agent_name,
+            schedule_executions.c.status.in_([str(getattr(s, "value", s)) for s in statuses]),
+        ]
+        if triggered_by is not None:
+            conditions.append(schedule_executions.c.triggered_by == triggered_by)
+        with get_engine().connect() as conn:
+            found = conn.execute(
+                select(schedule_executions.c.id).where(and_(*conditions)).limit(1)
+            ).first()
+        return found is not None
+
     def get_deepest_running_chain_row(self, agent_name: str) -> Optional[Dict]:
         """The RUNNING row of `agent_name` that `get_max_running_chain_depth` reads (#4357).
 

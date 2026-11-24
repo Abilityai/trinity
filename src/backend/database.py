@@ -2038,6 +2038,10 @@ class DatabaseManager:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
         return self._schedule_ops.get_max_running_chain_depth(agent_name)
 
+    def has_execution_with_status(self, agent_name: str, statuses, triggered_by=None) -> bool:
+        """Whether the agent has a row in one of `statuses`, optionally of one trigger (#4733)."""
+        return self._schedule_ops.has_execution_with_status(agent_name, statuses, triggered_by)
+
     def get_deepest_running_chain_row(self, agent_name: str):
         """The running row that set that depth, for a refusal to name (#4357)."""
         return self._schedule_ops.get_deepest_running_chain_row(agent_name)
@@ -4830,6 +4834,10 @@ class DatabaseManager:
     def idempotency_claim(self, scope: str, key: str, ttl_hours: int = 24, **intent) -> dict:
         """Atomically claim (scope, key). See IdempotencyOperations.claim."""
         return self._idempotency_ops.claim(scope, key, ttl_hours=ttl_hours, **intent)
+
+    def idempotency_peek(self, scope: str, key: str, ttl_hours: int = 24):
+        """Read (scope, key) without claiming it. See IdempotencyOperations.peek."""
+        return self._idempotency_ops.peek(scope, key, ttl_hours=ttl_hours)
 
     def idempotency_attach_execution(self, scope: str, key: str, execution_id: str, *, claim_token=None) -> None:
         """Record the execution_id for an in-flight idempotency claim."""
