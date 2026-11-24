@@ -1324,6 +1324,68 @@ def test_4750_github_installer_reports_whether_it_wrote(monkeypatch, tmp_path):
         ctx["patcher"].stop()
 
 
+@pytest.mark.asyncio
+async def test_4609_shipped_avatar_reaches_the_workspace_card(monkeypatch, tmp_path):
+    """#4609 end to end: a template that ships an image, created through
+    `create_agent_internal`, shows that image on the Workspace card.
+
+    Nothing here picks the avatar writer. The harness's `db` is a mock, so its
+    two avatar writers are bound to the REAL facade over a tmp sqlite; crud's
+    own choice between them lands in a real `agent_ownership` row, and the real
+    portal roster reads it back. Before #4750 crud chose `set_default_avatar`
+    (is_default_avatar=1) and the card stayed an initials tile."""
+    import db.connection as conn_mod
+    from sqlalchemy import insert
+    from db.engine import get_engine
+    from db.tables import metadata as m, agent_sharing, agent_ownership, users, system_settings
+    from database import db as real_db
+    from client_portal import service as portal
+
+    db_file = tmp_path / "trinity-4609.db"
+    monkeypatch.setenv("TRINITY_DB_PATH", str(db_file))
+    monkeypatch.setattr(conn_mod, "DB_PATH", str(db_file))
+    m.create_all(get_engine(), tables=[agent_sharing, agent_ownership, users, system_settings])
+    with get_engine().begin() as conn:
+        conn.execute(insert(users).values(id=1, username="alice", role="creator",
+                     email="alice@example.com", created_at="t", updated_at="t"))
+        # The ownership row `register_agent_owner` writes in production (mocked here).
+        conn.execute(insert(agent_ownership).values(
+            agent_name="shipped-e2e", owner_id=1, created_at="t", is_system=0))
+        conn.execute(insert(agent_sharing).values(
+            agent_name="shipped-e2e", shared_with_email="bob@example.com", shared_by_id=1,
+            created_at="2026-07-05T00:00:00Z"))
+
+    crud, ctx = _load_crud(monkeypatch, docker_available=True)
+    try:
+        ctx["db"].set_avatar_identity.side_effect = real_db.set_avatar_identity
+        ctx["db"].set_default_avatar.side_effect = real_db.set_default_avatar
+        tpl = tmp_path / "tpls" / "avtpl"
+        tpl.mkdir(parents=True)
+        (tpl / "template.yaml").write_text("type: business-assistant\navatar_prompt: a wizard\n")
+        (tpl / "avatar.png").write_bytes(_png_bytes())
+        monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
+        monkeypatch.setattr(crud.avatar_paths, "AVATAR_DIR", tmp_path / "avatars")
+        await crud.create_agent_internal(
+            AgentConfig(name="shipped-e2e", template="local:avtpl"), _user(), None)
+    finally:
+        ctx["patcher"].stop()
+
+    assert (tmp_path / "avatars" / "shipped-e2e.webp").exists()
+
+    async def _ready(names):
+        return {n: "ready" for n in names}
+
+    async def _one(name):
+        return "ready"
+
+    monkeypatch.setattr(portal, "_availability_map", _ready)
+    monkeypatch.setattr(portal, "_agent_availability", _one)
+    roster = await portal.get_roster("bob@example.com")
+    card = {c.name: c for c in roster.agents}["shipped-e2e"]
+    assert card.avatar_url is not None, "shipped image shown as initials (#4609)"
+    assert card.avatar_url.startswith("/api/agents/shipped-e2e/avatar?v=")
+
+
 def test_2693_first_run_fleet_ships_bundled_avatars():
     """AC4: every agent in the bundled first-run manifest carries both a bundled
     image and the `avatar_prompt` that makes it installable + regenerable."""
