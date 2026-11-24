@@ -10,9 +10,12 @@
 # 1. Vector must be running before agents start
 # 2. If an agent was running before Vector, restart it to capture new logs
 
+# The API serves this container's healthcheck and nothing else, so it listens
+# on the container's own loopback: no other container, and no host port, can
+# reach it. Keep it that way (tests/unit/test_ent1314_internal_ports.py).
 api:
   enabled: true
-  address: 0.0.0.0:8686
+  address: 127.0.0.1:8686
 
 # Sources - collect from Docker
 sources:

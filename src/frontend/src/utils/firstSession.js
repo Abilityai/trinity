@@ -111,26 +111,41 @@ export function inFirstSession(status, fleet = [], examples = []) {
  * assistant asks for it with the shared credential field (ent#1358,
  * `ask_credential` for this instance): the person pastes it into the masked
  * field, it is saved on this instance and the assistant hears only
- * "Provided" / "Not provided". Today what is pasted is an Anthropic API key.
+ * "Provided" / "Not provided".
  *
- * The one seam for the Claude step (trinity-enterprise#1354): when the
- * Claude Code sign-in exists, set this to `{ name, label, href }`. The same
- * field then shows that link instead of the API-key link; the person signs in
- * there, copies the code and pastes it into the same field, stored under
- * `name` (a credential the instance adds for it). Nothing else changes.
+ * The Claude step (trinity-enterprise#1354, ruled 2026-11-24): the field shows
+ * three short steps — open a terminal on your own computer, run Claude's own
+ * `claude setup-token`, paste the token it prints here — with an Anthropic API
+ * key as the alternative in the same field. The instance starts no sign-in and
+ * exchanges no code; it tests the token before registering it. The card keeps
+ * the name the assistant asked under (the gateway's script asks for
+ * ANTHROPIC_API_KEY; a card kept from an older conversation may carry either):
+ * the instance takes both names as this one card.
  */
-export const CLAUDE_SIGN_IN = null
+export const CLAUDE_TOKEN_CARD = Object.freeze({ name: 'CLAUDE_SUBSCRIPTION', command: 'claude setup-token' })
 
-/** The instance's own Claude credentials: the API key, and the sign-in code once it exists. */
-export function isClaudeCredential(card, signIn = CLAUDE_SIGN_IN) {
+/** The instance's own Claude credentials: the API key, and the subscription token card. */
+export function isClaudeCredential(card, tokenCard = CLAUDE_TOKEN_CARD) {
   if (!card || card.agent) return false
-  return card.name === 'ANTHROPIC_API_KEY' || Boolean(signIn && card.name === signIn.name)
+  return card.name === 'ANTHROPIC_API_KEY' || Boolean(tokenCard && card.name === tokenCard.name)
 }
 
-/** Where the person gets what they paste: the sign-in when it exists, else an API key at Anthropic. */
-export function claudeHelp(signIn = CLAUDE_SIGN_IN) {
-  if (signIn) return { lead: 'Sign in, copy the code, and paste it here:', label: signIn.label, href: signIn.href }
-  return { lead: 'No key yet?', label: 'Create one at Anthropic', href: CLAUDE_TAB_COPY.api_key.providerUrl }
+/**
+ * What the Claude field says. With the token card: three steps (the second
+ * names the command), and the API key as the alternative. Without it: where
+ * to create an API key.
+ */
+export function claudeHelp(tokenCard = CLAUDE_TOKEN_CARD) {
+  const apiKey = { label: 'Create one at Anthropic', href: CLAUDE_TAB_COPY.api_key.providerUrl }
+  if (!tokenCard) return { lead: 'No key yet?', ...apiKey }
+  return {
+    steps: [
+      { before: 'Open a terminal on your own computer.' },
+      { before: 'Run', command: tokenCard.command, after: 'and follow what it says.' },
+      { before: 'Paste the token it prints here and press Save.' },
+    ],
+    alternative: { lead: 'Using an Anthropic API key instead? Paste it here.', ...apiKey },
+  }
 }
 
 /**

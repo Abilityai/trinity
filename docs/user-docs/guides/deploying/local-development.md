@@ -48,7 +48,7 @@ The only edit a local install needs is **`ADMIN_PASSWORD`**. Everything else bel
 | Variable | Purpose |
 |---|---|
 | `ANTHROPIC_API_KEY` | Lets agents use Claude. Can be left blank; the setup steps that open the first time you log in ask for it, and agents cannot run until one is set. `start.sh` warns in its summary when no model key (`ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`) is set. |
-| `EMAIL_PROVIDER` | How verification codes are sent. `.env.example` sets `console` (codes print to the backend log); the compose default when the line is absent is `resend`. |
+| `EMAIL_PROVIDER` | How verification codes are sent. `.env.example` sets `console`, which sends nothing and logs each mail's recipient and subject but not its body. To read a code from the backend log on a development machine, also set `EMAIL_CONSOLE_LOG_BODY=true` (passed through by `docker-compose.yml` only); the compose default when the line is absent is `resend`. |
 | `RESEND_API_KEY` | Required if `EMAIL_PROVIDER=resend`. |
 | `GITHUB_PAT` | Forwarded to the backend; needed to clone private template repos. |
 | `GEMINI_API_KEY` | Platform image generation, voice. |
@@ -115,8 +115,8 @@ Once complete, the platform services are running:
 | MCP Server | `trinity-mcp-server` | 8080 |
 | Scheduler | `trinity-scheduler` | 8001 inside the container (health only; not published to the host) |
 | Redis | `trinity-redis` | 127.0.0.1:6379 (loopback only) |
-| Vector (logs) | `trinity-vector` | 8686 |
-| OTel collector | `trinity-otel-collector` | 4317, 4318, 8889, 13133 |
+| Vector (logs) | `trinity-vector` | 8686 inside the container (health only; not published to the host) |
+| OTel collector | `trinity-otel-collector` | 4317, 4318, 13133 inside Docker only (agents reach it by name; not published to the host). 8889 (metrics) answers only on the platform network, as `trinity-otel-metrics` |
 
 Two one-shot containers (`trinity-logs-init`, `trinity-archives-init`) prepare the log directories and exit; they are expected to show as exited.
 
@@ -133,7 +133,7 @@ Log in with username `admin` and the `ADMIN_PASSWORD` from `.env`. There is no s
 | http://localhost | Web UI |
 | http://localhost:8000/docs | Backend API (Swagger) |
 | http://localhost:8080/mcp | MCP Server endpoint (the dev Vite server does not proxy `/mcp`; that route exists on the production nginx only). Claude Code on your machine is refused with `external_mcp_access_off` until you turn on **External MCP access** once under Settings → MCP Keys |
-| http://localhost:8686/health | Vector log aggregator health |
+| `docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health` | Vector log aggregator health (asked inside its container; the port is not on the host) |
 
 ## Hot Reload
 

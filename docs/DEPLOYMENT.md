@@ -164,7 +164,7 @@ avoid: credentials and JWTs cross the network in the clear.
 A host firewall does not cover ports Docker publishes. Docker inserts its own
 iptables rules ahead of ufw's `INPUT` chain, so `ufw default deny incoming`
 with `22`, `80` and `443` allowed still leaves every published container port
-— the backend's 8000, the MCP server's 8080, Vector's 8686 and each agent's SSH
+— the backend's 8000, the MCP server's 8080 and each agent's SSH
 port in 2222–2262 — answering on the public interface. The hook Docker honours
 is the `DOCKER-USER` chain.
 
@@ -359,10 +359,10 @@ Trinity supports two login methods:
 #### Email Login (Primary)
 Users enter email → receive 6-digit code → login. Configure email provider:
 ```bash
-EMAIL_PROVIDER=console  # console (dev), smtp, sendgrid, resend
+EMAIL_PROVIDER=console  # console (dev: sends nothing, logs recipient and subject only), smtp, sendgrid, resend
 ```
 
-For local development, use `console` - codes are printed to backend logs.
+For local development, use `console`. It sends nothing and logs the recipient and subject only; to read sign-in codes from the backend log, also set `EMAIL_CONSOLE_LOG_BODY=true` in `.env` (it is passed through by `docker-compose.yml` only).
 
 Manage allowed emails in Settings → Email Whitelist.
 
@@ -382,7 +382,7 @@ ADMIN_PASSWORD=your-secure-password
 │      Port 80        │     Port 8000       │    Port 8080    │
 ├─────────────────────────────────────────────────────────────┤
 │  Redis (secrets)    │  PostgreSQL (data)  │  Vector (logs)  │
-│   Internal only     │   /data volume      │    Port 8686    │
+│   Internal only     │   /data volume      │  Internal only  │
 ├─────────────────────────────────────────────────────────────┤
 │                    Agent Containers                          │
 │  ┌─────────┐  ┌─────────┐  ┌─────────┐                     │

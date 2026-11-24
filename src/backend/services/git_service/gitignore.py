@@ -123,6 +123,16 @@ CONTAINER_ONLY_SETTINGS_GUARD = (
 )
 
 
+# abilityai/trinity-enterprise#1373: the folders the platform writes uploaded
+# documents into (see the comment where `_GITIGNORE_PATTERNS` takes them). A
+# named constant because the start path untracks exactly these and nothing
+# else (`gitignore_clone._build_untrack_dropped_documents_command`).
+_DROPPED_DOCUMENT_PATTERNS: Tuple[str, ...] = (
+    "/inbox/*/**",
+    "/uploads/*/**",
+)
+
+
 _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     # Shell init / history (instance-specific)
     ".bash_logout",
@@ -156,6 +166,16 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     ".trinity-clone-tmp/",  # #1439 transient full-history clone staging dir (removed post-merge; ignored so a crash-orphaned copy — incl. its PAT-bearing .git/config — is never committed)
     # Large generated content
     "content/",
+    # abilityai/trinity-enterprise#1373: documents people hand an agent. The
+    # platform writes them into HOME, which is the repo root: one folder per
+    # person under `inbox/` (Workspace drops) and one per session under
+    # `uploads/` (chat, public link and channel attachments). SUBFOLDERS only —
+    # a file the agent itself writes directly under `inbox/` keeps syncing.
+    # Contents-form (`/*/**`, not `/*/`) so a per-file negation in the agent's
+    # own rules works: `!inbox/<folder>/<file>` (no leading slash). Merged into
+    # existing agents on sync, which also untracks already-committed matches
+    # (history is not rewritten).
+    *_DROPPED_DOCUMENT_PATTERNS,
     # #1596: bulk data / dependency / cache / index dirs that churn on every
     # run and bloat `.git` unboundedly under auto-sync. Git sync is for code +
     # state, not datasets/indexes/deps — those belong in `data_paths` (#1169) or
@@ -617,8 +637,11 @@ def _build_rm_cached_ignored_command(git_dir: str) -> str:
         f"head -n {gitignore_sweep._SWEEP_PROBE_LINE_CAP + 1} | "
         f"sed 's#^#{gitignore_sweep._SWEEP_TAG_AFTER}#'; :; }} && "
         # `^!.` (not `^!`) — a bare `!` line would reach check-ignore as an
-        # empty pathspec and make it fatal.
-        "{ LC_ALL=C grep -a -h '^!.' .gitignore | sed 's/^!//' | "
+        # empty pathspec and make it fatal. The sed strips an anchoring `/`
+        # with the `!` (abilityai/trinity-enterprise#1373): `/inbox/...` is
+        # outside the repository to `check-ignore --stdin`, which aborts and
+        # drops every later `!` line from the report.
+        "{ LC_ALL=C grep -a -h '^!.' .gitignore | sed 's#^!/\\{0,1\\}##' | "
         "git check-ignore -v --no-index --stdin | "
         f"sed 's#^#{gitignore_sweep._SWEEP_TAG_SHADOW}#'; :; }}"
     )

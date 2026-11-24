@@ -53,7 +53,7 @@ Two common reasons: their address isn't on the email whitelist, or no email serv
 
 ## Why didn't I receive my 6-digit login code?
 
-The default email provider is `console`, which is meant for development — it prints the email (including the code) to the backend logs instead of sending it. For real delivery, add a Resend key and a sender address under Settings > Integrations — no `.env` edit needed ([Platform Keys](../credentials/platform-keys.md#email-provider-resend)) — or set `EMAIL_PROVIDER` in `.env` to `smtp`, `sendgrid`, or `resend` and fill in the matching credentials. Also confirm your address is on the whitelist, since codes only go to allowed emails. See [Setup](../getting-started/setup.md).
+The default email provider is `console`, which is meant for development — it sends nothing and logs each mail's recipient and subject, not its body, so the code is not in the log. On a development machine, set `EMAIL_CONSOLE_LOG_BODY=true` in `.env` (it is passed through by `docker-compose.yml` only) to print the body as well. For real delivery, add a Resend key and a sender address under Settings > Integrations — no `.env` edit needed ([Platform Keys](../credentials/platform-keys.md#email-provider-resend)) — or set `EMAIL_PROVIDER` in `.env` to `smtp`, `sendgrid`, or `resend` and fill in the matching credentials. Also confirm your address is on the whitelist, since codes only go to allowed emails. See [Setup](../getting-started/setup.md).
 
 ## Why does the login page say no email provider is configured?
 
@@ -61,7 +61,7 @@ Because this install cannot send email, so no code was sent. After you enter an 
 
 ## I requested a login code on localhost and nothing arrived — am I locked out?
 
-No. With no email provider configured — the default when first-run setup skipped the email key — Trinity sends no email: the code is written to the backend log, and the login page says so instead of "We sent a code". Read it with `docker compose logs backend` (look for the `EMAIL (console mode)` block) and type it into the code field. Or skip the code: choose **Admin Login** and sign in with the admin password from your `.env`. To get real emails, add an email provider key under **Settings → Integrations**. See [Platform Keys](../credentials/platform-keys.md#email-provider-resend).
+No. With no email provider configured — the default when first-run setup skipped the email key — Trinity sends no email, and the login page says so instead of "We sent a code". The code is not written anywhere you can read, so choose **Admin Login** and sign in with the admin password from your `.env`. (A development machine can print codes to the backend log: set `EMAIL_CONSOLE_LOG_BODY=true` in `.env` (it is passed through by `docker-compose.yml` only), then read the `EMAIL (console mode)` block with `docker compose logs backend`. The login page names the log only when that is on.) To get real emails, add an email provider key under **Settings → Integrations**. See [Platform Keys](../credentials/platform-keys.md#email-provider-resend).
 
 ## Why does nothing load when I open http://localhost?
 

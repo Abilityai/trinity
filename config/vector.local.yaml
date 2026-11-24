@@ -35,7 +35,7 @@ data_dir: /vector-data-dir
 
 api:
   enabled: true            # keep :8686 up so the backend `depends_on` health stays green
-  address: 0.0.0.0:8686
+  address: 127.0.0.1:8686  # the container's own healthcheck is its only reader
 
 sources:
   container_files:

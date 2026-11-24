@@ -220,7 +220,7 @@ export function validFeedback(raw) {
 export const feedbackKind = (card) => FEEDBACK_KINDS[card.kind] || 'Feedback'
 
 // Credentials the instance itself holds; the instance and Trinity's side hold the same list.
-export const INSTANCE_CREDENTIALS = Object.freeze(['ANTHROPIC_API_KEY'])
+export const INSTANCE_CREDENTIALS = Object.freeze(['ANTHROPIC_API_KEY', 'CLAUDE_SUBSCRIPTION'])
 const CREDENTIAL_NAME = /^[A-Z][A-Z0-9_]{1,63}$/
 
 /**
@@ -236,6 +236,10 @@ export function validCredential(raw, fleet) {
   } else if (!INSTANCE_CREDENTIALS.includes(raw.name)) {
     return null
   }
+  // ent#1354: the card keeps the name the assistant asked under. This instance
+  // takes both Claude names as one card (a subscription token from
+  // `claude setup-token` or an API key, tested before it is saved), and the
+  // "Provided:" line must name what the assistant asked for, or it asks again.
   const card = { action: 'credential', name: raw.name, why: String(raw.why ?? '').trim().slice(0, 300) }
   if (raw.agent !== undefined) card.agent = raw.agent
   return card
