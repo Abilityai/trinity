@@ -1583,6 +1583,16 @@ describe('assistant panel', () => {
       expect(sent(TURN)[0].body.message).toBe('My agents are here')
     })
 
+    it('steps already given: "My agents are here" stays once the moved agents have arrived', async () => {
+      status = { ...status, local_agents: 'offered' }
+      await leads()
+      const { useAssistantStore } = await import('@/stores/assistant')
+      useAssistantStore().fleet = [{ name: 'trinity-system', status: 'running', is_system: true }, { name: 'moved-in', status: 'running' }]
+      await flushPromises()
+      const offered = wrapper.findAll('[data-testid="assistant-starters"] button').map((b) => b.text())
+      expect(offered).toContain('My agents are here')
+    })
+
     it('raises no settings step in the first session: no getting-started list, no settings nudge', async () => {
       checklist = { completed_count: 0, total_count: 2, complete: false, dismissed: false, items: [
         { key: 'claude', title: 'Connect Claude in Settings', description: 'a', done: false, action_label: 'x', action_route: '/' },

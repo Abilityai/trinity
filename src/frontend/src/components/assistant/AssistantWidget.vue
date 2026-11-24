@@ -781,7 +781,8 @@ const messagesEl = ref(null)
 // What the empty screen offers, for this page and this fleet.
 const starters = computed(() => {
   // trinity-enterprise#1355: the assistant-led first session asks one question, with two answers.
-  if (firstSession.value) {
+  // ent#1353: steps already given, "My agents are here" stays once the moved agents arrive (until the first result is seen).
+  if (firstSession.value || (firstSessionOn.value && store.status?.local_agents === 'offered')) {
     return [openingGroup(store.status)]
   }
   const groups = starterGroups(describePage(route), store.fleet, { known: Boolean(store.status?.profile_known) })
