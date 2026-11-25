@@ -482,7 +482,8 @@ export function cronWords(expr, timezone) {
   if (dom === '*' && mon === '*' && dow === '*') {
     if (h === '*' && (m === '*' || every(m, 60) === 1)) return 'every minute'
     if (h === '*' && every(m, 60)) return `every ${every(m, 60)} minutes`
-    if (h === '*' && num(m, 59)) return `every hour at ${pad(m)} minutes past`
+    if (h === '*' && m === '0') return 'every hour'
+    if (h === '*' && num(m, 59)) return `every hour at ${Number(m)} ${Number(m) === 1 ? 'minute' : 'minutes'} past`
     if (m === '0' && every(h, 24) === 1) return 'every hour'
     if (m === '0' && every(h, 24)) return `every ${every(h, 24)} hours`
   }
@@ -491,7 +492,8 @@ export function cronWords(expr, timezone) {
   if (dom === '*' && dow === '*') return `every day ${at}`
   if (dom === '*' && dow === '1-5') return `every weekday ${at}`
   if (dom === '*' && /^[0-7](,[0-7])*$/.test(dow)) return `every ${and([...new Set(dow.split(',').map((d) => DAYS[Number(d)]))])} ${at}`
-  if (num(dom, 31) && dom !== '0' && dow === '*') return `on day ${Number(dom)} of every month ${at}`
+  // Only a day every month has: day 29-31 is skipped in shorter months.
+  if (num(dom, 28) && Number(dom) > 0 && dow === '*') return `on day ${Number(dom)} of every month ${at}`
   return fallback
 }
 
@@ -511,12 +513,14 @@ function updateZone(args, fleet) {
   const stored = storedSchedule(args, fleet)?.timezone
   return typeof stored === 'string' && stored.trim() ? stored : null
 }
-// Where a schedule's results go, when they go beyond the run record.
-function delivery(args, agent) {
+// Where a schedule's results go, when they go beyond the run record. On an update a
+// blank address clears delivery, the same as null.
+function delivery(args, agent, { update = false } = {}) {
   if (typeof args.deliver_to_workspace_email === 'string' && args.deliver_to_workspace_email.trim()) {
     return ` Each run's results are delivered to ${str(args.deliver_to_workspace_email.trim(), 120)}'s Workspace chat with ${agent}.`
   }
-  return args.deliver_to_workspace_email === null ? ' Its results are no longer delivered to a Workspace chat.' : ''
+  const cleared = args.deliver_to_workspace_email === null || (update && typeof args.deliver_to_workspace_email === 'string')
+  return cleared ? ' Its results are no longer delivered to a Workspace chat.' : ''
 }
 
 // Tools the page has its own words for. `sentence` is what happens; `button` names it.
@@ -539,9 +543,12 @@ const TOOL_COPY = Object.freeze({
   },
   update_agent_schedule: (a, { fleet }) => {
     const which = scheduleTitle(a, fleet)
-    const when = typeof a.cron_expression === 'string' ? `: it will run ${cronWords(a.cron_expression, updateZone(a, fleet))}` : ''
+    const zone = typeof a.timezone === 'string' && a.timezone.trim() ? str(a.timezone.trim()) : ''
+    const when = typeof a.cron_expression === 'string'
+      ? `: it will run ${cronWords(a.cron_expression, updateZone(a, fleet))}`
+      : (zone ? `: its times are now read in ${zone}` : '')
     const state = a.enabled === true ? ', and switches it on' : a.enabled === false ? ', and switches it off' : ''
-    const sentence = `Changes ${str(a.agent_name)}'s schedule${which ? ` ${which}` : ''}${when}${state}.${delivery(a, str(a.agent_name))}`
+    const sentence = `Changes ${str(a.agent_name)}'s schedule${which ? ` ${which}` : ''}${when}${state}.${delivery(a, str(a.agent_name), { update: true })}`
     return { sentence, button: 'Change it' }
   },
   trigger_agent_schedule: (a, { fleet }) => {

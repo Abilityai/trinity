@@ -232,7 +232,16 @@ describe('when a schedule runs, in words (ent#1390)', () => {
     ['0 6 1 * *', 'UTC', 'on day 1 of every month at 06:00 (UTC)'],
     ['*/15 * * * *', 'UTC', 'every 15 minutes'],
     ['0 */2 * * *', 'UTC', 'every 2 hours'],
-    ['5 * * * *', 'UTC', 'every hour at 05 minutes past'],
+    ['5 * * * *', 'UTC', 'every hour at 5 minutes past'],
+    ['1 * * * *', 'UTC', 'every hour at 1 minute past'],
+    ['0 * * * *', 'UTC', 'every hour'],
+    ['45 * * * *', 'UTC', 'every hour at 45 minutes past'],
+    // A day of the month every month has (1-28) is put into words; 29-31 are skipped in shorter months.
+    ['0 6 28 * *', 'UTC', 'on day 28 of every month at 06:00 (UTC)'],
+    ['0 6 29 * *', 'UTC', 'on the schedule 0 6 29 * * (UTC)'],
+    ['0 6 30 * *', 'UTC', 'on the schedule 0 6 30 * * (UTC)'],
+    ['0 6 31 * *', 'UTC', 'on the schedule 0 6 31 * * (UTC)'],
+    ['0 6 0 * *', 'UTC', 'on the schedule 0 6 0 * * (UTC)'],
     // PR #4779 review: a step is put into words only when it divides the range exactly.
     ['*/45 * * * *', 'UTC', 'on the schedule */45 * * * * (UTC)'],
     ['*/7 * * * *', 'UTC', 'on the schedule */7 * * * * (UTC)'],

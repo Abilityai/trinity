@@ -181,6 +181,17 @@ describe('the first session, in the person’s words (ent#1390)', () => {
       expect(body(card)).toContain('Its results are no longer delivered to a Workspace chat.')
     })
 
+    it.each(['', '   '])('a schedule change with a blank delivery address (%j) says delivery stops, like null', async (blank) => {
+      const card = await offer([tool('update_agent_schedule', { agent_name: OWN, schedule_id: 's1', deliver_to_workspace_email: blank })])
+      expect(body(card)).toContain('Its results are no longer delivered to a Workspace chat.')
+    })
+
+    it('a schedule change that only moves the timezone says so', async () => {
+      storedSchedules = [{ id: 's1', agent_name: OWN, name: 'Monday brief', enabled: true, cron_expression: '0 9 * * 1', timezone: 'Europe/London' }]
+      const card = await offer([tool('update_agent_schedule', { agent_name: OWN, schedule_id: 's1', timezone: 'America/New_York' })])
+      expect(body(card)).toContain(`Changes ${OWN}'s schedule “Monday brief”: its times are now read in America/New_York.`)
+    })
+
     it('a tool with no words of its own still gets a sentence and a button named for it, never "Confirm"', async () => {
       const card = await offer([tool('delete_agent', { name: OWN })])
       expect(body(card)).toContain(`Deletes ${OWN} from this instance. This cannot be undone.`)
