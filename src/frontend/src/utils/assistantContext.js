@@ -38,7 +38,7 @@ export function buildFleet(agents, autonomyByName, schedules) {
       autonomy: autonomyByName?.[a.name]?.autonomy_enabled ?? null,
       schedules: (schedules || [])
         .filter((s) => s?.agent_name === a.name)
-        .map((s) => ({ id: s.id, name: s.name, enabled: Boolean(s.enabled), cron: s.cron_expression || '' })),
+        .map((s) => ({ id: s.id, name: s.name, enabled: Boolean(s.enabled), cron: s.cron_expression || '', timezone: s.timezone || null })),
     }))
 }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { CARD_ACTIONS, MAX_CARDS_PER_REPLY, acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, irreversibleTool, toolWords, validBuild, validCard, validChoice, validFeedback, validJob, validTool, webLink } from '@/utils/assistantCards'
+import { CARD_ACTIONS, MAX_CARDS_PER_REPLY, acceptCards, buildOutcome, cardButton, cardLabel, cardNote, cronWords, outcomeLine, runCard, irreversibleTool, toolWords, validBuild, validCard, validChoice, validFeedback, validJob, validTool, webLink } from '@/utils/assistantCards'
 
 const fleet = [
   { name: 'issue-digest', schedules: [{ id: 's1', name: 'Mondays 09:00' }] },
@@ -159,7 +159,7 @@ describe('assistant cards: a change that cannot be undone', () => {
     expect(card).toEqual({ action: 'tool', tool: 'delete_agent', args: { name: 'scout' } })
     expect(toolWords(card)).toEqual({ title: 'Delete agent', details: [{ key: 'name', value: 'scout' }] })
     expect(cardLabel(card)).toBe('Delete agent: scout')
-    expect(cardNote(card)).toBe('This cannot be undone. It runs as you.')
+    expect(cardNote(card)).toBe('Deletes scout from this instance. This cannot be undone.')
   })
 
   it('shows nothing the model wrote as the description of what will run', () => {
@@ -213,8 +213,53 @@ describe('a change that takes the person\'s click', () => {
     const kept = { action: 'tool', tool: 'create_agent_schedule', args: { name: 'x' } }
     expect(irreversibleTool(gone)).toBe(true)
     expect(irreversibleTool(kept)).toBe(false)
-    expect(cardNote(gone)).toBe('This cannot be undone. It runs as you.')
-    expect(cardNote(kept)).toBe('Changes this instance. It runs as you.')
+    expect(cardNote(gone)).toBe('Deletes x from this instance. This cannot be undone.')
+    // ent#1390: a tool the page has no words of its own for is still said in a sentence, never by its parameters
+    expect(cardNote({ action: 'tool', tool: 'revoke_share', args: { name: 'x' } })).toBe('Runs “revoke share” on this instance, as you. This cannot be undone.')
+    expect(cardNote({ action: 'tool', tool: 'tag_agent', args: { agent_name: 'x', tag: 'y' } })).toBe('Runs “tag agent” on this instance, as you.')
+    expect(cardButton({ action: 'tool', tool: 'tag_agent', args: {} })).toBe('Tag agent')
+  })
+})
+
+describe('when a schedule runs, in words (ent#1390)', () => {
+  it.each([
+    ['0 9 * * 1', 'Europe/London', 'every Monday at 09:00 (Europe/London)'],
+    ['0 9 * * *', undefined, 'every day at 09:00 (UTC)'],
+    ['30 7 * * 1-5', 'UTC', 'every weekday at 07:30 (UTC)'],
+    ['0 18 * * 1,4', 'UTC', 'every Monday and Thursday at 18:00 (UTC)'],
+    ['0 9 * * 0', 'UTC', 'every Sunday at 09:00 (UTC)'],
+    ['0 9 * * 7', 'UTC', 'every Sunday at 09:00 (UTC)'],
+    ['0 6 1 * *', 'UTC', 'on day 1 of every month at 06:00 (UTC)'],
+    ['*/15 * * * *', 'UTC', 'every 15 minutes'],
+    ['0 */2 * * *', 'UTC', 'every 2 hours'],
+    ['5 * * * *', 'UTC', 'every hour at 5 minutes past'],
+    ['1 * * * *', 'UTC', 'every hour at 1 minute past'],
+    ['0 * * * *', 'UTC', 'every hour'],
+    ['45 * * * *', 'UTC', 'every hour at 45 minutes past'],
+    // A day of the month every month has (1-28) is put into words; 29-31 are skipped in shorter months.
+    ['0 6 28 * *', 'UTC', 'on day 28 of every month at 06:00 (UTC)'],
+    ['0 6 29 * *', 'UTC', 'on the schedule 0 6 29 * * (UTC)'],
+    ['0 6 30 * *', 'UTC', 'on the schedule 0 6 30 * * (UTC)'],
+    ['0 6 31 * *', 'UTC', 'on the schedule 0 6 31 * * (UTC)'],
+    ['0 6 0 * *', 'UTC', 'on the schedule 0 6 0 * * (UTC)'],
+    // PR #4779 review: a step is put into words only when it divides the range exactly.
+    ['*/45 * * * *', 'UTC', 'on the schedule */45 * * * * (UTC)'],
+    ['*/7 * * * *', 'UTC', 'on the schedule */7 * * * * (UTC)'],
+    ['0 */5 * * *', 'UTC', 'on the schedule 0 */5 * * * (UTC)'],
+    ['*/0 * * * *', 'UTC', 'on the schedule */0 * * * * (UTC)'],
+    ['0 */0 * * *', 'UTC', 'on the schedule 0 */0 * * * (UTC)'],
+    ['*/1 * * * *', 'UTC', 'every minute'],
+    ['0 */1 * * *', 'UTC', 'every hour'],
+    ['*/20 * * * *', 'UTC', 'every 20 minutes'],
+    ['0 */6 * * *', 'UTC', 'every 6 hours'],
+    // no zone known: none is named, never UTC by default
+    ['0 9 * * 1', null, 'every Monday at 09:00'],
+    ['*/45 * * * *', null, 'on the schedule */45 * * * *'],
+    ['0 9 1 1 *', 'UTC', 'on the schedule 0 9 1 1 * (UTC)'],
+    ['0 25 * * *', 'UTC', 'on the schedule 0 25 * * * (UTC)'],
+    ['not a cron', 'UTC', 'on the schedule not a cron (UTC)'],
+  ])('%s → %s', (expr, tz, words) => {
+    expect(cronWords(expr, tz)).toBe(words)
   })
 })
 
