@@ -338,7 +338,8 @@ def test_spawning_a_ghost_needs_no_grant(held, audit):
     (".claude/agents/reviewer.md", False, True),
     (".claude/commands/x.md", False, True),
     (".claude/skills/x/SKILL.md", False, False),        # skills.manage alone (decided)
-    ("docs/CLAUDE.md", False, False),                    # only the agent's own top-level file
+    ("docs/CLAUDE.md", False, True),                     # any depth (trinity-enterprise#978)
+    ("docs/template.yaml", False, False),                # template.yaml: top level only
     ("notes.md", False, False),
     (".claude", True, True),                             # deleting .claude deletes instructions
     ("/home/developer", True, True),

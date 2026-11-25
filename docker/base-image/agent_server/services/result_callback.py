@@ -230,6 +230,11 @@ def _envelope_from_http_exception(exc: HTTPException) -> Dict:
         # over the status-code guess.
         if isinstance(detail.get("error_code"), str):
             error_code = detail["error_code"]
+            # trinity-enterprise#978 / trinity#4778: a 502 that names its own
+            # class (the turn check that could not ask the platform) is not the
+            # #678 empty result the status alone guesses; that body names none.
+            if terminal_reason == "empty_result":
+                terminal_reason = error_code
     else:
         error_msg = str(detail)[:500]
 

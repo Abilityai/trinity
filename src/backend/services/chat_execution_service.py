@@ -68,6 +68,8 @@ from services.task_execution_service import (
 from services.execution_classification import (
     _extract_agent_error as _extract_switch_error,
     classify_switch_failure,
+    is_turn_check_unavailable_response,
+    is_turn_refusal,
 )
 from services.capacity_manager import (
     CapacityFull,
@@ -760,22 +762,39 @@ def _error_code_headers(code, extra: Optional[dict] = None) -> Optional[dict]:
     return headers
 
 
+# ent#978: what a caller is told when the agent could not ask the platform
+# whose turn it was. Fixed words, not the agent's relayed body: a 5xx answers
+# a fixed sentence (#4284). Nothing ran, so retrying is the right move.
+TURN_CHECK_UNAVAILABLE_MESSAGE = (
+    "The agent could not ask Trinity whose turn this is, so the turn did not start. "
+    "Try again in a moment."
+)
+
+
 def _classify_agent_http_failure(
-    agent_status_code, error_msg: str = ""
+    agent_status_code, error_msg: str = "", response=None
 ) -> TaskExecutionErrorCode:
     """The /chat path's twin of task_execution_service's producer-side rule:
     Claude Code refused the model → MODEL_UNSUPPORTED (#3012, any status — an
-    older agent image answers it 503), the agent answered 503 → AUTH,
-    429 → BILLING, never answered → NETWORK, any other agent status →
-    AGENT_ERROR."""
+    older agent image answers it 503), a typed refusal → TURN_REFUSED, the
+    turn check could not ask the platform → TURN_CHECK_UNAVAILABLE (ent#978),
+    the agent answered 503 → AUTH, 429 → BILLING, never answered → NETWORK,
+    any other agent status → AGENT_ERROR.
+
+    ``response`` is the agent's HTTP response, for the typed body: a refusal is
+    read from ``error_code: "turn_refused"`` only (ent#978 item 3), never from
+    the 403 alone."""
     from services.failure_classifier import is_model_rejection, is_prompt_too_long
 
     if agent_status_code is None:
         return TaskExecutionErrorCode.NETWORK
     if is_model_rejection(error_msg):
         return TaskExecutionErrorCode.MODEL_UNSUPPORTED
-    if agent_status_code == 403:
+    if is_turn_refusal(response):
         return TaskExecutionErrorCode.TURN_REFUSED
+    # ent#978: before the 503 → AUTH rule — an older image answers it 503.
+    if is_turn_check_unavailable_response(response):
+        return TaskExecutionErrorCode.TURN_CHECK_UNAVAILABLE
     # #3849: the API refused the prompt's length — a 503 from the agent, but
     # not a credential fault.
     if is_prompt_too_long(error_msg):
@@ -807,6 +826,7 @@ async def _apply_sub003_autoswitch(
     execution_id: Optional[str] = None,
     *,
     walk=None,
+    response=None,
 ):
     """SUB-003 (#441): auto-switch on rate-limit (429) OR auth-class failures.
     ALWAYS raises: ChatDispatchError (switch/plain) OR the HTTPException that
@@ -821,13 +841,17 @@ async def _apply_sub003_autoswitch(
     This then only words the final answer: the pool is exhausted (usage-limit
     copy naming the earliest known reset, the trail attached), or the turn ran
     out of time to re-issue (the last-resort "please retry", AC#5). A caller
-    without a walk gets the pre-#3470 behaviour unchanged."""
+    without a walk gets the pre-#3470 behaviour unchanged.
+
+    ``response`` (ent#978): the agent's HTTP response, so the typed body —
+    not the status alone — says whether the agent refused the turn or could
+    not check it."""
     from services.subscription_auto_switch import (
         handle_subscription_failure,
         is_auth_failure,
     )
 
-    code = _classify_agent_http_failure(agent_status_code, error_msg)
+    code = _classify_agent_http_failure(agent_status_code, error_msg, response)
     code_headers = _error_code_headers(
         code, {EXECUTION_ID_HEADER: execution_id} if execution_id else None
     )
@@ -842,6 +866,12 @@ async def _apply_sub003_autoswitch(
     # as the 403 it is; a 503 would tell every caller to retry a refusal.
     if code.value == TaskExecutionErrorCode.TURN_REFUSED.value:
         raise ChatDispatchError(403, error_msg, headers=code_headers)
+
+    # ent#978: the agent could not ask the platform whose turn this is, so the
+    # turn did not start. A 502 with fixed words — never the subscription walk
+    # below, which a 503 would start.
+    if code.value == TaskExecutionErrorCode.TURN_CHECK_UNAVAILABLE.value:
+        raise ChatDispatchError(502, TURN_CHECK_UNAVAILABLE_MESSAGE, headers=code_headers)
 
     # Only when the WALK ended the turn: a later, unrelated failure (a plain 500
     # after a served switch) keeps the generic wording below, and the walk's
@@ -1029,7 +1059,8 @@ async def _finalize_http_failure(
         )
 
     await _apply_sub003_autoswitch(
-        name, error_msg, agent_status_code, execution_id=task_execution_id, walk=walk
+        name, error_msg, agent_status_code, execution_id=task_execution_id, walk=walk,
+        response=getattr(e, "response", None),
     )
 
 
@@ -2608,7 +2639,8 @@ def stored_error(snapshot) -> Optional[dict]:
 def _map_task_failure(name, result, *, idem):
     """Shared /task failure translation (#679): a non-success terminal maps to
     422 (turn limit, #3988) / 429 (at-capacity) / 504 (timed out) / 400 (model
-    refused, #3012) / 503. Raises ChatDispatchError.
+    refused, #3012) / 403 (turn refused, ent#926) / 502 (turn check
+    unavailable, ent#978) / 503. Raises ChatDispatchError.
 
     #3988: the turn limit answers 422 — the agent's own status — and always
     carries ``X-Trinity-Error-Code: max_turns``, which is what tells it apart
@@ -2672,6 +2704,11 @@ def _map_task_failure(name, result, *, idem):
         ):
             # ent#926: same 403 as the /chat path — a refusal, never retried.
             raise ChatDispatchError(403, result.error, headers=code_headers)
+        elif getattr(getattr(result, "error_code", None), "value", None) == (
+            TaskExecutionErrorCode.TURN_CHECK_UNAVAILABLE.value
+        ):
+            # ent#978: same 502 and words as the /chat path — the turn did not start.
+            raise ChatDispatchError(502, TURN_CHECK_UNAVAILABLE_MESSAGE, headers=code_headers)
         else:
             raise ChatDispatchError(
                 503,

@@ -1510,8 +1510,8 @@ class DatabaseManager:
     # Agent Guardrails (GUARD-001)
     # =========================================================================
 
-    def get_guardrails_config(self, agent_name: str) -> dict:
-        return self._agent_ops.get_guardrails_config(agent_name)
+    def get_guardrails_config(self, agent_name: str, strict: bool = False) -> dict:
+        return self._agent_ops.get_guardrails_config(agent_name, strict=strict)
 
     def set_guardrails_config(self, agent_name: str, config: dict = None) -> bool:
         return self._agent_ops.set_guardrails_config(agent_name, config)

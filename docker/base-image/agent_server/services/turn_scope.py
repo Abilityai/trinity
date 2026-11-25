@@ -81,6 +81,20 @@ COULD_NOT_CHECK = (
     "Trinity could not be reached to check whose turn this is, so it did not run on "
     "{runtime}. Try again in a moment."
 )
+# The class an answer that could not be checked carries (trinity-enterprise#978):
+# answered 502, never 503, because every caller reads a 503 as an auth failure
+# (the subscription walk, the AUTH breaker code), and typed so the backend, the
+# async callback and the pull sink each name it instead of guessing from the
+# status. Claude Code's check (`managed_hooks.require_hooks_or_owner`) answers
+# the same body. The backend also recognises the sentence above from an older
+# image's 503 (`failure_classifier.TURN_CHECK_UNAVAILABLE_MARKERS`), so its
+# wording is pinned by a test.
+UNAVAILABLE_ERROR_CODE = "turn_check_unavailable"
+
+
+def could_not_check(runtime: str) -> dict:
+    """The typed 502 body for a turn whose tier the platform could not tell."""
+    return {"message": COULD_NOT_CHECK.format(runtime=runtime), "error_code": UNAVAILABLE_ERROR_CODE}
 
 
 def _agent_name() -> str:
@@ -181,7 +195,7 @@ async def require_owner_tier(runtime: str, execution_id: Optional[str]) -> None:
     logger.info(f"event=turn_scope_refused runtime={runtime} execution_id={execution_id} tier={tier} "
                 f"kind={kind} cause={cause}")
     if tier == "unreachable":
-        raise HTTPException(status_code=503, detail=COULD_NOT_CHECK.format(runtime=runtime))
+        raise HTTPException(status_code=502, detail=could_not_check(runtime))
     if schedule:
         text = schedule_refusal(runtime, schedule)
     else:

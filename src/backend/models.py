@@ -2856,6 +2856,7 @@ _PULL_ERROR_CODES = frozenset({
     "circuit_open", "reconciled", "lease_expired", "oom", "max_turns",
     "model_unsupported",  # #3012 — the agent's model-rejection 400
     "turn_refused",  # ent#926 — a runtime that cannot scope the turn refused it
+    "turn_check_unavailable",  # ent#978 — the agent could not ask whose turn it is
 })
 # reply.status value set (MESSAGE_ENVELOPE_SCHEMA §2.4/§4; `cancelled` per the
 # live #1083 3-way map — OPEN-1).

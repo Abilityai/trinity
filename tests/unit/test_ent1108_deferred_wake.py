@@ -596,7 +596,8 @@ def test_the_fresh_ddl_carries_the_column():
 # No turn started on the agent: the platform never reached it (network), never
 # admitted the turn (capacity, circuit_open, ephemeral_exhausted) or the agent
 # could not start one (auth, billing). The wake is still owed.
-NO_TURN_CLASSES = ["network", "capacity", "circuit_open", "billing", "auth", "ephemeral_exhausted"]
+NO_TURN_CLASSES = ["network", "capacity", "circuit_open", "billing", "auth", "ephemeral_exhausted",
+                   "turn_check_unavailable"]  # trinity-enterprise#978
 # A turn ran and ended badly — its own execution row says how. Not owed again.
 TURN_RAN_CLASSES = ["timeout", "agent_error", "max_turns", "skill_not_found",
                     "model_unsupported", "turn_refused"]

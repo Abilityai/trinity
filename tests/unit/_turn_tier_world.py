@@ -140,6 +140,6 @@ class World:
         self._count("get_execution")
         return self._executions.get(execution_id)
 
-    def get_guardrails_config(self, agent_name):
+    def get_guardrails_config(self, agent_name, strict=False):
         self._count("get_guardrails_config")
         return {"visitor_shell": self._visitor_shell}
