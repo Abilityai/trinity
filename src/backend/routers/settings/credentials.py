@@ -12,7 +12,7 @@ import re
 import httpx
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +203,13 @@ async def get_api_keys_status(
 async def update_anthropic_key(
     body: ApiKeyUpdate,
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    connect_agents: bool = Query(
+        True,
+        description="False: save only, and restart no agent onto it (the first-credential connect "
+                    "does not run). The assistant's card saves this way and asks the person first "
+                    "(trinity-enterprise#1354).",
+    ),
 ):
     """
     Set or update the Anthropic API key.
@@ -226,7 +232,7 @@ async def update_anthropic_key(
 
         # Store in settings — AES-256-GCM encrypted at rest (ent#435)
         set_secret_setting('anthropic_api_key', key)
-        connected = connect_agents_to_first_credential() if first_credential else 0
+        connected = connect_agents_to_first_credential() if first_credential and connect_agents else 0
 
         # SEC-001: audit API key change
         await platform_audit_service.log(

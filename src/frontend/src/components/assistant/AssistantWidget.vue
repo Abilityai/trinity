@@ -340,14 +340,23 @@
                 class="text-[12.5px] text-gray-900 dark:text-gray-100 whitespace-pre-wrap break-words max-h-40 overflow-y-auto"
                 data-testid="assistant-feedback"
               >{{ c.card.details }}</p>
-              <!-- A change that cannot be undone: exactly what will run, in the page's own words -->
-              <dl v-if="c.card.action === 'tool'" class="text-[12.5px] text-gray-900 dark:text-gray-100 space-y-0.5" data-testid="assistant-tool">
-                <div v-for="d in toolWords(c.card).details" :key="d.key" class="flex gap-2">
-                  <dt class="text-gray-500 dark:text-gray-400 flex-none">{{ d.key }}</dt>
-                  <dd class="min-w-0 break-words">{{ d.value }}</dd>
-                </div>
-              </dl>
               <p v-if="!(FOLLOWED.includes(c.card.action) && c.state !== 'making')" class="text-[12.5px] text-gray-600 dark:text-gray-300">{{ c.note }}</p>
+              <!-- A tool's parameters: exactly what will run, behind Details, never the body (ent#1390) -->
+              <div v-if="c.card.action === 'tool'" class="space-y-1">
+                <button
+                  type="button"
+                  class="text-[12.5px] font-medium underline text-action-primary-600 dark:text-action-primary-400"
+                  :aria-expanded="detailsOpen[c.id] ? 'true' : 'false'"
+                  data-testid="assistant-tool-details-toggle"
+                  @click="detailsOpen[c.id] = !detailsOpen[c.id]"
+                >Details</button>
+                <dl v-if="detailsOpen[c.id]" class="text-[12.5px] text-gray-900 dark:text-gray-100 space-y-0.5" data-testid="assistant-tool">
+                  <div v-for="d in toolWords(c.card).details" :key="d.key" class="flex gap-2">
+                    <dt class="text-gray-500 dark:text-gray-400 flex-none">{{ d.key }}</dt>
+                    <dd class="min-w-0 break-words">{{ d.value }}</dd>
+                  </div>
+                </dl>
+              </div>
 
               <!-- A run that ended well: its result, one click away (ent#1355) -->
               <a
@@ -394,7 +403,7 @@
                   :loading-label="LOADING[c.card.action] || 'Confirming…'"
                   :disabled="store.sending"
                   @click="answer(m.id, c.id, true)"
-                >{{ CONFIRM[c.card.action] || 'Confirm' }}</BaseButton>
+                >{{ c.button || CONFIRM[c.card.action] || 'Confirm' }}</BaseButton>
                 <BaseButton
                   variant="secondary"
                   size="sm"
@@ -716,7 +725,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import BaseButton from '../base/BaseButton.vue'
 import BaseInput from '../base/BaseInput.vue'
@@ -752,10 +761,12 @@ const OUTCOME = Object.freeze({
   refused: { words: "That didn't work.", tone: 'text-status-danger-700 dark:text-status-danger-400', icon: 'M6 18L18 6M6 6l12 12' },
   unsure: { words: 'Not sure it all worked.', tone: 'text-status-warning-700 dark:text-status-warning-400', icon: 'M12 8v5M12 16.5h.01' },
 })
-const CONFIRM = Object.freeze({ build: 'Build', upgrade: 'Continue', feedback: 'Send' })
-const LOADING = Object.freeze({ build: 'Building…', feedback: 'Sending…' })
+const CONFIRM = Object.freeze({ build: 'Build', upgrade: 'Continue', feedback: 'Send', 'use-claude': 'Yes, switch them', 'email-results': 'Email it to me' })
+const LOADING = Object.freeze({ build: 'Building…', feedback: 'Sending…', 'use-claude': 'Switching…' })
 const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running', feedback: 'For the Trinity team', credential: 'A credential, kept from the assistant', 'local-move': 'On your machine' })
 const SHOWN_STEPS = 4
+// ent#1390: which tool cards have their parameters open (closed by default).
+const detailsOpen = reactive({})
 const FOLLOWED = ['job', 'run']
 // A followed card's heading follows what happened to it.
 const ENDED = Object.freeze({ done: 'Finished', refused: "Didn't finish", unsure: 'Still going' })

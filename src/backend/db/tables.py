@@ -246,6 +246,10 @@ agent_schedules = Table(
     Column("webhook_auth_enabled", Integer),    # ent#77: gate signature verify
     # ent#498 — nullable, no backfill; see db/schema.py for the contract.
     Column("deliver_to_workspace_email", Text),
+    # ent#1391 — nullable, no backfill; see db/schema.py for the contract.
+    Column("email_results_user_id", Integer),
+    Column("email_results_error", Text),
+    Column("email_results_error_at", Text),
     Column("deleted_at", Text),
 )
 

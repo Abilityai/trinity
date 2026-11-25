@@ -4595,6 +4595,26 @@ def _migrate_schedule_workspace_delivery(cursor, conn):
     conn.commit()
 
 
+def _migrate_schedule_email_results(cursor, conn):
+    """ent#1391 — mail each run's result to the person who asked. Three nullable
+    columns, no backfill, no index (read only through the schedule row already
+    loaded by id): `email_results_user_id` (who turned it on; the address is read
+    from their account at each send), `email_results_error` and
+    `email_results_error_at` (why the last mail did not go). NULL mails nothing.
+
+    Postgres counterpart: `0126_schedule_email_results`.
+    """
+    for name, kind in (("email_results_user_id", "INTEGER"),
+                       ("email_results_error", "TEXT"),
+                       ("email_results_error_at", "TEXT")):
+        _safe_add_column(
+            cursor, "agent_schedules", name,
+            f"ALTER TABLE agent_schedules ADD COLUMN {name} {kind}",
+            log_msg=f"Adding {name} to agent_schedules (ent#1391)...",
+        )
+    conn.commit()
+
+
 def _migrate_agent_skills_delivery_status(cursor, conn):
     """#2914 — the durable per-assignment injection verdict.
 
@@ -6571,4 +6591,5 @@ MIGRATIONS = [
     ("agent_ownership_default_model", _migrate_agent_ownership_default_model),
     ("execution_continues_execution_id", _migrate_execution_continues_execution_id),
     ("guardrail_events_table", _migrate_guardrail_events_table),
+    ("schedule_email_results", _migrate_schedule_email_results),
 ]

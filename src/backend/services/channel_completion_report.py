@@ -80,7 +80,7 @@ _MAX_REPORT_CHARS = 2800
 _TELEGRAM_MAX_MESSAGE_CHARS = 4096
 
 
-def _sanitized_detail(summary_or_error: Optional[str]) -> str:
+def _sanitized_detail(summary_or_error: Optional[str], limit: int = _MAX_REPORT_CHARS) -> str:
     """Credential-sanitise, THEN truncate. The one rule every channel uses.
 
     Success text and a passed-through turn refusal only: a failure's own error
@@ -110,10 +110,10 @@ def _sanitized_detail(summary_or_error: Optional[str]) -> str:
     from utils.credential_sanitizer import sanitize_text
 
     raw = (summary_or_error or "").strip()
-    window = raw[: _MAX_REPORT_CHARS * 2]
+    window = raw[: limit * 2]
     cleaned = sanitize_text(window)
-    truncated = len(cleaned) > _MAX_REPORT_CHARS or len(raw) > len(window)
-    body = cleaned[:_MAX_REPORT_CHARS].rstrip()
+    truncated = len(cleaned) > limit or len(raw) > len(window)
+    body = cleaned[:limit].rstrip()
     if truncated:
         body += "…"
     return body
@@ -687,6 +687,14 @@ async def report_completion(
         source_channel_chat_id = getattr(row, "source_channel_chat_id", None)
         source_channel_thread = getattr(row, "source_channel_thread", None)
         triggered_by = getattr(row, "triggered_by", None)
+
+        # ent#1391: a schedule that mails its runs to the person who asked.
+        # Independent of any channel context, so it runs first; it never raises.
+        # It applies this module's own redaction (`_sanitized_detail`,
+        # `person_safe_failure`) before anything leaves the instance.
+        if getattr(row, "schedule_id", None):
+            from services import schedule_result_email
+            await schedule_result_email.deliver(execution_id=execution_id, status=status)
 
         if not source_channel or not source_channel_chat_id:
             return False                      # nothing to report back to

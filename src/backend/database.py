@@ -2008,6 +2008,12 @@ class DatabaseManager:
         # ent#77: disable signature auth + drop the stored secret.
         return self._schedule_ops.clear_webhook_secret(schedule_id)
 
+    def set_schedule_email_results(self, schedule_id: str, user_id, *, error=None):
+        return self._schedule_ops.set_schedule_email_results(schedule_id, user_id, error=error)
+
+    def record_schedule_email_results_outcome(self, schedule_id: str, error):
+        return self._schedule_ops.record_schedule_email_results_outcome(schedule_id, error)
+
     def set_schedule_enabled(self, schedule_id: str, enabled: bool):
         return self._schedule_ops.set_schedule_enabled(schedule_id, enabled)
 

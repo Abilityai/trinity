@@ -237,6 +237,11 @@ class Schedule(BaseModel):
     webhook_secret_encrypted: Optional[str] = None
     # ent#498: the Workspace delivery target. Nullable on every existing row.
     deliver_to_workspace_email: Optional[str] = None
+    # ent#1391: who each run's result is mailed to (their id; the address is
+    # read from their account at each send), and why the last mail did not go.
+    email_results_user_id: Optional[int] = None
+    email_results_error: Optional[str] = None
+    email_results_error_at: Optional[str] = None
 
 
 class ScheduleExecution(BaseModel):

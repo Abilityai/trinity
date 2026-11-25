@@ -11,6 +11,17 @@
       "description": "#4643: the boot result sweeps (result_callback and pull_worker) run as background tasks, so their 0-60 s jitter delays only the resend and not agent-server startup or /health; the sweep still runs, the pull periodic tick still follows it, and shutdown still cancels it."
     },
     {
+      "file": "unit/test_ent978_narrowed_read_marker.py",
+      "feature": "trinity-enterprise#978",
+      "added": "2026-11-24",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#978: through the real executions, schedules, fan-out and activity routers, real get_current_user, real JWTs, a real agent key and real execution rows on SQLite: while a shared person's turn runs, an agent key's reads carry X-Trinity-Read-Narrowed (running_turn for the owner's concurrent run with or without a turn header, turn_person for the key's own shared turn, unverified for an unreadable ledger or an unknown turn id with nothing running) on lists, detail, log, schedule history, fan-out, the fleet list and the timeline; a run that exists and one that does not answer the same status, body, headers and query count; a signed-in person and a route that reads no scope are never marked; the full view returns unmarked when the turn ends; the pure-ASGI middleware carries the code on JSON, 404 and streamed responses between two BaseHTTPMiddleware layers, first code wins, nothing leaks between requests, websocket and lifespan pass through, and main.py mounts it; a refusal caused by another running turn says so at the fence and at assert_agent_owner, and an unreadable ledger keeps the old text; every backend code has MCP wording."
+    },
+    {
       "file": "unit/test_4674_sync_on_loop_ratchet.py",
       "feature": "#4674",
       "added": "2026-11-20",
@@ -9981,6 +9992,28 @@
         "reliability"
       ],
       "description": "trinity-enterprise#1176, platform side: the managed-hooks fleet check (run inside the leased fleet-image cycle, whose failure it never breaks) names every running, non-ephemeral agent whose /health reads guardrails_registration=skipped in ONE high alert (managed_hooks_skipped:fleet, approved words, singular and plural), ends it when none is, leaves it on Docker unreadable, and lets a silent agent hold it only if the last reading named it or before the first reading; the /health read maps every answer; the kind is registered under a reserved prefix with the new-agent escalation; a typed turn_refused 403 is not a switch failure while any other 403 still is; no new text reads as an auth failure and every refusal is recognised by the public status read; HOOK_STATES carries skipped."
+    },
+    {
+      "file": "unit/test_ent1391_schedule_result_email.py",
+      "feature": "trinity-enterprise#1391",
+      "added": "2026-11-25",
+      "categories": [
+        "unit",
+        "backend",
+        "schedules",
+        "email"
+      ]
+    },
+    {
+      "file": "../src/frontend/tests/unit/assistantFirstSessionCards1390.mount.spec.js",
+      "feature": "trinity-enterprise#1390",
+      "added": "2026-11-25",
+      "categories": [
+        "frontend",
+        "unit",
+        "credentials"
+      ],
+      "description": "The assistant panel's first-session cards, mounted, with tool cards built from and checked against a real instance's toolset: a confirm card says in one sentence what happens and its button names the action ('Run its first task', 'Switch it on', 'Delete it', never 'Confirm'), with the tool's parameters only behind a Details toggle; the Claude card is titled 'Connect Claude', says whether a subscription or an API key was saved and shows no variable name; the save report, the line told to the assistant, the fleet in the turn's context and a proposed switch leave out hidden example agents and system agents, and name the examples again once the person asked to see them; when only hidden agents are off the new credential the assistant is told every agent the person can see is on it, never every agent; a schedule change that sends no zone names the schedule's stored zone (none when unknown, never UTC by default), and a schedule that delivers its results says where they go."
     }
   ]
 }
