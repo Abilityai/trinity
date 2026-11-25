@@ -110,15 +110,16 @@ async def share_agent_endpoint(
     # roster), not with the caller. A non-owner admin may add themselves: it is
     # the only way the agent reaches their Workspace.
     target_email = share_request.email.strip().lower()
-    owner_email = db.get_agent_owner_email(agent_name)
+    owner_email = await asyncio.to_thread(db.get_agent_owner_email, agent_name)
+    caller_email = await asyncio.to_thread(_user_email, current_user)
     if owner_email and owner_email == target_email:
-        if owner_email == _user_email(current_user):
+        if owner_email == caller_email:
             detail = ("Cannot share an agent with yourself: "
                       "you own it, so it is already on your Workspace")
         else:
             detail = "Cannot share an agent with its owner: it is already on their Workspace"
         raise HTTPException(status_code=400, detail=detail)
-    is_self_add = target_email == _user_email(current_user)
+    is_self_add = target_email == caller_email
 
     share = db.share_agent(agent_name, current_user.username, share_request.email)
     if not share:
