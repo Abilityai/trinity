@@ -21,11 +21,11 @@ import { defineStore } from 'pinia'
 import api from '../api'
 import { useOnboardingStore } from './onboarding'
 import { buildContext, buildFleet, describePage } from '../utils/assistantContext'
-import { acceptCards, buildOutcome, cardLabel, cardNote, credentialLine, outcomeLine, runCard, useClaude, validBuild, webLink } from '../utils/assistantCards'
+import { acceptCards, buildOutcome, cardButton, cardLabel, cardNote, credentialLine, outcomeLine, runCard, useClaude, validBuild, webLink } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
 import { useAuthStore } from './auth'
 import { useFirstRunStore } from './firstRun'
-import { firstResultSeen, inFirstSession, markFirstResultSeen, resultPath } from '../utils/firstSession'
+import { examplesOutOfSight, examplesShownOnRequest, firstResultSeen, inFirstSession, markFirstResultSeen, resultPath } from '../utils/firstSession'
 
 export const FEATURE_ID = 'assistant'
 
@@ -190,6 +190,7 @@ export const useAssistantStore = defineStore('assistant', {
     account: closedAccount(),
     byCode: null,        // the module offers subscribing by code: null until Subscribe is first pressed (trinity-enterprise#1331)
     fleet: [],
+    systemAgents: [],    // ent#1390: names of the instance's system agents, never named to the person
     openResult: '',      // ent#1355: a first result the page should open in front of the person (the panel does it)
   }),
 
@@ -389,8 +390,19 @@ export const useAssistantStore = defineStore('assistant', {
         read('/api/ops/schedules', {}),
       ])
       if (!Array.isArray(agents)) return this.fleet
+      this.systemAgents = agents.filter((a) => a?.is_system && typeof a.name === 'string').map((a) => a.name)
       this.fleet = buildFleet(agents, autonomy, schedules?.schedules || [])
       return this.fleet
+    },
+
+    /**
+     * trinity-enterprise#1390: the agents the person cannot see — the hidden
+     * example agents and the system agents. Left out of every list the panel
+     * shows them or tells the assistant.
+     */
+    outOfSight(fleet = this.fleet) {
+      const examples = examplesOutOfSight(this.status, fleet, useFirstRunStore().seededAgents || [], examplesShownOnRequest())
+      return new Set([...examples, ...this.systemAgents])
     },
 
     /**
@@ -427,7 +439,7 @@ export const useAssistantStore = defineStore('assistant', {
         let { data } = await api.post(`${BASE}/turn`, {
           conversation_id: this.conversationId,
           message: clicked.length ? `${clicked.join('\n')}\n${message}` : message,
-          context: { ...buildContext(route, fleet), ...(said ? { said } : {}), ...setupSteps(),
+          context: { ...buildContext(route, fleet.filter((a) => !this.outOfSight(fleet).has(a.name))), ...(said ? { said } : {}), ...setupSteps(),
             // trinity-enterprise#1355: the assistant leads this session and follows its script for it.
             ...(firstSession ? { first_session: true } : {}) },
           counted,
@@ -458,13 +470,18 @@ export const useAssistantStore = defineStore('assistant', {
         // against the fleet, and let the page behind the panel catch up.
         const after = await this.refreshFleet()
         useAgentsStore().fetchAgents().catch(() => {})
+        // ent#1390: a switch is never offered for an agent the person cannot see.
+        const hidden = this.outOfSight(after)
         const cards = acceptCards(data.cards, after)
+          .map((c) => (c.action === 'use-claude' ? { ...c, agents: c.agents.filter((n) => !hidden.has(n)) } : c))
+          .filter((c) => c.action !== 'use-claude' || c.agents.length > 0)
         const reply = {
           id: newId(),
           role: 'assistant',
           content: data.text || (cards.length ? '' : 'Done.'),
           cards: cards.map((card) => ({
-            id: newId(), card, label: cardLabel(card, after, { firstSession }), note: cardNote(card, { firstSession }),
+            id: newId(), card, label: cardLabel(card, after, { firstSession }), note: cardNote(card, { firstSession, fleet: after }),
+            button: cardButton(card, after, { firstSession }),
             state: FOLLOWED.includes(card.action) ? 'making' : 'open', reason: '', progress: '', picked: '',
             since: Date.now(), fraction: null,
             auto: false,       // a proposed build waits for the owner's click on Build; they can tick create-when-ready (ent#1343)
@@ -842,6 +859,12 @@ export const useAssistantStore = defineStore('assistant', {
           ? data.not_using.filter((r) => typeof r?.name === 'string').map((r) => ({ name: r.name.slice(0, 81), model_access: typeof r.model_access === 'boolean' ? r.model_access : null }))
           : (data && 'not_using' in data ? null : undefined)
         entry.moving = Array.isArray(data?.moving) ? data.moving.filter((n) => typeof n === 'string').map((n) => n.slice(0, 81)) : []
+        // ent#1390: only agents the person can see are named, on the card and to the assistant.
+        const hidden = this.outOfSight()
+        const before = (Array.isArray(entry.notUsing) ? entry.notUsing.length : 0) + entry.moving.length
+        if (Array.isArray(entry.notUsing)) entry.notUsing = entry.notUsing.filter((r) => !hidden.has(r.name))
+        entry.moving = entry.moving.filter((n) => !hidden.has(n))
+        entry.hidden = before - ((Array.isArray(entry.notUsing) ? entry.notUsing.length : 0) + entry.moving.length)
       } catch (error) {
         entry.state = 'open'
         const code = error?.response?.status
@@ -851,7 +874,7 @@ export const useAssistantStore = defineStore('assistant', {
           error: words(error, code ? `Trinity refused it (${code}). Nothing was stored.` : "Couldn't reach Trinity, so it may or may not have been stored."),
         }
       }
-      await this.send(credentialLine(entry.card, true, { working: entry.working, kind: entry.kind, notUsing: entry.notUsing, moving: entry.moving, connected: entry.connected }), route, { shown: false })
+      await this.send(credentialLine(entry.card, true, { working: entry.working, kind: entry.kind, notUsing: entry.notUsing, moving: entry.moving, connected: entry.connected, hidden: entry.hidden }), route, { shown: false })
       return { ok: true }
     },
 

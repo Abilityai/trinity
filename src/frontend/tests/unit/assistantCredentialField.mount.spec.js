@@ -172,7 +172,9 @@ describe('assistant credential field', () => {
 
   it("the instance's own Claude key is asked for with no agent, and an API key still goes in it (ent#1354)", async () => {
     await openAndAsk({ action: 'credential', name: 'ANTHROPIC_API_KEY', why: 'Your agents run on Claude.' })
-    expect(wrapper.get('[data-testid="assistant-card"]').text()).toContain('stored on this instance as ANTHROPIC_API_KEY')
+    // ent#1390: the person's view names Claude, never the variable it is stored under
+    expect(wrapper.get('[data-testid="assistant-card"]').text()).toContain('saved on this instance as its Claude credential')
+    expect(wrapper.get('[data-testid="assistant-card"]').text()).not.toContain('ANTHROPIC_API_KEY')
     await type('sk-ant-api03-example')
     await save()
     expect(posted(CRED)[0].body).toEqual({ agent: null, name: 'ANTHROPIC_API_KEY', value: 'sk-ant-api03-example' })
