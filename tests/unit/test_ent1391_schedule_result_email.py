@@ -28,6 +28,10 @@ Pinned, one test (or more) per review finding of the first validation:
 11. (second validation) turning it on or off each writes an audit row, and a
     failed attempt held back for a retry that is then dropped by the scheduler
     is still mailed, once per chain.
+12. (fourth validation) an ownership transfer, ordinary or the spare hand-over,
+    clears the recipient and its error columns on every schedule of the agent
+    unless the recipient is the new owner; an admin who only manages the agent
+    is mailed until it changes hands.
 
 Module: src/backend/services/schedule_result_email.py
 """
@@ -682,3 +686,94 @@ class TestARestartReportsTheRetriesItClears:
                                                attempt_number=1)])
         assert len(mails.sent) == 1 and mails.sent[0]["relay"][1]["status"] == "failed"
 
+
+
+# ---- fourth validation: a result is never mailed to a previous owner -----------------------
+#
+# `transfer_agent_ownership` (the ordinary transfer, and the spare hand-over's `own`
+# step, which calls it with every side-effect option on) clears the recipient and both
+# error columns on every schedule of the agent, unless the recipient is the new owner.
+# At send time an admin who manages the agent, but neither owns it nor is shared on it,
+# is mailed: they turned it on for themselves through the owner-tier route, and the
+# route's own gate admits them. It lasts until the agent changes hands or they stop it.
+
+def _transfer(world, to_user_id, **options):
+    opts = dict(clear_spawn_provenance=False, clear_ephemeral=False, enable_autonomy=False)
+    opts.update(options)
+    assert db.transfer_agent_ownership(world.agent, to_user_id=to_user_id,
+                                       expect={"owner_id": world.owner.id}, **opts) is True
+
+
+def _set_error(sid, error="The relay refused it."):
+    with get_engine().begin() as conn:
+        conn.execute(text("UPDATE agent_schedules SET email_results_error = :e, "
+                          "email_results_error_at = '2026-11-25T09:00:00Z' WHERE id = :sid"),
+                     {"e": error, "sid": sid})
+
+
+def _mail_columns(sid):
+    row = stored(sid)
+    return (row["email_results_user_id"], row["email_results_error"], row["email_results_error_at"])
+
+
+def test_an_admin_who_only_manages_the_agent_is_mailed_until_it_changes_hands(client, world, mails):
+    world.admin = _person("admin")
+    sid = turned_on(client, world, mails, who="admin")
+    assert db.get_agent_owner(world.agent)["owner_id"] == world.owner.id
+
+    finish(world, run_row(world, sid, response="ok"))
+
+    assert [m["to"] for m in mails.sent] == [world.admin.email]
+
+
+def test_an_ordinary_transfer_stops_mail_to_the_previous_owner(client, world, mails):
+    sid = turned_on(client, world, mails, who="owner")
+    _set_error(sid)
+    stopped = created(client, world)                            # mail stopped once, error left
+    _set_error(stopped, sre.LOST_ACCESS)
+    other = SimpleNamespace(**{**vars(world), "agent": f"t1391-{uuid.uuid4().hex[:8]}"})
+    db.register_agent_owner(other.agent, world.owner.username)
+    bystander = created(client, other)
+    assert email_me(client, other, bystander).status_code == 200
+    new_owner = _person("creator")
+
+    _transfer(world, new_owner.id)
+
+    assert _mail_columns(sid) == (None, None, None)
+    assert _mail_columns(stopped) == (None, None, None)
+    assert stored(bystander)["email_results_user_id"] == world.owner.id   # another agent: untouched
+    mails.sent.clear()
+    finish(world, run_row(world, sid, response="ok"))
+    assert mails.sent == []
+
+
+def test_a_transfer_keeps_mail_the_new_owner_turned_on(client, world, mails):
+    world.admin = _person("admin")
+    sid = turned_on(client, world, mails, who="admin")
+    _set_error(sid)
+
+    _transfer(world, world.admin.id)
+
+    assert _mail_columns(sid) == (world.admin.id, "The relay refused it.", "2026-11-25T09:00:00Z")
+    finish(world, run_row(world, sid, response="ok"))
+    assert [m["to"] for m in mails.sent] == [world.admin.email]
+
+
+def test_the_spare_hand_over_stops_an_admins_mail_though_the_admin_still_manages_it(
+        client, world, mails):
+    """The validator's reproduction: an admin turns mail on for a spare's schedule,
+    the hand-over's `own` step re-owns it to the steward (every side-effect option
+    on, as `member_agents.adoption` calls it), the member is shared on it. The
+    admin still manages the agent, so only the transfer can stop the mail."""
+    world.admin = _person("admin")
+    sid = turned_on(client, world, mails, who="admin")
+    steward, member = _person("creator"), _person("operator")
+
+    _transfer(world, steward.id, clear_spawn_provenance=True, clear_ephemeral=True,
+              enable_autonomy=True)
+    db.share_agent(world.agent, steward.username, member.username)
+
+    assert sre._manages(db, db.get_user_by_id(world.admin.id), world.agent)
+    assert _mail_columns(sid) == (None, None, None)
+    finish(world, run_row(world, sid, response="the member's own result"))
+    assert mails.sent == []

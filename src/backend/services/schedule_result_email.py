@@ -151,7 +151,11 @@ def _manages(db, user: dict, agent_name: str) -> bool:
 
     The recipient is a stored account row, never an agent key, so the reach
     helpers admit it on identity alone; they are used rather than a bare role
-    compare so this gate cannot drift from the route's (ent#629, ent#872)."""
+    compare so this gate cannot drift from the route's (ent#629, ent#872).
+
+    So an admin who neither owns the agent nor is shared on it is mailed, as
+    long as they turned it on themselves. A change of owner ends that: the
+    transfer clears every recipient but the new owner (ent#1391)."""
     from dependencies import agent_may_reach, is_fleet_admin
 
     if user.get("suspended_at"):
