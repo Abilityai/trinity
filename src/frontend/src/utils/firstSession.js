@@ -158,3 +158,27 @@ export function examplesToHide(status, seeded = [], ownAgentCount = 0, shownOnRe
   return Array.isArray(seeded) ? seeded.slice() : []
 }
 export const SHOW_EXAMPLES_KEY = 'trinity-show-example-agents'
+
+/** Whether the person asked to see the example agents (the Grid's "Show the example agents" button). */
+export function examplesShownOnRequest() {
+  try {
+    return localStorage.getItem(SHOW_EXAMPLES_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * trinity-enterprise#1390: the example agents left out of every list the
+ * assistant panel shows the person or tells the assistant. The ones the Grid
+ * keeps off the first screen (`examplesToHide`), and all of them while the
+ * first session still runs (until its first result is seen), when they are
+ * not the person's to think about; never once the person asked to see them.
+ * `fleet` is the panel's own reading: [{ name }].
+ */
+export function examplesOutOfSight(status, fleet = [], seeded = [], shownOnRequest = false) {
+  if (!status?.leads_setup || shownOnRequest || !Array.isArray(seeded) || !seeded.length) return []
+  const own = (fleet || []).filter((a) => a?.name && !seeded.includes(a.name)).length
+  if (examplesToHide(status, seeded, own, false).length || inFirstSession(status, fleet, seeded)) return seeded.slice()
+  return []
+}

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { CARD_ACTIONS, MAX_CARDS_PER_REPLY, acceptCards, buildOutcome, cardLabel, cardNote, outcomeLine, runCard, irreversibleTool, toolWords, validBuild, validCard, validChoice, validFeedback, validJob, validTool, webLink } from '@/utils/assistantCards'
+import { CARD_ACTIONS, MAX_CARDS_PER_REPLY, acceptCards, buildOutcome, cardButton, cardLabel, cardNote, cronWords, outcomeLine, runCard, irreversibleTool, toolWords, validBuild, validCard, validChoice, validFeedback, validJob, validTool, webLink } from '@/utils/assistantCards'
 
 const fleet = [
   { name: 'issue-digest', schedules: [{ id: 's1', name: 'Mondays 09:00' }] },
@@ -159,7 +159,7 @@ describe('assistant cards: a change that cannot be undone', () => {
     expect(card).toEqual({ action: 'tool', tool: 'delete_agent', args: { name: 'scout' } })
     expect(toolWords(card)).toEqual({ title: 'Delete agent', details: [{ key: 'name', value: 'scout' }] })
     expect(cardLabel(card)).toBe('Delete agent: scout')
-    expect(cardNote(card)).toBe('This cannot be undone. It runs as you.')
+    expect(cardNote(card)).toBe('Deletes scout from this instance. This cannot be undone.')
   })
 
   it('shows nothing the model wrote as the description of what will run', () => {
@@ -213,8 +213,31 @@ describe('a change that takes the person\'s click', () => {
     const kept = { action: 'tool', tool: 'create_agent_schedule', args: { name: 'x' } }
     expect(irreversibleTool(gone)).toBe(true)
     expect(irreversibleTool(kept)).toBe(false)
-    expect(cardNote(gone)).toBe('This cannot be undone. It runs as you.')
-    expect(cardNote(kept)).toBe('Changes this instance. It runs as you.')
+    expect(cardNote(gone)).toBe('Deletes x from this instance. This cannot be undone.')
+    // ent#1390: a tool the page has no words of its own for is still said in a sentence, never by its parameters
+    expect(cardNote({ action: 'tool', tool: 'revoke_share', args: { name: 'x' } })).toBe('Runs “revoke share” on this instance, as you. This cannot be undone.')
+    expect(cardNote({ action: 'tool', tool: 'tag_agent', args: { agent_name: 'x', tag: 'y' } })).toBe('Runs “tag agent” on this instance, as you.')
+    expect(cardButton({ action: 'tool', tool: 'tag_agent', args: {} })).toBe('Tag agent')
+  })
+})
+
+describe('when a schedule runs, in words (ent#1390)', () => {
+  it.each([
+    ['0 9 * * 1', 'Europe/London', 'every Monday at 09:00 (Europe/London)'],
+    ['0 9 * * *', undefined, 'every day at 09:00 (UTC)'],
+    ['30 7 * * 1-5', 'UTC', 'every weekday at 07:30 (UTC)'],
+    ['0 18 * * 1,4', 'UTC', 'every Monday and Thursday at 18:00 (UTC)'],
+    ['0 9 * * 0', 'UTC', 'every Sunday at 09:00 (UTC)'],
+    ['0 9 * * 7', 'UTC', 'every Sunday at 09:00 (UTC)'],
+    ['0 6 1 * *', 'UTC', 'on day 1 of every month at 06:00 (UTC)'],
+    ['*/15 * * * *', 'UTC', 'every 15 minutes'],
+    ['0 */2 * * *', 'UTC', 'every 2 hours'],
+    ['5 * * * *', 'UTC', 'every hour at 05 minutes past'],
+    ['0 9 1 1 *', 'UTC', 'on the schedule 0 9 1 1 * (UTC)'],
+    ['0 25 * * *', 'UTC', 'on the schedule 0 25 * * * (UTC)'],
+    ['not a cron', 'UTC', 'on the schedule not a cron (UTC)'],
+  ])('%s → %s', (expr, tz, words) => {
+    expect(cronWords(expr, tz)).toBe(words)
   })
 })
 

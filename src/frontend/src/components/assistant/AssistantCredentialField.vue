@@ -45,7 +45,7 @@
 
     <!-- The field opens only once the instance has said it may take this name. -->
     <template v-if="isOpen && checked">
-      <label :for="inputId" class="sr-only">{{ entry.card.name }}</label>
+      <label :for="inputId" class="sr-only">{{ claude ? 'Your Claude token or Anthropic API key' : entry.card.name }}</label>
       <div class="flex items-center gap-2">
         <BaseInput
           :id="inputId"
@@ -156,7 +156,19 @@ const replacesText = computed(() => {
 })
 const running = computed(() => props.entry.state === 'running')
 const isOpen = computed(() => ['open', 'running'].includes(props.entry.state))
+// ent#1390: the Claude card says what was saved in words (subscription or API key), never a variable name.
+const CLAUDE_SAVED = { subscription: 'your Claude subscription', api_key: 'your Anthropic API key' }
+const claudeOutcome = computed(() => {
+  const what = CLAUDE_SAVED[props.entry.kind]
+  if (props.entry.state === 'refused') return `Claude can't be connected from here: ${props.entry.reason} Nothing was stored.`
+  if (props.entry.state === 'done') {
+    if (!what) return 'Claude is connected on this instance.'
+    return `${props.entry.reason === 'replaced' ? 'Replaced' : 'Saved'} ${what} on this instance.`
+  }
+  return 'Claude is not connected. Nothing was stored.'
+})
 const outcome = computed(() => {
+  if (claude.value) return claudeOutcome.value
   if (props.entry.state === 'refused') {
     return `${props.entry.card.name} can't be set from here: ${props.entry.reason} Nothing was stored.`
   }
