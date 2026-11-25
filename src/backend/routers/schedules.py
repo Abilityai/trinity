@@ -1362,13 +1362,17 @@ async def get_execution(
     current_user: User = Depends(get_current_user),
 ):
     """Get details of a specific execution."""
+    # trinity-enterprise#978: the view is decided BEFORE the row is read, so an
+    # id that does not exist and a row outside the view cost the same lookups
+    # and carry the same narrowed-read marker.
+    scope = viewer_row_scope(current_user, name)
     execution = db.get_execution(execution_id)
     if (
         not execution
         or execution.agent_name != name
         # ent#875: a row that is not the share holder's answers the same 404 as
         # an id that does not exist, so it cannot be told apart from one.
-        or not row_is_viewers(viewer_row_scope(current_user, name), execution.source_user_id)
+        or not row_is_viewers(scope, execution.source_user_id)
     ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1398,11 +1402,12 @@ async def get_execution_log(
     Returns the raw Claude Code execution transcript as JSON array.
     This includes all tool calls, thinking, and responses.
     """
+    scope = viewer_row_scope(current_user, name)  # before the row: see get_execution
     execution = db.get_execution(execution_id)
     if (
         not execution
         or execution.agent_name != name
-        or not row_is_viewers(viewer_row_scope(current_user, name), execution.source_user_id)
+        or not row_is_viewers(scope, execution.source_user_id)
     ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
