@@ -1771,6 +1771,7 @@ class SchedulerService:
                 f"Schedule {schedule_id} no longer exists or is disabled, "
                 "skipping retry execution"
             )
+            await self._report_retry_dropped(failed_execution_id)
             return
 
         # #1970: a retry inherits the original run's attribution. The retry has
@@ -1819,6 +1820,7 @@ class SchedulerService:
                     f"Retry for schedule {schedule_id} dropped: agent {agent_name} "
                     "autonomy is disabled"
                 )
+                await self._report_retry_dropped(failed_execution_id)
                 return
             freeze_reason = self.db.sync_freeze_reason(agent_name)
             if freeze_reason:
@@ -1841,6 +1843,7 @@ class SchedulerService:
                     "schedule_name": schedule.name,
                     "reason": "Git sync frozen (schedules paused)",
                 })
+                await self._report_retry_dropped(failed_execution_id)
                 return
 
         # Create a new execution record for the retry
@@ -1890,6 +1893,21 @@ class SchedulerService:
                 error=_describe_exception(e)[:2000],  # #1022: never blank
                 expected_status=ExecutionStatus.RUNNING,
             )
+
+    async def _report_retry_dropped(self, failed_execution_id: str) -> None:
+        """abilityai/trinity-enterprise#1391: tell the backend this failed
+        attempt's retry will never run, so a schedule that mails its results
+        mails the failure it held back for the retry. Fire-and-forget: a
+        backend that cannot be reached never disturbs the scheduler."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(
+                    f"{config.backend_url}/api/internal/schedule-retry-dropped",
+                    json={"execution_id": failed_execution_id},
+                    headers={"X-Internal-Secret": config.internal_api_secret},
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not report the dropped retry of {failed_execution_id}: {e}")
 
     def _recover_pending_retries(self):
         """Recover pending retries after scheduler restart.

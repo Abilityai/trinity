@@ -24,7 +24,10 @@ Pinned, one test (or more) per review finding of the first validation:
 9. a failed attempt with a retry coming is not mailed, and a chain of attempts
    is mailed once;
 10. a schedule read never carries the address; a person the agent is shared
-    with sees only that results are mailed (to someone else).
+    with sees only that results are mailed (to someone else);
+11. (second validation) turning it on or off each writes an audit row, and a
+    failed attempt held back for a retry that is then dropped by the scheduler
+    is still mailed, once per chain.
 
 Module: src/backend/services/schedule_result_email.py
 """
@@ -430,3 +433,143 @@ def test_an_attempt_of_a_chain_already_mailed_is_not_mailed_again(client, world,
     second = run_row(world, sid, status="success", response="late", attempt=2, retry_of=first)
     finish(world, second)
     assert len(mails.sent) == 1
+
+
+# ---- 11. third validation: an audit row per grant, a dropped retry is still mailed -------
+
+@pytest.fixture
+def audited(monkeypatch):
+    rows = []
+
+    async def log(event_type, event_action, source, **kw):
+        rows.append({"event_type": event_type, "event_action": event_action, "source": source, **kw})
+
+    monkeypatch.setattr(schedules_router.platform_audit_service, "log", log)
+    return rows
+
+
+def test_turning_it_on_and_off_each_write_an_audit_row(client, world, mails, audited):
+    sid = created(client, world)
+    audited.clear()
+    assert email_me(client, world, sid).status_code == 200
+    assert email_me(client, world, sid, enabled=False).status_code == 200
+    actions = [(r["event_action"], r["target_id"], r["details"]["schedule_id"]) for r in audited]
+    assert actions == [("schedule_email_results_enabled", world.agent, sid),
+                       ("schedule_email_results_disabled", world.agent, sid)]
+    for row in audited:
+        assert row["actor_user"].username == world.owner.username
+        assert world.owner.email not in str(row["details"])      # who, not where
+
+
+def test_a_refused_turn_on_writes_no_audit_row(client, world, mails, audited):
+    sid = created(client, world)
+    audited.clear()
+    mails.fake.answer = False
+    assert email_me(client, world, sid).status_code >= 400
+    assert audited == []
+
+
+def _dropped(execution_id):
+    """The scheduler's notice that a pending retry will never run."""
+    from routers import internal as internal_router
+
+    app = FastAPI()
+    app.include_router(internal_router.router)
+    app.dependency_overrides[internal_router.verify_internal_secret] = lambda: None
+    return TestClient(app).post("/api/internal/schedule-retry-dropped", json={"execution_id": execution_id})
+
+
+def test_a_failed_run_whose_retry_never_fires_is_mailed_once(client, world, mails):
+    sid = turned_on(client, world, mails)
+    set_retries(sid, 2)
+    first = run_row(world, sid, status="failed", error="network blip", attempt=1)
+    finish(world, first, status="failed")
+    assert mails.sent == []                                     # a retry was expected
+    assert _dropped(first).status_code == 200                   # ...and it was dropped
+    assert _dropped(first).status_code == 200                   # a repeated notice
+    assert len(mails.sent) == 1 and mails.sent[0]["relay"][1]["status"] == "failed"
+
+
+def test_a_dropped_retry_of_a_chain_already_mailed_is_not_mailed_again(client, world, mails):
+    sid = turned_on(client, world, mails)
+    first = run_row(world, sid, status="failed", error="blip", attempt=1)
+    finish(world, first, status="failed")                       # no retries: mailed now
+    assert _dropped(first).status_code == 200
+    assert len(mails.sent) == 1
+
+
+def test_a_dropped_retry_of_a_schedule_that_does_not_mail_sends_nothing(client, world, mails):
+    sid = created(client, world)
+    first = run_row(world, sid, status="failed", error="blip", attempt=1)
+    assert _dropped(first).status_code == 200
+    assert _dropped("no-such-execution").status_code == 200
+    assert mails.sent == []
+
+
+class TestTheSchedulerSaysWhenARetryIsDropped:
+    """Each of `_execute_retry`'s drop paths tells the backend, once, which
+    failed attempt will now never be followed; a retry that runs does not."""
+
+    @staticmethod
+    def _service(*, enabled=True, autonomy=True, freeze=None, schedule=True):
+        import sys
+        from pathlib import Path
+        from unittest.mock import AsyncMock, MagicMock
+
+        repo = Path(__file__).resolve().parents[2]
+        if str(repo) not in sys.path:
+            sys.path.append(str(repo))
+        import src.scheduler.service as ssvc
+
+        svc = object.__new__(ssvc.SchedulerService)
+        svc.db = MagicMock()
+        svc.db.get_schedule.return_value = SimpleNamespace(
+            id="s1", name="Brief", agent_name="a1", enabled=enabled, message="m",
+            deliver_to_workspace_email=None) if schedule else None
+        svc.db.get_execution.return_value = SimpleNamespace(
+            triggered_by="schedule", source_user_id=None, source_user_email=None,
+            source_agent_name=None, source_mcp_key_id=None, source_mcp_key_name=None, chain_depth=None)
+        svc.db.get_autonomy_enabled.return_value = autonomy
+        svc.db.sync_freeze_reason.return_value = freeze
+        svc.db.create_execution.return_value = SimpleNamespace(id="retry-1")
+        svc.db.create_skipped_execution.return_value = SimpleNamespace(id="skipped-1")
+        svc._call_backend_execute_task = AsyncMock(return_value={"status": "dispatched"})
+        svc._publish_event = AsyncMock()
+        svc._report_retry_dropped = AsyncMock()
+        asyncio.run(svc._execute_retry(
+            original_execution_id="orig", failed_execution_id="failed", schedule_id="s1",
+            agent_name="a1", message="m", timeout_seconds=None, model=None,
+            allowed_tools=None, next_attempt_number=2))
+        return svc
+
+    @pytest.mark.parametrize("kw", [dict(enabled=False), dict(schedule=False),
+                                    dict(autonomy=False), dict(freeze="git sync failing")])
+    def test_each_drop_path_reports_the_failed_attempt(self, kw):
+        svc = self._service(**kw)
+        svc._call_backend_execute_task.assert_not_called()
+        svc._report_retry_dropped.assert_awaited_once_with("failed")
+
+    def test_a_retry_that_runs_reports_nothing(self):
+        svc = self._service()
+        svc._call_backend_execute_task.assert_called_once()
+        svc._report_retry_dropped.assert_not_called()
+
+    def test_the_report_posts_to_the_backend_and_never_raises(self, monkeypatch):
+        import src.scheduler.service as ssvc
+
+        posted = []
+
+        class _Client:
+            def __init__(self, *a, **k): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def post(self, url, json=None, headers=None):
+                posted.append((url, json, headers))
+                raise RuntimeError("backend down")
+
+        monkeypatch.setattr(ssvc.httpx, "AsyncClient", _Client)
+        svc = object.__new__(ssvc.SchedulerService)
+        asyncio.run(svc._report_retry_dropped("failed"))        # does not raise
+        url, body, headers = posted[0]
+        assert url.endswith("/api/internal/schedule-retry-dropped")
+        assert body == {"execution_id": "failed"} and "X-Internal-Secret" in headers

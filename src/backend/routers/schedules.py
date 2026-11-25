@@ -765,12 +765,25 @@ async def email_me_schedule_results(
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
     if not body.enabled:
-        return {"schedule_id": schedule_id, **await schedule_result_email.disable(schedule=schedule)}
-    try:
-        out = await schedule_result_email.enable(agent_name=name, schedule=schedule, user=current_user)
-    except schedule_result_email.EmailResultsRefused as refusal:
-        raise HTTPException(status_code=refusal.status_code,
-                            detail={"code": refusal.reason, "message": refusal.detail})
+        out = await schedule_result_email.disable(schedule=schedule)
+    else:
+        try:
+            out = await schedule_result_email.enable(agent_name=name, schedule=schedule, user=current_user)
+        except schedule_result_email.EmailResultsRefused as refusal:
+            raise HTTPException(status_code=refusal.status_code,
+                                detail={"code": refusal.reason, "message": refusal.detail})
+    # The grant mails as the platform, so each change is a row: who turned it
+    # on or off, for which schedule. Never the address (the actor is the person).
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="schedule_email_results_enabled" if body.enabled else "schedule_email_results_disabled",
+        source="api",
+        actor_user=current_user,
+        target_type="agent",
+        target_id=name,
+        endpoint=f"/api/agents/{name}/schedules/{schedule_id}/email-me",
+        details={"schedule_id": schedule_id, "sent_execution_id": out.get("sent_execution_id")},
+    )
     return {"schedule_id": schedule_id, **out}
 
 

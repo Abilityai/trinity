@@ -3972,6 +3972,11 @@ class ScheduleEmailMeRequest(BaseModel):
     enabled: bool = True
 
 
+class InternalScheduleRetryDroppedRequest(BaseModel):
+    """ent#1391: the scheduler dropped a pending retry of this failed attempt."""
+    execution_id: str
+
+
 class InternalPreCheckRequest(BaseModel):
     """The schedule a pre-check is gating (#3966). Every field is optional: a
     bodyless request (an older scheduler) runs the hook exactly as before."""

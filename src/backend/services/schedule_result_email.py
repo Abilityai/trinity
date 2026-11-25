@@ -41,6 +41,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -146,10 +147,19 @@ async def send_run(*, to: str, agent_name: str, title: str, execution_id: str,
 
 def _manages(db, user: dict, agent_name: str) -> bool:
     """The route's own gate (`OwnedAgent`): an admin, or a person who may share
-    the agent. A suspended account manages nothing."""
+    the agent. A suspended account manages nothing.
+
+    The recipient is a stored account row, never an agent key, so the reach
+    helpers admit it on identity alone; they are used rather than a bare role
+    compare so this gate cannot drift from the route's (ent#629, ent#872)."""
+    from dependencies import agent_may_reach, is_fleet_admin
+
     if user.get("suspended_at"):
         return False
-    if user.get("role") == "admin":
+    principal = SimpleNamespace(role=user.get("role"), agent_name=None)
+    if not agent_may_reach(principal, agent_name, manage=True):
+        return False
+    if is_fleet_admin(principal):
         return True
     return bool(db.can_user_share_agent(user.get("username") or "", agent_name))
 
@@ -216,18 +226,26 @@ def _root_id(db, row) -> str:
     return current.id
 
 
-def _plan_delivery(execution_id: str, status: str) -> Optional[_Plan]:
-    """Everything the send needs, read in a thread. None: nothing to mail."""
+def _plan_delivery(execution_id: str, status: Optional[str], retry_dropped: bool = False) -> Optional[_Plan]:
+    """Everything the send needs, read in a thread. None: nothing to mail.
+
+    ``retry_dropped``: the scheduler says this failed attempt's retry will never
+    run (the schedule was turned off or removed, autonomy went off, a sync
+    freeze), so the attempt skipped as "a retry is coming" is mailed now."""
     from database import db
 
     row = db.get_execution(execution_id) if execution_id else None
+    if retry_dropped and row is not None:
+        status = getattr(row, "status", None)
+        if _succeeded(str(status or "").lower()) or str(status or "").lower() in _UNFINISHED:
+            return None
     schedule_id = getattr(row, "schedule_id", None)
     schedule = db.get_schedule(schedule_id) if schedule_id else None
     if not schedule or getattr(schedule, "email_results_user_id", None) is None:
         return None
     if schedule.agent_name != row.agent_name:
         return None
-    if _will_retry(row, schedule, status):
+    if not retry_dropped and _will_retry(row, schedule, status):
         return None
     to, stopped = _recipient(db, schedule.email_results_user_id, schedule.agent_name)
     if stopped:
@@ -246,12 +264,15 @@ def _record(schedule_id: str, error: Optional[str]) -> None:
     db.record_schedule_email_results_outcome(schedule_id, error)
 
 
-async def deliver(*, execution_id: str, status: str) -> bool:
-    """The terminal leg: mail this run if its schedule asks for it. Never raises."""
+async def deliver(*, execution_id: str, status: Optional[str] = None, retry_dropped: bool = False) -> bool:
+    """The terminal leg: mail this run if its schedule asks for it. Never raises.
+
+    Also the scheduler's dropped-retry notice (``retry_dropped``). The claim is
+    keyed on the chain's first attempt either way, so a chain is mailed once."""
     try:
         from services.idempotency_service import EffectInProgressError, effect_guard
 
-        plan = await asyncio.to_thread(_plan_delivery, execution_id, status)
+        plan = await asyncio.to_thread(_plan_delivery, execution_id, status, retry_dropped)
         if plan is None:
             return False
         try:
