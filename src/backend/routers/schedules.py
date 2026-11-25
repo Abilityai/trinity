@@ -1,4 +1,4 @@
-# mcp: schedules.ts (schedule CRUD, toggle, trigger, executions); none for take-over — a human-only grant, refused to agent keys (#4281)
+# mcp: schedules.ts (schedule CRUD, toggle, trigger, executions); none for take-over — a human-only grant, refused to agent keys (#4281), or for email-me — a person-only grant that mails as the platform (ent#1391)
 """
 Schedule management routes for the Trinity backend.
 
@@ -24,6 +24,7 @@ from models import (
     ExecutionResponse,
     ExecutionSummary,
     ScheduleAnalyticsResponse,
+    ScheduleEmailMeRequest,
     ScheduleResponse,
     ScheduleTakeOverRequest,
     ScheduleUpdateRequest,
@@ -63,6 +64,7 @@ from services import (
     turn_tier_service,
 )
 from services import execution_attribution  # ent#1105
+from services import schedule_result_email  # ent#1391
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from utils import request_memo
 from utils.public_url import public_base_url
@@ -737,6 +739,31 @@ async def disable_schedule(
 
     return {"status": "disabled", "schedule_id": schedule_id,
             **_ScheduleView(name, current_user).run_tier_fields(schedule, name)}
+
+
+@router.post("/{name}/schedules/{schedule_id}/email-me", dependencies=[Depends(require_person)])
+async def email_me_schedule_results(
+    name: OwnedAgent,
+    schedule_id: str,
+    body: ScheduleEmailMeRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """abilityai/trinity-enterprise#1391: mail each run of this schedule to the
+    caller's own address, and the latest finished run now; or stop. The address
+    is never a parameter, so this cannot point a schedule at anyone else. A
+    person only: the grant sends mail as the platform."""
+    schedule = db.get_schedule(schedule_id)
+    if not schedule or schedule.agent_name != name:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    if not body.enabled:
+        return {"schedule_id": schedule_id, **schedule_result_email.disable(schedule=schedule)}
+    try:
+        out = await schedule_result_email.enable(agent_name=name, schedule=schedule,
+                                                 email=getattr(current_user, "email", None))
+    except schedule_result_email.EmailResultsRefused as refusal:
+        raise HTTPException(status_code=refusal.status_code,
+                            detail={"code": refusal.reason, "message": refusal.detail})
+    return {"schedule_id": schedule_id, **out}
 
 
 # #4281: a manual run carries the caller as its person, so it has the

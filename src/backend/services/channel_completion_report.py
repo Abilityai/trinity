@@ -688,6 +688,12 @@ async def report_completion(
         source_channel_thread = getattr(row, "source_channel_thread", None)
         triggered_by = getattr(row, "triggered_by", None)
 
+        # ent#1391: a schedule that mails its runs to the person who asked.
+        # Independent of any channel context, so it runs first; it never raises.
+        if getattr(row, "schedule_id", None):
+            from services import schedule_result_email
+            await schedule_result_email.deliver(execution_id=execution_id, status=status)
+
         if not source_channel or not source_channel_chat_id:
             return False                      # nothing to report back to
         resolver = _CHANNEL_RESOLVERS.get(source_channel)

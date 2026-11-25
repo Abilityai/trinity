@@ -239,6 +239,9 @@ TABLES = {
             -- on NULL, and an address that can no longer reach the agent is a
             -- refused dispatch rather than a silent drop.
             deliver_to_workspace_email TEXT,
+            -- ent#1391: mail each run's result to this address (the person who
+            -- asked, set only to their own). NULL — every existing row — mails nothing.
+            deliver_to_email TEXT,
             deleted_at TEXT,
             FOREIGN KEY (owner_id) REFERENCES users(id)
         )

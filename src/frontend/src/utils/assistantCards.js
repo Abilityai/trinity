@@ -40,6 +40,15 @@ export const CARD_ACTIONS = Object.freeze({
     call: (c) => ['post', `${agentPath(c.agent)}/schedules/${enc(c.schedule_id)}/disable`],
     held: async (http, c) => (await schedule(http, c))?.enabled === false,
   },
+  // trinity-enterprise#1391: each run of this schedule is mailed to the person.
+  // No address in the card or the request: the instance uses the caller's own.
+  'email-results': {
+    fields: ['agent', 'schedule_id'],
+    label: (c, f) => `Email each result of "${scheduleName(c, f)}" to you`,
+    note: 'Sent to your own email address, starting with the latest result now. Turn it off on the Schedules tab.',
+    call: (c) => ['post', `${agentPath(c.agent)}/schedules/${enc(c.schedule_id)}/email-me`, { enabled: true }],
+    held: async (http, c) => Boolean((await schedule(http, c))?.deliver_to_email),
+  },
   'autonomy-on': {
     fields: ['agent'],
     label: (c) => `Switch Autonomy on for ${c.agent}`,
@@ -475,7 +484,7 @@ export function cardNote(card, { firstSession = false } = {}) {
     return 'Switches only these agents, as you. A running one restarts, which takes about a minute. Nothing else changes.'
   }
   if (card.action === 'upgrade') return "A larger allowance and bigger teams. We email a code to this instance's registered address to confirm."
-  return 'Runs as you, not as the assistant.'
+  return CARD_ACTIONS[card.action]?.note || 'Runs as you, not as the assistant.'
 }
 
 // A 4xx is Trinity refusing: nothing changed. No answer, or a 5xx, may have

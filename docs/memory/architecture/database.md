@@ -189,6 +189,8 @@ CREATE TABLE agent_schedules (
     webhook_auth_enabled INTEGER DEFAULT 0,      -- ent#77: gate signature verification in the public trigger
     deliver_to_workspace_email TEXT,             -- ent#498: land this schedule's output in one
                                                 --   person's Main Workspace chat; NULL = no delivery
+    deliver_to_email TEXT,                       -- ent#1391: mail each run's result here (set only to the
+                                                --   caller's own address, via .../email-me); NULL = no mail
     deleted_at TEXT,                             -- #834: NULL = live; set = soft-deleted
     FOREIGN KEY (owner_id) REFERENCES users(id)
 );

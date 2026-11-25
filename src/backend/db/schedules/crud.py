@@ -107,6 +107,8 @@ class ScheduleCrudMixin:
                 row["deliver_to_workspace_email"]
                 if "deliver_to_workspace_email" in row_keys else None
             ),
+            # ent#1391: NULL (and a pre-migration row) mails nothing.
+            deliver_to_email=row["deliver_to_email"] if "deliver_to_email" in row_keys else None,
         )
 
     # =========================================================================
@@ -709,6 +711,17 @@ class ScheduleCrudMixin:
         )
         with get_engine().connect() as conn:
             return [dict(row) for row in conn.execute(stmt).mappings()]
+
+    def set_schedule_result_email(self, schedule_id: str, email: Optional[str]) -> bool:
+        """ent#1391: who each run of this schedule is mailed to (None: nobody).
+        Only `services.schedule_result_email` calls this, with the caller's own address."""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_schedules)
+                .where(agent_schedules.c.id == schedule_id)
+                .values(deliver_to_email=email, updated_at=utc_now_iso())
+            )
+        return result.rowcount > 0
 
     def set_schedule_enabled(self, schedule_id: str, enabled: bool) -> bool:
         """Enable or disable a schedule.

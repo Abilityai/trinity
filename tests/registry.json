@@ -9971,6 +9971,17 @@
         "reliability"
       ],
       "description": "trinity-enterprise#1176, platform side: the managed-hooks fleet check (run inside the leased fleet-image cycle, whose failure it never breaks) names every running, non-ephemeral agent whose /health reads guardrails_registration=skipped in ONE high alert (managed_hooks_skipped:fleet, approved words, singular and plural), ends it when none is, leaves it on Docker unreadable, and lets a silent agent hold it only if the last reading named it or before the first reading; the /health read maps every answer; the kind is registered under a reserved prefix with the new-agent escalation; a typed turn_refused 403 is not a switch failure while any other 403 still is; no new text reads as an auth failure and every refusal is recognised by the public status read; HOOK_STATES carries skipped."
+    },
+    {
+      "file": "unit/test_ent1391_schedule_result_email.py",
+      "feature": "trinity-enterprise#1391",
+      "added": "2026-11-25",
+      "categories": [
+        "unit",
+        "backend",
+        "schedules",
+        "email"
+      ]
     }
   ]
 }
