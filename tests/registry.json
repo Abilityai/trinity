@@ -9981,7 +9981,7 @@
         "unit",
         "credentials"
       ],
-      "description": "The assistant panel's first-session cards, mounted, with tool cards built from and checked against a real instance's toolset: a confirm card says in one sentence what happens and its button names the action ('Run its first task', 'Switch it on', 'Delete it', never 'Confirm'), with the tool's parameters only behind a Details toggle; the Claude card is titled 'Connect Claude', says whether a subscription or an API key was saved and shows no variable name; the save report, the line told to the assistant, the fleet in the turn's context and a proposed switch leave out hidden example agents and system agents, and name the examples again once the person asked to see them."
+      "description": "The assistant panel's first-session cards, mounted, with tool cards built from and checked against a real instance's toolset: a confirm card says in one sentence what happens and its button names the action ('Run its first task', 'Switch it on', 'Delete it', never 'Confirm'), with the tool's parameters only behind a Details toggle; the Claude card is titled 'Connect Claude', says whether a subscription or an API key was saved and shows no variable name; the save report, the line told to the assistant, the fleet in the turn's context and a proposed switch leave out hidden example agents and system agents, and name the examples again once the person asked to see them; when only hidden agents are off the new credential the assistant is told every agent the person can see is on it, never every agent; a schedule change that sends no zone names the schedule's stored zone (none when unknown, never UTC by default), and a schedule that delivers its results says where they go."
     }
   ]
 }

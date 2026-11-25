@@ -26,6 +26,7 @@ const EXAMPLES = ['acme-sage', 'acme-scout', 'acme-scribe', 'cornelius']
 const calls = []
 let turns
 let saveReport
+let storedSchedules
 
 vi.mock('@/api', () => {
   const respond = (method, url, body, config) => {
@@ -50,7 +51,7 @@ vi.mock('@/api', () => {
         ...EXAMPLES.map((name) => ({ name, status: 'stopped' }))]
     }
     if (url === '/api/agents/autonomy-status') return {}
-    if (url === '/api/ops/schedules') return { schedules: [] }
+    if (url === '/api/ops/schedules') return { schedules: storedSchedules }
     return {}
   }
   const client = {
@@ -103,6 +104,7 @@ describe('the first session, in the person’s words (ent#1390)', () => {
     calls.length = 0
     turns = []
     saveReport = {}
+    storedSchedules = []
     wrapper = mount(AssistantWidget, {
       attachTo: document.body,
       global: { stubs: { HelpChatWidget: { template: '<div />' } } },
@@ -151,6 +153,34 @@ describe('the first session, in the person’s words (ent#1390)', () => {
       expect(buttons(card)).toContain('Add it switched off')
     })
 
+    it('a schedule that delivers its results says where they go', async () => {
+      const card = await offer([tool('create_agent_schedule', { ...SCHEDULE.args, deliver_to_workspace_email: 'person@example.com' })])
+      expect(body(card)).toContain(`Each run's results are delivered to person@example.com's Workspace chat with ${OWN}.`)
+    })
+
+    it('a schedule without delivery says nothing about delivery', async () => {
+      const card = await offer([SCHEDULE])
+      expect(body(card)).not.toMatch(/delivered|Workspace chat/)
+    })
+
+    it('a schedule change that sends no zone names the schedule\'s stored zone, never UTC', async () => {
+      storedSchedules = [{ id: 's1', agent_name: OWN, name: 'Monday brief', enabled: true, cron_expression: '0 9 * * 1', timezone: 'Europe/London' }]
+      const card = await offer([tool('update_agent_schedule', { agent_name: OWN, schedule_id: 's1', cron_expression: '0 10 * * 1' })])
+      expect(body(card)).toContain(`Changes ${OWN}'s schedule “Monday brief”: it will run every Monday at 10:00 (Europe/London).`)
+      expect(body(card)).not.toContain('UTC')
+    })
+
+    it('a schedule change whose stored zone is not known names no zone', async () => {
+      const card = await offer([tool('update_agent_schedule', { agent_name: OWN, schedule_id: 'nope', cron_expression: '0 10 * * 1' })])
+      expect(body(card)).toContain(`Changes ${OWN}'s schedule: it will run every Monday at 10:00.`)
+      expect(body(card)).not.toContain('UTC')
+    })
+
+    it('a schedule change that stops delivery says so', async () => {
+      const card = await offer([tool('update_agent_schedule', { agent_name: OWN, schedule_id: 's1', deliver_to_workspace_email: null })])
+      expect(body(card)).toContain('Its results are no longer delivered to a Workspace chat.')
+    })
+
     it('a tool with no words of its own still gets a sentence and a button named for it, never "Confirm"', async () => {
       const card = await offer([tool('delete_agent', { name: OWN })])
       expect(body(card)).toContain(`Deletes ${OWN} from this instance. This cannot be undone.`)
@@ -197,8 +227,26 @@ describe('the first session, in the person’s words (ent#1390)', () => {
       for (const hidden of [...EXAMPLES, 'trinity-system']) expect(report).not.toContain(hidden)
 
       const told = posted(TURN).at(-1).body.message
-      expect(told).toContain(`Existing agents not on it (nothing was switched): ${OWN} (cannot run as it is).`)
+      expect(told).toContain(`Existing agents the person can see that are not on it (nothing was switched): ${OWN} (cannot run as it is).`)
       for (const hidden of [...EXAMPLES, 'trinity-system']) expect(told).not.toContain(hidden)
+    })
+
+    it('when only hidden agents are off it, the assistant is not told every agent is on it', async () => {
+      saveReport = { kind: 'subscription', connected_agents: 0, moving: [],
+        not_using: [...EXAMPLES, 'trinity-system'].map((name) => ({ name, model_access: false })) }
+      await offer([ASK])
+      await save('sk-ant-oat01-' + 't'.repeat(40))
+      const told = posted(TURN).at(-1).body.message
+      expect(told).not.toContain('Every existing agent is on it.')
+      expect(told).toContain('Every existing agent the person can see is on it.')
+      for (const hidden of [...EXAMPLES, 'trinity-system']) expect(told).not.toContain(hidden)
+    })
+
+    it('when nothing was hidden and every agent is on it, the assistant is told exactly that', async () => {
+      saveReport = { kind: 'subscription', connected_agents: 0, moving: [], not_using: [] }
+      await offer([ASK])
+      await save('sk-ant-oat01-' + 't'.repeat(40))
+      expect(posted(TURN).at(-1).body.message).toContain('Every existing agent is on it.')
     })
 
     it('a switch the assistant proposes names only agents the person can see', async () => {

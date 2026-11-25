@@ -31,7 +31,7 @@ describe('assistant context: the fleet', () => {
   it('leaves out the system agent and joins schedules by agent', () => {
     const fleet = buildFleet(agents, { scout: { autonomy_enabled: true } }, schedules)
     expect(fleet).toEqual([
-      { name: 'scout', status: 'running', autonomy: true, schedules: [{ id: 's1', name: 'Daily', enabled: true, cron: '0 9 * * *' }] },
+      { name: 'scout', status: 'running', autonomy: true, schedules: [{ id: 's1', name: 'Daily', enabled: true, cron: '0 9 * * *', timezone: null }] },
       { name: 'sage', status: 'stopped', autonomy: null, schedules: [] },
     ])
   })

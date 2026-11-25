@@ -254,7 +254,7 @@ export const claudeCard = (card) => card?.action === 'credential' && !card.agent
 export const credentialWhere = (card) => (card.agent ? `the agent ${card.agent}` : 'this instance')
 
 /** The only thing the assistant is told about a credential field: provided or not. */
-export function credentialLine(card, provided, { working = null, kind = null, notUsing, moving, connected } = {}) {
+export function credentialLine(card, provided, { working = null, kind = null, notUsing, moving, connected, hidden = 0 } = {}) {
   const line = `${provided ? 'Provided' : 'Not provided'}: ${card.name} for ${credentialWhere(card)}.`
   // ent#1355: the instance checked its own Claude key after the save; a rejection is said, the value never.
   if (provided && working === false) return `${line} Anthropic did not accept it, so agents cannot run on it yet.`
@@ -268,9 +268,16 @@ export function credentialLine(card, provided, { working = null, kind = null, no
   if (notUsing === null) {
     return `${said} Whether ${facts.switchedNone ? '' : 'other '}existing agents use it could not be checked.`
   }
+  // ent#1390: `hidden` agents were left out of `notUsing`, so a claim about
+  // every agent holds only for the ones the person can see.
+  const seen = hidden > 0
   const words = notUsingWords(notUsing)
-  if (words) return `${said} Existing agents not on it${facts.switchedNone ? ' (nothing was switched)' : ''}: ${words}.`
-  return facts.moving.length || facts.connected ? said : `${said} Every existing agent is on it.`
+  if (words) {
+    const who = seen ? 'Existing agents the person can see that are not on it' : 'Existing agents not on it'
+    return `${said} ${who}${facts.switchedNone ? ' (nothing was switched)' : ''}: ${words}.`
+  }
+  if (facts.moving.length || facts.connected) return said
+  return `${said} Every existing agent${seen ? ' the person can see' : ''} is on it.`
 }
 
 const agentsWord = (n) => (n === 1 ? '1 agent' : `${n} agents`)
@@ -452,21 +459,32 @@ const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 
 const pad = (v) => String(v).padStart(2, '0')
 const and = (words) => (words.length < 2 ? words.join('') : `${words.slice(0, -1).join(', ')} and ${words.at(-1)}`)
 
-/** When a 5-field cron expression runs, in words: `every Monday at 09:00 (Europe/London)`. */
+/**
+ * When a 5-field cron expression runs, in words: `every Monday at 09:00 (Europe/London)`.
+ * Words only when they are exactly true; anything else is the expression itself.
+ * `timezone` undefined is the create default (UTC); `null` means the zone is not
+ * known, so none is named.
+ */
 export function cronWords(expr, timezone) {
   const raw = String(expr ?? '').trim()
-  const zone = ` (${typeof timezone === 'string' && timezone.trim() ? timezone.trim() : 'UTC'})`
+  const tz = typeof timezone === 'string' && timezone.trim() ? timezone.trim() : (timezone === null ? '' : 'UTC')
+  const zone = tz ? ` (${tz})` : ''
   const fallback = `on the schedule ${raw}${zone}`
   const f = raw.split(/\s+/)
   if (f.length !== 5) return fallback
   const [m, h, dom, mon, dow] = f
   const num = (v, max) => /^\d{1,2}$/.test(v) && Number(v) <= max
-  const every = (v) => v.match(/^\*\/(\d{1,2})$/)?.[1]
+  // `*/N` is an even gap only when N divides the range: `*/45` runs at :00 and :45.
+  const every = (v, range) => {
+    const n = Number(v.match(/^\*\/(\d{1,2})$/)?.[1])
+    return n > 0 && range % n === 0 ? n : 0
+  }
   if (dom === '*' && mon === '*' && dow === '*') {
-    if (h === '*' && m === '*') return 'every minute'
-    if (h === '*' && every(m)) return `every ${every(m)} minutes`
+    if (h === '*' && (m === '*' || every(m, 60) === 1)) return 'every minute'
+    if (h === '*' && every(m, 60)) return `every ${every(m, 60)} minutes`
     if (h === '*' && num(m, 59)) return `every hour at ${pad(m)} minutes past`
-    if (m === '0' && every(h)) return `every ${every(h)} hours`
+    if (m === '0' && every(h, 24) === 1) return 'every hour'
+    if (m === '0' && every(h, 24)) return `every ${every(h, 24)} hours`
   }
   if (!num(m, 59) || !num(h, 23) || mon !== '*') return fallback
   const at = `at ${pad(h)}:${pad(m)}${zone}`
@@ -478,10 +496,27 @@ export function cronWords(expr, timezone) {
 }
 
 const str = (v, max = 80) => (typeof v === 'string' ? v.slice(0, max) : '')
-function scheduleTitle(args, fleet) {
+function storedSchedule(args, fleet) {
   const agent = (fleet || []).find((a) => a.name === args.agent_name)
-  const name = agent?.schedules?.find((s) => s.id === args.schedule_id)?.name
+  return agent?.schedules?.find((s) => s.id === args.schedule_id) || null
+}
+function scheduleTitle(args, fleet) {
+  const name = storedSchedule(args, fleet)?.name
   return name ? `“${str(name, 120)}”` : ''
+}
+// An update sends `timezone` only when it changes it; otherwise the schedule keeps
+// its stored zone, which is named when the page read it and left out when not.
+function updateZone(args, fleet) {
+  if (typeof args.timezone === 'string' && args.timezone.trim()) return args.timezone
+  const stored = storedSchedule(args, fleet)?.timezone
+  return typeof stored === 'string' && stored.trim() ? stored : null
+}
+// Where a schedule's results go, when they go beyond the run record.
+function delivery(args, agent) {
+  if (typeof args.deliver_to_workspace_email === 'string' && args.deliver_to_workspace_email.trim()) {
+    return ` Each run's results are delivered to ${str(args.deliver_to_workspace_email.trim(), 120)}'s Workspace chat with ${agent}.`
+  }
+  return args.deliver_to_workspace_email === null ? ' Its results are no longer delivered to a Workspace chat.' : ''
 }
 
 // Tools the page has its own words for. `sentence` is what happens; `button` names it.
@@ -491,6 +526,7 @@ const TOOL_COPY = Object.freeze({
     : { sentence: `Gives ${str(a.agent_name)} this task to run now, as you.`, button: 'Run the task' }),
   create_agent_schedule: (a) => ({
     sentence: `${str(a.agent_name)} will run “${str(a.name, 120)}” ${cronWords(a.cron_expression, a.timezone)}.`
+      + delivery(a, str(a.agent_name))
       + (a.enabled === false ? ' It is added switched off.' : ''),
     button: a.enabled === false ? 'Add it switched off' : 'Switch it on',
   }),
@@ -503,9 +539,10 @@ const TOOL_COPY = Object.freeze({
   },
   update_agent_schedule: (a, { fleet }) => {
     const which = scheduleTitle(a, fleet)
-    const when = typeof a.cron_expression === 'string' ? `: it will run ${cronWords(a.cron_expression, a.timezone)}` : ''
+    const when = typeof a.cron_expression === 'string' ? `: it will run ${cronWords(a.cron_expression, updateZone(a, fleet))}` : ''
     const state = a.enabled === true ? ', and switches it on' : a.enabled === false ? ', and switches it off' : ''
-    return { sentence: `Changes ${str(a.agent_name)}'s schedule${which ? ` ${which}` : ''}${when}${state}.`, button: 'Change it' }
+    const sentence = `Changes ${str(a.agent_name)}'s schedule${which ? ` ${which}` : ''}${when}${state}.${delivery(a, str(a.agent_name))}`
+    return { sentence, button: 'Change it' }
   },
   trigger_agent_schedule: (a, { fleet }) => {
     const which = scheduleTitle(a, fleet)
