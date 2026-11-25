@@ -170,6 +170,9 @@ class SchedulerService:
 
         # Issue #132: Track active background polling tasks for graceful shutdown
         self._active_poll_tasks: set = set()
+        # ent#1391: the dropped-retry notices a restart sends (see
+        # _recover_pending_retries); held so a notice is not collected mid-flight.
+        self._retry_drop_reports: set = set()
 
     @property
     def redis(self) -> redis.Redis:
@@ -1909,6 +1912,20 @@ class SchedulerService:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Could not report the dropped retry of {failed_execution_id}: {e}")
 
+    def _spawn_retry_dropped_report(self, failed_execution_id: str) -> None:
+        """Send `_report_retry_dropped` from sync code that runs inside the
+        scheduler's event loop (`initialize()` is called from the async main)."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(
+                f"No event loop to report the dropped retry of {failed_execution_id}"
+            )
+            return
+        task = loop.create_task(self._report_retry_dropped(failed_execution_id))
+        self._retry_drop_reports.add(task)
+        task.add_done_callback(self._retry_drop_reports.discard)
+
     def _recover_pending_retries(self):
         """Recover pending retries after scheduler restart.
 
@@ -1931,6 +1948,11 @@ class SchedulerService:
                     f"clearing retry for execution {execution.id}"
                 )
                 self.db.clear_retry_scheduled(execution.id)
+                # ent#1391: the retry never runs, so say so, as _execute_retry's
+                # drop paths do. A schedule turned off while the scheduler was
+                # down then mails its held-back failure once; a deleted one
+                # mails nothing (the backend decides).
+                self._spawn_retry_dropped_report(execution.id)
                 continue
 
             retry_at = execution.retry_scheduled_at

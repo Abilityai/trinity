@@ -506,6 +506,33 @@ def test_a_dropped_retry_of_a_schedule_that_does_not_mail_sends_nothing(client, 
     assert mails.sent == []
 
 
+def test_a_deleted_schedule_mails_nothing_even_for_a_held_back_failure(client, world, mails):
+    """On purpose: deleting a schedule stops its mail, including the failure
+    held back for a retry that now never runs. The person removed the schedule;
+    a mail about it afterwards would read as the schedule still being there."""
+    sid = turned_on(client, world, mails)
+    set_retries(sid, 2)
+    first = run_row(world, sid, status="failed", error="network blip", attempt=1)
+    finish(world, first, status="failed")
+    assert mails.sent == []                                     # held back for the retry
+    assert call(client, world, "owner", "DELETE", f"/{sid}").status_code in (200, 204)
+    assert _dropped(first).status_code == 200                   # the scheduler's notice
+    assert mails.sent == []
+
+
+def test_a_schedule_turned_off_mails_the_held_back_failure_once(client, world, mails):
+    """The other half of the line: turned off (not deleted), the held-back
+    failure is mailed once when the scheduler reports the dropped retry."""
+    sid = turned_on(client, world, mails)
+    set_retries(sid, 2)
+    first = run_row(world, sid, status="failed", error="network blip", attempt=1)
+    finish(world, first, status="failed")
+    with get_engine().begin() as conn:
+        conn.execute(text("UPDATE agent_schedules SET enabled = 0 WHERE id = :sid"), {"sid": sid})
+    assert _dropped(first).status_code == 200
+    assert len(mails.sent) == 1 and mails.sent[0]["relay"][1]["status"] == "failed"
+
+
 class TestTheSchedulerSaysWhenARetryIsDropped:
     """Each of `_execute_retry`'s drop paths tells the backend, once, which
     failed attempt will now never be followed; a retry that runs does not."""
@@ -573,3 +600,85 @@ class TestTheSchedulerSaysWhenARetryIsDropped:
         url, body, headers = posted[0]
         assert url.endswith("/api/internal/schedule-retry-dropped")
         assert body == {"execution_id": "failed"} and "X-Internal-Secret" in headers
+
+
+class TestARestartReportsTheRetriesItClears:
+    """`_recover_pending_retries` (run by `initialize()` on every scheduler
+    start) clears a pending retry whose schedule was turned off or deleted
+    while the scheduler was down. It reports each cleared retry the way
+    `_execute_retry`'s drop paths do, so the held-back failure of a schedule
+    turned off is mailed once (the backend decides; a deleted one mails
+    nothing, `test_a_deleted_schedule_mails_nothing_even_for_a_held_back_failure`)."""
+
+    @staticmethod
+    def _recover(schedules, pending=None, real_report=False, restarts=1):
+        import sys
+        from datetime import datetime, timedelta
+        from pathlib import Path
+        from unittest.mock import AsyncMock, MagicMock
+
+        repo = Path(__file__).resolve().parents[2]
+        if str(repo) not in sys.path:
+            sys.path.append(str(repo))
+        import src.scheduler.service as ssvc
+
+        svc = object.__new__(ssvc.SchedulerService)
+        svc._active_poll_tasks = set()
+        svc._retry_drop_reports = set()
+        svc.db = MagicMock()
+        later = datetime.utcnow() + timedelta(minutes=5)
+        svc.db.get_pending_retries.return_value = pending or [
+            SimpleNamespace(id=f"failed-{sid}", schedule_id=sid, retry_scheduled_at=later,
+                            attempt_number=1) for sid in schedules]
+        svc.db.get_schedule.side_effect = lambda sid: schedules[sid]
+        svc._schedule_retry_job = MagicMock()
+        if not real_report:
+            svc._report_retry_dropped = AsyncMock()
+
+        async def boot():
+            svc._recover_pending_retries()          # sync, inside the running loop
+            await asyncio.gather(*list(svc._retry_drop_reports))
+
+        for _ in range(restarts):
+            asyncio.run(boot())
+        return svc
+
+    def test_a_retry_cleared_at_restart_is_reported(self):
+        live = SimpleNamespace(id="on", enabled=True)
+        svc = self._recover({"off": SimpleNamespace(id="off", enabled=False), "gone": None, "on": live})
+        cleared = sorted(c.args[0] for c in svc.db.clear_retry_scheduled.call_args_list)
+        assert cleared == ["failed-gone", "failed-off"]
+        reported = sorted(c.args[0] for c in svc._report_retry_dropped.await_args_list)
+        assert reported == ["failed-gone", "failed-off"]          # each once
+        svc._schedule_retry_job.assert_called_once()              # the live one re-armed
+
+    def test_a_retry_re_armed_at_restart_is_not_reported(self):
+        svc = self._recover({"on": SimpleNamespace(id="on", enabled=True)})
+        svc._report_retry_dropped.assert_not_called()
+
+    def test_a_restart_turns_the_report_into_one_mail_of_the_held_back_failure(
+            self, client, world, mails, monkeypatch):
+        """End to end below the HTTP hop: the restart's report reaches the
+        real internal route, and the failure is mailed once."""
+        import src.scheduler.service as ssvc
+
+        sid = turned_on(client, world, mails)
+        set_retries(sid, 2)
+        first = run_row(world, sid, status="failed", error="network blip", attempt=1)
+        finish(world, first, status="failed")
+        assert mails.sent == []
+
+        class _Client:                                            # the scheduler's httpx, onto the route
+            def __init__(self, *a, **k): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def post(self, url, json=None, headers=None):
+                assert url.endswith("/api/internal/schedule-retry-dropped")
+                return _dropped(json["execution_id"])
+
+        monkeypatch.setattr(ssvc.httpx, "AsyncClient", _Client)
+        self._recover({sid: SimpleNamespace(id=sid, enabled=False)}, real_report=True, restarts=2,
+                      pending=[SimpleNamespace(id=first, schedule_id=sid, retry_scheduled_at=None,
+                                               attempt_number=1)])
+        assert len(mails.sent) == 1 and mails.sent[0]["relay"][1]["status"] == "failed"
+

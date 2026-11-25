@@ -240,6 +240,9 @@ def _plan_delivery(execution_id: str, status: Optional[str], retry_dropped: bool
         if _succeeded(str(status or "").lower()) or str(status or "").lower() in _UNFINISHED:
             return None
     schedule_id = getattr(row, "schedule_id", None)
+    # A deleted schedule mails nothing, on purpose, including a failure held
+    # back for a retry that now never runs: get_schedule() skips soft-deleted
+    # rows, and the person who removed the schedule has stopped its mail.
     schedule = db.get_schedule(schedule_id) if schedule_id else None
     if not schedule or getattr(schedule, "email_results_user_id", None) is None:
         return None
