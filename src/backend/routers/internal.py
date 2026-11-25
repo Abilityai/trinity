@@ -20,6 +20,7 @@ from database import db
 from models import (
     InternalAuditRequest,
     InternalPreCheckRequest,
+    InternalScheduleRetryDroppedRequest,
     InternalTaskExecutionRequest,
     PullTaskResultRequest,
     TaskExecutionStatus,
@@ -823,6 +824,18 @@ async def _run_validation_background(
         )
     except Exception as e:
         logger.error(f"Validation failed for execution {execution_id}: {e}")
+
+
+@router.post("/schedule-retry-dropped")
+async def schedule_retry_dropped(request: InternalScheduleRetryDroppedRequest):
+    """abilityai/trinity-enterprise#1391: the scheduler dropped a pending retry
+    (the schedule was turned off or removed, autonomy went off, a sync freeze).
+    The failed attempt was not mailed because a retry was coming; mail it now,
+    once per chain. Always 200: the notice is fire-and-forget for the scheduler."""
+    from services import schedule_result_email
+
+    mailed = await schedule_result_email.deliver(execution_id=request.execution_id, retry_dropped=True)
+    return {"mailed": bool(mailed)}
 
 
 # =============================================================================

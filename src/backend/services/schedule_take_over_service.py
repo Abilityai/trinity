@@ -14,7 +14,8 @@ taker adopts exactly the version they reviewed:
   owner-tier runs through a URL they hold;
 * a delivery to another person's Workspace is cleared unless the request
   repeats its address: owner-tier output must not reach a third party by
-  accident.
+  accident;
+* result mail (ent#1391) to anyone but the taker stops in the same write.
 """
 
 import logging
@@ -74,6 +75,7 @@ class TakeOver(NamedTuple):
     previous_creator_id: Optional[int]
     webhook_revoked: bool
     delivery_cleared: bool
+    email_results_cleared: bool = False
 
 
 def _email(value) -> str:
@@ -129,7 +131,9 @@ def take_over(db, agent_name: str, schedule, taker, body) -> TakeOver:
     )
     outcome = result["outcome"]
     if outcome == "taken_over":
-        return TakeOver(True, previous, bool(result["webhook_revoked"]), clear)
+        mailed_to = getattr(schedule, "email_results_user_id", None)
+        return TakeOver(True, previous, bool(result["webhook_revoked"]), clear,
+                        mailed_to is not None and mailed_to != taker.id)
     if outcome == "in_progress":
         raise TakeOverRefused(RUN_IN_PROGRESS)
     if outcome == "changed":

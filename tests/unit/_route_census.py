@@ -1198,6 +1198,7 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
     "routers/internal.py::mcp_external_access": ("GET /api/internal/mcp-external-access", _SECRET),
     "routers/internal.py::mcp_exposed_agents": ("GET /api/internal/mcp-exposed-agents", _SECRET),
     "routers/internal.py::validate_execution": ("POST /api/internal/validate-execution", _SECRET),
+    "routers/internal.py::schedule_retry_dropped": ("POST /api/internal/schedule-retry-dropped", _SECRET),
     "routers/setup.py::get_setup_status": ("GET /api/setup/status", "unauthenticated by design (first-run status)"),
     "routers/setup.py::set_admin_password": ("POST /api/setup/admin-password", "unauthenticated by design until setup completes, then refused"),
     "routers/setup.py::get_registration_terms": ("GET /api/setup/registration-terms", "unauthenticated by design: open only until setup completes and only with a registration-terms provider registered; reads nothing from the caller (trinity-enterprise#1329)"),

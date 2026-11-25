@@ -45,10 +45,24 @@ SMTP_TIMEOUT_SECONDS = 30
 _relay: Optional[dict] = None
 
 
+class EmailRefused(Exception):
+    """The relay refused a mail and said why (trinity-enterprise#1391).
+
+    ``code`` is the relay's reason code, ``message`` a sentence written for the
+    person. A relay's ``send`` may raise this instead of answering False; it
+    reaches only a caller that asked for it (``send_html(raise_refusal=True)``),
+    every other caller still reads False."""
+
+    def __init__(self, code: str, message: str, status_code: int = 422):
+        super().__init__(message)
+        self.code, self.message, self.status_code = code, message, status_code
+
+
 def register_relay(available: Callable[[], bool], send: Callable[[str, str, dict], Awaitable[bool]]) -> None:
     """Register the relay. ``available()`` is cheap and synchronous (it is read
     on the unauthenticated auth-mode path); ``send(kind, to, fields)`` delivers
-    one mail and answers whether it did. Neither may raise."""
+    one mail and answers whether it did. ``available`` may not raise; ``send``
+    may raise only ``EmailRefused``, for a refusal with a reason."""
     global _relay
     _relay = {"available": available, "send": send}
 
@@ -117,7 +131,8 @@ class EmailService:
             logger.warning("[email] the relay could not say whether it is available", exc_info=True)
             return False
 
-    async def _relayed(self, kind: str, to_email: str, fields: dict) -> Optional[bool]:
+    async def _relayed(self, kind: str, to_email: str, fields: dict, *,
+                       raise_refusal: bool = False) -> Optional[bool]:
         """Deliver through the relay when this install has no provider of its
         own. None when the relay does not apply (the caller sends as before);
         otherwise whether it delivered. A relay that fails is NOT reported as
@@ -127,6 +142,11 @@ class EmailService:
             return None
         try:
             return bool(await _relay["send"](kind, to_email, fields))
+        except EmailRefused as refused:
+            logger.warning("[email] relay refused a %s mail: %s", kind, refused.code)
+            if raise_refusal:
+                raise
+            return False
         except Exception as e:  # noqa: BLE001
             logger.warning("[email] relay failed for a %s mail: %s", kind, type(e).__name__)
             return False
@@ -315,6 +335,7 @@ If you didn't request this code, you can safely ignore this email.
         paragraphs: Optional[Sequence[Optional[str]]] = None,
         cta: Optional[Tuple[str, str]] = None,
         relay: Optional[Tuple[str, dict]] = None,
+        raise_refusal: bool = False,
     ) -> bool:
         """Send a mail rendered on the shared shell, with a plain-text twin.
 
@@ -328,10 +349,12 @@ If you didn't request this code, you can safely ignore this email.
 
         ``relay`` is the same mail as ``(kind, fields)`` for a registered relay,
         which words it itself. Used only when this install has no provider of
-        its own; a mail given no ``relay`` is never relayed.
+        its own; a mail given no ``relay`` is never relayed. With
+        ``raise_refusal`` a relay's refusal raises ``EmailRefused`` (its reason
+        reaches the person) instead of answering False.
         """
         if relay:
-            relayed = await self._relayed(relay[0], to_email, relay[1])
+            relayed = await self._relayed(relay[0], to_email, relay[1], raise_refusal=raise_refusal)
             if relayed is not None:
                 return relayed
         from html import escape

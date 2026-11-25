@@ -3967,6 +3967,16 @@ class InternalTaskExecutionRequest(BaseModel):
     deliver_to_workspace_email: Optional[str] = None
 
 
+class ScheduleEmailMeRequest(BaseModel):
+    """ent#1391: mail each run of this schedule to me (the caller), or stop. No address: it is the caller's own."""
+    enabled: bool = True
+
+
+class InternalScheduleRetryDroppedRequest(BaseModel):
+    """ent#1391: the scheduler dropped a pending retry of this failed attempt."""
+    execution_id: str
+
+
 class InternalPreCheckRequest(BaseModel):
     """The schedule a pre-check is gating (#3966). Every field is optional: a
     bodyless request (an older scheduler) runs the hook exactly as before."""
@@ -4833,6 +4843,16 @@ class ScheduleResponse(BaseModel):
     # it the field is silently dropped from every response — `ScheduleResponse`
     # is built with `**schedule.model_dump()`, and pydantic ignores extra keys.
     deliver_to_workspace_email: Optional[str] = None
+    # ent#1391: whether each run's result is mailed, and whether to THIS caller.
+    # Never the address: a person the agent is shared with must not read the
+    # owner's email off a schedule read, and the caller's own needs no echo.
+    # Set only through POST .../schedules/{id}/email-me, by the person it mails.
+    email_results: bool = False
+    email_results_to_me: bool = False
+    # Why the last result mail did not go (NULL after one that went), for the
+    # schedule card: a dropped mail is never silent.
+    email_results_error: Optional[str] = None
+    email_results_error_at: Optional[str] = None
     # ent#875: whether THIS caller may mint, rotate, revoke or read the schedule's
     # webhook (its creator, the agent owner, an admin). Computed server-side by
     # both checks the webhook routes enforce — the principal rule (a person, or an

@@ -753,6 +753,7 @@ def test_an_audit_row_names_both_creators(client, world, audit):
         "new_creator_id": world.owner.id,
         "webhook_revoked": True,
         "delivery_cleared": True,
+        "email_results_cleared": False,  # trinity-enterprise#1391: nobody had result mail on
     }
 
 

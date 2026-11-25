@@ -1426,6 +1426,11 @@
   "reason": "ent#875: the schedule's creator or the agent's owner (can_manage_webhook)",
   "tier": "resource"
  },
+ "schedules.py::email_me_schedule_results": {
+  "method": "POST",
+  "path": "/api/agents/{name}/schedules/{schedule_id}/email-me",
+  "tier": "owner"
+ },
  "schedules.py::enable_schedule": {
   "method": "POST",
   "path": "/api/agents/{name}/schedules/{schedule_id}/enable",

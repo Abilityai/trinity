@@ -130,6 +130,11 @@ class AutonomyMixin:
           "spawned_by_key_id": ...}`` written back onto the row (an inverse
           transfer); exclusive with ``clear_spawn_provenance``.
 
+        Always, on a hit: every ``agent_schedules`` row of the agent whose
+        result-mail recipient (``email_results_user_id``) is not ``to_user_id``
+        loses it and both ``email_results_error*`` columns (ent#1391), so no
+        run is mailed to anyone the new owner did not choose.
+
         MCP keys are NOT touched — deactivating them is the caller's job.
         """
         unknown = sorted(set(expect) - set(agent_ownership.c.keys()))
@@ -179,6 +184,20 @@ class AutonomyMixin:
                     .where(table.c.agent_name == agent_name)
                     .values({column: to_user_id})
                 )
+            # ent#1391: each run's result mail goes to a person who turned it on.
+            # After a hand-over nobody but the new owner keeps it: an earlier
+            # recipient (the previous owner, or an admin who still manages the
+            # agent) would go on reading the new owner's runs. The error columns
+            # go with it, so no earlier person's delivery failure is shown.
+            conn.execute(
+                update(agent_schedules)
+                .where(
+                    (agent_schedules.c.agent_name == agent_name)
+                    & agent_schedules.c.email_results_user_id.is_distinct_from(to_user_id)
+                )
+                .values(email_results_user_id=None, email_results_error=None,
+                        email_results_error_at=None)
+            )
             if clear_spawn_provenance and spawner is not None:
                 conn.execute(
                     delete(agent_permissions).where(
