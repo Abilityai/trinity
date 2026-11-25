@@ -1451,6 +1451,13 @@ async def add_security_headers(request: Request, call_next):
     return response
 
 
+# trinity-enterprise#978 — a response computed under a narrowed view of an
+# agent's executions carries `X-Trinity-Read-Narrowed`. Pure ASGI: it installs
+# the per-request holder the auth seam notes into, so it must wrap the routers.
+from utils.read_narrowing import ReadNarrowedMiddleware
+
+app.add_middleware(ReadNarrowedMiddleware)
+
 # trinity-enterprise#873 — one canonical client address per request, before any
 # route, limiter or audit writer reads `request.client`. Registered just before
 # the Host guard so it runs immediately INSIDE it and outside everything else;
