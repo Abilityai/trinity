@@ -64,7 +64,7 @@ export const MODEL_CATALOG = [
     "note": "Fast + smart, 1M context (latest)",
     "publicChannel": true,
     "adminDefaultSelectable": true,
-    "recommended": false,
+    "recommended": true,
     "workspace": true,
     "workspaceTier": "Balanced — fast and smart"
   },
@@ -114,7 +114,7 @@ export const MODEL_CATALOG = [
     "note": "Fast + smart",
     "publicChannel": true,
     "adminDefaultSelectable": true,
-    "recommended": true,
+    "recommended": false,
     "workspace": false,
     "workspaceTier": ""
   },

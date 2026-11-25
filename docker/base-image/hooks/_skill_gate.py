@@ -94,6 +94,13 @@ CLI_FACTS_TO_REAUDIT = (
     "The Monitor tool (offered since 2.1.310 with telemetry off) runs a shell command of its "
     "own; hooks registered for Bash see that command as a Bash call (since 2.1.314) and can "
     "block it. Headless and chat turns do not offer the tool at all (PLATFORM_DENIED_TOOLS).",
+    "A server-managed settings payload the CLI holds (cached as <config dir>/remote-settings.json, "
+    "the settings object itself) that sets any key but managedSourcesBehavior and "
+    "wslInheritsWindowsSettings is the managed tier alone: managed-settings.json and every "
+    "managed-settings.d file are skipped, so none of their hooks run (only env still merges per "
+    "key). With managedSourcesBehavior \"merge\" they run, unless the payload sets "
+    "disableAllHooks. agent_server/services/managed_hooks.py reads that cache "
+    "(trinity-enterprise#1176).",
 )
 
 MARKER = "/opt/trinity/skill-gates-active"
@@ -795,14 +802,14 @@ def _verdict(status: int, payload: bytes, call: Call) -> Outcome:
     message = data.get("message")
     if not isinstance(message, str) or not message.strip():
         message = REFUSED_WITHOUT_WORDS
-    return Outcome(2, message[:MESSAGE_MAX_CHARS], "skill_gate_deny", _fields(call))
+    return Outcome(2, message[:MESSAGE_MAX_CHARS], "skill_gate_deny", dict(_fields(call), code="skill_refused"))
 
 
 def _no_verdict(reason: str, call) -> Outcome:
     """No answer from the platform: the marker decides. Present — this agent
     has gates — refuses; absent lets the call through."""
     marker = _marker_present()
-    fields = dict(_fields(call), reason=reason, marker=marker)
+    fields = dict(_fields(call), reason=reason, marker=marker, code="skill_check_unreachable")
     if marker:
         return Outcome(2, COULD_NOT_CHECK, "skill_gate_unknown", fields)
     return Outcome(0, None, "skill_gate_unknown", fields)
@@ -822,10 +829,10 @@ def _fields(call) -> dict:
 # ---------------------------------------------------------------------------
 
 def _log(outcome: Outcome) -> None:
-    """To /logs/guardrails.jsonl through the guardrails' own helper. The file
-    stays in the agent container: nothing collects it (Vector reads container
-    stdout and stderr only). In a thread with a short join: a failing or
-    blocking write never changes the exit code and never holds the tool."""
+    """To the /logs/guardrails.jsonl spool through the guardrails' own helper
+    (the agent server forwards it to the platform, trinity-enterprise#165), in
+    a thread with a short join: a failing or blocking write never changes the
+    exit code and never holds the tool."""
     if not outcome.event:
         return
 

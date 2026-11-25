@@ -21,7 +21,7 @@ import { defineStore } from 'pinia'
 import api from '../api'
 import { useOnboardingStore } from './onboarding'
 import { buildContext, buildFleet, describePage } from '../utils/assistantContext'
-import { acceptCards, buildOutcome, cardLabel, cardNote, credentialLine, outcomeLine, runCard, validBuild, webLink } from '../utils/assistantCards'
+import { acceptCards, buildOutcome, cardLabel, cardNote, credentialLine, outcomeLine, runCard, useClaude, validBuild, webLink } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
 import { useAuthStore } from './auth'
 import { useFirstRunStore } from './firstRun'
@@ -215,12 +215,15 @@ export const useAssistantStore = defineStore('assistant', {
       const a = s.allowance
       if (s.plan === 'pro') return 'Trinity Pro'
       if (!a) return 'Free'
+      // The trial's other limit is its days (Abilityai/trinity-gateway#37); absent on an older gateway.
+      if (a.reached === 'days') return 'Free trial ended'
+      const days = typeof a.days_left === 'number' ? ` · ${a.days_left} ${a.days_left === 1 ? 'day' : 'days'} left` : ''
       const left = `Free · ${a.messages_left} ${a.messages_left === 1 ? 'message' : 'messages'} left`
       // Running low: say when more come back, before the limit says it for us.
       const back = a.messages_left <= LOW_MESSAGES ? backIn(a.resets_at) : ''
-      if (back) return `${left} · more ${back}`
+      if (back) return `${left} · more ${back}${days}`
       const period = a.period_hours === 24 ? 'today' : a.period_hours === 168 ? 'this week' : 'for now'
-      return `${left} ${period}`
+      return `${left} ${period}${days}`
     },
   },
 
@@ -420,12 +423,13 @@ export const useAssistantStore = defineStore('assistant', {
       this.startedAt = Date.now()
       try {
         const fleet = await this.refreshFleet()
+        const firstSession = inFirstSession(this.status, fleet, useFirstRunStore().seededAgents || [])
         let { data } = await api.post(`${BASE}/turn`, {
           conversation_id: this.conversationId,
           message: clicked.length ? `${clicked.join('\n')}\n${message}` : message,
           context: { ...buildContext(route, fleet), ...(said ? { said } : {}), ...setupSteps(),
             // trinity-enterprise#1355: the assistant leads this session and follows its script for it.
-            ...(inFirstSession(this.status, fleet, useFirstRunStore().seededAgents || []) ? { first_session: true } : {}) },
+            ...(firstSession ? { first_session: true } : {}) },
           counted,
         }, { timeout: STEP_TIMEOUT_MS })
 
@@ -460,7 +464,7 @@ export const useAssistantStore = defineStore('assistant', {
           role: 'assistant',
           content: data.text || (cards.length ? '' : 'Done.'),
           cards: cards.map((card) => ({
-            id: newId(), card, label: cardLabel(card, after), note: cardNote(card),
+            id: newId(), card, label: cardLabel(card, after, { firstSession }), note: cardNote(card, { firstSession }),
             state: FOLLOWED.includes(card.action) ? 'making' : 'open', reason: '', progress: '', picked: '',
             since: Date.now(), fraction: null,
             auto: false,       // a proposed build waits for the owner's click on Build; they can tick create-when-ready (ent#1343)
@@ -764,6 +768,8 @@ export const useAssistantStore = defineStore('assistant', {
         outcome = await this.confirmTool(entry.card, entry.label)
       } else if (entry.card.action === 'feedback') {
         outcome = await this.sendFeedback(entry.card, entry.label, route)
+      } else if (entry.card.action === 'use-claude') {
+        outcome = await useClaude(api, entry.card, entry.label)
       } else {
         const result = await runCard(api, entry.card, this.fleet)
         outcome = { kind: result.kind, reason: result.reason || '', line: outcomeLine(result.kind, entry.label, result.reason) }
@@ -830,6 +836,12 @@ export const useAssistantStore = defineStore('assistant', {
         entry.connected = Number.isInteger(data?.connected_agents) ? data.connected_agents : null
         entry.working = typeof data?.working === 'boolean' ? data.working : null
         entry.problem = entry.working === false && typeof data?.problem === 'string' ? data.problem.slice(0, 300) : ''
+        // ent#1354: the save switched no agent; which existing ones are not on it, by name.
+        entry.kind = typeof data?.kind === 'string' ? data.kind : null
+        entry.notUsing = Array.isArray(data?.not_using)
+          ? data.not_using.filter((r) => typeof r?.name === 'string').map((r) => ({ name: r.name.slice(0, 81), model_access: typeof r.model_access === 'boolean' ? r.model_access : null }))
+          : (data && 'not_using' in data ? null : undefined)
+        entry.moving = Array.isArray(data?.moving) ? data.moving.filter((n) => typeof n === 'string').map((n) => n.slice(0, 81)) : []
       } catch (error) {
         entry.state = 'open'
         const code = error?.response?.status
@@ -839,7 +851,7 @@ export const useAssistantStore = defineStore('assistant', {
           error: words(error, code ? `Trinity refused it (${code}). Nothing was stored.` : "Couldn't reach Trinity, so it may or may not have been stored."),
         }
       }
-      await this.send(credentialLine(entry.card, true, { working: entry.working }), route, { shown: false })
+      await this.send(credentialLine(entry.card, true, { working: entry.working, kind: entry.kind, notUsing: entry.notUsing, moving: entry.moving, connected: entry.connected }), route, { shown: false })
       return { ok: true }
     },
 

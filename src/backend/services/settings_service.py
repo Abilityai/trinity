@@ -19,11 +19,17 @@ from database import db
 
 logger = logging.getLogger(__name__)
 
-# Platform default model (#831)
+# Platform default model (#831). Sonnet 5.5 since #4757 (was Sonnet 4.6): an
+# install with no `platform_default_model` row resolves this, so it moves on
+# upgrade; an admin's saved choice is a row and is kept. Mirrored as
+# `DEFAULT_CLAUDE_MODEL` in the agent image (claude_code.py), parity-tested.
 PLATFORM_DEFAULT_MODEL_KEY = "platform_default_model"
-PLATFORM_DEFAULT_MODEL_VALUE = "claude-sonnet-4-6"
+PLATFORM_DEFAULT_MODEL_VALUE = "claude-sonnet-5-5"
 _platform_model_cache: Optional[str] = None
 _platform_model_cache_ts: float = 0.0
+# Whether the cached value came from a saved row (#4757): refreshed in the same
+# block as `_platform_model_cache`, so resetting that cache resets this too.
+_platform_model_saved_cache: bool = False
 _PLATFORM_MODEL_CACHE_TTL = 60.0
 # Abilityai/lilu#652: OpenCode's platform default is its own setting, because
 # the fleet default above is a bare Claude id OpenCode refuses ("missing a
@@ -90,6 +96,7 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "operator_queue_aging_hours": "Hours a pending operator-queue item may wait before it is marked as aging on the card and the filing agent receives a receipt (0 = disabled; default: 24, #2915)",
     "operator_queue_retention_days": "Days to retain terminal operator_queue rows (acknowledged/cancelled/expired; default: 90, 0 = disabled, #1142)",
     "agent_reminders_retention_days": "Days to retain terminal agent_reminders rows (fired/cancelled/failed; default: 90, 0 = disabled, #1296)",
+    "guardrail_event_retention_days": "Days to retain guardrail events an agent reported, counted from when they arrived (default: 90, 0 = disabled, trinity-enterprise#165)",
     "subscription_headroom_retention_days": "Days to retain subscription headroom probe history used for utilization trends (default: 30, 0 = disabled, ent#433)",
     "subscription_failure_event_retention_days": "Days to retain subscription rate-limit/auth failure events (default: 30, 0 = disabled; was a hardcoded 24h sweep before ent#433)",
     "backup_retention_days": "Days to retain database-backup artifacts in /data/backups (default: 14, bounds 1-3650 — 0 is invalid; the newest 3 artifacts are always kept; disable backups via DB_BACKUP_ENABLED=false, #2216)",
@@ -1016,10 +1023,21 @@ class SettingsService:
         now = time.monotonic()
         if _platform_model_cache is not None and (now - _platform_model_cache_ts) < _PLATFORM_MODEL_CACHE_TTL:
             return _platform_model_cache
-        value = self.get_setting(PLATFORM_DEFAULT_MODEL_KEY, PLATFORM_DEFAULT_MODEL_VALUE)
-        _platform_model_cache = value or PLATFORM_DEFAULT_MODEL_VALUE
+        global _platform_model_saved_cache
+        row = self.get_setting(PLATFORM_DEFAULT_MODEL_KEY, None)
+        _platform_model_saved_cache = bool(row)
+        _platform_model_cache = row or PLATFORM_DEFAULT_MODEL_VALUE
         _platform_model_cache_ts = now
         return _platform_model_cache
+
+    def platform_default_model_is_saved(self) -> bool:
+        """True when an admin saved a ``platform_default_model`` row (#4757).
+
+        The resolver's old-CLI step-down applies only when this is False: a
+        saved default is used as saved, exactly as before #4757.
+        """
+        self.get_platform_default_model()  # refreshes the flag with the value
+        return _platform_model_saved_cache
 
     def resolve_ops_setting(self, key: str):
         """`(value, source)` for one ops setting — the whole chain, once.
@@ -1874,3 +1892,8 @@ def is_template_registry_enabled() -> bool:
 def get_platform_default_model(runtime: Optional[str] = None) -> Optional[str]:
     """Return the platform-wide default model for ``runtime`` (#831, lilu#652)."""
     return settings_service.get_platform_default_model(runtime)
+
+
+def platform_default_model_is_saved() -> bool:
+    """True when an admin saved a platform default model (#4757)."""
+    return settings_service.platform_default_model_is_saved()

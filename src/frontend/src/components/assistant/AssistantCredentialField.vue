@@ -24,7 +24,7 @@
       v-if="isOpen && checked && current === true"
       class="text-[12.5px] text-gray-900 dark:text-gray-100"
       data-testid="assistant-credential-replaces"
-    >{{ entry.card.name }} is already set on {{ where }}. Saving replaces it; the current value is never shown.</p>
+    >{{ replacesText }}</p>
 
     <!-- This instance's Claude credential: where to get it (ent#1355), the three terminal steps (ent#1354) -->
     <template v-if="isOpen && checked && claude">
@@ -112,7 +112,7 @@ import BaseButton from '../base/BaseButton.vue'
 import BaseInput from '../base/BaseInput.vue'
 import InlineError from '../InlineError.vue'
 import { useAssistantStore } from '../../stores/assistant'
-import { credentialWhere } from '../../utils/assistantCards'
+import { credentialWhere, savedReportText } from '../../utils/assistantCards'
 import { claudeHelp, isClaudeCredential } from '../../utils/firstSession'
 import { claudeSavedText } from '../onboarding/steps/credentialSteps'
 
@@ -130,11 +130,30 @@ const value = ref('')
 const revealed = ref(false)
 const error = ref('')
 const current = ref(null)     // whether it is set already: true / false / null (unknown)
+const holds = ref(null)       // the Claude card only: which credential the instance holds (ent#1354)
 const checked = ref(false)    // the instance has answered whether it takes this name
 
 const where = computed(() => credentialWhere(props.entry.card))
 const claude = computed(() => (isClaudeCredential(props.entry.card) ? claudeHelp() : null))
-const connectedText = computed(() => claudeSavedText(props.entry.connected))
+// ent#1354 (ruled 2026-11-24, evening): the card's save switches no existing agent; it names the ones not on it.
+// It says what the save reported (connected, moving, not on it), never more.
+const connectedText = computed(() => savedReportText(props.entry, claudeSavedText))
+// ent#1354 (walk 2026-11-24 14:50Z): the Claude card said "CLAUDE_SUBSCRIPTION is
+// already set" on an instance holding only an API key. Its note names what is there.
+const HOLDS = {
+  api_key: 'an Anthropic API key',
+  subscription: 'a Claude subscription',
+  subscription_and_api_key: 'a Claude subscription and an Anthropic API key',
+}
+const replacesText = computed(() => {
+  if (!claude.value) {
+    return `${props.entry.card.name} is already set on ${where.value}. Saving replaces it; the current value is never shown.`
+  }
+  return (
+    `This instance already has ${HOLDS[holds.value] || 'a Claude credential'}. A token you paste is saved as its ` +
+    'Claude subscription and a key as its API key, replacing only one of the same kind; the current value is never shown.'
+  )
+})
 const running = computed(() => props.entry.state === 'running')
 const isOpen = computed(() => ['open', 'running'].includes(props.entry.state))
 const outcome = computed(() => {
@@ -160,6 +179,7 @@ onMounted(async () => {
     return
   }
   current.value = state ? state.set : null
+  holds.value = state?.current ?? null
   checked.value = true
 })
 

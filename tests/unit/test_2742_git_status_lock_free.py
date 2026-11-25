@@ -1095,7 +1095,7 @@ def _bulk_repo(repo: Path, files: int) -> Path:
 class TestACommitSurvivesAConcurrentPoll:
 
     @staticmethod
-    def _freeze_status_holding_the_lock(repo: Path, argv, attempts: int = 8):
+    def _freeze_status_holding_the_lock(repo: Path, argv, attempts: int = 40):
         """Start a real `git status` child and SIGSTOP it the instant it takes
         `.git/index.lock`. Returns the frozen Popen, or None if the lock never
         appeared (which is the expected outcome for the flagged argv).
@@ -1110,7 +1110,15 @@ class TestACommitSurvivesAConcurrentPoll:
         import time as _time
 
         lock = repo / ".git" / "index.lock"
-        for _ in range(attempts):
+        bulk = sorted((repo / "bulk").glob("*")) if (repo / "bulk").is_dir() else []
+        for attempt in range(attempts):
+            # Give every bulk file a new mtime with unchanged content, so this
+            # status must re-hash them all while it holds the lock. Without
+            # it the lock window can shrink below what the poll below sees,
+            # and every attempt misses it (#4695).
+            stamp = _time.time() + attempt + 1
+            for path in bulk:
+                os.utime(path, (stamp, stamp))
             proc = subprocess.Popen(
                 argv, cwd=str(repo),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -1122,7 +1130,15 @@ class TestACommitSurvivesAConcurrentPoll:
                         os.kill(proc.pid, signal.SIGSTOP)
                     except ProcessLookupError:
                         break
-                    if lock.exists() and proc.poll() is None:
+                    # kill() only queues the signal: git keeps running until
+                    # it is delivered and can release the lock in that gap
+                    # (#4695). Wait until the child is really stopped (or has
+                    # exited) before checking that it still holds the lock.
+                    _, status = os.waitpid(proc.pid, os.WUNTRACED)
+                    if not os.WIFSTOPPED(status):
+                        proc.returncode = os.waitstatus_to_exitcode(status)
+                        break
+                    if lock.exists():
                         return proc
                     try:
                         os.kill(proc.pid, signal.SIGCONT)
