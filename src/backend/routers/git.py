@@ -540,6 +540,28 @@ async def initialize_github_sync(
     # Get GitHub PAT: per-agent PAT first, then platform PAT (DB then env var)
     github_pat = get_github_pat_for_agent(agent_name)
     if not github_pat:
+        from services import github_token_provider
+
+        if github_token_provider.is_configured():
+            # trinity-enterprise#1279: this flow seeds a long-lived token into
+            # the container and may create the repository. A GitHub App
+            # cannot create a repository in a personal account, and its
+            # one-hour tokens are not seeded into containers.
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        "Initializing GitHub sync needs a GitHub personal "
+                        "access token. The GitHub App configured on this "
+                        "platform is not used here: it cannot create "
+                        "repositories, and its tokens expire within the hour. "
+                        "Set a per-agent token or the platform token in "
+                        "Settings, or create the agent from a repository the "
+                        "app is installed on."
+                    ),
+                    "code": "GITHUB_PAT_REQUIRED",
+                },
+            )
         raise HTTPException(
             status_code=400,
             detail="GitHub Personal Access Token not configured. Set a per-agent PAT or configure the platform PAT in Settings."
@@ -1291,8 +1313,16 @@ async def get_git_token(agent_name: str, current_user: User = Depends(get_curren
     repo = getattr(config, "github_repo", None) if config else None
     if f"{github_token_provider.BROKER_ENV}=1" not in env or not repo:
         return Response(status_code=204)
+    # trinity-enterprise#1279: a pull-only agent gets a read-only token. A
+    # working-branch agent pushes; a fork-to-own agent carries its own PAT and
+    # is never in broker mode.
+    permissions = (
+        {"contents": "read", "metadata": "read"}
+        if getattr(config, "source_mode", True) else None
+    )
     try:
-        token, tier, expires_at = await resolve_github_token(repo, agent_name=agent_name)
+        token, tier, expires_at = await resolve_github_token(
+            repo, agent_name=agent_name, permissions=permissions)
     except github_token_provider.GithubTokenUnavailable:
         raise HTTPException(status_code=503, detail="GitHub token unavailable")
     if tier != "app":

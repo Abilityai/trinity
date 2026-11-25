@@ -1778,3 +1778,156 @@ async def test_ent704_git_mode_pushes_for_fork_to_own(crud_env, monkeypatch):
     assert result.git_mode["source_mode"] is True
     assert result.git_mode["pushes"] is True
     assert result.git_mode["reason"] == "fork-to-own: the agent owns its fork"
+
+
+# ===========================================================================
+# trinity-enterprise#1279 — a create through the GitHub App, no PAT configured
+# ===========================================================================
+# AC1: a private template in an installed organization creates with no PAT.
+# The installation token reads, validates and probes; the container gets the
+# broker flag and no token; nothing is persisted.
+
+_APP_TOKEN = "ghs_1279_create_token"
+
+
+def _app_install(monkeypatch, crud, ctx, *, permissions=None, error=None, others=()):
+    """Register a provider and route the resolver through it, with no PAT tier."""
+    from services import github_token_provider as gtp
+
+    class _P:
+        async def token_for_repo(self, repo, perms=None):
+            if error:
+                raise error
+            return gtp.RepoToken(
+                _APP_TOKEN, "2026-11-25T12:00:00Z",
+                permissions={"contents": "write", "metadata": "read"}
+                if permissions is None else permissions,
+                repository_selection="selected")
+
+    gtp.register_provider(_P())
+    monkeypatch.setattr(crud, "resolve_github_pat", MagicMock(return_value=("", "none")))
+
+    async def _resolve(repo, agent_name=None, owner_id=None, permissions=None):
+        if error:
+            raise gtp.GithubTokenUnavailable("mint failed")
+        return _APP_TOKEN, "app", "2026-11-25T12:00:00Z"
+
+    ctx["settings_service"].resolve_github_token = _resolve
+    ctx["db"].get_git_config_agent_names_for_repo = MagicMock(return_value=list(others))
+    ctx["git_service"].probe_push_access = AsyncMock(return_value=("ok", ""))
+    return gtp
+
+
+@pytest.fixture
+def _clear_provider():
+    yield
+    from services import github_token_provider as gtp
+    gtp.clear_provider()
+
+
+@pytest.mark.asyncio
+async def test_ent1279_a_covered_private_repo_creates_with_no_pat(crud_env, monkeypatch, _clear_provider):
+    crud, ctx = crud_env
+    _app_install(monkeypatch, crud, ctx)
+    result = await _create_own_repo(crud, ctx, monkeypatch, "app-agent")
+
+    env = _agent_run_kwargs(ctx)["environment"]
+    assert env["TRINITY_GIT_TOKEN_BROKER"] == "1"
+    for key in ("GITHUB_PAT", "GH_TOKEN", "GITHUB_TOKEN"):
+        assert key not in env
+    assert _APP_TOKEN not in str(env)
+    # the installation token read the template and probed the push
+    reads = ctx["template_service"].fetch_template_metadata_result_for_create.call_args_list
+    assert reads and all(c.kwargs.get("pat") == _APP_TOKEN for c in reads)
+    ctx["git_service"].probe_push_access.assert_awaited_once_with(_OWN_REPO, _APP_TOKEN)
+    # never persisted as a per-agent PAT
+    ctx["db"].set_agent_github_pat.assert_not_called()
+    assert result.git_mode["token_tier"] == "app"
+    assert result.git_mode["source_mode"] is False
+    assert env["GIT_SYNC_AUTO"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_ent1279_a_read_only_app_creates_a_pull_only_agent(crud_env, monkeypatch, _clear_provider):
+    crud, ctx = crud_env
+    _app_install(monkeypatch, crud, ctx, permissions={"contents": "read", "metadata": "read"})
+    result = await _create_own_repo(crud, ctx, monkeypatch, "app-ro")
+
+    env = _agent_run_kwargs(ctx)["environment"]
+    assert env["TRINITY_GIT_TOKEN_BROKER"] == "1"
+    assert env["GIT_SOURCE_MODE"] == "true" and "GIT_SYNC_AUTO" not in env
+    assert result.git_mode["source_mode"] is True
+    assert "Contents: Read and write" in result.git_mode["reason"]
+    ctx["git_service"].probe_push_access.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ent1279_a_failed_mint_refuses_the_create_before_any_container(
+        crud_env, monkeypatch, _clear_provider):
+    from fastapi import HTTPException
+    from services import github_token_provider as gtp
+
+    crud, ctx = crud_env
+    _app_install(monkeypatch, crud, ctx, error=gtp.GithubTokenUnavailable("suspended"))
+    with pytest.raises(HTTPException) as raised:
+        await _create_own_repo(crud, ctx, monkeypatch, "app-fail")
+    assert raised.value.status_code == 503
+    assert raised.value.detail["code"] == "GITHUB_APP_TOKEN_UNAVAILABLE"
+    assert not any(c.kwargs.get("detach") for c in ctx["docker_utils"].containers_run.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_ent1279_no_agent_key_refuses_the_create_and_bakes_nothing(
+        crud_env, monkeypatch, _clear_provider):
+    """Without the agent key the container cannot fetch its token, and baking
+    the platform PAT instead would hand a working-branch agent the
+    install-wide credential."""
+    crud, ctx = crud_env
+    _app_install(monkeypatch, crud, ctx)
+    monkeypatch.setattr(crud, "_mint_agent_mcp_key", lambda config, user: (None, None))
+    with pytest.raises(Exception) as raised:
+        await _create_own_repo(crud, ctx, monkeypatch, "app-nokey")
+    assert raised.value.status_code == 503
+    assert raised.value.detail["code"] == "GITHUB_APP_AGENT_KEY_MISSING"
+    ctx["db"].delete_git_config.assert_called()  # the reserved branch is rolled back
+    assert not any(c.kwargs.get("detach") for c in ctx["docker_utils"].containers_run.call_args_list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("others,catalog", [(["someone-else"], False), ([], True)])
+async def test_ent1279_an_explicit_working_branch_on_a_shared_repo_is_refused(
+        crud_env, monkeypatch, _clear_provider, others, catalog):
+    """The app needs no credential from the creator, so `source_mode=false`
+    still has to pass the shared-repository checks."""
+    from fastapi import HTTPException
+
+    crud, ctx = crud_env
+    _app_install(monkeypatch, crud, ctx, others=others)
+    # side_effect outranks the return_value `_create_own_repo` sets.
+    ctx["template_service"].is_catalog_github_template.side_effect = lambda repo: catalog
+    with pytest.raises(HTTPException) as raised:
+        await _create_own_repo(crud, ctx, monkeypatch, "app-explicit", source_mode=False)
+    assert raised.value.status_code == 400
+    assert raised.value.detail["code"] == "GITHUB_APP_SHARED_REPO"
+    assert "someone-else" not in raised.value.detail["error"]
+
+
+@pytest.mark.asyncio
+async def test_ent1279_a_fork_never_asks_the_app(crud_env, monkeypatch, _clear_provider):
+    """Fork-to-own is PAT-only: a failed app lookup must not block it."""
+    from services import github_token_provider as gtp
+    from services.agent_service.fork_to_own import ForkToOwnResult
+
+    crud, ctx = crud_env
+    _app_install(monkeypatch, crud, ctx, error=gtp.GithubTokenUnavailable("suspended"))
+    _script_github_template(ctx, fork_to_own_meta="required")
+    _patch_repo_validation(monkeypatch, crud)
+    monkeypatch.setattr(
+        crud, "fork_template_to_own_repo",
+        AsyncMock(return_value=ForkToOwnResult("alice/brain", "main", False)))
+    cfg = _github_config(
+        "app-fork",
+        fork_to_own={"destination_repo": "alice/brain",
+                     "github_pat": "ghp_userpat", "private": True})
+    result = await crud.create_agent_internal(cfg, _user(), None)
+    assert result.git_mode["reason"] == "fork-to-own: the agent owns its fork"

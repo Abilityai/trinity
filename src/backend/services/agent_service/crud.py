@@ -706,7 +706,49 @@ _TIER_LABELS = {
     "global": "platform GitHub token",
     "none": "anonymous API read",
     "anonymous": "anonymous read",
+    "app": "the GitHub App",
 }
+
+# trinity-enterprise#1279: ceiling on the create-time app-tier lookup. A cold
+# cache costs an installation lookup plus a mint.
+_APP_TOKEN_TIMEOUT = 20
+
+
+async def _create_time_token(repo: str, owner_id: Optional[int]) -> tuple:
+    """``(token, tier)`` for the create-time GitHub reads of ``repo``.
+
+    The PAT ladder of ``resolve_github_pat`` with the GitHub App between the
+    per-user and the platform token (trinity-enterprise#1279,
+    ``settings_service.resolve_github_token``). A tier ``"app"`` token expires
+    within the hour: it is used for this create's reads and probes and never
+    baked or persisted (the container gets the broker flag instead).
+
+    A covered repo whose token cannot be produced is a 503, never a fall back
+    to the platform PAT.
+    """
+    if not github_token_provider.has_provider():
+        # No provider registered (every OSS install): the PAT ladder as before.
+        return resolve_github_pat(owner_id=owner_id)
+
+    from services.settings_service import resolve_github_token
+
+    try:
+        token, tier, _expires_at = await asyncio.wait_for(
+            resolve_github_token(repo, owner_id=owner_id), _APP_TOKEN_TIMEOUT
+        )
+    except (github_token_provider.GithubTokenUnavailable, asyncio.TimeoutError):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": (
+                    f"The GitHub App covers '{repo}' but could not issue a "
+                    f"token for it. Check that the app is installed and not "
+                    f"suspended, then retry."
+                ),
+                "code": "GITHUB_APP_TOKEN_UNAVAILABLE",
+            },
+        ) from None
+    return token or "", tier
 _DEFAULT_GIT_BASE_URL = "https://github.com"
 
 
@@ -800,6 +842,11 @@ async def _read_source_template(
     attempts.append({"tier": tier, "status": _attempt_status(reason)})
     if not metadata_reason_is_unreadable(reason):
         return TemplateRead(metadata, reason, tier, pat, preferred_reason, attempts)
+    if tier == "app":
+        # trinity-enterprise#1279: the app covers this repo, so the PAT tiers
+        # and the credential-free path are not consulted (no PAT fallback for
+        # a covered repo, 11.20 FR-4). The reason stands as the app's answer.
+        return TemplateRead({}, reason, None, None, preferred_reason, attempts)
 
     # Step 2 — the remaining token tiers. Only a 200 answers.
     tried = {pat} if pat else set()
@@ -948,19 +995,38 @@ def _gate_tokenless_request(
                 "your GitHub token in Settings (or ask an admin to configure "
                 "the platform token), or create the agent in source mode "
                 "(pull-only)."
+                + _app_not_installed_note()
             ),
         )
     return None
 
 
+def _app_not_installed_note(repo: Optional[str] = None) -> str:
+    """trinity-enterprise#1279: with a GitHub App configured, a create that
+    found no token for the repo means the app is not installed on it."""
+    if not github_token_provider.is_configured():
+        return ""
+    where = f"'{repo}'" if repo else "this repository"
+    return (f" The GitHub App configured on this platform is not installed on "
+            f"{where}; installing it there also works.")
+
+
 def _resolve_github_repo_and_pat(
-    config: AgentConfig, current_user: User, template_lookup: str, repo_path: str
+    config: AgentConfig, current_user: User, template_lookup: str, repo_path: str,
+    resolved: Optional[tuple] = None,
 ) -> tuple[Optional[dict], str, Optional[str], str]:
     """Resolve `(gh_template, github_repo, github_pat, github_pat_tier)` for a
     github template. Prefers the predefined catalog entry; otherwise treats the
     ref as a dynamic `owner/repo`. Mutates `config.resources`/`config.mcp_servers`
-    for a predefined template."""
+    for a predefined template.
+
+    ``resolved`` (trinity-enterprise#1279) is the ``(token, tier)`` the caller
+    already resolved with ``_create_time_token``, which can answer tier
+    ``"app"``. Without it the PAT ladder is resolved here."""
     gh_template = get_github_template(template_lookup)
+
+    def _resolve(owner_id):
+        return resolved if resolved is not None else resolve_github_pat(owner_id=owner_id)
 
     # ent#162: the PAT resolver prefers THIS creator's personal token
     # over the shared admin PAT. `current_user.id` is the owner user id
@@ -983,7 +1049,7 @@ def _resolve_github_repo_and_pat(
         # non-admin is not confined to the admin PAT's repo scope.
         # Fork-to-own (#93) doesn't need it — the user's PAT is the
         # write identity and public templates clone unauthenticated.
-        github_pat, github_pat_tier = resolve_github_pat(owner_id=creator_user_id)
+        github_pat, github_pat_tier = _resolve(creator_user_id)
         github_pat = _gate_tokenless_request(config, github_pat)
 
         config.resources = gh_template.get("resources", config.resources)
@@ -1001,7 +1067,7 @@ def _resolve_github_repo_and_pat(
     # Resolve the GitHub PAT: per-agent → this owner's per-user
     # (live) → global (ent#162). Prefers the creator's own token so a
     # non-admin can clone a private repo the admin PAT can't see.
-    github_pat, github_pat_tier = resolve_github_pat(owner_id=creator_user_id)
+    github_pat, github_pat_tier = _resolve(creator_user_id)
     github_pat = _gate_tokenless_request(config, github_pat)
 
     logger.info(f"Using dynamic GitHub template: {repo_path} (branch: {config.source_branch})")
@@ -1334,6 +1400,12 @@ async def _apply_agent_kind_default(
     if config.fork_to_own or fork_upstream:
         return {**decision, "reason": "fork-to-own: the agent owns its fork"}
     if "source_mode" in config.model_fields_set:
+        if github_pat_tier == "app" and not config.source_mode:
+            # trinity-enterprise#1279: the app needs no credential from the
+            # creator, so an explicit working-branch request still has to
+            # pass the shared-repository checks.
+            await _refuse_app_working_branch_on_shared_repo(
+                config, github_repo, catalog_template)
         return {**decision, "reason": "source_mode set explicitly"}
     if kind == "deployment":
         return {**decision, "reason": "a deployment of a codebase: pull-only"}
@@ -1341,6 +1413,10 @@ async def _apply_agent_kind_default(
         return {**decision, "reason": "ephemeral agents never auto-push (ent#69)"}
     if not github_pat:
         return {**decision, "reason": "no GitHub token: pull-only"}
+    if github_pat_tier == "app":
+        return await _apply_app_kind_default(
+            config, decision, github_repo, github_pat, catalog_template
+        )
     if github_pat_tier not in ("per_agent", "per_user"):
         return {**decision, "reason": (
             "only the platform-wide GitHub token is available, which does not "
@@ -1375,6 +1451,87 @@ async def _apply_agent_kind_default(
         return {**decision, "reason": (
             f"the token cannot push to {github_repo}: pull-only. Fork it to "
             f"your own repository to keep this agent's work in git"
+        )}
+    return {**decision, "reason": "push access could not be verified: pull-only"}
+
+
+async def _refuse_app_working_branch_on_shared_repo(
+    config: AgentConfig, github_repo: str, catalog_template: bool
+) -> None:
+    """400 for an explicit working branch through the GitHub App on a catalog
+    template or a repository another agent already uses (the ent#162 class)."""
+    shared = catalog_template or any(
+        n != config.name for n in db.get_git_config_agent_names_for_repo(github_repo))
+    if shared:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"{github_repo} is shared (a catalog template, or already "
+                    f"used by another agent), so the GitHub App will not give "
+                    f"this agent a working branch on it. Create it in source "
+                    f"mode (pull-only), fork it to your own repository, or use "
+                    f"your own GitHub token."
+                ),
+                "code": "GITHUB_APP_SHARED_REPO",
+            },
+        )
+
+
+async def _apply_app_kind_default(
+    config: AgentConfig,
+    decision: dict,
+    github_repo: str,
+    token: str,
+    catalog_template: bool,
+) -> dict:
+    """trinity-enterprise#1279: the git mode for a create read through the
+    GitHub App.
+
+    The login rule above does not apply: ``GET /user`` answers 403 for an
+    installation token, and the repo owner always equals the installation
+    account (a private app installs only on the account that owns it). What
+    decides is what the installation grants and whether the repo is shared:
+
+    - a catalog template is shared by definition: pull-only
+    - the installation does not grant ``contents: write``: pull-only
+    - another agent is already bound to the repo, so it is a shared upstream
+      (the ent#162 class): pull-only
+    - the push probe refused or could not answer: pull-only
+    - otherwise: a working branch
+    """
+    if catalog_template:
+        return {**decision, "reason": (
+            f"{github_repo} is a shared catalog template: pull-only. Fork it to "
+            f"your own repository to keep this agent's work in git"
+        )}
+    try:
+        grant = await github_token_provider.token_for_repo(github_repo)
+    except github_token_provider.GithubTokenUnavailable:
+        grant = None
+    contents = ((grant.permissions if grant else None) or {}).get("contents")
+    if contents not in ("write", "admin"):
+        return {**decision, "reason": (
+            f"the GitHub App can read {github_repo} but cannot write to it "
+            f"(it needs Repository permissions → Contents: Read and write): "
+            f"pull-only"
+        )}
+    others = [n for n in db.get_git_config_agent_names_for_repo(github_repo)
+              if n != config.name]
+    if others:
+        # Never name them: the other agents may belong to someone else.
+        return {**decision, "reason": (
+            f"{github_repo} is already used by another agent, so it is a "
+            f"shared repository: pull-only"
+        )}
+    outcome, _detail = await git_service.probe_push_access(github_repo, token)
+    if outcome == "ok":
+        config.source_mode = False
+        return {**decision, "source_mode": False, "push_verified": True,
+                "reason": "the GitHub App can push: working branch"}
+    if outcome == "denied":
+        return {**decision, "reason": (
+            f"the GitHub App cannot push to {github_repo}: pull-only"
         )}
     return {**decision, "reason": "push access could not be verified: pull-only"}
 
@@ -1415,6 +1572,7 @@ async def _validate_github_access(
                     f"Repository '{github_repo_for_agent}' was not found or is "
                     f"private. If it is private, add your GitHub token in "
                     f"Settings or ask an admin to configure the platform token."
+                    + _app_not_installed_note(github_repo_for_agent)
                 ),
             )
         if outcome != "ok":
@@ -1950,8 +2108,8 @@ async def _resolve_template(
                             detail="Invalid GitHub template format. Use: github:owner/repo or github:owner/repo@branch",
                         )
                     copy_repo = repo_path
-                copy_pat, _copy_tier = resolve_github_pat(
-                    owner_id=current_user.id
+                copy_pat, _copy_tier = await _create_time_token(
+                    copy_repo, current_user.id
                 )
                 # GIT-002 parity with startup.sh (`-b` only when ≠ "main"):
                 # the default "main" means "the repo's default branch".
@@ -1976,13 +2134,25 @@ async def _resolve_template(
                 )
                 return tr
 
+            _app = await _create_time_token(
+                (get_github_template(template_lookup) or {}).get("github_repo")
+                or repo_path,
+                current_user.id,
+            ) if github_token_provider.has_provider() and not config.fork_to_own else ("", "none")
+            # Fork-to-own acts as the person and is PAT-only; a failed app
+            # lookup must not block it.
             (
                 gh_template,
                 tr.github_repo_for_agent,
                 tr.github_pat_for_agent,
                 tr.github_pat_tier,
             ) = _resolve_github_repo_and_pat(
-                config, current_user, template_lookup, repo_path
+                config, current_user, template_lookup, repo_path,
+                # trinity-enterprise#1279: the app tier needs an await, so it
+                # is resolved here for the repo the template names and handed
+                # in only when it answered. Every other answer is the PAT
+                # ladder the function resolves itself.
+                **({"resolved": _app} if _app[1] == "app" else {}),
             )
             # Read the SOURCE template's declarations here, before
             # `_apply_fork_to_own` swaps in the user's fork + PAT: this pairing
@@ -2433,7 +2603,10 @@ def _apply_github_env(
             # trinity-enterprise#1278: no token is baked. The credential
             # helper fetches a short-lived one per git operation.
             env_vars[github_token_provider.BROKER_ENV] = '1'
-        elif github_pat_for_agent:
+        elif github_pat_for_agent and not github_pat_for_agent.startswith("ghs_"):
+            # trinity-enterprise#1279: a `ghs_` installation token expires
+            # within the hour and is never baked; tier "app" always runs in
+            # broker mode (create_agent_internal refuses otherwise).
             env_vars['GITHUB_PAT'] = github_pat_for_agent
             # #1574: the SAME managed token also authenticates the `gh` CLI
             # and the REST API (which read GH_TOKEN/GITHUB_TOKEN), not just
@@ -4024,16 +4197,23 @@ async def create_agent_internal(
     # the next start's drift check converts the container. The container
     # authenticates its token fetch with the agent key, so no key means no
     # broker.
-    tr.git_token_broker = github_token_provider.wants_broker(
-        coverage=(
-            await github_token_provider.coverage(tr.github_repo_for_agent)
-            if tr.github_repo_for_agent and tr.github_pat_tier == "global" and agent_mcp_key
-            else False
-        ),
-        carried_flag=False,
-        would_bake_pat=bool(tr.github_pat_for_agent),
-        has_own_pat=False,
-    )
+    #
+    # trinity-enterprise#1279: a create read through the app (tier "app") is
+    # covered by definition and takes the broker flag; without an agent key it
+    # cannot, and the create is refused inside the rollback block below.
+    if tr.github_pat_tier == "app":
+        tr.git_token_broker = bool(tr.github_repo_for_agent and agent_mcp_key)
+    else:
+        tr.git_token_broker = github_token_provider.wants_broker(
+            coverage=(
+                await github_token_provider.coverage(tr.github_repo_for_agent)
+                if tr.github_repo_for_agent and tr.github_pat_tier == "global" and agent_mcp_key
+                else False
+            ),
+            carried_flag=False,
+            would_bake_pat=bool(tr.github_pat_for_agent),
+            has_own_pat=False,
+        )
     env_vars, auto_assigned_subscription_id = _build_env_vars(
         config, agent_mcp_key, trinity_mcp_url, tr
     )
@@ -4072,6 +4252,21 @@ async def create_agent_internal(
         # reclaim re-derives it by name under provenance gates.
         created_container = None
         try:
+            # trinity-enterprise#1279: an app-tier agent without an agent key
+            # cannot fetch its token, and baking the platform PAT instead
+            # would hand a working-branch agent the install-wide credential.
+            if tr.github_pat_tier == "app" and tr.github_repo_for_agent and not tr.git_token_broker:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": (
+                            "The agent's platform key could not be issued, and "
+                            "an agent reading its repository through the GitHub "
+                            "App needs it to fetch git tokens. Retry the create."
+                        ),
+                        "code": "GITHUB_APP_AGENT_KEY_MISSING",
+                    },
+                )
             # Persist the resolved PAT as the per-agent PAT (#347) onto the
             # agent_git_config row the reservation above just created. Inside
             # this try so a failure hits the except below and rolls back the
@@ -4206,6 +4401,9 @@ async def create_agent_internal(
             # keeps the #1667 guard from 409ing the retry.
             _cleanup_copy_artifacts(handles)
             logger.error(f"Failed to create agent {config.name}: {e}")
+            if (isinstance(e, HTTPException) and isinstance(e.detail, dict)
+                    and e.detail.get("code") == "GITHUB_APP_AGENT_KEY_MISSING"):
+                raise
             raise HTTPException(status_code=500, detail="Failed to create agent. Please try again.")
     else:
         _release_ephemeral_on_no_docker(handles)

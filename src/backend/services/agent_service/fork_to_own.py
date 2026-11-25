@@ -249,12 +249,24 @@ _TOKEN_FAILURE_CODES = frozenset({
 
 
 def fork_pat_required():
-    """The named 400 for a fork/bind with no form token and no saved personal one."""
+    """The named 400 for a fork/bind with no form token and no saved personal one.
+
+    trinity-enterprise#1279: with a GitHub App configured the message says the
+    app cannot do this. Installation tokens cannot create repositories in a
+    personal account, and fork and bind act as the person."""
+    from services import github_token_provider
+
+    app_note = (
+        " The GitHub App configured on this platform cannot fork or bind for "
+        "you: these act as your own GitHub account and need your personal "
+        "access token."
+        if github_token_provider.is_configured() else ""
+    )
     return _http_error(
         400, "FORK_PAT_REQUIRED",
         "A GitHub token is needed to create the repository in your account. "
         "Save your personal token in Settings → MCP Keys → Personal GitHub Token, or enter one here. "
-        "The platform's token is never used to create a repository for you.",
+        "The platform's token is never used to create a repository for you." + app_note,
     )
 
 

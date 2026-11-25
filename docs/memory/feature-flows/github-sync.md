@@ -20,9 +20,18 @@ reservation:
 | `kind=agent`, probe unverifiable | source | fail safe |
 | `kind=agent`, no token | source | nothing pushes anonymously (ent#123) |
 | `kind=agent`, only the platform-wide token (tier `global`) | source, never probed | being able to push is not owning the repo — the admin's token can write shared template repos (ent#162 class) |
+| `kind=agent`, a repo the registered repo-token provider covers (tier `app`, trinity-enterprise#1279), installation grants `contents: write`, no other agent bound to the repo, not a catalog template, probe `ok` | **working branch**, container in broker mode | `GET /user` answers 403 for an installation token, and the owner always equals the installation account, so what the installation grants and whether the repo is shared decide |
+| `kind=agent`, tier `app`, installation read-only / repo shared / catalog / probe refused | source | named reason; another agent's name is never shown |
+| explicit `source_mode=false`, tier `app`, catalog or shared repo | 400 `GITHUB_APP_SHARED_REPO` | the provider needs no credential from the creator |
 | ephemeral ghost | source | its workspace is throwaway (ent#69) |
 | `kind=deployment` | source | a deployment of a codebase |
 | fork-to-own | fork's own trio | it owns its fork |
+
+Create-time GitHub reads (template, access and ref checks, push probe, avatar,
+copy snapshot) use `crud._create_time_token`: the PAT ladder, with the provider
+between the per-user and the platform tier. A covered repo whose token cannot
+be produced fails the create with 503 `GITHUB_APP_TOKEN_UNAVAILABLE` and never
+falls back to the platform PAT. Requirements: `requirements/github.md` §11.22.
 
 The decision is logged (`[ent#705] git mode for …`) and returned as
 `git_mode` on the create response only, never on the `/ws` broadcast (#918).

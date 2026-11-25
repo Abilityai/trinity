@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from database import db
+from services import github_token_provider
 from services.settings_service import get_skills_library_url, get_skills_library_branch, get_github_pat
 from services.agent_client import get_agent_client, AgentClientError
 from services import skill_packaging as pkg
@@ -875,6 +876,25 @@ class SkillService:
                 continue
 
             clone_url, source_pat = self._clone_target(url, github_pat)
+            # trinity-enterprise#1279: a repository the GitHub App covers is
+            # cloned with a one-hour installation token, never the platform
+            # PAT. A covered repository whose token cannot be issued is a
+            # failed source, not a fall back to the PAT.
+            try:
+                app_token = self._app_token_for(clone_url)
+            except github_token_provider.GithubTokenUnavailable:
+                msg = ("the GitHub App covers this repository but could not "
+                       "issue a token for it")
+                results.append({
+                    "source_id": src.id, "name": src.name,
+                    "success": False, "error": msg,
+                })
+                db.record_skill_source_sync(
+                    src.id, success=False, error=msg, **_synced_target(src)
+                )
+                continue
+            if app_token:
+                clone_url, source_pat = self._clone_target(url, app_token)
             logger.info(
                 "syncing skill source %s (%s) %s=%s",
                 src.name, src.id, src.ref_type, src.ref,
@@ -1012,6 +1032,25 @@ class SkillService:
         if pat:
             clone_url = strip_url_credentials(clone_url)
         return clone_url, pat
+
+    @staticmethod
+    def _app_token_for(clone_url: str) -> Optional[str]:
+        """The GitHub App's token for a github.com source, or None
+        (trinity-enterprise#1279). Runs in the sync worker thread; raises
+        ``GithubTokenUnavailable`` when the app covers the repo and cannot
+        issue a token."""
+        if not github_token_provider.has_provider():
+            return None
+        parsed = urlparse(clone_url)
+        if parsed.scheme != "https" or (parsed.hostname or "").lower() != "github.com":
+            return None
+        repo = github_token_provider.normalize_repo(parsed.path.strip("/"))
+        if not repo:
+            return None
+        grant = github_token_provider.token_for_repo_blocking(
+            repo, {"contents": "read", "metadata": "read"}
+        )
+        return grant.token if grant else None
 
     @staticmethod
     def _auth_pat_for(url: str, github_pat: Optional[str]) -> str:
