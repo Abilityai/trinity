@@ -71,7 +71,7 @@
       "exploit_scenario": "A turn sends X-Trinity-Execution-Id with candidate ids on any narrowed read and compares the header value across answers.",
       "impact": "Existence and tier of an execution id on the key's own agent. Not new in practice: the turn-tier read already answers this to the same key.",
       "recommendation": "Say `turn_person` only of a share turn that is itself RUNNING; any other id reads `running_turn` while a share turn runs and `unverified` otherwise.",
-      "regression_test": "tests/unit/test_ent978_narrowed_read_marker.py::test_the_code_does_not_vary_with_the_turn_id_sent_while_a_shared_turn_runs"
+      "regression_test": "tests/unit/test_ent978_narrowed_read_marker.py::test_an_id_that_is_not_a_running_share_turn_reads_the_same_while_one_runs"
     },
     {
       "id": 2,

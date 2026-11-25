@@ -14,10 +14,13 @@ The table is read against the code, not trusted:
     read from the code's identifiers (names and attributes on the AST), so a
     gate name in a comment, docstring or message string does not count;
   * the other four tiers are held to the code too (trinity-enterprise#978): a
-    ``self`` row shows a self gate and no owner gate, an ``internal`` row sits
-    on a router that requires the internal secret, a ``resource`` row shows its
-    resource predicate, and a ``public`` row shows no user or agent gate and is
-    on the reviewed list ``PUBLIC_ROUTES``. The runtime fence leaves ``self``,
+    ``self`` row shows a self gate and no owner gate, in the handler or one
+    level into a helper of the same file that the handler names (a gate run on
+    a worker thread sits in such a helper); an ``internal`` row sits on a router
+    that requires the internal secret; a ``resource`` row shows its resource
+    predicate, or calls a DB writer whose own body carries the creator check;
+    and a ``public`` row shows no user or agent gate and is on the reviewed
+    list ``PUBLIC_ROUTES``. The runtime fence leaves ``self``,
     ``public`` and ``internal`` rows open to an agent's key in a restricted
     turn, so a row that claims one of them without enforcing it is a hole;
   * the accessor rows tagged ``legacy`` are the debt list - a shrink-only
@@ -69,9 +72,12 @@ SELF_ONLY_GATE = re.compile(r"\b(get_self_acting_agent|get_self_agent|authorize_
 # person, so a route that self-gates with it must check the person's access too.
 OWN_AGENT_GATE = re.compile(r"\b(assert_own_agent)\b")
 INTERNAL_GATE = re.compile(r"\b(verify_internal_secret)\b")
-RESOURCE_GATE = re.compile(
-    r"\b(_assert_can_manage_webhook|_can_manage_webhook|update_schedule|delete_schedule|"
-    r"set_allow_proactive)\b")
+# A resource row shows its predicate in the handler...
+RESOURCE_PREDICATE = re.compile(r"\b(_assert_can_manage_webhook|_can_manage_webhook)\b")
+# ...or leaves it to the DB writer it calls. Then calling the writer proves
+# nothing by itself (every handler does its job): the WRITER's body is read for
+# the creator check (`shows_creator_check`).
+RESOURCE_WRITERS = frozenset({"update_schedule", "delete_schedule", "set_allow_proactive"})
 # Anything that resolves a signed-in principal: a public route shows none.
 USER_AUTH_GATE = re.compile(
     r"\b(get_current_user\w*|CurrentUser|get_optional_user|get_user_or_anonymous|"
@@ -156,6 +162,11 @@ def scan_source(src: str, fname: str) -> dict[str, dict]:
     tree = ast.parse(src)
     pre = _prefixes(tree)
     gates = _router_gates(tree)
+    # Module-level functions of this file: a handler that names one is read one
+    # level into it (never further), so a gate behind `asyncio.to_thread(helper,
+    # ...)` or a plain call is seen, and a helper cannot hide an owner gate.
+    local = {f.name: identifiers(f) for f in tree.body
+             if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))}
     found: dict[str, dict] = {}
     for n in ast.walk(tree):
         if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -168,8 +179,11 @@ def scan_source(src: str, fname: str) -> dict[str, dict]:
             full = pre.get(router, "") + d.args[0].value
             if not _names_an_agent(full):
                 continue
+            names = identifiers(n)
+            helper_names = frozenset().union(
+                *(local[h] for h in names if h in local and h != n.name))
             found[f"{fname}::{n.name}"] = {"method": d.func.attr.upper(), "path": full,
-                                           "names": identifiers(n),
+                                           "names": names, "helper_names": helper_names,
                                            "router_names": gates.get(router, frozenset())}
     return found
 
@@ -266,13 +280,14 @@ def _self_rule(key, row, names, live):
     # an owner gate is an owner route, and stays fenced in a restricted turn.
     if row.get("via"):
         return "is declared self with a `via`: a self gate is read from the handler itself"
-    if shows(OWNER_GATE, live["names"]):
+    seen = live["names"] | live.get("helper_names", frozenset())
+    if shows(OWNER_GATE, seen):
         return "is declared self but shows an owner/admin gate - re-declare it owner"
-    if not shows(SELF_ONLY_GATE, live["names"]):
-        if not shows(OWN_AGENT_GATE, live["names"]):
+    if not shows(SELF_ONLY_GATE, seen):
+        if not shows(OWN_AGENT_GATE, seen):
             return ("is declared self but shows no self gate (assert_own_agent, "
                     "get_self_acting_agent, authorize_heartbeat)")
-        if not shows(ACCESSOR_GATE, live["names"]):
+        if not shows(ACCESSOR_GATE, seen):
             return ("is declared self but gates with assert_own_agent alone, which lets every "
                     "signed-in person through: check the person's access too")
 
@@ -294,10 +309,50 @@ def _public_rule(key, row, names, live):
             return f"is declared public but shows a {label} gate - re-declare it"
 
 
+_DB_FUNCTIONS: dict[str, list] | None = None
+
+
+def _db_functions(name: str) -> list:
+    """Every function called `name` under src/backend/db (the AST nodes)."""
+    global _DB_FUNCTIONS
+    if _DB_FUNCTIONS is None:
+        _DB_FUNCTIONS = {}
+        for f in sorted((_BACKEND / "db").rglob("*.py")):
+            for n in ast.walk(ast.parse(f.read_text())):
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    _DB_FUNCTIONS.setdefault(n.name, []).append(n)
+    return _DB_FUNCTIONS.get(name, [])
+
+
+def shows_creator_check(fn: ast.AST) -> bool:
+    """Does this DB writer refuse a caller who is not the row's creator (or the
+    agent's owner)? A COMPARISON on `owner_id`, or a call to the owner predicate.
+    A column name in a string or an assignment to `owner_id` is not a check."""
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Compare):
+            for side in (n.left, *n.comparators):
+                if isinstance(side, ast.Attribute) and side.attr == "owner_id":
+                    return True
+                if (isinstance(side, ast.Subscript) and isinstance(side.slice, ast.Constant)
+                        and side.slice.value == "owner_id"):
+                    return True
+        if isinstance(n, ast.Call) and getattr(
+                n.func, "attr", getattr(n.func, "id", None)) == "can_user_share_agent":
+            return True
+    return False
+
+
 def _resource_rule(key, row, names, live):
-    if not shows(RESOURCE_GATE, names):
+    if shows(RESOURCE_PREDICATE, names):
+        return None
+    writers = sorted(RESOURCE_WRITERS & set(names))
+    if not writers:
         return ("is declared resource but shows none of the resource predicates "
-                "(webhook manager, the schedule's creator, the share row's owner)")
+                "(webhook manager, or a DB writer that checks the creator)")
+    for writer in writers:
+        bodies = _db_functions(writer)
+        if not bodies or not all(shows_creator_check(fn) for fn in bodies):
+            return f"is declared resource, but its DB writer {writer} shows no creator check"
 
 
 TIER_RULES = {"owner": _owner_rule, "accessor": _accessor_rule, "self": _self_rule,
@@ -536,6 +591,44 @@ async def own_and_access(agent_name: str, current_user=Depends(get_current_user)
 async def mine(agent: str = Depends(get_self_acting_agent)):
     return 5
 
+def _require_own_key(request, agent_name):
+    if not heartbeat_service.authorize_heartbeat(request, agent_name):
+        raise HTTPException(403)
+
+def _reads_the_body(request):
+    return request
+
+def _own_then_owner(current_user, agent_name):
+    assert_own_agent(current_user, agent_name)
+    assert_agent_owner(current_user, agent_name)
+
+def _two_levels(request, agent_name):
+    _require_own_key(request, agent_name)
+
+@open_router.post("/{agent_name}/threaded")
+async def threaded(agent_name: str, request: Request):
+    await asyncio.to_thread(_require_own_key, request, agent_name)
+
+@open_router.post("/{agent_name}/helper-without-a-gate")
+async def helper_without_a_gate(agent_name: str, request: Request):
+    _reads_the_body(request)
+
+@open_router.post("/{agent_name}/helper-hides-owner")
+async def helper_hides_owner(agent_name: str, current_user=Depends(get_current_user)):
+    _own_then_owner(current_user, agent_name)
+
+@open_router.post("/{agent_name}/two-levels")
+async def two_levels(agent_name: str, request: Request):
+    _two_levels(request, agent_name)
+
+@open_router.put("/{agent_name}/renames")
+async def renames(agent_name: str, current_user=Depends(get_current_user)):
+    return db.rename_schedule(agent_name, current_user.username)
+
+@open_router.put("/{agent_name}/updates")
+async def updates(agent_name: str, current_user=Depends(get_current_user)):
+    return db.update_schedule(agent_name, current_user.username, {})
+
 @open_router.post("/{agent_name}/own-or-owner")
 async def own_or_owner(agent_name: str, current_user=Depends(get_current_user)):
     assert_own_agent(current_user, agent_name)
@@ -562,6 +655,8 @@ def _synth_problem(handler, tier, **row):
 
 @pytest.mark.parametrize("handler,tier", [
     ("sealed", "internal"), ("own_and_access", "self"), ("mine", "self"), ("hook", "resource"),
+    ("threaded", "self"),       # the gate sits in a helper of the same file, run on a thread
+    ("updates", "resource"),    # the creator check sits in the DB writer, and is read there
 ])
 def test_a_route_that_shows_its_tiers_gate_passes(handler, tier):
     assert _synth_problem(handler, tier) is None
@@ -577,6 +672,10 @@ def test_a_route_that_shows_its_tiers_gate_passes(handler, tier):
     ("card", "resource", "none of the resource predicates"),
     ("own", "resource", "none of the resource predicates"),
     ("card", "public", "not on the reviewed list"),                  # open, but nobody reviewed it
+    ("helper_without_a_gate", "self", "shows no self gate"),         # a helper, but it gates nothing
+    ("helper_hides_owner", "self", "shows an owner/admin gate"),     # a helper cannot hide a person path
+    ("two_levels", "self", "shows no self gate"),                    # one level of helper, no further
+    ("renames", "resource", "none of the resource predicates"),      # a DB call that is not a known writer
 ])
 def test_a_route_that_does_not_show_its_tiers_gate_is_reported(handler, tier, says):
     assert says in (_synth_problem(handler, tier) or "")
@@ -598,3 +697,39 @@ def test_a_reviewed_public_route_must_still_show_no_gate(monkeypatch, handler, s
     monkeypatch.setattr(sys.modules[__name__], "PUBLIC_ROUTES", PUBLIC_ROUTES | {f"synth.py::{handler}"})
     problem = _synth_problem(handler, "public")
     assert problem is None if says is None else says in problem
+
+
+
+# ---- a resource row whose check lives in the DB writer (PR #4760 review) ------------------
+
+@pytest.mark.parametrize("writer", sorted(RESOURCE_WRITERS))
+def test_every_resource_writer_carries_its_creator_check(writer):
+    """The handler calling the writer proves nothing: it is the writer that must
+    refuse a caller who is not the creator, the owner or an admin."""
+    bodies = _db_functions(writer)
+    assert bodies, f"{writer} is not a function under src/backend/db"
+    assert all(shows_creator_check(fn) for fn in bodies), f"db {writer} shows no creator check"
+
+
+@pytest.mark.parametrize("writer_source", [
+    "def update_schedule(self, schedule_id, username, updates):\n    return self._write(schedule_id, updates)\n",
+    None,   # no such function under db/
+])
+def test_calling_a_writer_that_checks_nothing_does_not_make_a_resource_row(monkeypatch, writer_source):
+    bodies = [ast.parse(writer_source).body[0]] if writer_source else []
+    monkeypatch.setattr(sys.modules[__name__], "_db_functions", lambda name: bodies)
+    assert "its DB writer update_schedule shows no creator check" in _synth_problem("updates", "resource")
+
+
+@pytest.mark.parametrize("body,expected", [
+    ("if user['role'] != 'admin' and schedule.owner_id != user['id']:\n        return None", True),
+    ("if row['owner_id'] != user['id']:\n        return False", True),
+    ("where.append(agent_schedules.c.owner_id == user['id'])", True),
+    ("if not self.can_user_share_agent(username, agent_name):\n        return False", True),
+    ("schedule.owner_id = user['id']", False),               # an assignment is not a check
+    ("fields = ['owner_id', 'updated_at']", False),           # a column name in a string is not a check
+    ("return self._write(schedule_id, updates)", False),
+])
+def test_what_counts_as_a_creator_check(body, expected):
+    fn = ast.parse(f"def writer(self, schedule_id, username, updates):\n    {body}\n").body[0]
+    assert shows_creator_check(fn) is expected

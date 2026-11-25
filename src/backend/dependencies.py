@@ -3406,12 +3406,19 @@ def _acting_turn_narrowing(current_user: User) -> Tuple[Optional[int], Optional[
     """`acting_turn_user_id`'s answer and why it is narrowed: one of
     `turn_tier_service.READ_NARROWED_CODES`, None for the full view.
 
-    The code does not vary with the turn id a caller chooses to send.
-    `turn_person` is said only of a share turn that is itself RUNNING (a turn
-    whose process can make a request always is). Any other id, whether unknown,
-    an owner turn's, or a finished share turn's, reads `running_turn` while a
-    share turn runs and `unverified` otherwise, so the header cannot tell a turn
-    whether an execution id exists or whose it was."""
+    What the code can tell a caller about a turn id it chooses to send:
+
+      * while a share turn runs, every id that is not itself a RUNNING share
+        turn of the agent (unknown, an owner turn's, a finished share turn's,
+        none at all) reads `running_turn`, so the code does not say whether
+        such an id exists or whose it was;
+      * `turn_person` is said only of a share turn that is itself running (a
+        turn whose process can make a request always is). That confirms one
+        thing to a caller that already holds the id: it is a share turn running
+        on the caller's own agent;
+      * with no share turn running, an owner turn's id (or none) reads the full
+        view and an unknown or finished-share id reads narrowed (`unverified`).
+        That difference is the view's, and predates the marker."""
     agent = getattr(current_user, "agent_name", None)
     if getattr(current_user, "mcp_scope", None) != "agent" or not (isinstance(agent, str) and agent):
         return None, None
@@ -3471,20 +3478,22 @@ OWNER_TIER_TURN_REFUSED = (
     "owner to do it."
 )
 # trinity-enterprise#978: the same two refusals when the caller's own turn is
-# not the restricted one. While a shared person's or a limited visitor's turn
-# runs, every other run on the agent is fenced too (the ledger cannot tell
+# not known to be the restricted one. While a shared person's or a limited
+# visitor's turn runs, every run on the agent is fenced (the ledger cannot tell
 # which process sent a request), and "this turn is for a person" would misname
-# the cause to the owner's own concurrent run.
-_ANOTHER_TURN_RUNNING = (
-    "Another turn is running on this agent for a person it is shared with (or a visitor "
+# the cause to the owner's own concurrent run. The text says "a turn", never
+# "another turn": a request that sends no turn id may come from the restricted
+# turn itself, and the sentence has to be true for it too.
+_SHARE_TURN_RUNNING = (
+    "A turn is running on this agent for a person it is shared with (or a visitor "
     "the owner has limited). Until that turn ends, no run on the agent can "
 )
 STANDING_WORK_REFUSED_RUNNING_TURN = (
-    _ANOTHER_TURN_RUNNING + "set up work that runs later as the agent's owner: schedules, "
+    _SHARE_TURN_RUNNING + "set up work that runs later as the agent's owner: schedules, "
     "loops, reminders and events. Try again after that turn ends."
 )
 OWNER_TIER_TURN_REFUSED_RUNNING_TURN = (
-    _ANOTHER_TURN_RUNNING + "do what only the agent's owner may do. Try again after that "
+    _SHARE_TURN_RUNNING + "do what only the agent's owner may do. Try again after that "
     "turn ends."
 )
 
@@ -3510,13 +3519,16 @@ def restricted_agent_turn(principal) -> bool:
 
 
 def _refused_by_another_turn(principal) -> bool:
-    """For a principal `restricted_agent_turn` already refused: is the cause
-    ANOTHER running turn, not the caller's own (trinity-enterprise#978)?
+    """For a principal `restricted_agent_turn` already refused: is the cause a
+    share-tier turn RUNNING on the agent, rather than a turn the request itself
+    names as restricted (trinity-enterprise#978)?
 
     Chooses the refusal's words, never whether to refuse. True only when the
-    caller's own turn does not restrict and the ledger was read and shows a
-    share-tier turn running; anything that cannot be confirmed (an unreadable
-    ledger) keeps the original text."""
+    turn the request names does not restrict (or it names none) and the ledger
+    was read and shows a share-tier turn running; anything that cannot be
+    confirmed (an unreadable ledger) keeps the original text. A request with no
+    turn id from the restricted turn itself lands here too, which is why the
+    text it selects does not say "another"."""
     agent = getattr(principal, "agent_name", None)
     from services import turn_tier_service
     try:

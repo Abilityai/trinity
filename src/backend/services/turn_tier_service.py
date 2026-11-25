@@ -564,7 +564,7 @@ RUNS_AS_MESSAGES = {
 # trinity-enterprise#978). Codes only; the wording lives with the MCP tools
 # that show it (`src/mcp-server/src/read-narrowing.ts`, parity-tested).
 READ_NARROWED_TURN_PERSON = "turn_person"      # the key's own turn is a person's or a visitor's
-READ_NARROWED_RUNNING_TURN = "running_turn"    # another running turn on the agent narrows this one
+READ_NARROWED_RUNNING_TURN = "running_turn"    # a share-tier turn running on the agent narrows this one
 READ_NARROWED_UNVERIFIED = "unverified"        # the turn or the running turns could not be checked
 READ_NARROWED_CODES = (READ_NARROWED_TURN_PERSON, READ_NARROWED_RUNNING_TURN, READ_NARROWED_UNVERIFIED)
 

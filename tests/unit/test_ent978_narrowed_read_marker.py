@@ -10,7 +10,7 @@ The behaviour stays (operator ruling 2026-11-23). What changes: a response
 computed under the narrowed view carries `X-Trinity-Read-Narrowed: <code>`.
 
 * `turn_person`  - the key's own turn is for a person or a visitor;
-* `running_turn` - another running turn on the agent narrows this request;
+* `running_turn` - a share-tier turn running on the agent narrows this request;
 * `unverified`   - the turn or the running turns could not be checked.
 
 The header is decided from the principal, never from a row: a run that exists
@@ -42,6 +42,7 @@ from db.write_params import TaskExecutionFields
 from db_models import UserCreate
 from dependencies import create_access_token, get_current_user
 from routers import activities as activities_router
+from routers import chat as chat_router
 from routers import executions as executions_router
 from routers import fan_out as fan_out_router
 from routers import schedules as schedules_router
@@ -75,7 +76,9 @@ def _app() -> FastAPI:
 @pytest.fixture
 def client():
     app = _app()
-    for module in (schedules_router, fan_out_router, executions_router, activities_router):
+    # The chat router first, as in main.py: its `/executions/running` must win
+    # over the schedules router's `/executions/{execution_id}`.
+    for module in (chat_router, schedules_router, fan_out_router, executions_router, activities_router):
         app.include_router(module.router)
 
     @app.get("/plain")
@@ -184,17 +187,43 @@ def test_without_a_narrowing_turn_neither_404_is_marked(client, world, suffix):
                turn=world.owner_live).status_code == 200
 
 
-def test_the_code_does_not_vary_with_the_turn_id_sent_while_a_shared_turn_runs(
+def test_an_id_that_is_not_a_running_share_turn_reads_the_same_while_one_runs(
         client, world, shared_turn):
     """Else the header would tell a turn whether an execution id exists, or
     whose it was: an owner's turn, an unknown id, a share turn that has ended,
-    another person's ended share turn, no id at all."""
+    another person's ended share turn, no id at all. The one id that reads
+    differently is a RUNNING share turn's own (the next test)."""
     other = _person("operator")
     db.share_agent(world.agent, world.owner.username, other.username)
     turns = (world.owner_live, world.owner_done, "no-such-run", world.mate_done,
              _run(world.agent, other), None)
     answers = [get(client, world, runs(world, "/no-such-run"), turn=turn) for turn in turns]
     assert {(a.status_code, a.headers.get(HEADER)) for a in answers} == {(404, "running_turn")}
+
+
+def test_only_a_running_share_turns_own_id_reads_turn_person(client, world, shared_turn):
+    """With two people's share turns running, each running turn's own id reads
+    `turn_person` and every other id reads `running_turn`. So the code confirms
+    one thing to a caller that already holds an id: that it is a share turn
+    running on the caller's own agent."""
+    other = _person("operator")
+    db.share_agent(world.agent, world.owner.username, other.username)
+    others_turn = _run(world.agent, other, done=False)
+    for turn, code in ((shared_turn, "turn_person"), (others_turn, "turn_person"),
+                       (world.owner_live, "running_turn"), ("no-such-run", "running_turn"),
+                       (world.mate_done, "running_turn"), (None, "running_turn")):
+        resp = get(client, world, runs(world), turn=turn)
+        assert (resp.status_code, resp.headers.get(HEADER), resp.json()) == (200, code, []), turn
+
+
+def test_with_nothing_running_the_turn_id_decides_the_view_as_before(client, world):
+    """Not the marker's doing: an owner turn's id (or none) reads the full view
+    and an unknown id reads nothing, as they did before the marker existed."""
+    for turn in (world.owner_live, None):
+        resp = get(client, world, runs(world), turn=turn)
+        assert HEADER not in resp.headers and len(resp.json()) >= 3
+    resp = get(client, world, runs(world), turn="no-such-run")
+    assert (resp.headers[HEADER], resp.json()) == ("unverified", [])
 
 
 def test_an_ended_share_turns_id_is_not_the_keys_own_turn(client, world):
@@ -253,6 +282,32 @@ def test_a_fan_out_inside_the_view_is_read_and_marked(client, world, shared_turn
 def test_the_fleet_reads_are_marked(client, world, shared_turn, path):
     resp = get(client, world, path, turn=world.owner_live)
     assert (resp.status_code, resp.headers[HEADER]) == (200, "running_turn")
+
+
+@pytest.mark.parametrize("container,status", [
+    (None, 404),                                    # no container
+    (SimpleNamespace(status="exited"), 200),        # stopped
+    (SimpleNamespace(status="running"), 200),       # running, but the agent does not answer
+])
+def test_the_running_list_is_marked_whatever_the_container_says(client, world, shared_turn,
+                                                               monkeypatch, container, status):
+    """The scope is read before the container is looked at, so an answer that
+    never reaches the agent ("no executions") is marked like any other."""
+    import httpx
+
+    class Unreachable:
+        async def __aenter__(self):
+            raise httpx.ConnectError("agent down")
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(chat_router, "get_agent_container", lambda name: container)
+    monkeypatch.setattr(chat_router, "agent_httpx_client", lambda name, **kw: Unreachable())
+    resp = get(client, world, f"/api/agents/{world.agent}/executions/running", turn=world.owner_live)
+    assert (resp.status_code, resp.headers.get(HEADER)) == (status, "running_turn")
+    if status == 200:
+        assert resp.json() == {"executions": []}
 
 
 def test_the_full_view_returns_unmarked_when_the_turn_ends(client, world, shared_turn):
@@ -442,7 +497,10 @@ def _refused(client, world, path, *, turn, method="GET", **kw):
     return resp.json()["detail"]
 
 
-def test_the_owners_concurrent_run_is_told_another_turn_is_running(client, world, shared_turn):
+def test_the_owners_concurrent_run_is_told_a_shared_turn_is_running(client, world, shared_turn):
+    """With the owner's turn id, and with no turn id at all. The second case is
+    also what a header-less request from the shared turn itself gets, which is
+    why the text says "a turn", never "another turn": it is true either way."""
     agent = world.agent
     for turn in (world.owner_live, None):
         assert _refused(client, world, f"/api/agents/{agent}/uncensused",
@@ -463,7 +521,7 @@ def test_the_shared_persons_own_turn_keeps_its_text(client, world, shared_turn):
 
 
 def test_an_unreadable_ledger_keeps_the_old_text(client, world, monkeypatch):
-    """Refused (fail closed), but "another turn is running" would be a guess."""
+    """Refused (fail closed), but "a turn is running" would be a guess."""
     def boom(agent):
         raise RuntimeError("ledger down")
 
@@ -475,7 +533,8 @@ def test_an_unreadable_ledger_keeps_the_old_text(client, world, monkeypatch):
 def test_the_two_texts_differ_and_name_nobody():
     for old, new in ((dep.OWNER_TIER_TURN_REFUSED, dep.OWNER_TIER_TURN_REFUSED_RUNNING_TURN),
                      (dep.STANDING_WORK_REFUSED, dep.STANDING_WORK_REFUSED_RUNNING_TURN)):
-        assert new != old and new.startswith("Another turn is running on this agent")
+        assert new != old and new.startswith("A turn is running on this agent for a person")
+        assert "nother turn" not in new
 
 
 # ---- the MCP server words every code ------------------------------------------------------
