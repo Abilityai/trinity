@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent978_narrowed_read_marker.py",
+      "feature": "trinity-enterprise#978",
+      "added": "2026-11-24",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#978: through the real executions, schedules, fan-out and activity routers, real get_current_user, real JWTs, a real agent key and real execution rows on SQLite: while a shared person's turn runs, an agent key's reads carry X-Trinity-Read-Narrowed (running_turn for the owner's concurrent run with or without a turn header, turn_person for the key's own shared turn, unverified for an unreadable ledger or an unknown turn id with nothing running) on lists, detail, log, schedule history, fan-out, the fleet list and the timeline; a run that exists and one that does not answer the same status, body, headers and query count; a signed-in person and a route that reads no scope are never marked; the full view returns unmarked when the turn ends; the pure-ASGI middleware carries the code on JSON, 404 and streamed responses between two BaseHTTPMiddleware layers, first code wins, nothing leaks between requests, websocket and lifespan pass through, and main.py mounts it; a refusal caused by another running turn says so at the fence and at assert_agent_owner, and an unreadable ledger keeps the old text; every backend code has MCP wording."
+    },
+    {
       "file": "unit/test_4674_sync_on_loop_ratchet.py",
       "feature": "#4674",
       "added": "2026-11-20",
