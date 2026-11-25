@@ -7,7 +7,7 @@ from typing import Optional, List, Dict
 
 import pytz
 from croniter import croniter
-from sqlalchemy import select, insert, update, delete, and_
+from sqlalchemy import select, insert, update, delete, and_, case
 from sqlalchemy.exc import IntegrityError
 
 from ..engine import get_engine
@@ -108,7 +108,9 @@ class ScheduleCrudMixin:
                 if "deliver_to_workspace_email" in row_keys else None
             ),
             # ent#1391: NULL (and a pre-migration row) mails nothing.
-            deliver_to_email=row["deliver_to_email"] if "deliver_to_email" in row_keys else None,
+            email_results_user_id=row["email_results_user_id"] if "email_results_user_id" in row_keys else None,
+            email_results_error=row["email_results_error"] if "email_results_error" in row_keys else None,
+            email_results_error_at=row["email_results_error_at"] if "email_results_error_at" in row_keys else None,
         )
 
     # =========================================================================
@@ -607,7 +609,14 @@ class ScheduleCrudMixin:
             )
             .exists()
         )
-        values = {"owner_id": new_owner_id, **self._webhook_revoked_values(), "updated_at": utc_now_iso()}
+        values = {"owner_id": new_owner_id, **self._webhook_revoked_values(), "updated_at": utc_now_iso(),
+                  # ent#1391: result mail to anyone but the taker stops: the runs
+                  # now have the taker's access, and mailing them on to someone
+                  # else was never the taker's decision. The taker's own stays.
+                  "email_results_user_id": case(
+                      (agent_schedules.c.email_results_user_id == new_owner_id, new_owner_id),
+                      else_=None),
+                  }
         if clear_delivery:
             values["deliver_to_workspace_email"] = None
         pinned = [agent_schedules.c[col].is_not_distinct_from(row[col]) for col in self._TAKE_OVER_PINNED]
@@ -712,14 +721,31 @@ class ScheduleCrudMixin:
         with get_engine().connect() as conn:
             return [dict(row) for row in conn.execute(stmt).mappings()]
 
-    def set_schedule_result_email(self, schedule_id: str, email: Optional[str]) -> bool:
-        """ent#1391: who each run of this schedule is mailed to (None: nobody).
-        Only `services.schedule_result_email` calls this, with the caller's own address."""
+    def set_schedule_email_results(self, schedule_id: str, user_id: Optional[int], *,
+                                   error: Optional[str] = None) -> bool:
+        """ent#1391: who each run of this schedule is mailed to (None: nobody), and
+        why mail stopped when it stopped by itself (`error`). Only
+        `services.schedule_result_email` calls this, with the caller's own id."""
         with get_engine().begin() as conn:
             result = conn.execute(
                 update(agent_schedules)
                 .where(agent_schedules.c.id == schedule_id)
-                .values(deliver_to_email=email, updated_at=utc_now_iso())
+                .values(email_results_user_id=user_id, email_results_error=error,
+                        email_results_error_at=utc_now_iso() if error else None,
+                        updated_at=utc_now_iso())
+            )
+        return result.rowcount > 0
+
+    def record_schedule_email_results_outcome(self, schedule_id: str, error: Optional[str]) -> bool:
+        """ent#1391: the last result mail went (`error` None) or why it did not.
+        Leaves `updated_at` alone: a delivery is not an edit, and a take-over is
+        pinned to `updated_at` (a mail must not stale the taker's review)."""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_schedules)
+                .where(agent_schedules.c.id == schedule_id)
+                .values(email_results_error=error,
+                        email_results_error_at=utc_now_iso() if error else None)
             )
         return result.rowcount > 0
 

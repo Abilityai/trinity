@@ -45,9 +45,9 @@ export const CARD_ACTIONS = Object.freeze({
   'email-results': {
     fields: ['agent', 'schedule_id'],
     label: (c, f) => `Email each result of "${scheduleName(c, f)}" to you`,
-    note: 'Sent to your own email address, starting with the latest result now. Turn it off on the Schedules tab.',
+    note: 'Sent to your own email address, starting with its latest result now. To stop, choose "Stop emailing" on the schedule in the Schedules tab.',
     call: (c) => ['post', `${agentPath(c.agent)}/schedules/${enc(c.schedule_id)}/email-me`, { enabled: true }],
-    held: async (http, c) => Boolean((await schedule(http, c))?.deliver_to_email),
+    held: async (http, c) => (await schedule(http, c))?.email_results_to_me === true,
   },
   'autonomy-on': {
     fields: ['agent'],

@@ -1,189 +1,432 @@
 """Each run of a schedule mailed to the person who asked (abilityai/trinity-enterprise#1391).
 
-The first session's email offer, made real. Pinned by executing the code:
+Real routes, the real `get_current_user`, real JWTs, the real terminal
+chokepoint (`channel_completion_report.report_completion`), the real
+idempotency guard, on the unit conftest's SQLite. Only the mail provider's
+`send_html` is replaced (it records, or answers as a provider / relay would).
 
-- `enable` mails the latest finished run to the caller's own address and only
-  then keeps it, so a setting that never delivered is never a "working" channel;
-  a mail that did not go refuses with a named reason and keeps nothing;
-- the mail goes through the instance's provider, or the relay as the structured
-  `run_result` kind (the gateway sends that kind only to its own address for
-  the instance);
-- the terminal chokepoint `report_completion` mails a run whose schedule asks
-  for it, also when the run has no channel context, and nothing otherwise;
-- the route takes no address: it uses the caller's own, and refuses one with none.
+Pinned, one test (or more) per review finding of the first validation:
+
+1. turning email on mails THIS schedule's own latest finished run, never a
+   chat, another schedule's run or another person's turn; with no finished run
+   it says so and mails a plain confirmation with no dead link;
+2. every result mail is redacted like every other delivery path: a credential
+   is masked, a failure is only the person-safe sentence (no traceback);
+3. the recipient is resolved at send time from who turned it on: it follows an
+   account email change, stops (and says why) once that person no longer
+   manages the agent, and a take-over clears it unless the taker set it;
+4. a mail that did not go is recorded on the schedule, and a later one that
+   went clears it;
+5. a relay refusal reaches the person with its own reason;
+6. a schedule name with ordinary punctuation is sent as it is;
+7. the mail names the control that exists for turning it off;
+8. the route takes the schedules fence and a person only;
+9. a failed attempt with a retry coming is not mailed, and a chain of attempts
+   is mailed once;
+10. a schedule read never carries the address; a person the agent is shared
+    with sees only that results are mailed (to someone else).
 
 Module: src/backend/services/schedule_result_email.py
 """
+from __future__ import annotations
+
 import asyncio
-import os
-import sys
-import types
-from contextlib import asynccontextmanager
-from pathlib import Path
+import uuid
+from types import SimpleNamespace
 
-os.environ.setdefault("REDIS_URL", "redis://test:test@127.0.0.1:1")
-os.environ.setdefault("REDIS_PASSWORD", "test")
-os.environ.setdefault("REDIS_BACKEND_PASSWORD", "test")
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import text
 
-import pytest  # noqa: E402
+from database import db
+from db.engine import get_engine
+from db_models import UserCreate
+from dependencies import create_access_token
+from routers import schedules as schedules_router
+from services import channel_completion_report as ccr
+from services import email_service as email_module
+from services import schedule_result_email as sre
 
-_BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
-if str(_BACKEND) not in sys.path:
-    sys.path.insert(0, str(_BACKEND))
+pytestmark = pytest.mark.unit
 
-from services import schedule_result_email as sre  # noqa: E402
-from services import channel_completion_report as ccr  # noqa: E402
-from routers import schedules as routes  # noqa: E402  (imported before any module is stubbed)
-from models import ScheduleEmailMeRequest  # noqa: E402
-
-SCHEDULE = types.SimpleNamespace(id="s1", name="Weekly reviews", agent_name="acme-scout", deliver_to_email=None)
-
-
-def _run(coro):
-    return asyncio.run(coro)
+BODY = {"name": "Daily digest: 9am — news/feedback?", "cron_expression": "0 9 * * *",
+        "message": "Summarise my inbox", "timezone": "UTC"}
+SECRET = "sk-ant-api03-" + "A" * 40
+TRACEBACK = ('Traceback (most recent call last):\n  File "/app/x.py", line 3, in run\n'
+             'RuntimeError: boom ANTHROPIC_API_KEY=' + SECRET)
 
 
-class FakeDB:
-    def __init__(self, schedule=SCHEDULE, executions=(), execution=None):
-        self.schedule, self.executions, self.execution = schedule, list(executions), execution
-        self.kept = []
+# ---- harness ----------------------------------------------------------------------------
 
-    def get_schedule(self, sid):
-        return self.schedule if self.schedule and sid == self.schedule.id else None
+@pytest.fixture
+def mails(monkeypatch):
+    """`send_html` as a provider that delivers; `.answer` changes what it does."""
+    sent = []
 
-    def get_agent_executions(self, agent_name, limit=50):
-        return self.executions
+    async def send_html(to, subject, *, intro, paragraphs=None, cta=None, relay=None, raise_refusal=False):
+        sent.append({"to": to, "subject": subject, "intro": intro, "paragraphs": list(paragraphs or []),
+                     "cta": cta, "relay": relay, "raise_refusal": raise_refusal})
+        answer = send_html.answer
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
 
-    def get_execution(self, eid):
-        return self.execution
-
-    def set_schedule_result_email(self, sid, email):
-        self.kept.append((sid, email))
-        return True
+    send_html.answer = True
+    monkeypatch.setattr(email_module.email_service, "send_html", send_html)
+    monkeypatch.setenv("FRONTEND_URL", "https://trinity.example.org")
+    return SimpleNamespace(sent=sent, fake=send_html)
 
 
 @pytest.fixture
-def wired(monkeypatch):
-    mails, guards = [], set()
-
-    class Mailer:
-        ok = True
-
-        async def send_html(self, to, subject, *, intro, paragraphs=None, cta=None, relay=None):
-            mails.append({"to": to, "subject": subject, "intro": intro, "paragraphs": paragraphs, "cta": cta, "relay": relay})
-            return Mailer.ok
-
-    monkeypatch.setitem(sys.modules, "services.email_service", types.SimpleNamespace(email_service=Mailer()))
-
-    class Guard:
-        def __init__(self, replay):
-            self.replay, self.snapshot = replay, None
-
-    @asynccontextmanager
-    async def effect_guard(scope, identity, *, execution_id, agent_name):
-        key = (scope, tuple(sorted(identity.items())), execution_id)
-        guard = Guard(key in guards)
-        yield guard
-        if guard.snapshot is not None:
-            guards.add(key)
-
-    monkeypatch.setitem(sys.modules, "services.idempotency_service",
-                        types.SimpleNamespace(effect_guard=effect_guard, EffectInProgressError=RuntimeError))
-    monkeypatch.setenv("FRONTEND_URL", "https://trinity.example.org")
-
-    def use(fake):
-        monkeypatch.setitem(sys.modules, "database", types.SimpleNamespace(db=fake))
-        return fake
-    return types.SimpleNamespace(mails=mails, mailer=Mailer, use=use)
+def client(monkeypatch):
+    async def audit(**kw):
+        return None
+    monkeypatch.setattr(schedules_router.platform_audit_service, "log",
+                        lambda event_type, event_action, source, **kw: audit(**kw))
+    app = FastAPI()
+    app.include_router(schedules_router.router)
+    return TestClient(app)
 
 
-def _finished(eid="e1", status="success", response="Three new reviews."):
-    return types.SimpleNamespace(id=eid, status=status, completed_at="2026-11-25T10:00:00Z", response=response,
-                                 error=None, agent_name="acme-scout", schedule_id="s1", triggered_by="schedule")
+def _person(role):
+    username = f"t1391-{uuid.uuid4().hex[:8]}@example.com"
+    db.create_user(UserCreate(username=username, email=username, role=role, password="x"))
+    user = db.get_user_by_username(username)
+    return SimpleNamespace(username=username, email=username, id=user["id"],
+                           jwt=create_access_token({"sub": username}))
 
 
-# -- enable -----------------------------------------------------------------
-def test_enable_mails_the_latest_run_to_the_callers_address_then_keeps_it(wired):
-    db = wired.use(FakeDB(executions=[_finished()]))
-    out = _run(sre.enable(agent_name="acme-scout", schedule=SCHEDULE, email="ada@example.com"))
-    assert out == {"deliver_to_email": "ada@example.com", "sent": True, "sent_execution_id": "e1"}
-    assert db.kept == [("s1", "ada@example.com")]
-    mail = wired.mails[-1]
-    assert mail["to"] == "ada@example.com" and "Three new reviews." in mail["paragraphs"]
-    kind, fields = mail["relay"]
-    assert kind == "run_result" and fields["status"] == "succeeded" and fields["result"] == "Three new reviews."
-    assert fields["url"] == "https://trinity.example.org/agents/acme-scout/executions/e1"
+@pytest.fixture
+def world():
+    owner, mate = _person("creator"), _person("operator")
+    agent = f"t1391-{uuid.uuid4().hex[:8]}"
+    db.register_agent_owner(agent, owner.username)
+    db.share_agent(agent, owner.username, mate.username)
+    key = db.create_agent_mcp_api_key(agent, owner.username).api_key
+    return SimpleNamespace(agent=agent, owner=owner, mate=mate, key=key)
 
 
-def test_a_mail_that_did_not_go_keeps_nothing_and_says_why(wired):
-    db = wired.use(FakeDB(executions=[_finished()]))
-    wired.mailer.ok = False
-    with pytest.raises(sre.EmailResultsRefused) as refused:
-        _run(sre.enable(agent_name="acme-scout", schedule=SCHEDULE, email="ada@example.com"))
-    assert refused.value.reason == "email_not_sent" and refused.value.status_code == 422
-    assert db.kept == []
+def call(client, world, who, method, path="", **kw):
+    token = world.key if who == "key" else getattr(world, who).jwt
+    return client.request(method, f"/api/agents/{world.agent}/schedules{path}",
+                          headers={"Authorization": f"Bearer {token}"}, **kw)
 
 
-def test_no_address_on_the_account_is_a_named_refusal(wired):
-    db = wired.use(FakeDB())
-    with pytest.raises(sre.EmailResultsRefused) as refused:
-        _run(sre.enable(agent_name="acme-scout", schedule=SCHEDULE, email=None))
-    assert refused.value.reason == "no_email_address" and db.kept == [] and wired.mails == []
+def created(client, world, who="owner", **extra):
+    resp = call(client, world, who, "POST", json={**BODY, **extra})
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
 
 
-def test_with_no_run_yet_it_still_proves_the_address_works(wired):
-    wired.use(FakeDB())
-    out = _run(sre.enable(agent_name="acme-scout", schedule=SCHEDULE, email="ada@example.com"))
-    assert out["sent"] is True and out["sent_execution_id"] is None and len(wired.mails) == 1
+def email_me(client, world, sid, who="owner", enabled=True):
+    return call(client, world, who, "POST", f"/{sid}/email-me", json={"enabled": enabled})
 
 
-# -- the terminal leg -----------------------------------------------------------
-def test_a_finished_run_of_a_schedule_that_asks_is_mailed_once_through_report_completion(wired):
-    asked = types.SimpleNamespace(**{**vars(SCHEDULE), "deliver_to_email": "ada@example.com"})
-    row = _finished(eid="e2", response="Done this week.")
-    row.source_channel = row.source_channel_chat_id = None     # no channel context at all
-    wired.use(FakeDB(schedule=asked, execution=row))
-    _run(ccr.report_completion(execution_id="e2", agent_name="acme-scout", status="success", summary_or_error=None))
-    _run(ccr.report_completion(execution_id="e2", agent_name="acme-scout", status="success", summary_or_error=None))
-    assert [m["to"] for m in wired.mails] == ["ada@example.com"]           # at most once
-    assert "Done this week." in wired.mails[0]["paragraphs"]
+def stored(sid):
+    with get_engine().connect() as conn:
+        return dict(conn.execute(text("SELECT * FROM agent_schedules WHERE id = :sid"),
+                                 {"sid": sid}).mappings().one())
 
 
-def test_a_failed_run_is_mailed_as_failed(wired):
-    asked = types.SimpleNamespace(**{**vars(SCHEDULE), "deliver_to_email": "ada@example.com"})
-    row = _finished(eid="e3", status="failed", response=None)
-    row.error = "The agent stopped."
-    wired.use(FakeDB(schedule=asked, execution=row))
-    assert _run(sre.deliver(execution_id="e3", status="failed")) is True
-    assert wired.mails[0]["relay"][1]["status"] == "failed" and "did not finish" in wired.mails[0]["intro"]
+_CLOCK = iter(range(10, 59))
 
 
-def test_a_schedule_that_did_not_ask_mails_nothing(wired):
-    row = _finished(eid="e4")
-    row.source_channel = row.source_channel_chat_id = None
-    wired.use(FakeDB(execution=row))
-    _run(ccr.report_completion(execution_id="e4", agent_name="acme-scout", status="success", summary_or_error=None))
-    assert wired.mails == []
+def run_row(world, schedule_id, *, status="success", response=None, error=None, attempt=1,
+            retry_of=None, source_user_id=None, completed=True):
+    """One execution row, as the terminal writer leaves it."""
+    eid = f"e-{uuid.uuid4().hex[:10]}"
+    minute = next(_CLOCK)
+    with get_engine().begin() as conn:
+        conn.execute(text(
+            "INSERT INTO schedule_executions (id, schedule_id, agent_name, status, started_at, completed_at, "
+            "message, response, error, triggered_by, attempt_number, retry_of_execution_id, source_user_id) "
+            "VALUES (:id, :sid, :agent, :status, :started, :completed, 'm', :response, :error, 'schedule', "
+            ":attempt, :retry_of, :uid)"),
+            {"id": eid, "sid": schedule_id, "agent": world.agent, "status": status,
+             "started": f"2026-11-25T10:{minute:02d}:00Z",
+             "completed": f"2026-11-25T10:{minute:02d}:30Z" if completed else None,
+             "response": response, "error": error, "attempt": attempt, "retry_of": retry_of,
+             "uid": source_user_id})
+    return eid
 
 
-# -- the route ---------------------------------------------------------------
-def test_the_route_uses_the_callers_own_address_and_names_a_refusal(wired, monkeypatch):
-    from fastapi import HTTPException
+def set_retries(sid, n):
+    with get_engine().begin() as conn:
+        conn.execute(text("UPDATE agent_schedules SET max_retries = :n WHERE id = :sid"), {"n": n, "sid": sid})
 
-    fake = wired.use(FakeDB(executions=[_finished()]))
-    monkeypatch.setattr(routes, "db", fake)
-    me = types.SimpleNamespace(email="ada@example.com", id=1)
-    out = _run(routes.email_me_schedule_results("acme-scout", "s1", ScheduleEmailMeRequest(enabled=True), me))
-    assert out["deliver_to_email"] == "ada@example.com" and wired.mails[-1]["to"] == "ada@example.com"
-    assert "email" not in ScheduleEmailMeRequest.model_fields          # never an address the caller supplies
 
-    with pytest.raises(HTTPException) as refused:
-        _run(routes.email_me_schedule_results("acme-scout", "s1", ScheduleEmailMeRequest(enabled=True),
-                                              types.SimpleNamespace(email=None, id=2)))
-    assert refused.value.status_code == 422 and refused.value.detail["code"] == "no_email_address"
-    with pytest.raises(HTTPException) as missing:
-        _run(routes.email_me_schedule_results("other-agent", "s1", ScheduleEmailMeRequest(enabled=True), me))
-    assert missing.value.status_code == 404
+def finish(world, eid, status="success"):
+    """The real chokepoint every CAS-won terminal calls."""
+    asyncio.run(ccr.report_completion(execution_id=eid, agent_name=world.agent, status=status,
+                                      summary_or_error=None))
 
-    off = _run(routes.email_me_schedule_results("acme-scout", "s1", ScheduleEmailMeRequest(enabled=False), me))
-    assert off["deliver_to_email"] is None and fake.kept[-1] == ("s1", None)
+
+def turned_on(client, world, mails, who="owner"):
+    sid = created(client, world)
+    resp = email_me(client, world, sid, who=who)
+    assert resp.status_code == 200, resp.text
+    mails.sent.clear()
+    return sid
+
+
+def body_of(mail):
+    return "\n".join([mail["intro"], *mail["paragraphs"]])
+
+
+# ---- 1. turning it on mails this schedule's own latest finished run --------------------
+
+def test_turning_it_on_mails_only_this_schedules_own_latest_run(client, world, mails):
+    sid = created(client, world)
+    other = created(client, world, name="Other one")
+    run_row(world, sid, response="Three new reviews.")
+    # Newer than it: another schedule's run, a chat (no schedule) and another
+    # person's turn on the agent. None of them may be mailed under this title.
+    run_row(world, other, response="NOT THIS: another schedule")
+    run_row(world, "__chat__", response="NOT THIS: someone's chat", source_user_id=world.mate.id)
+    run_row(world, sid, status="running", completed=False)      # unfinished: skipped
+
+    resp = email_me(client, world, sid)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["no_finished_run_yet"] is False
+    [mail] = mails.sent
+    assert mail["to"] == world.owner.email
+    assert "Three new reviews." in body_of(mail) and "NOT THIS" not in body_of(mail)
+    assert stored(sid)["email_results_user_id"] == world.owner.id
+
+
+def test_with_no_finished_run_it_says_so_and_sends_a_plain_confirmation(client, world, mails):
+    sid = created(client, world)
+    run_row(world, "__chat__", response="NOT THIS: a chat")
+
+    resp = email_me(client, world, sid)
+
+    assert resp.status_code == 200, resp.text
+    out = resp.json()
+    assert out["no_finished_run_yet"] is True and out["sent_execution_id"] is None
+    assert "has not finished a run yet" in out["message"]
+    [mail] = mails.sent
+    assert "has not finished a run yet" in body_of(mail) and "NOT THIS" not in body_of(mail)
+    assert mail["cta"] is None and mail["relay"][1]["url"] == ""     # no link that ends at /executions/
+
+
+# ---- 2. redaction ------------------------------------------------------------------------
+
+def test_a_result_is_credential_sanitised_before_it_leaves(client, world, mails):
+    sid = turned_on(client, world, mails)
+    finish(world, run_row(world, sid, response=f"Done. The key is {SECRET}"))
+    [mail] = mails.sent
+    assert SECRET not in body_of(mail) and SECRET not in mail["relay"][1]["result"]
+    assert "Done." in mail["relay"][1]["result"]
+
+
+def test_a_failure_is_only_the_person_safe_sentence(client, world, mails):
+    sid = turned_on(client, world, mails)
+    finish(world, run_row(world, sid, status="failed", error=TRACEBACK), status="failed")
+    [mail] = mails.sent
+    assert mail["relay"][1]["result"] == ccr.GENERIC_FAILURE
+    assert "Traceback" not in body_of(mail) and SECRET not in body_of(mail)
+    assert mail["relay"][1]["status"] == "failed"
+
+
+def test_turning_it_on_redacts_the_run_it_mails_now(client, world, mails):
+    sid = created(client, world)
+    run_row(world, sid, status="failed", error=TRACEBACK)
+    assert email_me(client, world, sid).status_code == 200
+    [mail] = mails.sent
+    assert "Traceback" not in body_of(mail) and SECRET not in body_of(mail)
+
+
+# ---- 3. the recipient, at send time ------------------------------------------------------
+
+def test_it_follows_a_changed_account_email(client, world, mails):
+    sid = turned_on(client, world, mails)
+    with get_engine().begin() as conn:
+        conn.execute(text("UPDATE users SET email = 'ada.new@example.com' WHERE id = :id"), {"id": world.owner.id})
+    finish(world, run_row(world, sid, response="ok"))
+    assert [m["to"] for m in mails.sent] == ["ada.new@example.com"]
+
+
+def test_mail_stops_when_the_person_no_longer_manages_the_agent(client, world, mails):
+    admin = _person("admin")
+    sid = turned_on(client, world, mails, who="owner")
+    # An admin turned it on; then the admin is demoted to a plain operator
+    # with no share: they no longer manage the agent.
+    resp = email_me(client, world, sid, who="owner", enabled=False)
+    assert resp.status_code == 200
+    world.admin = admin
+    assert email_me(client, world, sid, who="admin").status_code == 200
+    mails.sent.clear()
+    with get_engine().begin() as conn:
+        conn.execute(text("UPDATE users SET role = 'operator' WHERE id = :id"), {"id": admin.id})
+
+    finish(world, run_row(world, sid, response="ok"))
+
+    assert mails.sent == []
+    row = stored(sid)
+    assert row["email_results_user_id"] is None
+    assert row["email_results_error"] == sre.LOST_ACCESS
+    seen = call(client, world, "owner", "GET", f"/{sid}").json()
+    assert (seen["email_results"], seen["email_results_error"]) == (False, sre.LOST_ACCESS)
+
+
+def test_a_take_over_clears_mail_to_anyone_but_the_taker(client, world, mails):
+    admin = _person("admin")
+    world.admin = admin
+    sid = created(client, world, who="mate")                    # a shared person's schedule
+    assert email_me(client, world, sid, who="admin").status_code == 200
+    row = call(client, world, "owner", "GET", f"/{sid}").json()
+    body = {"expected_updated_at": row["updated_at"],
+            "reviewed": {k: row[k] for k in ("message", "allowed_tools", "model",
+                                             "validation_enabled", "validation_prompt")}}
+
+    resp = call(client, world, "owner", "POST", f"/{sid}/take-over", json=body)
+
+    assert resp.status_code == 200, resp.text
+    assert stored(sid)["email_results_user_id"] is None
+    assert resp.json()["email_results"] is False
+
+
+def test_a_take_over_keeps_the_takers_own(client, world, mails):
+    sid = created(client, world, who="mate")
+    assert email_me(client, world, sid, who="owner").status_code == 200
+    row = call(client, world, "owner", "GET", f"/{sid}").json()
+    body = {"expected_updated_at": row["updated_at"],
+            "reviewed": {k: row[k] for k in ("message", "allowed_tools", "model",
+                                             "validation_enabled", "validation_prompt")}}
+    assert call(client, world, "owner", "POST", f"/{sid}/take-over", json=body).status_code == 200
+    assert stored(sid)["email_results_user_id"] == world.owner.id
+
+
+# ---- 4. a dropped mail is visible ---------------------------------------------------------
+
+def test_a_mail_that_did_not_go_shows_on_the_schedule_until_one_goes(client, world, mails):
+    sid = turned_on(client, world, mails)
+    mails.fake.answer = email_module.EmailRefused(
+        "result_address_limit", "You reached today's limit of result emails for this address.", 429)
+    finish(world, run_row(world, sid, response="first"))
+    seen = call(client, world, "owner", "GET", f"/{sid}").json()
+    assert seen["email_results"] is True
+    assert seen["email_results_error"] == "You reached today's limit of result emails for this address."
+    assert seen["email_results_error_at"]
+
+    mails.fake.answer = True
+    finish(world, run_row(world, sid, response="second"))
+    seen = call(client, world, "owner", "GET", f"/{sid}").json()
+    assert (seen["email_results_error"], seen["email_results_error_at"]) == (None, None)
+
+
+# ---- 5. a refusal reaches the person with its reason -------------------------------------
+
+def test_a_relay_refusal_reaches_the_person_with_its_reason(client, world, mails):
+    sid = created(client, world)
+    mails.fake.answer = email_module.EmailRefused(
+        "not_own_address", "Trinity mails a run's result only to this instance's own registered address.", 403)
+
+    resp = email_me(client, world, sid)
+
+    assert resp.status_code == 403, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "not_own_address"
+    assert "only to this instance's own registered address" in detail["message"]
+    assert "Try again in a moment" not in detail["message"]
+    assert stored(sid)["email_results_user_id"] is None
+    assert mails.sent[0]["raise_refusal"] is True
+
+
+def test_the_email_service_passes_a_refusal_only_to_a_caller_that_asked(monkeypatch):
+    """The seam itself: `_relayed` re-raises the relay's EmailRefused only with
+    `raise_refusal`; every other mail still reads False."""
+    async def refuse(kind, to, fields):
+        raise email_module.EmailRefused("result_address_limit", "Limit reached.", 429)
+    monkeypatch.setattr(email_module, "_relay", {"available": lambda: True, "send": refuse})
+    monkeypatch.setattr(email_module.EmailService, "_provider_can_deliver", lambda self: False)
+    service = email_module.EmailService()
+    assert asyncio.run(service.send_html("a@example.com", "s", intro="i", relay=("code", {}))) is False
+    with pytest.raises(email_module.EmailRefused):
+        asyncio.run(service.send_html("a@example.com", "s", intro="i", relay=("run_result", {}),
+                                      raise_refusal=True))
+
+
+# ---- 6. ordinary punctuation in the name -------------------------------------------------
+
+def test_a_name_with_ordinary_punctuation_is_sent_as_it_is(client, world, mails):
+    sid = turned_on(client, world, mails)
+    finish(world, run_row(world, sid, response="ok"))
+    [mail] = mails.sent
+    assert mail["relay"][1]["title"] == BODY["name"]
+    assert mail["subject"] == f"{world.agent}: {BODY['name']}"
+
+
+# ---- 7. the mail names the control that turns it off -------------------------------------
+
+def test_the_mail_names_the_stop_control(client, world, mails):
+    sid = turned_on(client, world, mails)
+    finish(world, run_row(world, sid, response="ok"))
+    assert '"Stop emailing"' in body_of(mails.sent[0])
+    assert sre.STOP_CONTROL == "Stop emailing"
+    # ...and that control works: the person turns it off and nothing more is mailed.
+    assert email_me(client, world, sid, enabled=False).status_code == 200
+    finish(world, run_row(world, sid, response="after"))
+    assert len(mails.sent) == 1 and stored(sid)["email_results_user_id"] is None
+
+
+# ---- 8. the route's gates -----------------------------------------------------------------
+
+def test_an_agent_key_is_refused_and_a_shared_person_cannot_reach_it(client, world, mails):
+    sid = created(client, world)
+    assert email_me(client, world, sid, who="key").status_code == 403
+    assert email_me(client, world, sid, who="mate").status_code in (403, 404)
+    assert mails.sent == [] and stored(sid)["email_results_user_id"] is None
+
+
+# ---- 9. retries ---------------------------------------------------------------------------
+
+def test_a_retried_run_is_mailed_once_with_its_final_outcome(client, world, mails):
+    sid = turned_on(client, world, mails)
+    set_retries(sid, 2)
+    first = run_row(world, sid, status="failed", error="network blip", attempt=1)
+    finish(world, first, status="failed")
+    assert mails.sent == []                                    # a retry is coming: not mailed
+    second = run_row(world, sid, status="success", response="Done on retry.", attempt=2, retry_of=first)
+    finish(world, second)
+    finish(world, second)                                      # a redelivered report
+    assert len(mails.sent) == 1 and "Done on retry." in mails.sent[0]["relay"][1]["result"]
+
+
+def test_the_last_attempt_that_fails_is_mailed_once(client, world, mails):
+    sid = turned_on(client, world, mails)
+    set_retries(sid, 1)
+    first = run_row(world, sid, status="failed", error="blip", attempt=1)
+    finish(world, first, status="failed")
+    second = run_row(world, sid, status="failed", error="blip", attempt=2, retry_of=first)
+    finish(world, second, status="failed")
+    finish(world, second, status="failed")
+    assert len(mails.sent) == 1 and mails.sent[0]["relay"][1]["status"] == "failed"
+
+
+# ---- 10. who may read what on a schedule read ---------------------------------------------
+
+def test_a_schedule_read_never_carries_the_address(client, world, mails):
+    sid = turned_on(client, world, mails)
+    mine = call(client, world, "owner", "GET", f"/{sid}").json()
+    theirs = call(client, world, "mate", "GET", f"/{sid}").json()
+    assert (mine["email_results"], mine["email_results_to_me"]) == (True, True)
+    assert (theirs["email_results"], theirs["email_results_to_me"]) == (True, False)
+    # The person the agent is shared with reads nothing that carries the owner's address.
+    assert world.owner.email not in str(theirs)
+    for read in (mine, theirs):
+        assert "deliver_to_email" not in read and "email_results_user_id" not in read
+
+
+def test_an_attempt_of_a_chain_already_mailed_is_not_mailed_again(client, world, mails):
+    """The guard is keyed on the run the chain started from, not the attempt:
+    should the retry rule here and the scheduler's ever disagree (a retry of an
+    attempt that was mailed), the run is still mailed once."""
+    sid = turned_on(client, world, mails)
+    first = run_row(world, sid, status="failed", error="blip", attempt=1)
+    finish(world, first, status="failed")                       # no retries configured: mailed
+    second = run_row(world, sid, status="success", response="late", attempt=2, retry_of=first)
+    finish(world, second)
+    assert len(mails.sent) == 1

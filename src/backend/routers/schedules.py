@@ -246,6 +246,11 @@ def _schedule_response(schedule, agent_name: str, current_user: User,
             and _can_manage_webhook(schedule, agent_name, current_user, viewer_tier=view.tier)
         ),
         can_take_over=view.can_take_over(schedule, run_tier),
+        # ent#1391: whether runs are mailed and whether to this caller; never
+        # the address (a person the agent is shared with must not read it).
+        email_results=getattr(schedule, "email_results_user_id", None) is not None,
+        email_results_to_me=(getattr(schedule, "email_results_user_id", None) is not None
+                             and schedule.email_results_user_id == view.viewer_id),
         **run_tier,
     )
 
@@ -741,7 +746,9 @@ async def disable_schedule(
             **_ScheduleView(name, current_user).run_tier_fields(schedule, name)}
 
 
-@router.post("/{name}/schedules/{schedule_id}/email-me", dependencies=[Depends(require_person)])
+@router.post("/{name}/schedules/{schedule_id}/email-me",
+             dependencies=[Depends(require_person),
+                           Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
 async def email_me_schedule_results(
     name: OwnedAgent,
     schedule_id: str,
@@ -749,17 +756,18 @@ async def email_me_schedule_results(
     current_user: User = Depends(get_current_user),
 ):
     """abilityai/trinity-enterprise#1391: mail each run of this schedule to the
-    caller's own address, and the latest finished run now; or stop. The address
-    is never a parameter, so this cannot point a schedule at anyone else. A
-    person only: the grant sends mail as the platform."""
-    schedule = db.get_schedule(schedule_id)
+    caller, at their own account's address, and this schedule's latest finished
+    run now (a plain confirmation when it has none yet); or stop. The address is
+    never a parameter, so this cannot point a schedule at anyone else. A person
+    only (the grant sends mail as the platform), at the owner tier, behind the
+    schedules fence like every other schedule write."""
+    schedule = await asyncio.to_thread(db.get_schedule, schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
     if not body.enabled:
-        return {"schedule_id": schedule_id, **schedule_result_email.disable(schedule=schedule)}
+        return {"schedule_id": schedule_id, **await schedule_result_email.disable(schedule=schedule)}
     try:
-        out = await schedule_result_email.enable(agent_name=name, schedule=schedule,
-                                                 email=getattr(current_user, "email", None))
+        out = await schedule_result_email.enable(agent_name=name, schedule=schedule, user=current_user)
     except schedule_result_email.EmailResultsRefused as refusal:
         raise HTTPException(status_code=refusal.status_code,
                             detail={"code": refusal.reason, "message": refusal.detail})
@@ -1030,6 +1038,7 @@ async def take_over_schedule(
                 "new_creator_id": current_user.id,
                 "webhook_revoked": done.webhook_revoked,
                 "delivery_cleared": done.delivery_cleared,
+                "email_results_cleared": done.email_results_cleared,
             },
         )
 

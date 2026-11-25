@@ -512,6 +512,37 @@
               </span>
             </div>
 
+            <!-- trinity-enterprise#1391: each run's result by email. Never the
+                 address (the read does not carry it). "Stop emailing" is the
+                 control the mail and the assistant card name. A mail that did
+                 not go says why here, so it is never dropped in silence. -->
+            <div
+              v-if="schedule.email_results || schedule.email_results_error"
+              class="mt-2 flex flex-col items-start gap-1.5 text-xs sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-3"
+              data-testid="schedule-email-results"
+            >
+              <span v-if="schedule.email_results" class="flex items-center">
+                <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                </svg>
+                {{ schedule.email_results_to_me ? "Each run's result is emailed to you" : "Each run's result is emailed to the person who turned it on" }}
+              </span>
+              <BaseButton
+                v-if="schedule.email_results && ownerTier"
+                size="sm"
+                variant="secondary"
+                :disabled="emailStopLoading.has(schedule.id)"
+                data-testid="schedule-email-stop"
+                @click="stopEmailing(schedule)"
+              >Stop emailing</BaseButton>
+              <p
+                v-if="schedule.email_results_error"
+                class="w-full text-status-warning-700 dark:text-status-warning-400 [overflow-wrap:anywhere]"
+                role="status"
+                data-testid="schedule-email-error"
+              >Last result not emailed: {{ schedule.email_results_error }}</p>
+            </div>
+
             <!-- #1115: inline per-schedule performance (last 7d). Compact
                  mini-stats from the shared aggregate — not a chart/modal. -->
             <div
@@ -1590,6 +1621,24 @@ async function toggleSchedule(schedule) {
     reportActionFailure(error, `${wanted} the schedule "${schedule.name}"`)
   } finally {
     toggleLoading.value.delete(schedule.id)
+  }
+}
+
+// trinity-enterprise#1391: stop mailing this schedule's results. The control
+// the result mail and the assistant card name ("Stop emailing").
+const emailStopLoading = ref(new Set())
+async function stopEmailing(schedule) {
+  emailStopLoading.value.add(schedule.id)
+  clearActionError()
+  try {
+    await axios.post(`/api/agents/${props.agentName}/schedules/${schedule.id}/email-me`, { enabled: false }, {
+      headers: authStore.authHeader
+    })
+    await loadSchedules()
+  } catch (error) {
+    reportActionFailure(error, `stop emailing the results of "${schedule.name}"`)
+  } finally {
+    emailStopLoading.value.delete(schedule.id)
   }
 }
 
