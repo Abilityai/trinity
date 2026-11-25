@@ -9341,6 +9341,18 @@
         "github"
       ],
       "description": "Use-time git token for agent containers: wants_broker truth table; tri-state coverage including a slow provider; the recreate matcher asks for a recreate only when the mode changes; the token route serves the calling agent's own broker-mode container, refuses a person and another agent's key, and never returns a PAT; the real credential helper script against a local HTTP server uses the route first, continues on 204 only, and gives no credential on 503/403/500/unreachable; the gh wrapper fetches per call; startup.sh treats the flag as credentialed with no network call and ignores a stale .env PAT; PAT rotation skips broker containers; AST pin that coverage reaches both env writers and the matcher. Mutation: 12 mutations, each turns a named test red."
+    },
+    {
+      "file": "unit/test_ent1279_backend_app_mode.py",
+      "feature": "trinity-enterprise#1279",
+      "added": "2026-11-25",
+      "categories": [
+        "unit",
+        "backend",
+        "security",
+        "github"
+      ],
+      "description": "GitHub App mode for backend GitHub call sites: wants_broker puts a covered repo in broker mode on an install with no PAT; env writer and recreate matcher converge in one start for a create-baked app agent, the /git/initialize row shape, and both decoverage cases (pull-only gets the platform PAT back, working branch does not); a create read through the app never walks the PAT ladder and a failed mint is a 503 with no PAT fallback; the app working-branch rule (Contents write, not shared, push probe ok, not catalog) with named pull-only reasons that never name other agents; an installation token is never baked; the token route mints read-only for a pull-only agent; fork/bind and /git/initialize name the PAT requirement when an app is configured; skills-library clones use a read-only app token for covered github.com repos only and fail the source on a failed mint; the blocking bridge refuses a running loop and is bounded. End-to-end create cases live in test_1484 (ent#1279 section). Rebuild-from-nothing keeps working-branch rows off the platform PAT where a provider is configured; an explicit working branch on a shared repo through the app is a named 400; a fork never consults the provider; an unconfigured provider is never named in messages. Mutation: 19 mutations, each turns a named test red."
     }
   ]
 }

@@ -922,6 +922,8 @@ def check_github_pat_env_matches(
             carried_flag=carried_flag,
             would_bake_pat=bool(container_pat),
             has_own_pat=bool(db.get_agent_github_pat(agent_name)),
+            # trinity-enterprise#1279: the same input the env writer passes.
+            no_pat_configured=not get_github_pat_for_agent(agent_name),
         )
         if want != carried_flag:
             return False

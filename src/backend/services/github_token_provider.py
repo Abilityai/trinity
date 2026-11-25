@@ -47,6 +47,12 @@ class GithubTokenUnavailable(RuntimeError):
 class RepoToken:
     token: str = field(repr=False)
     expires_at: str
+    # What the INSTALLATION grants on this repo (trinity-enterprise#1279), read
+    # from the installation lookup. The mint response describes the narrowed
+    # token instead (its `repository_selection` is always "selected"), so it
+    # cannot classify anything. Empty when the provider does not report them.
+    permissions: Dict[str, str] = field(default_factory=dict)
+    repository_selection: Optional[str] = None
 
 
 class GithubTokenProvider(Protocol):
@@ -64,6 +70,31 @@ def register_provider(provider: GithubTokenProvider) -> None:
     global _provider
     _provider = provider
     logger.info("[github_token_provider] provider registered: %s", type(provider).__name__)
+
+
+def has_provider() -> bool:
+    """Is a repo-token provider registered?"""
+    return _provider is not None
+
+
+def is_configured() -> bool:
+    """Is the registered provider set up to answer for any repo?
+
+    A provider module can be registered on an install that has not configured
+    it (an enterprise install with no GitHub App credentials). Messages that
+    name the provider, and rules that must hold only where it can cover a repo,
+    ask this. A provider without an ``is_configured`` method counts as
+    configured; one whose check fails counts as configured too (fail closed).
+    """
+    if _provider is None:
+        return False
+    check = getattr(_provider, "is_configured", None)
+    if check is None:
+        return True
+    try:
+        return bool(check())
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def clear_provider() -> None:
@@ -105,6 +136,31 @@ async def token_for_repo(
             f"GitHub token provider failed for {normalized}") from None
 
 
+def token_for_repo_blocking(
+    repo: str, permissions: Optional[Dict[str, str]] = None, timeout: float = 10
+) -> Optional[RepoToken]:
+    """:func:`token_for_repo` for synchronous code running in a worker thread
+    (trinity-enterprise#1279: the skills-library sweep).
+
+    ``asyncio.run`` raises ``RuntimeError`` on a thread with a running event
+    loop, so a caller on the loop fails loudly. A timeout raises
+    :class:`GithubTokenUnavailable`. The provider opens a fresh HTTP client per
+    request and keeps plain dict caches, so a race between threads costs at
+    most one extra mint.
+    """
+    if _provider is None:
+        return None
+
+    async def _bounded():
+        return await asyncio.wait_for(token_for_repo(repo, permissions), timeout)
+
+    try:
+        return asyncio.run(_bounded())
+    except asyncio.TimeoutError:
+        raise GithubTokenUnavailable(
+            f"GitHub token provider timed out for {normalize_repo(repo) or 'repo'}") from None
+
+
 async def coverage(repo: str) -> Optional[bool]:
     """Does the provider cover ``repo``? True, False, or None for unknown.
 
@@ -125,6 +181,7 @@ def wants_broker(
     carried_flag: bool,
     would_bake_pat: bool,
     has_own_pat: bool,
+    no_pat_configured: bool = False,
 ) -> bool:
     """Should this agent's container carry :data:`BROKER_ENV`?
 
@@ -136,9 +193,12 @@ def wants_broker(
     * A covered repo uses the broker only where a platform PAT would have been
       baked (``would_bake_pat``) or the broker is already in use. A container
       that was deliberately given no credential stays that way.
+    * With no per-agent and no platform PAT (``no_pat_configured``,
+      trinity-enterprise#1279) the provider is the install's only credential,
+      so a covered repo uses the broker.
     """
     if has_own_pat:
         return False
     if coverage is None:
         return carried_flag
-    return bool(coverage) and (carried_flag or would_bake_pat)
+    return bool(coverage) and (carried_flag or would_bake_pat or no_pat_configured)

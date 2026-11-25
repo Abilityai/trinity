@@ -1,0 +1,51 @@
+{
+  "version": "cso-diff",
+  "date": "2026-11-25",
+  "mode": "diff-daily",
+  "scope": "abilityai/trinity-enterprise#1279",
+  "phases_run": [
+    0,
+    1,
+    2,
+    5,
+    6,
+    7,
+    9,
+    10,
+    12,
+    13,
+    14
+  ],
+  "stack_cve_quicklist": [],
+  "attack_surface": {
+    "new_routes": 0,
+    "changed_routes": [
+      "GET /api/agents/{name}/git/token",
+      "POST /api/agents/{name}/git/initialize"
+    ]
+  },
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "phase3: no dependency changes, no scanner run",
+    "phase4: no workflow changes",
+    "docker image checks not applicable",
+    "full unit suite delegated to CI",
+    "live GitHub behaviour not exercised"
+  ],
+  "supply_chain_summary": {
+    "scanner": "none (no dependency changes)"
+  },
+  "filter_stats": {
+    "candidates": 0,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "n/a (diff run)",
+  "counts_as_full_run": false
+}

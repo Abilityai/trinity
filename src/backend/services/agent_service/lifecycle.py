@@ -949,19 +949,47 @@ def _apply_git_env_from_db(
     # Decided on the CARRIED env, before the block below rewrites it. On the
     # rebuild-from-nothing path "would a PAT be baked" is "does one resolve".
     _broker = False
+    _has_own_pat = bool(db.get_agent_github_pat(agent_name))
     if carried_flag or coverage:
-        if pat_gate == "effective":
-            from routers.git import get_github_pat_for_agent as _effective_pat
+        from routers.git import get_github_pat_for_agent as _effective_pat
 
-            _would_bake = bool(_effective_pat(agent_name))
+        _resolved_pat = bool(_effective_pat(agent_name))
+        if pat_gate == "effective":
+            _would_bake = _resolved_pat
         else:
             _would_bake = bool(env_vars.get("GITHUB_PAT"))
         _broker = wants_broker(
             coverage=coverage,
             carried_flag=carried_flag,
             would_bake_pat=_would_bake,
-            has_own_pat=bool(db.get_agent_github_pat(agent_name)),
+            has_own_pat=_has_own_pat,
+            # trinity-enterprise#1279: no per-agent and no platform PAT, so the
+            # provider is the install's only credential.
+            no_pat_configured=not _resolved_pat,
         )
+
+    # --- leaving broker mode (trinity-enterprise#1279) ----------------------
+    # A working-branch agent that leaves broker mode (its repo is no longer
+    # covered) does not fall back to the platform PAT: that is the
+    # install-wide credential the ent#162 rule keeps off working branches
+    # (`crud._apply_agent_kind_default`). It comes up with no credential and
+    # its sync fails visibly. A pull-only agent falls back as before (11.21
+    # FR-4); a per-agent PAT is a deliberate identity and is always used.
+    #
+    # The rebuild-from-nothing path has no old container, so it cannot tell
+    # whether the agent was in broker mode. Where a provider is configured it
+    # treats every working-branch row as if it had been: unknown coverage
+    # keeps the broker (the token route answers at use time, and never with a
+    # PAT), and an uncovered repo gets no PAT.
+    from services import github_token_provider as _gtp
+
+    _working_branch = not _gc("source_mode") and not _has_own_pat
+    _maybe_broker = carried_flag or (pat_gate == "effective" and _gtp.is_configured())
+    if _working_branch and _maybe_broker and not carried_flag and coverage is None:
+        _broker = True
+    if _working_branch and _maybe_broker and not _broker:
+        _pat_allowed = False
+        env_vars.pop("GITHUB_PAT", None)
 
     # --- Correct what is carried; never INTRODUCE the block -----------------
     # Config-drift only. The repo half is gated on the REPO (ent#123) while the
@@ -986,8 +1014,12 @@ def _apply_git_env_from_db(
     # rebuild-from-nothing path is deliberately exempt: it has no old container
     # to carry anything, and NOT introducing the block there is the #843/#1439
     # silently-empty-agent bug.
+    # A broker answer passes too (trinity-enterprise#1279): broker mode bakes
+    # no credential, so there is no origin-URL token for the block to destroy,
+    # and returning here would leave the matcher asking for broker mode on
+    # every start.
     if pat_gate == "per_agent_only" and not (
-        env_vars.get("GITHUB_REPO") or _pat_allowed
+        env_vars.get("GITHUB_REPO") or _pat_allowed or _broker
     ):
         return
 

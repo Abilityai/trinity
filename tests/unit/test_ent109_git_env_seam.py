@@ -676,16 +676,18 @@ class TestBrokerMode:
         lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only", coverage=True)
         assert _FLAG not in env and env["GITHUB_PAT"] == "ghp_PER_AGENT"
 
-    def test_rebuild_from_nothing_uses_the_broker_only_where_a_pat_resolves(self, bound):
+    def test_rebuild_from_nothing_uses_the_broker_on_a_covered_repo(self, bound):
         lc, _, rg = bound
         env = {}
         lc._apply_git_env_from_db("a1", env, pat_gate="effective", coverage=True)
         assert env[_FLAG] == "1" and "GITHUB_PAT" not in env
 
-        rg.get_github_pat_for_agent.return_value = None  # no platform PAT at all
+        # trinity-enterprise#1279: with no PAT anywhere the provider is the
+        # install's only credential, so a covered repo still gets the broker.
+        rg.get_github_pat_for_agent.return_value = None
         env = {}
         lc._apply_git_env_from_db("a1", env, pat_gate="effective", coverage=True)
-        assert _FLAG not in env and "GITHUB_PAT" not in env
+        assert env[_FLAG] == "1" and "GITHUB_PAT" not in env
 
     def test_flag_is_cleared_with_the_binding(self, bound):
         lc, db, _ = bound
