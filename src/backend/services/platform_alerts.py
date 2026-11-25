@@ -183,6 +183,10 @@ _BUILTIN_KINDS = (
     Kind("fleet_base_image_stale", "base-image-stale-fleet-", _N, CLEARS_HOOK,
          escalates=_a_new_agent_failed),
     Kind("circuit_dormant", "cb-dormant-", _N, CLEARS_HOOK),
+    # trinity-enterprise#1176: one row naming every agent whose Claude Code is
+    # not applying the managed hooks; a newly named agent breaks a snooze.
+    Kind("managed_hooks_skipped", "managed-hooks-skipped-", _N, CLEARS_HOOK,
+         escalates=_a_new_agent_failed),
     # -- every other in-repo platform emitter -----------------------------
     Kind("skills_reconcile_refused", "skills-reconcile-", _N, CLEARS_HOOK,
          escalates=_orphans_at_least_doubled),

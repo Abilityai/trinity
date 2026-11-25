@@ -507,6 +507,8 @@ const HOOK_WARNINGS = {
   writable: 'The in-agent gate check on this agent can be changed from inside it; recreate the agent to restore it.',
   unsupported_runtime: "This agent's runtime can't enforce gates inside the agent; requests that name a gated skill still wait for approval.",
   predates: "This agent's image predates the in-agent gate check; recreate the agent to enforce gates inside it.",
+  // trinity-enterprise#1176: the files are intact, Claude Code is not applying them.
+  skipped: "Gates can't be checked inside this agent: Claude Code on this agent is using cached organization settings, so it skips Trinity's guardrails. Its turns run without skills. A shared person's turn is refused until that is fixed, and so is a visitor's while visitors may not run commands.",
 }
 const enforcementSlot = computed(() => showOwnerRow.value && gatesStore.gates.length > 0)
 const hookWarning = computed(() => {

@@ -786,6 +786,40 @@ describe('assistant panel', () => {
     expect(wrapper.get('[data-testid="assistant-plan"]').text()).toBe('Free · 3 messages left · more in about 5 hours')
   })
 
+  // Abilityai/trinity-gateway#37: the trial is limited by its messages and its days; the header shows both.
+  it('shows the days left of the trial beside the messages left', async () => {
+    turns = [final('It is running.', [], { ...ALLOWANCE, days_left: 6, days_limit: 7 })]
+    await openPanel()
+    await say('is it running?')
+    expect(wrapper.get('[data-testid="assistant-plan"]').text()).toBe('Free · 24 messages left today · 6 days left')
+    turns = [final('Still running.', [], { ...ALLOWANCE, days_left: 1, days_limit: 7 })]
+    await say('and now?')
+    expect(wrapper.get('[data-testid="assistant-plan"]').text()).toBe('Free · 24 messages left today · 1 day left')
+  })
+
+  it('at the end of the trial names the days, offers to subscribe, and promises no reset', async () => {
+    turns = [{ status: 'limit', conversation_id: null, text: '', cards: [],
+      allowance: { ...ALLOWANCE, days_left: 0, days_limit: 7, reached: 'days', resets_at: new Date(Date.now() + 5 * 3600000).toISOString() } }]
+    await openPanel()
+    await say('one more thing')
+    const limit = wrapper.get('[data-testid="assistant-limit"]').text()
+    expect(limit).toContain('Your 7-day free trial has ended.')
+    expect(limit).not.toContain('comes back')
+    expect(wrapper.find('[data-testid="assistant-upgrade"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="assistant-plan"]').text()).toBe('Free trial ended')
+  })
+
+  it('at the message limit names the messages, not the days', async () => {
+    turns = [{ status: 'limit', conversation_id: 'c1', text: '', cards: [],
+      allowance: { ...ALLOWANCE, messages_left: 0, days_left: 4, days_limit: 7, reached: 'messages', resets_at: new Date(Date.now() + 5 * 3600000).toISOString() } }]
+    await openPanel()
+    await say('one more thing')
+    const limit = wrapper.get('[data-testid="assistant-limit"]').text()
+    expect(limit).toContain("You've used today's 25 free messages.")
+    expect(limit).toContain('in about 5 hours')
+    expect(limit).not.toContain('trial has ended')
+  })
+
   it('carries the conversation on in the next message', async () => {
     turns = [final('Hello.'), final('Yes.')]
     await openPanel()

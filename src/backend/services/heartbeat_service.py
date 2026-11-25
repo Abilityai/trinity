@@ -34,6 +34,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from services import loop_health
+from services.docker_utils import run_blocking
 
 logger = logging.getLogger(__name__)
 
@@ -352,11 +353,11 @@ def process_watch_tick() -> List[Tuple[str, str]]:
         if state == "stale":
             misses_key = _misses_key(name)
             try:
-                # The 3-miss threshold assumes a single backend process
-                # (confirmed today — docker-compose runs one worker; see
-                # docker-compose.yml:292). With multiple workers each tick
-                # INCRs, so the threshold is reached in fewer wall-clock ticks,
-                # though the atomic INCR still makes exactly one caller observe
+                # This tick runs in EVERY backend worker (`BACKEND_WORKERS`,
+                # 2 by default on the prod and hosted stacks), with no leader
+                # lease, and each one INCRs. So the 3-miss threshold is
+                # reached in about 3/N wall-clock ticks, not 3. The atomic
+                # INCR still makes exactly one caller observe
                 # ``== THRESHOLD``, so the transition stays single-fire.
                 misses = redis.incr(misses_key)
                 redis.expire(misses_key, _MISS_COUNTER_TTL_SECONDS)
@@ -402,7 +403,12 @@ async def run_heartbeat_watch_loop(interval_seconds: int = HEARTBEAT_WATCH_INTER
     while True:
         try:
             with loop_health.tick("heartbeat_watch"):
-                for name, kind in process_watch_tick():
+                # #4674: the tick lists every agent container and reads Redis,
+                # all synchronously. On the event loop it blocked the worker —
+                # measured at 208 ms with 55 containers, every 5 s, in every
+                # worker (the probe's first attribution on a live instance).
+                transitions = await run_blocking(process_watch_tick)
+                for name, kind in transitions:
                     await _emit_heartbeat_alert(name, kind)
         except Exception:  # noqa: BLE001 — loop must never die
             logger.exception("heartbeat watch tick raised unexpectedly")

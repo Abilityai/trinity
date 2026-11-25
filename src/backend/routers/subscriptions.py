@@ -55,7 +55,13 @@ async def get_encryption_status(
 async def register_subscription(
     payload: SubscriptionCredentialCreate,
     http_request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    connect_agents: bool = Query(
+        True,
+        description="False: register only, and move no existing agent onto it (neither the "
+                    "first-credential connect nor the credential-less adoption sweep runs). The "
+                    "assistant's card saves this way and asks the person first (trinity-enterprise#1354).",
+    ),
 ):
     """
     Register a new subscription token.
@@ -136,6 +142,10 @@ async def register_subscription(
         # never restarts one mid-execution. Run second, it would find nothing
         # left to assign, report `connected_agents: 0` to the first-run step,
         # and leave the restarts to the broader phase below.
+        # trinity-enterprise#1354: `connect_agents=false` (the assistant's card)
+        # registers only; that caller asks the person before any agent moves.
+        if not connect_agents:
+            return SubscriptionRegistration(**subscription.model_dump(), connected_agents=0)
         connected = connect_agents_to_first_credential(subscription.id) if first_credential else 0
 
         try:

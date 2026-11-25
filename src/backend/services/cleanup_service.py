@@ -874,6 +874,8 @@ class CleanupReport:
     rate_limit_events_pruned: int = 0
     # trinity-enterprise#478: recorded metric points deleted past their window.
     metric_points_pruned: int = 0
+    # trinity-enterprise#165: guardrail events deleted past their window.
+    guardrail_events_pruned: int = 0
     # Issue #1804: dispatch activities closed by a recovery path that won the
     # terminal CAS (watchdog, startup recovery, the bulk sweeps). Post-merge
     # signal: `stale_activities` should trend to ~0 while this picks up the
@@ -910,7 +912,8 @@ class CleanupReport:
                 self.operator_queue_pruned + self.ssh_credentials_expired +
                 self.agent_reminders_pruned +
                 self.headroom_history_pruned + self.rate_limit_events_pruned +
-                self.results_recovered + self.metric_points_pruned)
+                self.results_recovered + self.metric_points_pruned +
+                self.guardrail_events_pruned)
     # NOTE (#1804): activities_closed_on_recovery is deliberately NOT summed
     # into `total` — it is an observability counter over work already counted
     # by the sweep that closed the execution, not additional cleanup work.
@@ -951,6 +954,7 @@ class CleanupReport:
             "headroom_history_pruned": self.headroom_history_pruned,
             "rate_limit_events_pruned": self.rate_limit_events_pruned,
             "metric_points_pruned": self.metric_points_pruned,
+            "guardrail_events_pruned": self.guardrail_events_pruned,
             "activities_closed_on_recovery": self.activities_closed_on_recovery,
             "total": self.total,
         }
@@ -1055,6 +1059,7 @@ class CleanupService:
         self._sweep_agent_reminders_retention(report)
         self._sweep_headroom_history(report)
         self._sweep_metric_points(report)
+        self._sweep_guardrail_events_retention(report)
         await self._sweep_soft_deleted_agents(report)
         await self._sweep_orphan_agent_volumes(report)
         await self._sweep_ephemeral_agents(report)
@@ -1530,6 +1535,37 @@ class CleanupService:
                     )
         except Exception as e:
             logger.error(f"[Cleanup] Error pruning metric points: {e}")
+
+    def _sweep_guardrail_events_retention(self, report: CleanupReport) -> None:
+        """Delete guardrail events past their window (trinity-enterprise#165, D10).
+
+        Keyed on `received_at` — the server's clock — because `occurred_at` is
+        agent-reported and a far-future value would make a row immortal. The
+        AGENT_REFS CASCADE cleans on agent delete; this bounds a LIVE agent.
+        `0` disables; gated through the #1644 blast-radius guard.
+        """
+        days = _read_retention_setting("guardrail_event_retention_days")
+        if days <= 0:
+            return
+        try:
+            if _guard_allows(
+                "guardrail_event_retention_days", "guardrail_events", days,
+                lambda limit: db.count_guardrail_event_candidates(days, limit),
+            ):
+                pruned = db.prune_guardrail_events(
+                    retention_days=days,
+                    chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
+                )
+                report.guardrail_events_pruned = pruned
+                _after_guarded_prune("guardrail_event_retention_days")
+                if pruned > 0:
+                    _log_prune(
+                        pruned,
+                        f"[Cleanup] Deleted {pruned} guardrail_events rows older "
+                        f"than {days} days (trinity-enterprise#165)",
+                    )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error pruning guardrail events: {e}")
 
     def _sweep_shared_files(self, report: CleanupReport) -> None:
         """4b. Purge expired / old-revoked shared files (C4 / FILES-001).
@@ -2409,7 +2445,8 @@ class CleanupService:
                            + report.agent_reminders_pruned  # #1296 — was omitted
                            + report.headroom_history_pruned      # ent#433
                            + report.rate_limit_events_pruned    # ent#433
-                           + report.metric_points_pruned)       # ent#478
+                           + report.metric_points_pruned        # ent#478
+                           + report.guardrail_events_pruned)    # ent#165
         if retention_total > 0:
             try:
                 _wal_checkpoint_truncate()

@@ -244,6 +244,7 @@ from .execution_classification import (  # noqa: F401
     _salvage_attempt_cost,
     classify_switch_failure,
     detect_unresolved_slash_command,
+    is_turn_refusal,
 )
 
 
@@ -3328,10 +3329,15 @@ class TaskExecutionService:
         # rejection answers 503 (zero tokens), so the status test below would
         # otherwise switch on it and code it AUTH for the dispatch breaker.
         credential_independent = is_turn_limit(error_msg) or is_prompt_too_long(error_msg)
+        # trinity-enterprise#1176: a typed turn refusal carries free text (a
+        # schedule's name, a creator's label) that `is_auth_failure` below
+        # would read as an auth word. No credential changes a refusal.
+        turn_refused = is_turn_refusal(getattr(e, "response", None))
         if (
             not state.subscription_switch_attempted
             and not model_rejected
             and not credential_independent
+            and not turn_refused
         ):
             try:
                 from services.subscription_auto_switch import (

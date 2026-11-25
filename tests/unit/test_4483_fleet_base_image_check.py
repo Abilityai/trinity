@@ -323,6 +323,12 @@ def _cycle(monkeypatch, redis):
         return {"status": "current"}
     monkeypatch.setattr(fis, "run_once", run_once)
     monkeypatch.setattr(fis, "_redis", lambda: redis)
+    # trinity-enterprise#1176: the same cycle runs the managed-hooks check.
+    from services import managed_hooks_check_service
+
+    async def hooks_once():
+        return {"status": "clear"}
+    monkeypatch.setattr(managed_hooks_check_service, "run_once", hooks_once)
     service = fis.FleetImageCheckService()
     asyncio.run(service.run_cycle())
     return ran, service
