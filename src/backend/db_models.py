@@ -1101,6 +1101,24 @@ class HeadroomWindow(BaseModel):
     status: Optional[str] = None             # provider's per-window status (e.g. "allowed")
 
 
+class EnforcingWindow(BaseModel):
+    """The window currently enforcing a rate limit (#4656).
+
+    Present only when the provider reported at least one window; absent
+    (None) when the provider gave no enforcing figure — never fabricated.
+    `basis` names why this window was selected:
+      "blocking_status"      — window status is not in the non-blocking set
+      "representative_claim" — provider's own representative-claim header named it
+      "highest_utilization"  — window with the highest utilization among non-blocking windows
+    """
+    window: str                              # key into the windows dict ("five_hour", "seven_day", ...)
+    basis: str                               # "blocking_status" | "representative_claim" | "highest_utilization"
+    utilization_pct: Optional[float] = None
+    remaining_pct: Optional[float] = None   # max(0, 100 - utilization_pct); None when utilization absent
+    resets_at: Optional[str] = None         # ISO-Z
+    status: Optional[str] = None
+
+
 class SubscriptionHeadroom(BaseModel):
     """Provider-truth headroom snapshot for one subscription (#471).
 
@@ -1109,6 +1127,8 @@ class SubscriptionHeadroom(BaseModel):
     """
     five_hour: Optional[HeadroomWindow] = None
     seven_day: Optional[HeadroomWindow] = None
+    windows: Dict[str, Any] = Field(default_factory=dict)  # all discovered windows (#4656)
+    enforcing: Optional[EnforcingWindow] = None             # the binding window (#4656); null when absent
     representative_claim: Optional[str] = None  # which window binds ("five_hour"/"seven_day")
     overage_status: Optional[str] = None
     fetched_at: Optional[str] = None            # ISO-Z of the probe
