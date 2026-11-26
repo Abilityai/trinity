@@ -124,6 +124,7 @@ from .opencode_provider import (
     require_openrouter_key,
 )
 from .process_registry import get_process_registry
+from . import turn_scope
 from .runtime_adapter import (
     AgentRuntime,
     RuntimeCapabilities,
@@ -136,6 +137,9 @@ from .subprocess_lifecycle import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The name a person reads in a refusal (`turn_scope`).
+RUNTIME_LABEL = "OpenCode"
 
 _AGENT_HOME = "/home/developer"
 _READ_ONLY_CONFIG = Path(_AGENT_HOME) / ".trinity" / "read-only-config.json"
@@ -1797,6 +1801,11 @@ class OpenCodeRuntime(AgentRuntime):
                 status_code=503,
                 detail="OpenCode CLI is not available in this container",
             )
+        # ent#1384: nothing here holds a shared person's turn to that person's
+        # reach, so it is refused before the CLI starts, as on Gemini CLI and
+        # Codex (ent#926). The turn's tool policy (`apply_tool_policy`) is the
+        # agent's read-only mode and guardrails, not a per-person fence.
+        await turn_scope.require_owner_tier(RUNTIME_LABEL, execution_id)
 
         guardrails = _load_guardrails()
         timeout_seconds = int(
@@ -1952,6 +1961,11 @@ class OpenCodeRuntime(AgentRuntime):
                 status_code=503,
                 detail="OpenCode CLI is not available in this container",
             )
+        # ent#1384: nothing here holds a shared person's turn to that person's
+        # reach, so it is refused before the CLI starts, as on Gemini CLI and
+        # Codex (ent#926). The turn's tool policy (`apply_tool_policy`) is the
+        # agent's read-only mode and guardrails, not a per-person fence.
+        await turn_scope.require_owner_tier(RUNTIME_LABEL, execution_id)
         if allowed_tools:
             logger.info(
                 "[OpenCode] allowed_tools=%s requested; per-tool gating lands in "

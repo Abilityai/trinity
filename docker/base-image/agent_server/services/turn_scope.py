@@ -5,8 +5,11 @@ On Claude Code the turn-tier hook (`/opt/trinity/hooks/turn-tier-guard.py`)
 holds a turn for a person the agent is merely shared with to the paths the
 Files API allows them, and gives it no shell. Gemini CLI and Codex run no Claude
 Code hooks, and their own sandboxes need user namespaces the container does not
-grant (see `codex_runtime._resolve_sandbox_mode`). So on those runtimes such a
-turn is refused before the CLI starts, with a reason that names what to do. A
+grant (see `codex_runtime._resolve_sandbox_mode`). OpenCode runs no Claude Code
+hooks either, and its per-turn tool policy is the agent's read-only mode and
+guardrails, not a fence for one person (trinity-enterprise#1384). So on those
+runtimes such a turn is refused before the CLI starts, with a reason that names
+what to do. A
 channel or public-link visitor's turn runs while the owner leaves the
 `visitor_shell` guardrail on (the default); the platform's `shell` answer says.
 

@@ -1,6 +1,16 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1384_opencode_turn_scope.py",
+      "feature": "abilityai/trinity-enterprise#1384",
+      "added": "2026-11-26",
+      "categories": [
+        "agent",
+        "security"
+      ],
+      "description": "An OpenCode agent refuses a turn it cannot hold to a shared person's reach, before the CLI starts, as Gemini CLI and Codex do (ent#926). OpenCodeRuntime.execute and execute_headless call turn_scope.require_owner_tier: a shared person's turn, a turn the platform cannot place, a limited visitor and a schedule rated below the owner are refused with 403 turn_refused naming OpenCode (the schedule one by its name); no answer is a 503; the owner, a member, a delegated turn and an allowed visitor reach the spawn; a call with no execution id asks nobody. The isolated-session chat branch is covered. AST scans: every call of a runtime's execute / execute_headless in the agent server passes execution_id (four sites: sync chat, task push, pull claim, result callback); nothing outside opencode_runtime reaches its private spawn methods; every runtime module the factory imports calls the gate as a top-level statement of both entry points before anything is awaited, or is listed in HELD_ANOTHER_WAY (Claude Code, the hook). The scan is checked against a runtime that does not ask, one that asks late, one missing an entry point, and a factory with a fifth runtime."
+    },
+    {
       "file": "unit/test_ent978_narrowed_read_marker.py",
       "feature": "trinity-enterprise#978",
       "added": "2026-11-24",

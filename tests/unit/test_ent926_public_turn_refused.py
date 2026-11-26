@@ -26,7 +26,7 @@ pytestmark = pytest.mark.unit
 def _refusals():
     from agent_server.services import managed_hooks, turn_scope
     out = []
-    for runtime in ("Gemini CLI", "Codex"):
+    for runtime in ("Gemini CLI", "Codex", "OpenCode"):
         out.append(turn_scope.REFUSED.format(runtime=runtime))
         out.append(turn_scope.REFUSED_VISITOR.format(runtime=runtime))
     # trinity-enterprise#1176: a Claude agent whose guardrails are not running.
