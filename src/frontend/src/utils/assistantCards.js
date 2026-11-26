@@ -352,14 +352,20 @@ export function validUseClaude(raw, fleet) {
  * offered "this API key" after a subscription was saved; the confirm was refused.
  * `saved`: the kind this conversation's Claude card saved last. `held`: what the
  * instance holds ("subscription", "api_key", "subscription_and_api_key", null),
- * or undefined when it could not be read. Answers the kind, or null when the
- * instance holds none, so there is nothing a confirm could switch them onto.
+ * or undefined when it could not be read. `off`: when both are held, per kind
+ * the agents not on it (`not_using` ∪ `moving`, which is what the switch
+ * accepts), or undefined when that could not be read. Answers the kind, or null
+ * when no kind's confirm could succeed: the instance holds none, or, holding
+ * both, the agents on the card are not all off either one.
  */
-export function claudeKindFor(card, { saved, held } = {}) {
+export function claudeKindFor(card, { saved, held, off } = {}) {
   if (Object.hasOwn(CLAUDE_KINDS, saved || '')) return saved
   if (held === null) return null
   if (Object.hasOwn(CLAUDE_KINDS, held || '')) return held
-  return card.kind        // both held, or unreadable: either kind is one the instance may hold
+  if (!off) return card.kind      // unreadable: the instance could not say
+  const covers = (kind) => Array.isArray(off[kind]) && card.agents.every((n) => off[kind].includes(n))
+  const other = card.kind === 'subscription' ? 'api_key' : 'subscription'
+  return [card.kind, other].find(covers) || null
 }
 
 /** What the instance said about its existing agents, in the words the assistant is given: names, never a value. */

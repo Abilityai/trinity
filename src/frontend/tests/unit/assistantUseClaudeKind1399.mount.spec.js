@@ -24,6 +24,7 @@ const ALLOWANCE = { plan: 'free', period_hours: 24, messages_left: 24, messages_
 const calls = []
 let turns
 let held          // what the instance holds: null, 'subscription', 'api_key', 'subscription_and_api_key'
+let off           // per kind, the agents not on it (credential._report: not_using ∪ moving), or null: unreadable
 
 vi.mock('@/api', () => {
   const respond = (method, url, body, config) => {
@@ -44,12 +45,22 @@ vi.mock('@/api', () => {
       return { provided: true, agent: null, name: body.name, replaced: false, working: true, connected_agents: 0,
         kind, not_using: [{ name: 'scout', model_access: false }], moving: [] }
     }
+    if (url === '/api/enterprise/assistant/credential/agents') {
+      if (off === null) throw { response: { status: 502 } }
+      const kind = config?.params?.kind
+      return { kind, not_using: off[kind].map((name) => ({ name, model_access: false })), moving: [] }
+    }
     if (url === '/api/enterprise/assistant/credential/use') {
-      // The instance's own refusal (credential.use): a kind it does not hold.
+      // The instance's own refusals (credential.use), in its order: a kind it
+      // does not hold (409), then an agent not among those off that kind (422).
       const has = held === body.kind || held === 'subscription_and_api_key'
+      const words = body.kind === 'api_key' ? 'Anthropic API key' : 'Claude subscription'
       if (!has) {
-        const words = body.kind === 'api_key' ? 'Anthropic API key' : 'Claude subscription'
         throw { response: { status: 409, data: { detail: { code: 'no_credential', message: `This instance has no ${words} to switch them to. Nothing was changed.` } } } }
+      }
+      const extra = body.agents.filter((n) => !(off?.[body.kind] || []).includes(n))
+      if (extra.length) {
+        throw { response: { status: 422, data: { detail: { code: 'not_listed', message: `Not among the agents off ${words}: ${extra.join(', ')}. Nothing was changed.` } } } }
       }
       return { kind: body.kind, now_using: body.agents, not_switched: [] }
     }
@@ -111,6 +122,7 @@ describe('the use-claude card names the kind that was saved (ent#1399)', () => {
     calls.length = 0
     turns = []
     held = null
+    off = { subscription: ['scout'], api_key: ['scout'] }     // scout is on neither yet
     localStorage.clear()
     sessionStorage.clear()
     setActivePinia(createPinia())
@@ -163,10 +175,42 @@ describe('the use-claude card names the kind that was saved (ent#1399)', () => {
       expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'api_key', agents: ['scout'] }])
     })
 
-    it('holding both, it keeps the kind the assistant named', async () => {
+    // ent#1399 (validation of d456e08): holding both, the card names the kind
+    // scout is off, so its confirm is never refused with not_listed.
+    it.each([
+      ['on the API key', 'api_key', 'subscription', 'this subscription'],
+      ['on the subscription', 'subscription', 'api_key', 'this API key'],
+    ])('holding both, with scout %s, the card names the other kind whatever the model sent', async (_on, onKind, offKind, words) => {
+      held = 'subscription_and_api_key'
+      off = { [onKind]: [], [offKind]: ['scout'] }
+      await offer(onKind)
+      expect(useCard().text()).toContain(`Use ${words} on these agents: scout`)
+      await confirm()
+      expect(posted(USE).map((c) => c.body)).toEqual([{ kind: offKind, agents: ['scout'] }])
+      expect(posted(TURN).at(-1).body.message).toBe(`Done: Use ${words} on these agents: scout. Now on it: scout.`)
+    })
+
+    it('holding both, with scout off both, it keeps the kind the assistant named and the confirm succeeds', async () => {
       held = 'subscription_and_api_key'
       await offer('api_key')
       expect(useCard().text()).toContain('Use this API key on these agents: scout')
+      await confirm()
+      expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'api_key', agents: ['scout'] }])
+    })
+
+    it('holding both, with scout off neither, no card is shown: either confirm would be refused', async () => {
+      held = 'subscription_and_api_key'
+      off = { subscription: [], api_key: [] }
+      await offer('api_key')
+      expect(useCard()).toBeUndefined()
+      expect(posted(USE)).toHaveLength(0)
+    })
+
+    it('holding both, when the instance cannot say which agents are off each, it keeps the kind the assistant named', async () => {
+      held = 'subscription_and_api_key'
+      off = null
+      await offer('subscription')
+      expect(useCard().text()).toContain('Use this subscription on these agents: scout')
     })
 
     it('holding none, no card is shown: its confirm could only be refused', async () => {

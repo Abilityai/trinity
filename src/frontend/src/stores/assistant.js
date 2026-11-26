@@ -476,8 +476,8 @@ export const useAssistantStore = defineStore('assistant', {
         // ent#1399: a switch names the kind the instance saved or holds, never the assistant's guess.
         const kinds = accepted.some((c) => c.action === 'use-claude') ? await this.claudeKinds() : {}
         const cards = accepted
-          .map((c) => (c.action === 'use-claude'
-            ? { ...c, kind: claudeKindFor(c, kinds), agents: c.agents.filter((n) => !hidden.has(n)) } : c))
+          .map((c) => (c.action === 'use-claude' ? { ...c, agents: c.agents.filter((n) => !hidden.has(n)) } : c))
+          .map((c) => (c.action === 'use-claude' ? { ...c, kind: claudeKindFor(c, kinds) } : c))
           .filter((c) => c.action !== 'use-claude' || (c.kind && c.agents.length > 0))
         const reply = {
           id: newId(),
@@ -674,17 +674,33 @@ export const useAssistantStore = defineStore('assistant', {
      * ent#1399: which Claude credential a switch card may name. `saved` is the
      * kind this conversation's Claude card saved last, as the save reported it;
      * only when there is none is the instance asked what it holds (`held`:
-     * undefined when it could not say).
+     * undefined when it could not say). Holding both, it is also asked which
+     * agents are off each (`off`), so the card can name the kind its confirm
+     * would be accepted for (the switch refuses any other agent, not_listed).
      */
     async claudeKinds() {
       const entries = this.messages.flatMap((m) => m.cards || [])
       const saved = entries.filter((e) => claudeCard(e.card) && e.state === 'done' && Object.hasOwn(CLAUDE_KINDS, e.kind || '')).at(-1)?.kind
       if (saved) return { saved }
+      let held
       try {
         const { data } = await api.get(`${BASE}/credential`, { params: { name: 'CLAUDE_SUBSCRIPTION' } })
-        return { held: typeof data?.current === 'string' || data?.current === null ? data.current : undefined }
+        held = typeof data?.current === 'string' || data?.current === null ? data.current : undefined
       } catch {
         return { held: undefined }
+      }
+      if (held !== 'subscription_and_api_key') return { held }
+      try {
+        const reports = await Promise.all(Object.keys(CLAUDE_KINDS).map((kind) =>
+          api.get(`${BASE}/credential/agents`, { params: { kind } }).then(({ data }) => [kind, data])))
+        const off = {}
+        for (const [kind, data] of reports) {
+          if (!Array.isArray(data?.not_using) || !Array.isArray(data?.moving)) return { held }
+          off[kind] = [...data.not_using.map((r) => r?.name), ...data.moving].filter((n) => typeof n === 'string')
+        }
+        return { held, off }
+      } catch {
+        return { held }
       }
     },
 
