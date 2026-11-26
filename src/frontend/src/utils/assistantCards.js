@@ -352,20 +352,27 @@ export function validUseClaude(raw, fleet) {
  * offered "this API key" after a subscription was saved; the confirm was refused.
  * `saved`: the kind this conversation's Claude card saved last. `held`: what the
  * instance holds ("subscription", "api_key", "subscription_and_api_key", null),
- * or undefined when it could not be read. `off`: when both are held, per kind
- * the agents not on it (`not_using` ∪ `moving`, which is what the switch
- * accepts), or undefined when that could not be read. Answers the kind, or null
- * when no kind's confirm could succeed: the instance holds none, or, holding
- * both, the agents on the card are not all off either one.
+ * or undefined when it could not be read. `off`: per kind, the agents not on it
+ * (`not_using` ∪ `moving`, which is what the switch accepts) — from the save's
+ * own report for a saved kind, from the instance's list otherwise — or undefined
+ * when that could not be read. Answers the card with the kind and only the
+ * agents its confirm would be accepted for, or null when none is left: the
+ * instance holds no kind, or every agent on the card is already on it.
  */
-export function claudeKindFor(card, { saved, held, off } = {}) {
-  if (Object.hasOwn(CLAUDE_KINDS, saved || '')) return saved
-  if (held === null) return null
-  if (Object.hasOwn(CLAUDE_KINDS, held || '')) return held
-  if (!off) return card.kind      // unreadable: the instance could not say
-  const covers = (kind) => Array.isArray(off[kind]) && card.agents.every((n) => off[kind].includes(n))
-  const other = card.kind === 'subscription' ? 'api_key' : 'subscription'
-  return [card.kind, other].find(covers) || null
+export function claudeSwitchFor(card, { saved, held, off } = {}) {
+  const listed = (kind) => (off && Array.isArray(off[kind]) ? card.agents.filter((n) => off[kind].includes(n)) : card.agents)
+  let kind
+  if (Object.hasOwn(CLAUDE_KINDS, saved || '')) kind = saved
+  else if (held === null) return null
+  else if (Object.hasOwn(CLAUDE_KINDS, held || '')) kind = held
+  else if (!off) kind = card.kind      // unreadable: the instance could not say
+  else {
+    // Holding both: the kind most of the card's agents are off, the one named on a tie.
+    const other = card.kind === 'subscription' ? 'api_key' : 'subscription'
+    kind = listed(other).length > listed(card.kind).length ? other : card.kind
+  }
+  const agents = listed(kind)
+  return agents.length ? { ...card, kind, agents } : null
 }
 
 /** What the instance said about its existing agents, in the words the assistant is given: names, never a value. */

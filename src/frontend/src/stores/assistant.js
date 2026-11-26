@@ -21,7 +21,7 @@ import { defineStore } from 'pinia'
 import api from '../api'
 import { useOnboardingStore } from './onboarding'
 import { buildContext, buildFleet, describePage } from '../utils/assistantContext'
-import { acceptCards, buildOutcome, cardButton, cardLabel, cardNote, CLAUDE_KINDS, claudeCard, claudeKindFor, credentialLine, outcomeLine, runCard, useClaude, validBuild, webLink } from '../utils/assistantCards'
+import { acceptCards, buildOutcome, cardButton, cardLabel, cardNote, CLAUDE_KINDS, claudeCard, claudeSwitchFor, credentialLine, outcomeLine, runCard, useClaude, validBuild, webLink } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
 import { useAuthStore } from './auth'
 import { useFirstRunStore } from './firstRun'
@@ -473,12 +473,13 @@ export const useAssistantStore = defineStore('assistant', {
         // ent#1390: a switch is never offered for an agent the person cannot see.
         const hidden = this.outOfSight(after)
         const accepted = acceptCards(data.cards, after)
-        // ent#1399: a switch names the kind the instance saved or holds, never the assistant's guess.
+        // ent#1399: a switch names the kind the instance saved or holds, never the
+        // assistant's guess, and only agents its confirm would be accepted for.
         const kinds = accepted.some((c) => c.action === 'use-claude') ? await this.claudeKinds() : {}
         const cards = accepted
           .map((c) => (c.action === 'use-claude' ? { ...c, agents: c.agents.filter((n) => !hidden.has(n)) } : c))
-          .map((c) => (c.action === 'use-claude' ? { ...c, kind: claudeKindFor(c, kinds) } : c))
-          .filter((c) => c.action !== 'use-claude' || (c.kind && c.agents.length > 0))
+          .map((c) => (c.action === 'use-claude' && c.agents.length > 0 ? claudeSwitchFor(c, kinds) : c))
+          .filter((c) => c && (c.action !== 'use-claude' || c.agents.length > 0))
         const reply = {
           id: newId(),
           role: 'assistant',
@@ -671,17 +672,22 @@ export const useAssistantStore = defineStore('assistant', {
     },
 
     /**
-     * ent#1399: which Claude credential a switch card may name. `saved` is the
-     * kind this conversation's Claude card saved last, as the save reported it;
-     * only when there is none is the instance asked what it holds (`held`:
-     * undefined when it could not say). Holding both, it is also asked which
-     * agents are off each (`off`), so the card can name the kind its confirm
-     * would be accepted for (the switch refuses any other agent, not_listed).
+     * ent#1399: which Claude credential a switch card may name, and which agents
+     * its confirm would accept (the switch refuses any other agent, not_listed).
+     * `saved` is the kind this conversation's Claude card saved last, with that
+     * save's own lists; only when there is none is the instance asked what it
+     * holds (`held`: undefined when it could not say) and, per kind held, which
+     * agents are off it. `off` is undefined when no list could be read.
      */
     async claudeKinds() {
       const entries = this.messages.flatMap((m) => m.cards || [])
-      const saved = entries.filter((e) => claudeCard(e.card) && e.state === 'done' && Object.hasOwn(CLAUDE_KINDS, e.kind || '')).at(-1)?.kind
-      if (saved) return { saved }
+      const save = entries.filter((e) => claudeCard(e.card) && e.state === 'done' && Object.hasOwn(CLAUDE_KINDS, e.kind || '')).at(-1)
+      if (save) {
+        const off = Array.isArray(save.notUsing) && Array.isArray(save.moving)
+          ? { [save.kind]: [...save.notUsing.map((r) => r.name), ...save.moving] }
+          : undefined
+        return { saved: save.kind, off }
+      }
       let held
       try {
         const { data } = await api.get(`${BASE}/credential`, { params: { name: 'CLAUDE_SUBSCRIPTION' } })
@@ -689,9 +695,10 @@ export const useAssistantStore = defineStore('assistant', {
       } catch {
         return { held: undefined }
       }
-      if (held !== 'subscription_and_api_key') return { held }
+      const kinds = held === 'subscription_and_api_key' ? Object.keys(CLAUDE_KINDS) : Object.hasOwn(CLAUDE_KINDS, held || '') ? [held] : []
+      if (!kinds.length) return { held }
       try {
-        const reports = await Promise.all(Object.keys(CLAUDE_KINDS).map((kind) =>
+        const reports = await Promise.all(kinds.map((kind) =>
           api.get(`${BASE}/credential/agents`, { params: { kind } }).then(({ data }) => [kind, data])))
         const off = {}
         for (const [kind, data] of reports) {

@@ -14,7 +14,7 @@
  * When it holds none, no card is shown, because its confirm could only be
  * refused.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
@@ -24,14 +24,18 @@ const ALLOWANCE = { plan: 'free', period_hours: 24, messages_left: 24, messages_
 const calls = []
 let turns
 let held          // what the instance holds: null, 'subscription', 'api_key', 'subscription_and_api_key'
-let off           // per kind, the agents not on it (credential._report: not_using ∪ moving), or null: unreadable
+let off           // per kind, the agents not on it (credential._report: not_using), or null: unreadable
+let moving        // per kind, the agents already moving onto it (credential._report: moving)
+let seeded        // the example agents the instance seeded; hidden from the person during the first session
 
 vi.mock('@/api', () => {
   const respond = (method, url, body, config) => {
     calls.push({ method, url, body, params: config?.params })
     if (url === '/api/enterprise/assistant/status') {
-      return { available: true, contacted: true, reachable: true, plan: 'free', email: null, allowance: null, trial_terms: { version: 't0', url: '', accepted: 't0' }, profile_known: true }
+      return { available: true, contacted: true, reachable: true, plan: 'free', email: null, allowance: null, trial_terms: { version: 't0', url: '', accepted: 't0' }, profile_known: true,
+        ...(seeded.length ? { leads_setup: true } : {}) }
     }
+    if (url === '/api/onboarding/first-run') return { first_run: false, seeded_agents: seeded, own_agent_count: 1 }
     if (url === '/api/enterprise/assistant/turn' || url === '/api/enterprise/assistant/turn/continue') {
       return turns.shift() || { status: 'final', conversation_id: 'c1', text: 'Thanks.', cards: [], allowance: ALLOWANCE }
     }
@@ -43,12 +47,12 @@ vi.mock('@/api', () => {
       const kind = body.value.startsWith('sk-ant-api') ? 'api_key' : 'subscription'
       held = held && held !== kind ? 'subscription_and_api_key' : kind
       return { provided: true, agent: null, name: body.name, replaced: false, working: true, connected_agents: 0,
-        kind, not_using: [{ name: 'scout', model_access: false }], moving: [] }
+        kind, not_using: (off?.[kind] || []).map((name) => ({ name, model_access: false })), moving: moving[kind] }
     }
     if (url === '/api/enterprise/assistant/credential/agents') {
       if (off === null) throw { response: { status: 502 } }
       const kind = config?.params?.kind
-      return { kind, not_using: off[kind].map((name) => ({ name, model_access: false })), moving: [] }
+      return { kind, not_using: off[kind].map((name) => ({ name, model_access: false })), moving: moving[kind] }
     }
     if (url === '/api/enterprise/assistant/credential/use') {
       // The instance's own refusals (credential.use), in its order: a kind it
@@ -58,13 +62,13 @@ vi.mock('@/api', () => {
       if (!has) {
         throw { response: { status: 409, data: { detail: { code: 'no_credential', message: `This instance has no ${words} to switch them to. Nothing was changed.` } } } }
       }
-      const extra = body.agents.filter((n) => !(off?.[body.kind] || []).includes(n))
+      const extra = body.agents.filter((n) => ![...(off?.[body.kind] || []), ...moving[body.kind]].includes(n))
       if (extra.length) {
         throw { response: { status: 422, data: { detail: { code: 'not_listed', message: `Not among the agents off ${words}: ${extra.join(', ')}. Nothing was changed.` } } } }
       }
       return { kind: body.kind, now_using: body.agents, not_switched: [] }
     }
-    if (url === '/api/agents') return [{ name: 'scout', status: 'running' }]
+    if (url === '/api/agents') return [{ name: 'scout', status: 'running' }, { name: 'scribe', status: 'running' }, ...seeded.map((name) => ({ name, status: 'stopped' }))]
     if (url === '/api/agents/autonomy-status') return {}
     if (url === '/api/ops/schedules') return { schedules: [] }
     return {}
@@ -86,7 +90,7 @@ const TURN = '/api/enterprise/assistant/turn'
 const USE = '/api/enterprise/assistant/credential/use'
 // The gateway's first-session script asks under ANTHROPIC_API_KEY (gateway/prompt.py step 8).
 const ASK = { action: 'credential', name: 'ANTHROPIC_API_KEY', why: 'Your agent runs on Claude, and this connects it.' }
-const switchCard = (kind) => ({ action: 'use-claude', kind, agents: ['scout'] })
+const switchCard = (kind, agents = ['scout']) => ({ action: 'use-claude', kind, agents })
 const final = (text, cards = []) => ({ status: 'final', conversation_id: 'c1', text, cards, allowance: ALLOWANCE })
 const posted = (url) => calls.filter((c) => c.url === url && c.method === 'post')
 
@@ -103,9 +107,9 @@ describe('the use-claude card names the kind that was saved (ent#1399)', () => {
   }
   // Step 8 then 8a of the first-session script: the Claude card, the paste,
   // then the model's follow-up card with whatever kind the model chose.
-  const connectThenOffer = async (value, modelKind) => {
+  const connectThenOffer = async (value, modelKind, agents) => {
     turns = [final('Paste the token in the field below.', [ASK]),
-      final('scout is not on it yet. Shall I switch it?', [switchCard(modelKind)])]
+      final('scout is not on it yet. Shall I switch it?', [switchCard(modelKind, agents)])]
     await wrapper.get('[data-testid="assistant-launcher"]').trigger('click')
     await flushPromises()
     await say('build it')
@@ -118,13 +122,8 @@ describe('the use-claude card names the kind that was saved (ent#1399)', () => {
     await flushPromises()
   }
 
-  beforeEach(() => {
-    calls.length = 0
-    turns = []
-    held = null
-    off = { subscription: ['scout'], api_key: ['scout'] }     // scout is on neither yet
-    localStorage.clear()
-    sessionStorage.clear()
+  // The page as it loads: status and the seeded examples are read on mount.
+  const open = () => {
     setActivePinia(createPinia())
     wrapper = mount(AssistantWidget, {
       attachTo: document.body,
@@ -133,7 +132,20 @@ describe('the use-claude card names the kind that was saved (ent#1399)', () => {
         HelpChatWidget: { template: '<div />' },
       } },
     })
+  }
+
+  beforeEach(() => {
+    calls.length = 0
+    turns = []
+    held = null
+    off = { subscription: ['scout'], api_key: ['scout'] }     // scout is on neither yet
+    moving = { subscription: [], api_key: [] }
+    seeded = []
+    localStorage.clear()
+    sessionStorage.clear()
+    open()
   })
+  afterEach(() => wrapper.unmount())
 
   describe.each([
     ['a subscription token', TOKEN, 'subscription', 'this subscription'],
@@ -159,9 +171,37 @@ describe('the use-claude card names the kind that was saved (ent#1399)', () => {
     expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'subscription', agents: ['scout'] }])
   })
 
+  // ent#1399 (validation EaTT0dhdFseLaORl5bCuZA): the save's own lists say
+  // which agents its switch accepts; one it did not list is never offered.
+  describe("after a save, the card holds only agents the save listed", () => {
+    it('an agent the save did not list is left off the card, and the confirm succeeds', async () => {
+      await connectThenOffer(TOKEN, 'api_key', ['scout', 'scribe'])
+      expect(useCard().text()).toContain('Use this subscription on these agents: scout')
+      expect(useCard().text()).not.toContain('scribe')
+      await confirm()
+      expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'subscription', agents: ['scout'] }])
+    })
+
+    it('when the save listed none of them, no card is shown', async () => {
+      off = { subscription: [], api_key: ['scout'] }
+      await connectThenOffer(TOKEN, 'subscription')
+      expect(useCard()).toBeUndefined()
+      expect(posted(USE)).toHaveLength(0)
+    })
+
+    it('an agent the save lists as moving onto it stays on the card', async () => {
+      off = { subscription: [], api_key: [] }
+      moving = { subscription: ['scout'], api_key: [] }
+      await connectThenOffer(TOKEN, 'subscription')
+      expect(useCard().text()).toContain('Use this subscription on these agents: scout')
+      await confirm()
+      expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'subscription', agents: ['scout'] }])
+    })
+  })
+
   describe('with nothing saved in this conversation', () => {
-    const offer = async (modelKind) => {
-      turns = [final('scout is not on it.', [switchCard(modelKind)])]
+    const offer = async (modelKind, agents) => {
+      turns = [final('scout is not on it.', [switchCard(modelKind, agents)])]
       await wrapper.get('[data-testid="assistant-launcher"]').trigger('click')
       await flushPromises()
       await say('why can scout not run?')
@@ -173,6 +213,49 @@ describe('the use-claude card names the kind that was saved (ent#1399)', () => {
       expect(useCard().text()).toContain('Use this API key on these agents: scout')
       await confirm()
       expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'api_key', agents: ['scout'] }])
+    })
+
+    it('holding one kind, an agent not off it is left off the card', async () => {
+      held = 'api_key'
+      await offer('api_key', ['scout', 'scribe'])
+      expect(useCard().text()).toContain('Use this API key on these agents: scout')
+      expect(useCard().text()).not.toContain('scribe')
+      await confirm()
+      expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'api_key', agents: ['scout'] }])
+      expect(calls.filter((c) => c.url.endsWith('/credential/agents')).map((c) => c.params)).toEqual([{ kind: 'api_key' }])
+    })
+
+    it('holding one kind, with every agent on the card already on it, no card is shown', async () => {
+      held = 'api_key'
+      off = { subscription: ['scout'], api_key: [] }
+      await offer('api_key')
+      expect(useCard()).toBeUndefined()
+      expect(posted(USE)).toHaveLength(0)
+    })
+
+    it('holding both, an agent only moving onto a kind counts as off it (not_using ∪ moving)', async () => {
+      held = 'subscription_and_api_key'
+      off = { subscription: [], api_key: [] }
+      moving = { subscription: ['scout'], api_key: [] }
+      await offer('api_key')
+      expect(useCard().text()).toContain('Use this subscription on these agents: scout')
+      await confirm()
+      expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'subscription', agents: ['scout'] }])
+    })
+
+    it('holding both, a hidden agent is left out before the kind is chosen', async () => {
+      // acme-scout is a hidden example. Only it is off the API key; scout is off the subscription.
+      seeded = ['acme-scout', 'acme-sage']
+      wrapper.unmount()
+      open()
+      await flushPromises()
+      held = 'subscription_and_api_key'
+      off = { subscription: ['scout'], api_key: ['acme-scout'] }
+      await offer('api_key', ['scout', 'acme-scout'])
+      expect(useCard().text()).toContain('Use this subscription on these agents: scout')
+      expect(useCard().text()).not.toContain('acme-scout')
+      await confirm()
+      expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'subscription', agents: ['scout'] }])
     })
 
     // ent#1399 (validation of d456e08): holding both, the card names the kind
