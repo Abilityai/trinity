@@ -1999,6 +1999,10 @@ watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
   // ent#551: unless the "change" is the call's own new thread being adopted —
   // `startVoiceCall` creates the thread and adopts it BEFORE the call starts,
   // and the shell's route replace lands here a moment later with that same id.
+  // #4456: words parked behind a turn that has not settled were for the agent and
+  // thread being left, and the call need not still be on for them to be waiting.
+  // Dropped before anything is awaited: the turn can settle while the call winds down.
+  if (props.agent.name !== oldName || sid !== currentSessionId.value) dropSpokenQueue()
   if (threadChangeEndsCall({
     callActive: anyCallActive.value,
     agentChanged: props.agent.name !== oldName,
@@ -3515,6 +3519,9 @@ let spokenQueue = ''
 // #4456: the call was ended with words still to send, behind a turn that had not settled.
 // They were said, so they go once it has, call or no call.
 let sendQueueAfterCall = false
+// The queue belongs to the agent and thread it was spoken in. Stop takes it back; so does
+// leaving either, whether or not the call is still on.
+function dropSpokenQueue() { spokenQueue = ''; sendQueueAfterCall = false }
 function sendSpoken(text) {
   if (sending.value) { spokenQueue = spokenQueue ? `${spokenQueue} ${text}` : text; return 'queued' }
   void submitUserText(text, { spoken: true, tags: [] }).then((res) => {
@@ -3528,7 +3535,7 @@ const direct = useDirectVoiceSession({
   onBargeIn: ({ executionId } = {}) => stopCallTurn(executionId),
   // ent#1087: a Stop is not more words. Whatever was waiting to be sent after the turn
   // stays unsent, or the cancel would land and the queue would start the next turn.
-  onStop: () => { spokenQueue = ''; sendQueueAfterCall = false },
+  onStop: dropSpokenQueue,
   // A spoken turn still being dispatched is something to stop, before its id is known.
   isBusy: () => sending.value,
   onAnswer: answerAskByVoice,

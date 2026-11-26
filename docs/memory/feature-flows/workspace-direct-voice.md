@@ -59,7 +59,13 @@ browser send() ─▶ POST …/chat/stream {voice_call_id: vd_…} ◀──┘ 
      person is talking;
    - ending the call sends what was collected (after the turn in front of it has settled,
      if there is one), except when it ends because the person left for another agent or
-     thread (`stop({flush:false})`): those words go nowhere.
+     thread (`stop({flush:false})`): those words go nowhere. The same holds for words
+     already parked in `spokenQueue` behind a settling turn: they belong to the agent and
+     thread they were spoken in, so the thread watcher drops them (`dropSpokenQueue`) on
+     any agent or thread change, before it awaits the call's end and whether or not a call
+     is still on. Adopting the conversation's own new thread is not a change. An utterance
+     still being transcribed when End is pressed is lost: `handleTranscript` ignores a
+     transcript that arrives after the call ended.
 
    `VAD.endMs` stays 850 ms: the quiet period covers a mid-sentence pause, and a longer
    endpoint would also delay yes/no and stop words. The cost is up to `GRACE_MS` before every
