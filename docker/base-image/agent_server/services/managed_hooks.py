@@ -69,6 +69,8 @@ SKILL_GATE_MARKER = "/opt/trinity/skill-gates-active"
 GATED_FALLBACK_DENIED_TOOLS = ("Skill", "Agent", "Task")
 
 RUNTIME_LABEL = "Claude Code"
+# The terminal reason of a turn refused because the platform could not be asked.
+TURN_CHECK_UNAVAILABLE = "turn_check_unavailable"
 REFUSED = (
     "This agent cannot limit what this turn may do right now, because its guardrails are not "
     "running. Only the agent's owner can use it until that is fixed."
@@ -225,7 +227,10 @@ async def require_hooks_or_owner(execution_id: Optional[str]) -> None:
     if tier == "unreachable":
         # 502, never 503: a 503 from a Claude agent reads as an auth failure on
         # every caller (the subscription walk, the AUTH breaker code).
+        # The body names its terminal reason so the async result callback does
+        # not record this as the model returning nothing (#4778).
         raise HTTPException(status_code=502,
-                            detail={"message": turn_scope.COULD_NOT_CHECK.format(runtime=RUNTIME_LABEL)})
+                            detail={"message": turn_scope.COULD_NOT_CHECK.format(runtime=RUNTIME_LABEL),
+                                    "terminal_reason": TURN_CHECK_UNAVAILABLE})
     text = schedule_refusal(schedule) if schedule else REFUSED
     raise HTTPException(status_code=403, detail={"message": text, "error_code": turn_scope.ERROR_CODE})
