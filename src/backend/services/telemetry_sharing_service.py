@@ -299,6 +299,35 @@ def is_consent_enabled() -> bool:
         return False
 
 
+def has_opted_out() -> bool:
+    """Has the operator said no to sharing? (abilityai/trinity-enterprise#1397)
+
+    "Off" has two meanings the consent flag alone cannot tell apart: never
+    asked, and asked and refused. A caller that turns sharing on for the
+    operator (an acceptance of terms that say sharing comes on with them) may
+    do so only for the first. The refusal is on record when sharing is off and
+    any of these holds:
+
+    - the consent row exists and is not ``"true"``: only ``set_consent(False)``
+      writes it, the Settings switch being turned off;
+    - a consent time is stored: sharing was on once and was switched off;
+    - the ask was dismissed: "Don't ask again" in the first-run step.
+
+    Deleting the rows (the generic settings DELETE, the reset path) returns the
+    install to "never asked". An unreadable store counts as a refusal: nothing
+    is switched on for an operator on a failed read."""
+    try:
+        stored = db.get_setting_value(KEY_ENABLED, None)
+        if stored == "true":
+            return False
+        if stored is not None:
+            return True
+        return bool(db.get_setting_value(KEY_CONSENT_AT, None)
+                    or db.get_setting_value(KEY_DISMISSED_AT, None))
+    except Exception:  # noqa: BLE001 - never opt an operator in on a read failure
+        return True
+
+
 def is_hard_disabled() -> bool:
     """Config/air-gap kill switch (``TELEMETRY_SHARING_ENABLED`` / ``DO_NOT_TRACK``)."""
     return not TELEMETRY_SHARING_ENABLED
