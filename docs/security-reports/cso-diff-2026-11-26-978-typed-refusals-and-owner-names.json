@@ -1,0 +1,112 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-26",
+  "mode": "diff",
+  "scope": "all (diff-constrained)",
+  "base": "7ce8eb1d2",
+  "issue": "trinity-enterprise#978",
+  "phases_run": [
+    0,
+    1,
+    2,
+    6,
+    7,
+    8,
+    9,
+    12,
+    13,
+    14
+  ],
+  "phases_not_applicable": {
+    "3": "no dependency change",
+    "4": "no workflow change",
+    "5": "no Docker or compose change"
+  },
+  "stack_cve_quicklist": [
+    {
+      "component": "agent CLIs in the base image",
+      "verdict": "pins unchanged by this diff"
+    }
+  ],
+  "attack_surface": {
+    "endpoints_added": 0,
+    "endpoints_removed": 0,
+    "files_api_classes_changed": [
+      "instructions (nested names, AGENTS.override.md)",
+      "runs_code (.codex/**)"
+    ],
+    "agent_context_ingress_added": 0
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "HIGH",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "resolution": "fixed in this PR",
+      "evidence": "SUPPORTED",
+      "category": "instruction-file-coverage",
+      "owasp_2025": "A01",
+      "asi": [
+        "ASI01",
+        "ASI06"
+      ],
+      "llm": "LLM01",
+      "phase": "P7",
+      "file": "src/backend/services/file_path_policy.py",
+      "line": 126,
+      "title": "Codex's AGENTS.override.md was not an instruction file name",
+      "verifier": "independent fresh-context agent: CONFIRMED 8/10"
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "H1",
+      "title": "A project .codex/config.toml in the agent home",
+      "resolution": "closed defensively in this PR: .codex joins RUNS_CODE_DIRS",
+      "missing_link": "whether codex exec applies the project config layer to an untrusted folder"
+    }
+  ],
+  "coverage_gaps": [
+    "no Docker pass (image-internal checks; agent-side 502 not exercised in a built image)",
+    "Codex project-layer trust rule not established"
+  ],
+  "supply_chain_summary": {
+    "scanner": "not run (no dependency change in the diff)"
+  },
+  "guards_run": [
+    "test_ent978_typed_refusals_and_owner_names",
+    "test_ent164_self_change_grants",
+    "test_ent820_files_tier_census",
+    "test_ent820_path_policy_parity",
+    "test_4284_no_exception_text_in_5xx",
+    "test_186_enumeration_uniformity",
+    "test_293_admin_gate_rejects_agent_keys",
+    "test_1081_pull_worker",
+    "test_4257_pull_worker_hardening",
+    "test_3012_model_rejection",
+    "test_3487_pull_subscription_walk",
+    "test_ent926_runtime_turn_scope",
+    "test_ent926_public_turn_refused",
+    "test_ent926_turn_tier_hook (macOS realpath reds; 172/173 with a lexical resolve)"
+  ],
+  "guards_result": "pass (local-only macOS hook reds explained)",
+  "filter_stats": {
+    "candidates": 4,
+    "reported": 1,
+    "hypotheses": 1,
+    "dropped": 2
+  },
+  "totals": {
+    "CRITICAL": 0,
+    "HIGH": 1,
+    "MEDIUM": 0,
+    "LOW": 0
+  },
+  "trend": {
+    "against": "cso-diff-2026-11-23-1176-managed-hooks",
+    "persistent": 0,
+    "new": 1,
+    "resolved_in_same_pr": 1
+  }
+}

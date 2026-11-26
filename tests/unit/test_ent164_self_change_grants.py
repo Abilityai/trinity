@@ -345,7 +345,13 @@ def test_spawning_a_ghost_needs_no_grant(held, audit):
     (".claude/agents/reviewer.md", False, True),
     (".claude/commands/x.md", False, True),
     (".claude/skills/x/SKILL.md", False, False),        # skills.manage alone (decided)
+    # An instruction file name inside a skill folder is instructions too (any
+    # depth, trinity-enterprise#978): Claude Code loads it when a turn works in
+    # that folder, so it takes instructions.manage as well as skills.manage.
+    (".claude/skills/x/CLAUDE.md", False, True),
     ("docs/CLAUDE.md", False, True),                     # any depth (trinity-enterprise#978)
+    ("AGENTS.override.md", False, True),                 # Codex reads it ahead of AGENTS.md
+    ("docs/AGENTS.override.md", False, True),
     ("docs/template.yaml", False, False),                # template.yaml: top level only
     ("notes.md", False, False),
     (".claude", True, True),                             # deleting .claude deletes instructions

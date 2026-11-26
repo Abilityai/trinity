@@ -140,6 +140,8 @@ ROWS = [
     (".npmrc", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
     (".gemini/extensions/ext/gemini-extension.json", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
     (".gemini/commands/deploy.toml", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
+    # trinity-enterprise#978: Codex reads a project `.codex/config.toml` (MCP servers run commands)
+    (".codex/config.toml", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
     (".bash_logout", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
     (".local", policy.DELETE, None, policy.OWNER_TIER, policy.PROTECTED),
     (".env", policy.WRITE, policy.PROTECTED, policy.PROTECTED, policy.PROTECTED),

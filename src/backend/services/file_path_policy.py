@@ -122,8 +122,9 @@ SYSTEM_PATTERNS = (
 # works in that folder, and Gemini CLI and Codex read theirs the same way, so a
 # `docs/CLAUDE.md` a shared person wrote would steer a later owner turn there.
 # Exact names: the container's filesystem is case-sensitive and the runtimes
-# load exactly these.
-INSTRUCTION_FILE_NAMES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md")
+# load exactly these. `AGENTS.override.md` is Codex's: it reads it ahead of
+# `AGENTS.md` in the same folder (the pinned 0.147.0).
+INSTRUCTION_FILE_NAMES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", "GEMINI.md")
 # `template.yaml` joins them at the top level only (ent#1006): its `metrics:`
 # block is what the UI declaration form edits, so it takes the same owner tier
 # as CLAUDE.md and the generic Files write is not a back door around the form's
@@ -151,7 +152,12 @@ RUNS_CODE_FILES = (
 # a `.pth` or `usercustomize.py` there runs at the next `python3` the agent starts.
 # ent#949: Gemini CLI loads extensions (which declare MCP server commands) and
 # custom commands from the home, and Trinity runs it with `--yolo`.
-RUNS_CODE_DIRS = (".config/git", ".local/bin", ".local/lib", ".gemini/extensions", ".gemini/commands")
+# trinity-enterprise#978: Codex reads a project `.codex/config.toml` from its
+# working directory (the home) above its own settings, and that file can
+# declare MCP servers it starts as commands. Trinity keeps Codex's own state in
+# CODEX_HOME (`.tmp/codex`, runtime config above), so `.codex` has no platform use.
+RUNS_CODE_DIRS = (".config/git", ".local/bin", ".local/lib", ".gemini/extensions", ".gemini/commands",
+                  ".codex")
 # The agent server's own code, agent-owned outside the home (ent#926): `/app` is
 # on PYTHONPATH, so a `sitecustomize.py` there runs in every python process, and
 # `startup.sh` runs at boot.
