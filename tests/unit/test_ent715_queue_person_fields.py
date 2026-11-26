@@ -948,8 +948,8 @@ _ROW_READERS = {
         "addressee", "the discussion link on the viewer's own ask, after `_owned_ask`"),
     (_PORTAL_ASKS, "discussion_context_line"): (
         "agent", "the line a discussion chat carries to the agent: the viewer's own ask's request_id, "
-                 "kind, status, title and options, never its question or answer (a gate card's title "
-                 "names no person)"),
+                 "kind, status, title and options — plus question and proposal only for an agent-raised "
+                 "ask (#4781) — never the answer (a gate card's title names no person)"),
     (_PORTAL_ASKS, "list_asks_page"): (
         "addressee", "the Workspace inbox: addressed to the viewer in SQL, before the limit; the roster "
                      "set OR the reserved reach family the gate raised about them (trinity-enterprise#981) "

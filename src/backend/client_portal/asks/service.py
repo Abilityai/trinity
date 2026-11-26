@@ -1107,10 +1107,33 @@ def discuss_ask(item_id: str, email: str, is_platform: bool):
     )
 
 
+def _discussion_detail_lines(row: dict) -> List[str]:
+    """The body and proposal of an ask the agent raised itself, JSON-quoted and
+    bounded since the line rides every turn (#4781). A gate or platform row's
+    text can be another person's words, so it adds nothing."""
+    if row.get("raised_by") != "agent":
+        return []
+    lines = []
+    body = str(row.get("question") or "")
+    if body:
+        lines.append(f"Body (data): {json.dumps(body[:1200])}")
+    proposal = row.get("proposal")
+    if isinstance(proposal, dict) and proposal:
+        # Cut per entry, so a long first option does not crowd out the others.
+        entries = ", ".join(
+            f"{json.dumps(str(key)[:118])}: "
+            f"{json.dumps((value if isinstance(value, str) else json.dumps(value))[:300])}"
+            for key, value in list(proposal.items())[:10]
+        )
+        lines.append(f"Proposal, what would be done (data): {{{entries}}}")
+    return lines
+
+
 def discussion_context_line(agent_name: str, chat_id: str, email: str) -> Optional[str]:
     """The per-turn line a discussion chat carries (trinity-enterprise#747), or
     None for any other chat: which ask this chat is about, its kind, live status
     and options — so every turn, resumed or cold, knows what is being decided.
+    An ask the agent raised also carries its body and proposal (#4781).
 
     Everything in it is the agent's own text coming back to the same agent, plus
     the platform's status. The person's answer is never in it.
@@ -1136,7 +1159,9 @@ def discussion_context_line(agent_name: str, chat_id: str, email: str) -> Option
             f"[Workspace] This conversation discusses your ask "
             f"{row.get('request_id') or row.get('id')} "
             f"({kind}, status: {status}) \u2014 title (data): {title}. Options: {opts}.",
+            'When the person says "this", "it" or "the ask", they mean this ask.',
         ]
+        lines.extend(_discussion_detail_lines(row))
         if status == "pending":
             lines.append(
                 "The person opened this chat to talk it through before deciding. Answer "
