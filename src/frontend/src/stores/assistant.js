@@ -674,40 +674,46 @@ export const useAssistantStore = defineStore('assistant', {
     /**
      * ent#1399: which Claude credential a switch card may name, and which agents
      * its confirm would accept (the switch refuses any other agent, not_listed).
-     * `saved` is the kind this conversation's Claude card saved last, with that
-     * save's own lists; only when there is none is the instance asked what it
-     * holds (`held`: undefined when it could not say) and, per kind held, which
-     * agents are off it. `off` is undefined when no list could be read.
+     * `saved` is the kind this conversation's Claude card saved last; it decides
+     * the kind and nothing else. `held` is what the instance holds now (undefined
+     * when it could not say), so a saved kind removed since shows no card. `off`
+     * is, per kind the card may name, the agents off it, read from the instance
+     * now (an agent switched or created since the save is counted as it is); the
+     * save's own lists stand in only when that read fails. undefined when no list
+     * could be read at all.
      */
     async claudeKinds() {
       const entries = this.messages.flatMap((m) => m.cards || [])
       const save = entries.filter((e) => claudeCard(e.card) && e.state === 'done' && Object.hasOwn(CLAUDE_KINDS, e.kind || '')).at(-1)
-      if (save) {
-        const off = Array.isArray(save.notUsing) && Array.isArray(save.moving)
-          ? { [save.kind]: [...save.notUsing.map((r) => r.name), ...save.moving] }
-          : undefined
-        return { saved: save.kind, off }
-      }
+      const saved = save?.kind
+      const fromSave = save && Array.isArray(save.notUsing) && Array.isArray(save.moving)
+        ? { [saved]: [...save.notUsing.map((r) => r?.name), ...save.moving].filter((n) => typeof n === 'string') }
+        : undefined
+      const fallback = (held) => (saved ? { saved, held, off: fromSave } : { held })
       let held
       try {
         const { data } = await api.get(`${BASE}/credential`, { params: { name: 'CLAUDE_SUBSCRIPTION' } })
         held = typeof data?.current === 'string' || data?.current === null ? data.current : undefined
       } catch {
-        return { held: undefined }
+        held = undefined
       }
-      const kinds = held === 'subscription_and_api_key' ? Object.keys(CLAUDE_KINDS) : Object.hasOwn(CLAUDE_KINDS, held || '') ? [held] : []
-      if (!kinds.length) return { held }
+      if (held === undefined) return fallback(undefined)
+      const holds = (kind) => held === kind || held === 'subscription_and_api_key'
+      const kinds = saved
+        ? (holds(saved) ? [saved] : [])
+        : held === 'subscription_and_api_key' ? Object.keys(CLAUDE_KINDS) : Object.hasOwn(CLAUDE_KINDS, held || '') ? [held] : []
+      if (!kinds.length) return { saved, held }
       try {
         const reports = await Promise.all(kinds.map((kind) =>
           api.get(`${BASE}/credential/agents`, { params: { kind } }).then(({ data }) => [kind, data])))
         const off = {}
         for (const [kind, data] of reports) {
-          if (!Array.isArray(data?.not_using) || !Array.isArray(data?.moving)) return { held }
+          if (!Array.isArray(data?.not_using) || !Array.isArray(data?.moving)) return fallback(held)
           off[kind] = [...data.not_using.map((r) => r?.name), ...data.moving].filter((n) => typeof n === 'string')
         }
-        return { held, off }
+        return { saved, held, off }
       } catch {
-        return { held }
+        return fallback(held)
       }
     },
 

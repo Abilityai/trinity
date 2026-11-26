@@ -66,6 +66,9 @@ vi.mock('@/api', () => {
       if (extra.length) {
         throw { response: { status: 422, data: { detail: { code: 'not_listed', message: `Not among the agents off ${words}: ${extra.join(', ')}. Nothing was changed.` } } } }
       }
+      // A switched agent is on that kind now, so it is off it no longer.
+      off[body.kind] = off[body.kind].filter((n) => !body.agents.includes(n))
+      moving[body.kind] = moving[body.kind].filter((n) => !body.agents.includes(n))
       return { kind: body.kind, now_using: body.agents, not_switched: [] }
     }
     if (url === '/api/agents') return [{ name: 'scout', status: 'running' }, { name: 'scribe', status: 'running' }, ...seeded.map((name) => ({ name, status: 'stopped' }))]
@@ -196,6 +199,63 @@ describe('the use-claude card names the kind that was saved (ent#1399)', () => {
       expect(useCard().text()).toContain('Use this subscription on these agents: scout')
       await confirm()
       expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'subscription', agents: ['scout'] }])
+    })
+  })
+
+  // ent#1399 (validation EZddZmEELapW1xpCH-aioA): the save decides the kind
+  // only. Which agents are off it is read from the instance when the card is
+  // built, as on the one-held path; the save's lists are what it was then.
+  describe('after a save, the agents are read from the instance when the card is built', () => {
+    const offerAgain = async (agents) => {
+      turns = [final('Shall I switch them too?', [switchCard('api_key', agents)])]
+      await say('and the others?')
+    }
+    const later = () => cards().filter((c) => c.text().includes('on these agents')).at(-1)
+
+    it('confirm one agent, then a second card naming both offers only the one still off it', async () => {
+      off = { subscription: ['scout', 'scribe'], api_key: ['scout', 'scribe'] }
+      await connectThenOffer(TOKEN, 'api_key', ['scout'])
+      await confirm()
+      expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'subscription', agents: ['scout'] }])
+      await offerAgain(['scout', 'scribe'])
+      expect(later().text()).toContain('Use this subscription on these agents: scribe')
+      expect(later().text()).not.toContain('scout')
+      await button(later(), 'Yes, switch them').trigger('click')
+      await flushPromises()
+      expect(posted(USE).map((c) => c.body)).toEqual([
+        { kind: 'subscription', agents: ['scout'] }, { kind: 'subscription', agents: ['scribe'] }])
+      expect(posted(TURN).at(-1).body.message).toBe('Done: Use this subscription on these agents: scribe. Now on it: scribe.')
+    })
+
+    it('an agent created after the save is on the card, and the confirm succeeds', async () => {
+      off = { subscription: ['scout'], api_key: ['scout'] }
+      await connectThenOffer(TOKEN, 'api_key', ['scout'])
+      off.subscription.push('scribe')        // scribe is created after the save, off the subscription
+      await offerAgain(['scout', 'scribe'])
+      expect(later().text()).toContain('Use this subscription on these agents: scout, scribe')
+      await button(later(), 'Yes, switch them').trigger('click')
+      await flushPromises()
+      expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'subscription', agents: ['scout', 'scribe'] }])
+      expect(calls.filter((c) => c.url.endsWith('/credential/agents')).map((c) => c.params))
+        .toEqual([{ kind: 'subscription' }, { kind: 'subscription' }])
+    })
+
+    it('when the saved kind is no longer held, no card is shown', async () => {
+      await connectThenOffer(TOKEN, 'api_key', ['scout'])
+      held = 'api_key'                        // the subscription was removed later; a key is held
+      await offerAgain(['scout'])
+      expect(cards().filter((c) => c.text().includes('on these agents'))).toHaveLength(1)
+      held = null
+      await offerAgain(['scout'])
+      expect(cards().filter((c) => c.text().includes('on these agents'))).toHaveLength(1)
+    })
+
+    it("when the instance's list cannot be read, it falls back to the save's lists", async () => {
+      await connectThenOffer(TOKEN, 'api_key', ['scout', 'scribe'])
+      off = null
+      await offerAgain(['scout', 'scribe'])
+      expect(later().text()).toContain('Use this subscription on these agents: scout')
+      expect(later().text()).not.toContain('scribe')
     })
   })
 
