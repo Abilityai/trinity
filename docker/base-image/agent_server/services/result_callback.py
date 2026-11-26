@@ -230,6 +230,10 @@ def _envelope_from_http_exception(exc: HTTPException) -> Dict:
         # over the status-code guess.
         if isinstance(detail.get("error_code"), str):
             error_code = detail["error_code"]
+        # #4778: likewise a terminal reason, so the managed-hooks 502 ("could
+        # not check the turn") is not recorded as an empty result.
+        if isinstance(detail.get("terminal_reason"), str):
+            terminal_reason = detail["terminal_reason"]
     else:
         error_msg = str(detail)[:500]
 

@@ -86,6 +86,12 @@ class TestEnvelopeMapping:
         assert env["metadata"] == {"cost_usd": 0.02, "num_turns": 1}
         assert env["error"] == "no result"
 
+    def test_502_body_naming_its_terminal_reason_wins(self):
+        detail = {"message": "could not check", "terminal_reason": "turn_check_unavailable"}
+        env = rc._envelope_from_http_exception(HTTPException(status_code=502, detail=detail))
+        assert env["error_code"] is None
+        assert env["terminal_reason"] == "turn_check_unavailable"
+
     def test_unknown_status_falls_back_to_error(self):
         env = rc._envelope_from_http_exception(HTTPException(status_code=500, detail="boom"))
         assert env["error_code"] is None

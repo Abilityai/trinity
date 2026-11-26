@@ -277,7 +277,21 @@ def test_no_answer_from_the_platform_is_a_502_never_a_503(home, monkeypatch):
     with pytest.raises(HTTPException) as exc:
         _require()
     assert exc.value.status_code == 502
-    assert exc.value.detail == {"message": turn_scope.COULD_NOT_CHECK.format(runtime="Claude Code")}
+    assert exc.value.detail == {"message": turn_scope.COULD_NOT_CHECK.format(runtime="Claude Code"),
+                                "terminal_reason": "turn_check_unavailable"}
+
+
+def test_an_async_could_not_check_is_not_recorded_as_an_empty_result(home, monkeypatch):
+    """#4778: the async result callback maps every bare 502 to empty_result."""
+    from agent_server.services import result_callback
+
+    _cache(home, {"channelsEnabled": True})
+    _answer(monkeypatch, "unreachable")
+    with pytest.raises(HTTPException) as exc:
+        _require()
+    env = result_callback._envelope_from_http_exception(exc.value)
+    assert env["terminal_reason"] == "turn_check_unavailable"
+    assert env["error_code"] is None
 
 
 def test_a_schedule_run_gets_its_own_words_and_no_take_over_remedy(home, monkeypatch):
