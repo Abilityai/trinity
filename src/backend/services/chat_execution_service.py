@@ -95,7 +95,7 @@ from services.event_dispatch_service import (
 )
 from services import idempotency_service
 from services import channel_completion_report
-from services import caller_wake_service  # #4733: a /chat slot release drains a parked wake
+from services import caller_wake_service  # #4733: a /chat slot release drains a parked wake; #4538: call terms
 from services import dispatch_admission_service
 from services import chat_persistence_service
 from services import skill_gate_service
@@ -1527,6 +1527,13 @@ async def run_pulled_chat_turn(
     """
     idem_done = False
     user_email = current_user.email or current_user.username
+    # #4538: a pulled /chat ends through the terminal fan-out, so its caller
+    # can be woken; the call's own word on that is kept for the row. (A push
+    # /chat never wakes and keeps nothing.)
+    wake_terms = caller_wake_service.call_terms(request, sync=True)
+    if wake_terms and x_source_agent and x_source_agent != name:
+        await asyncio.to_thread(
+            caller_wake_service.record_call_terms, name, task_execution_id, wake_terms)
     try:
         start_time = datetime.utcnow()
         cached_uuid = None if isolated_session else db.get_chat_session_claude_id(session.id)
@@ -1601,6 +1608,9 @@ async def run_pulled_chat_turn(
             # meanwhile is used; a turn still running gets the /task receipt.
             from services.task_execution_service import result_from_execution_row
 
+            # #4538: the wait is over for the caller; flip before the read.
+            await asyncio.to_thread(
+                caller_wake_service.caller_stopped_waiting, name, execution_id)
             row_result = result_from_execution_row(execution_id)
             if row_result is not None and row_result.status in _SYNC_BACKLOG_TERMINAL:
                 result = row_result
@@ -1619,7 +1629,8 @@ async def run_pulled_chat_turn(
                     "async_mode": True,
                     # ent#1102: the one /chat answer that is a receipt rather
                     # than the reply, so it carries the wake verdict too.
-                    **_wake_on_ending_receipt(x_source_agent, name),
+                    **_wake_on_ending_receipt(
+                        x_source_agent, name, declined=_wake_declined(request)),
                 }
                 idempotency_service.complete(idem, execution_id, receipt)
                 idem_done = True
@@ -2288,11 +2299,16 @@ async def create_task_execution_and_activities(
     is_self_task,
     idem,
     chain_depth=None,
+    wake_terms=None,
 ):
     """Create the execution record (#95/#96), attach the idempotency claim, and
     track the collaboration / self-task activity (mirrors the /chat pattern).
     Returns (execution_id, subscription_id, collaboration_activity_id,
-    self_task_activity_id)."""
+    self_task_activity_id).
+
+    ``wake_terms`` (#4538, ``caller_wake_service.call_terms``) is what the call
+    said about its own wake. It is kept for the new row before anything can run
+    it, and only for an agent's call to another agent: nobody else is woken."""
     # SUB-004: subscription snapshot at creation time (best-effort).
     try:
         subscription_id = db.get_agent_subscription_id(name)
@@ -2341,6 +2357,11 @@ async def create_task_execution_and_activities(
         execution, principal=current_user,
         requested_project_id=getattr(request, "project_id", None))
     idempotency_service.attach_execution(idem, execution_id)
+    wake_declined = False
+    if wake_terms and x_source_agent and not is_self_task:
+        await asyncio.to_thread(
+            caller_wake_service.record_call_terms, name, execution_id, wake_terms)
+        wake_declined = wake_terms.get("declined") is True
 
     collaboration_activity_id = None
     self_task_activity_id = None
@@ -2398,6 +2419,8 @@ async def create_task_execution_and_activities(
                     "message_preview": request.message[:100],
                     "execution_id": execution_id,
                     "parallel_mode": True,
+                    # #4538: the caller declined this run's wake.
+                    **({"wake": "declined"} if wake_declined else {}),
                 },
             )
 
@@ -2717,7 +2740,12 @@ def _map_task_failure(name, result, *, idem):
             )
 
 
-def _wake_on_ending_receipt(x_source_agent, target_name) -> dict:
+def _wake_declined(request) -> bool:
+    """#4538: the call itself declined its wake. Only a real ``False`` does."""
+    return getattr(request, "wake", None) is False
+
+
+def _wake_on_ending_receipt(x_source_agent, target_name, *, declined=False) -> dict:
     """ent#1102: what a RECEIPT tells the delegating caller about its wake.
 
     A receipt is the one answer that is not the answer, so it is the moment the
@@ -2734,9 +2762,15 @@ def _wake_on_ending_receipt(x_source_agent, target_name) -> dict:
     worse than silence. A policy that cannot be read is also silence rather
     than a promise: ``resolve`` already fails closed, and a receipt that says
     ``on_ending`` and then goes quiet costs exactly what ent#1102 removed.
+
+    ``declined`` (#4538): the call said ``wake: false``. That is its own layer,
+    ``source: "call"``, answered before the policy is read: the receipt
+    confirms the caller's choice whatever the owner's switch says.
     """
     if not x_source_agent or x_source_agent == target_name:
         return {}
+    if declined:
+        return {"wake_on_ending": {"effective": False, "source": "call"}}
     try:
         verdict = wake_policy.resolve(x_source_agent)
     except Exception:  # noqa: BLE001 — a receipt never fails over its own footnote
@@ -2814,7 +2848,7 @@ async def _dispatch_async(
             **_queue_wait_fields(name, execution_id, pull=cap_result.pull),
             # ent#1102: a queued receipt is a receipt — the caller needs the
             # wake verdict here exactly as it does on `accepted`.
-            **_wake_on_ending_receipt(x_source_agent, name),
+            **_wake_on_ending_receipt(x_source_agent, name, declined=_wake_declined(request)),
         }
         idempotency_service.complete(idem, execution_id, _queued_payload)
         return _queued_payload
@@ -2862,7 +2896,7 @@ async def _dispatch_async(
         "async_mode": True,
         # ent#1102: whether a turn is coming when this run ends, and which
         # layer decided. Absent when there is no caller to wake.
-        **_wake_on_ending_receipt(x_source_agent, name),
+        **_wake_on_ending_receipt(x_source_agent, name, declined=_wake_declined(request)),
     }
     idempotency_service.complete(idem, execution_id, _accepted_payload)
     return _accepted_payload
@@ -2891,6 +2925,10 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
         # exits that left the idempotency claim `in_flight` for its 24h TTL.
         wait_payload = None
         timed_out = True
+        # #4538: this handler stopped holding the call open, so the caller's
+        # wait ends here — before the row is read: a terminal that lands in
+        # between is a wake beside the inline answer, never a lost wake.
+        await asyncio.to_thread(caller_wake_service.caller_stopped_waiting, name, execution_id)
 
     if wait_payload is not None and wait_payload.get("result") is not None:
         result = wait_payload["result"]
@@ -3121,6 +3159,9 @@ async def dispatch_parallel_task(
     to 200/409); raises ChatDispatchError for the HTTP error cases. The router
     keeps the resume-validation + #1068 timeout guards ahead of this call (their
     order + the redis-via-router #1068 helper are boundary concerns — RD10)."""
+    # #4538: what the call says about its own wake, stamped before anything
+    # else — the caller's wait runs from its send, not from the row's insert.
+    wake_terms = caller_wake_service.call_terms(request, sync=not request.async_mode)
     derivation = derive_source_and_trigger(
         name=name,
         x_source_agent=x_source_agent,
@@ -3248,6 +3289,7 @@ async def dispatch_parallel_task(
         is_self_task=derivation.is_self_task,
         idem=idem,
         chain_depth=chain_depth,
+        wake_terms=wake_terms,
     )
     # trinity-enterprise#752: clear the run the agent receives for the skills
     # it was self-approved for (the in-container hook's clearance), + audit.

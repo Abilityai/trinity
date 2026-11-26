@@ -128,7 +128,23 @@ export interface RunAgentChatParams {
   execution_id?: string;
   /** ent#1105: the project to attribute the run to; forwarded only when set. */
   project_id?: string;
+  /** #4538: `false` declines the turn started on the caller when the run ends.
+   *  Only `false` is forwarded; `true` and absent are the default. */
+  wake?: boolean;
 }
+
+/**
+ * #4538: the `wake` parameter's text, shared by `chat_with_agent` and every
+ * dedicated `chat_with_<agent>` tool. It is taught here and not in the tool
+ * description or the delegation contract: parameter descriptions are not cut
+ * at Claude Code's 2,048-character cap, and the contract's `none` line ("set a
+ * reminder") is for a caller that will not read the result in this turn.
+ */
+export const WAKE_PARAM_DESCRIPTION =
+  "Set `false` when you will read the answer in this turn (a sync call, or an async call you poll " +
+  "before you end the turn). No turn is started on you when the run ends, and the receipt says " +
+  '`wake: "none"`, `wake_reason: "caller_declined"`; read the result with `get_execution_result` ' +
+  "and set no reminder for it. A sync call that answers inline never wakes you. Omit it to keep the default.";
 
 /**
  * #2806: the tool result for a chain-depth refusal — the backend's refusal
@@ -472,7 +488,8 @@ export type WakeReason =
   | "self_task"
   | "fan_out"
   | "no_caller"
-  | "opted_out";
+  | "opted_out"
+  | "caller_declined";
 export interface WakeFields {
   wake: WakeValue;
   wake_reason?: WakeReason;
@@ -488,6 +505,8 @@ export interface WakeInput {
   batch?: boolean;
   /** What the dispatch answer said about this caller's wake policy. */
   policyEnabled?: boolean;
+  /** #4538: the dispatch answer says THIS call declined its wake (`wake: false`). */
+  declined?: boolean;
 }
 
 /**
@@ -516,6 +535,23 @@ export function wakePolicyFromAnswer(answer?: unknown): boolean | undefined {
   return undefined;
 }
 
+/**
+ * #4538 — did the backend record that this call declined its wake?
+ *
+ * A declined call is answered with `wake_on_ending: {effective: false, source:
+ * "call"}`: its own layer, beside the owner's (`agent`, `legacy_resume`) and the
+ * instance default. Read from the answer and never from the parameter this
+ * server sent: a replay answers with the FIRST call's receipt, and an older
+ * backend ignores the field, so the caller's word alone proves nothing.
+ */
+export function wakeDeclinedByCall(answer?: unknown): boolean {
+  if (!answer || typeof answer !== "object") return false;
+  const raw = (answer as { wake_on_ending?: unknown }).wake_on_ending;
+  if (!raw || typeof raw !== "object") return false;
+  const verdict = raw as { effective?: unknown; source?: unknown };
+  return verdict.source === "call" && verdict.effective === false;
+}
+
 export function resolveWake(input: WakeInput): WakeFields | undefined {
   const no = (wake_reason: WakeReason): WakeFields => ({ wake: "none", wake_reason });
   if (!input.hasCaller) return no("no_caller");
@@ -523,6 +559,7 @@ export function resolveWake(input: WakeInput): WakeFields | undefined {
   if (input.outcome === "inline") return no("answered_inline");
   if (input.isSelfTask) return no("self_task");
   if (input.batch) return no("fan_out");
+  if (input.declined) return no("caller_declined");
   if (input.policyEnabled === false) return no("opted_out");
   if (input.policyEnabled === true) return { wake: "on_ending" };
   return undefined;
@@ -539,7 +576,8 @@ export function resolveWake(input: WakeInput): WakeFields | undefined {
  *
  * The decision above still names them — it is the full verdict, and the places
  * that EXPLAIN a wake (audit rows, `get_agent_info`) want the reason even when
- * the receipt does not print it. Only `nothing_ran`, `fan_out` and `opted_out`
+ * the receipt does not print it. Only `nothing_ran`, `fan_out`, `opted_out` and
+ * `caller_declined` (#4538, the receipt confirming the caller's own choice)
  * reach a caller that dispatched to a sibling and would otherwise be entitled
  * to expect a turn.
  */
@@ -561,6 +599,14 @@ export function wakeReceiptFields(input: WakeInput): WakeFields | undefined {
 
 /** How a sequential `/chat` call ended, which decides what it says about report-back (#3295). */
 export type ChatOutcome = "inline" | "receipt" | "busy";
+
+/** #4538: a `/task` answer that is a receipt (the run goes on), not the reply. */
+const RECEIPT_STATUSES = new Set(["accepted", "queued", "queued_timeout"]);
+function isReceiptAnswer(answer: unknown): boolean {
+  if (!answer || typeof answer !== "object") return false;
+  const status = (answer as { status?: unknown }).status;
+  return typeof status === "string" && RECEIPT_STATUSES.has(status);
+}
 
 /**
  * #3295: the result fields for the sequential `/chat` route, from the decision
@@ -625,7 +671,10 @@ export async function runAgentChat(
     inject_result,
     chat_session_id,
     project_id,
+    wake,
   } = params;
+  // #4538: only a real `false` declines; nothing else leaves this server.
+  const declineWake = wake === false;
 
   // Get auth context from FastMCP session. Read unconditionally (mirrors
   // operator_queue.ts) so the #946 scope-based pull routing is decidable
@@ -669,6 +718,7 @@ export async function runAgentChat(
       hasCaller: sourceAgent !== undefined,
       isSelfTask,
       policyEnabled: wakePolicyFromAnswer(answer),
+      declined: wakeDeclinedByCall(answer),
     });
 
   // #946 pull pilot: route a SEQUENTIAL agent→agent call through the
@@ -783,6 +833,7 @@ export async function runAgentChat(
         // originating channel/thread and its completion is reported back there.
         parent_execution_id: reportBack.parentExecutionId,
         ...(project_id ? { project_id } : {}),  // ent#1105
+        ...(declineWake ? { wake: false } : {}),  // #4538
       },
       sourceAgent,
       mcpKeyInfo,
@@ -801,7 +852,10 @@ export async function runAgentChat(
     if ('status' in response && response.status === 'queued_timeout') {
       console.log(`[Task Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#2661)`);
     }
-    return JSON.stringify(withWake(withReportBack(asyncReceipt(agent_name, response), reportBack.fields), wakeFields("receipt", response)), null, 2);
+    // #4538: a sync answer that is the reply is `inline`, like the sequential
+    // route's; only a receipt can say anything about a wake.
+    const taskOutcome: ChatOutcome = isReceiptAnswer(response) ? "receipt" : "inline";
+    return JSON.stringify(withWake(withReportBack(asyncReceipt(agent_name, response), reportBack.fields), wakeFields(taskOutcome, response)), null, 2);
   }
 
   // #946 pull pilot: agent→agent sequential call routed through the
@@ -822,6 +876,7 @@ export async function runAgentChat(
         async_mode: true,
         parent_execution_id: reportBack.parentExecutionId,
         ...(project_id ? { project_id } : {}),  // ent#1105
+        ...(declineWake ? { wake: false } : {}),  // #4538
       },
       sourceAgent,
       mcpKeyInfo,
@@ -834,7 +889,10 @@ export async function runAgentChat(
   }
 
   // Sequential chat mode - uses queue, maintains context
-  const response = await apiClient.chat(agent_name, message, sourceAgent, mcpKeyInfo, idempotencyKey, callerTurn, project_id);
+  const response = await apiClient.chat(
+    agent_name, message, sourceAgent, mcpKeyInfo, idempotencyKey, callerTurn, project_id,
+    declineWake ? { wake: false } : undefined,  // #4538
+  );
 
   // trinity-enterprise#751: a gated skill — pending approval or refused by
   // name. Nothing ran; the model must not retry it or report it as done.
@@ -1013,6 +1071,10 @@ export function createChatTools(
           .string()
           .optional()
           .describe(EXECUTION_ID_PARAM_DESCRIPTION),
+        wake: z
+          .boolean()
+          .optional()
+          .describe(WAKE_PARAM_DESCRIPTION),
         project_id: z
           .string()
           .min(1)
@@ -1037,6 +1099,7 @@ export function createChatTools(
           chat_session_id,
           execution_id,
           project_id,
+          wake,
         }: {
           agent_name: string;
           message: string;
@@ -1050,6 +1113,7 @@ export function createChatTools(
           chat_session_id?: string;
           execution_id?: string;
           project_id?: string;
+          wake?: boolean;
         },
         context: any
       ) => {
@@ -1073,6 +1137,7 @@ export function createChatTools(
             chat_session_id,
             execution_id,
             project_id,
+            wake,
           },
           context,
           reportBackEnabled

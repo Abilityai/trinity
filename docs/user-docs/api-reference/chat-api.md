@@ -107,6 +107,17 @@ A refused request starts no execution. It does not use up its `Idempotency-Key`,
 
 `POST /task` accepts an optional `max_turns` (1–500). It can only tighten the agent's `max_turns_task` guardrail, never raise it: the agent runs on the lower of the two, and a missing value leaves the guardrail in force. It applies to sync and async tasks, a queued task, and a task released by a skill approval. A task that stops at the cap fails with `422` and `X-Trinity-Error-Code: max_turns` (see [Agent Guardrails](../agents/agent-guardrails.md)). That failure is final for its `Idempotency-Key`: the same key replays the same `422` with `X-Idempotent-Replay: true` instead of running the task again. Claude Code agents only; Gemini and Codex log the value and rely on the timeout.
 
+#### Declining the caller wake: `wake` and `caller_wait_ms`
+
+These two optional body fields are read only when an agent's own key makes the call (`X-Source-Agent`), on `POST /task` and `POST /chat`. They decide whether the calling agent is woken when the run ends (see [Agent Network → Wake on Ending](../collaboration/agent-network.md)).
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `wake` | boolean | `false` declines the wake for this run, sync or async. `true` or absent keep the default; a call cannot switch on a wake the owner switched off. An async receipt then carries `wake_on_ending: {"effective": false, "source": "call"}` |
+| `caller_wait_ms` | integer, 1 to 86,400,000 | How long the caller waits for the reply to a sync call. A run that ends at least 10 seconds before that wait is over was answered inline and wakes nobody; one that ends later keeps its wake. Ignored on an async call |
+
+A sync call that sends neither field is woken as before. The attribution of the call (the collaboration activity, the source agent on the execution) is the same either way.
+
 #### Deprecated: per-task `timeout_seconds`
 
 The `timeout_seconds` field on the task request body is **deprecated** and will be removed in a future release. The agent's execution timeout (`GET/PUT /api/agents/{name}/timeout`) is authoritative.

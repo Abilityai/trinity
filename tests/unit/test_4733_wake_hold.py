@@ -59,6 +59,7 @@ pytestmark = pytest.mark.unit
 # Mid-window on the old 15 s key, so +11 s and +26 s land in the next two.
 _OLD_NOW = 1_800_000_000 - (1_800_000_000 % 15) + 5
 _REAL_HAS_FREE_SLOT = _WAKE.__dict__.get("_has_free_slot")
+_REAL_SLOT_FREED = _WAKE.__dict__.get("_slot_freed")   # #4538: the strict re-check
 
 
 class _Clock:
@@ -648,6 +649,8 @@ def meter(world, monkeypatch):
         monkeypatch.setattr(_WAKE, "_has_free_slot", _REAL_HAS_FREE_SLOT)
     else:
         monkeypatch.delattr(_WAKE, "_has_free_slot", raising=False)
+    if _REAL_SLOT_FREED is not None:
+        monkeypatch.setattr(_WAKE, "_slot_freed", _REAL_SLOT_FREED)
     state = {"available": 0, "pilot": False, "boom": False}
 
     class _Capacity:
