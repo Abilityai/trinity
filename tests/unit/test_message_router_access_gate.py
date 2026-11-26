@@ -82,6 +82,8 @@ def _env(policy: dict, rate_ok: bool = True, container_status: str = "running"):
     db.is_channel_client_blocked.return_value = False   # ent#21: not blocked
     db.get_access_policy.return_value = policy
     db.email_has_agent_access.return_value = False
+    db.get_user_by_email.return_value = None
+    db.get_agent_owner.return_value = None
     db.get_or_create_public_chat_session.return_value = {"id": "s1"}
     db.build_public_chat_context.return_value = "ctx-prompt"
     db.get_or_create_public_user_memory.return_value = {}
@@ -142,17 +144,21 @@ def test_dm_verified_with_access_executes():
     db.email_has_agent_access.assert_called()
 
 
-def test_dm_verified_but_suspended_is_denied_even_on_open_access():
+@pytest.mark.parametrize("channel", ["telegram", "slack", "whatsapp"])
+def test_dm_verified_but_suspended_is_denied_even_on_open_access(channel):
     """ent#720: an email verified BEFORE its account was suspended is still on
     the channel link; the per-message gate refuses it, open_access included."""
-    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message()
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(channel), _make_message()
     adapter.resolve_verified_email = AsyncMock(return_value="a@b.com")
     with _env({"require_email": False, "open_access": True, "group_auth_mode": "none"}) as (db, service):
         db.is_email_account_suspended.return_value = True
         db.email_has_agent_access.return_value = True
+        db.get_user_by_email.return_value = {"id": 7}
+        db.get_agent_owner.return_value = {"owner_id": 7}
         _run(router, adapter, message)
     service.execute_task.assert_not_awaited()
     db.upsert_access_request.assert_not_called()
+    db.get_user_by_email.assert_not_called()
 
 
 def test_dm_verified_no_access_records_pending_request():
@@ -206,6 +212,69 @@ def test_group_none_executes():
 # --------------------------------------------------------------- entry gates (#1026)
 
 _OPEN = {"require_email": False, "open_access": True, "group_auth_mode": "none"}
+
+
+@pytest.mark.parametrize("channel", ["telegram", "slack", "whatsapp"])
+@pytest.mark.parametrize(
+    "verified_email,is_group,user,owner,expected_id",
+    [
+        pytest.param("owner@example.com", False, {"id": 7, "role": "user"},
+                     {"owner_id": 7}, 7, id="verified-owner"),
+        pytest.param("owner@example.com", False, {"id": 7, "role": "admin"},
+                     {"owner_id": 7}, 7, id="verified-owner-admin"),
+        pytest.param("shared@example.com", False, {"id": 8, "role": "user"},
+                     {"owner_id": 7}, None, id="shared-nonowner"),
+        pytest.param("admin@example.com", False, {"id": 8, "role": "admin"},
+                     {"owner_id": 7}, None, id="admin-nonowner"),
+        pytest.param("other-owner@example.com", False, {"id": 9, "role": "user"},
+                     {"owner_id": 7}, None, id="different-agent-owner"),
+        pytest.param("owner@example.com", False, None,
+                     {"owner_id": 7}, None, id="no-platform-account"),
+        pytest.param("owner@example.com", False, {"id": 7},
+                     None, None, id="no-agent-owner"),
+        pytest.param(None, False, {"id": 7},
+                     {"owner_id": 7}, None, id="unverified-native-identifier"),
+        pytest.param("owner@example.com", True, {"id": 7},
+                     {"owner_id": 7}, None, id="group-owner-unlocker"),
+    ],
+)
+def test_channel_source_identity_requires_verified_dm_agent_owner(
+    channel, verified_email, is_group, user, owner, expected_id,
+):
+    """#4510: real access gate and producer; access alone must not confer identity."""
+    router = ChannelMessageRouter()
+    adapter, message = _make_adapter(channel), _make_message(is_group=is_group)
+    adapter.resolve_verified_email.return_value = verified_email
+    adapter.get_source_identifier.return_value = "owner@example.com"
+    policy = {**_OPEN, "group_auth_mode": "any_verified" if is_group else "none"}
+    with _env(policy) as (db, service):
+        db.email_has_agent_access.return_value = True
+        db.get_user_by_email.return_value = user
+        db.get_agent_owner.return_value = owner
+        _run(router, adapter, message)
+    service.execute_task.assert_awaited_once()
+    assert service.execute_task.await_args.kwargs.get("source_user_id") == expected_id
+    if is_group:
+        adapter.set_group_verified.assert_awaited_once()
+    if is_group or not verified_email:
+        db.get_user_by_email.assert_not_called()
+        db.get_agent_owner.assert_not_called()
+    elif expected_id is not None:
+        db.get_user_by_email.assert_called_once_with(verified_email)
+        db.get_agent_owner.assert_called_once_with("agent1")
+
+
+@pytest.mark.parametrize("lookup", ["get_user_by_email", "get_agent_owner"])
+def test_channel_owner_identity_lookup_failure_preserves_anonymous_dispatch(lookup):
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message()
+    adapter.resolve_verified_email.return_value = "owner@example.com"
+    with _env(_OPEN) as (db, service):
+        db.get_user_by_email.return_value = {"id": 7}
+        db.get_agent_owner.return_value = {"owner_id": 7}
+        getattr(db, lookup).side_effect = RuntimeError("lookup unavailable")
+        _run(router, adapter, message)
+    service.execute_task.assert_awaited_once()
+    assert service.execute_task.await_args.kwargs.get("source_user_id") is None
 
 
 def test_no_agent_resolved_aborts():
