@@ -180,7 +180,8 @@ const askOperatorParameters = z.object({
       "The request_id of one of your OWN asks that is still pending and that this ask replaces: it ends as replaced — never edited in place — and this ask is shown instead; the receipt names it in replaces, and get_my_ask on the old ask names this one in replaced_by. " +
         "Refused when it already ended (409 replaces_ended, with its ask_status and disposition: a person's answer stands — read it with get_my_ask) or is not your own pending ask (422 invalid_replaces). " +
         "Repeating a pending ask's proposal without naming it here is refused with 409 already_pending, which names that ask's request_id. " +
-        "A retry of THIS request_id replays the first receipt and does not replace again. After an expiry use supersedes_expired, not this.",
+        "A retry of THIS request_id replays the first receipt and does not replace again. After an expiry use supersedes_expired, not this. " +
+        "An alert that replaces your own pending alert is the same condition raised again: it keeps the date it was first raised and counts the raise, and nobody is notified again unless you raise its priority or it reaches different people.",
     ),
 });
 
@@ -370,6 +371,8 @@ export function createOperatorQueueTools(
         "closed_by_filer | missing | stale_id | unconfirmed) with sync_detail, " +
         "delivery_state (delivered | undelivered | not_applicable) for answered " +
         "items, and aging/aged_since once it has waited past the operator's bound. " +
+        "An alert its agent raised again carries first_raised_at (the first raise) and " +
+        "raise_count; created_at is the latest raise, and aging counts from the first. " +
         "Complete within limit: every item you may see is ranked before the cut, so " +
         "has_more=false means you have them all and total counts them. To page, pass " +
         "cursor=\"start\", then cursor=next_cursor until has_more is false; within one " +
@@ -543,7 +546,9 @@ export function createOperatorQueueTools(
       description:
         "Get a single Operating Room (operator queue) item by id — full detail " +
         "including title, question, options, context, status, priority, and any " +
-        "operator response. Read-only. Access control: agent-scoped keys may " +
+        "operator response. An alert its agent raised again carries first_raised_at " +
+        "(the first raise) and raise_count; created_at is the latest raise. " +
+        "Read-only. Access control: agent-scoped keys may " +
         "only read items belonging to themselves or agents they have explicit " +
         "permission for.",
       parameters: z.object({

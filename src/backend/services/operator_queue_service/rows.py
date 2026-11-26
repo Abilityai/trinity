@@ -189,13 +189,17 @@ def aging_hours() -> int:
 def _aged_at(item: dict, hours: int) -> Optional[datetime]:
     if hours <= 0 or item.get("status") != "pending":
         return None
-    created = item.get("created_at")
-    if not created:
-        return None
-    try:
-        return parse_iso_timestamp(str(created)) + timedelta(hours=hours)
-    except Exception:  # noqa: BLE001
-        return None
+    # abilityai/trinity-enterprise#1367: an alert raised again has waited since
+    # its FIRST raise — its own filing time would never let it age. A stored
+    # date that does not parse falls back to the filing time.
+    for since in (item.get("first_raised_at"), item.get("created_at")):
+        if not since:
+            continue
+        try:
+            return parse_iso_timestamp(str(since)) + timedelta(hours=hours)
+        except Exception:  # noqa: BLE001
+            continue
+    return None
 
 
 def is_aged(item: dict, hours: Optional[int] = None, now: Optional[datetime] = None) -> bool:

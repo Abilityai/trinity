@@ -179,9 +179,19 @@
                   :title="absolute(it.ask.expires_at)"
                   data-testid="inbox-row-badge-expiry"
                 >{{ expiry(it).label }}</BaseBadge>
+                <!-- trinity-enterprise#1367: an alert raised again says how
+                     often and since when — in the place of the "Replaces"
+                     badge, because that is what differs about it. -->
+                <BaseBadge
+                  v-if="raised(it)"
+                  variant="neutral"
+                  class="tabular-nums"
+                  :title="absolute(it.ask.first_raised_at)"
+                  :data-testid="`inbox-row-raised-${it.key}`"
+                >{{ raised(it) }}</BaseBadge>
                 <!-- #3247: the replacement names the ask it replaced. -->
                 <BaseBadge
-                  v-if="workspaceReplacesText(it.ask)"
+                  v-else-if="workspaceReplacesText(it.ask)"
                   variant="neutral"
                   :data-testid="`inbox-row-replaces-${it.key}`"
                 >{{ workspaceReplacesText(it.ask) }}</BaseBadge>
@@ -226,7 +236,7 @@ import { relativeTime } from './portalUtils'
 import { newLabel, isChatItem, roomAgentsLabel } from './portalInbox'
 import { mentionWhere } from './portalMentions'
 import { priorityBadge, expiresSoonLabel, needsExpiryTick, nextExpiryEntry, askKindIcon } from './portalAskUrgency'
-import { queueEnding, queueTypeLabel, workspaceEndingText, workspaceReplacesText } from '@/utils/operatorQueue'
+import { queueEnding, queueTypeLabel, workspaceEndingText, workspaceRaisedText, workspaceReplacesText } from '@/utils/operatorQueue'
 // trinity#3524: an answered approval's verdict on its row.
 import { workspaceOwnAnswer } from '@/utils/operatorQueue'
 import { formatLocalDateTime } from '@/utils/timestamps'
@@ -302,8 +312,10 @@ const expiry = (it) => expiresSoonLabel(it.ask && it.ask.expires_at, now.value)
 // #4229: a pending ask with no priority / expiry / replaces badge would leave
 // the badge line empty, and the ended badge then grows the row on answer. Such
 // a row carries Unanswered instead — one badge in every state.
+const raised = (it) => workspaceRaisedText(it.ask, now.value)
 const pendingSaysNothing = (it) => it.type === 'ask' && it.status === 'pending'
   && !priorityBadge(it.ask && it.ask.priority) && !expiry(it) && !workspaceReplacesText(it.ask)
+  && !raised(it)
 const kindLabel = (it) => queueTypeLabel(it.ask && it.ask.kind) || 'Ask'
 
 // trinity-enterprise#901: an ended ask the agent withdrew, and why.

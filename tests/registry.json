@@ -10004,6 +10004,29 @@
         "credentials"
       ],
       "description": "The assistant panel's first-session cards, mounted, with tool cards built from and checked against a real instance's toolset: a confirm card says in one sentence what happens and its button names the action ('Run its first task', 'Switch it on', 'Delete it', never 'Confirm'), with the tool's parameters only behind a Details toggle; the Claude card is titled 'Connect Claude', says whether a subscription or an API key was saved and shows no variable name; the save report, the line told to the assistant, the fleet in the turn's context and a proposed switch leave out hidden example agents and system agents, and name the examples again once the person asked to see them; when only hidden agents are off the new credential the assistant is told every agent the person can see is on it, never every agent; a schedule change that sends no zone names the schedule's stored zone (none when unknown, never UTC by default), and a schedule that delivers its results says where they go."
+    },
+    {
+      "file": "unit/test_ent1367_reraised_alert.py",
+      "feature": "trinity-enterprise#1367",
+      "added": "2026-11-26",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "database",
+        "unit"
+      ],
+      "description": "A re-raised alert keeps its age and its history: an agent's alert replacing its own pending alert carries first_raised_at and raise_count in the replace's transaction (both schema tracks; nothing on a rollback, a replay, a question or an approval); a chain raised before the columns is counted by a bounded walk of the replaces links that stops at another agent's row, a non-alert, a broken back-link, a deleted row and a loop; the queue list, the aging bound and the agent's pending line read the first raise while the cursor walk stays newest first on the latest; a repeat to the same people in the same room at no higher priority sends no new-ask trigger and posts no room line, and a higher priority, another person, another room or a changed title in a room announces as ever; machine keys and the Workspace projection carry both fields and the replaced ask stays unnamed to a viewer who could not see it. Real per-process SQLite, the real sink and the room's real ending observer. No Docker, no network."
+    },
+    {
+      "file": "../src/frontend/tests/unit/reraisedAlert.mount.spec.js",
+      "feature": "trinity-enterprise#1367",
+      "added": "2026-11-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "operator-queue"
+      ],
+      "description": "The raised line, mounted: 'raised N times · first raised 3d ago' on the Operating Room card for a pending alert raised more than once (a platform alert keeps its seen line), the Workspace Inbox row's badge in the place of 'Replaces' and with no visible link, and the ask card's line beside 'Replaces'; the Operating Room order and the Inbox urgency order read the first raise, the Inbox newest-first order keeps the latest."
     }
   ]
 }

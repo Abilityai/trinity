@@ -1944,6 +1944,10 @@ TABLES = {
             replaced_by TEXT,
             -- abilityai/trinity-enterprise#1108 AC #4: NULL | 'pending' (agent not yet woken) | 'woken'
             wake_state TEXT,
+            -- abilityai/trinity-enterprise#1367: an alert raised again (it replaced the
+            -- agent's own pending alert) carries the first raise's date and a count
+            first_raised_at TEXT,
+            raise_count INTEGER,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,

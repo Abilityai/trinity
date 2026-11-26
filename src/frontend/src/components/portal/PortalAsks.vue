@@ -184,6 +184,16 @@
       >
         {{ workspaceReplacesText(ask) }}
       </p>
+      <!-- trinity-enterprise#1367: an alert raised again — how often, and how
+           long the condition has stood. -->
+      <p
+        v-if="workspaceRaisedText(ask)"
+        class="mt-1 text-xs tabular-nums"
+        :title="formatLocalDateTime(ask.first_raised_at)"
+        :data-testid="`${tid.prefix}-raised`"
+      >
+        {{ workspaceRaisedText(ask) }}
+      </p>
 
       <!-- trinity-enterprise#748: a dismissal is undoable for a few seconds,
            here on the card it ended — nothing is sent until the window lapses. -->
@@ -428,7 +438,7 @@ import { queueResponseKind, buildQueueResponse, queueTypeLabel } from '@/utils/o
 // #2915: the same home; a second line so the #2375 import pin above stays byte-exact.
 import { respondRefusedAsDiverged, QUEUE_RESPONSE_DIVERGED } from '@/utils/operatorQueue'
 // trinity-enterprise#611: the one ending rule, a third line for the same reason.
-import { queueEnding, workspaceEndingText, workspaceReplacesText } from '@/utils/operatorQueue'
+import { queueEnding, workspaceEndingText, workspaceRaisedText, workspaceReplacesText } from '@/utils/operatorQueue'
 // trinity#3524: the viewer's own answer on an answered card.
 import { workspaceOwnAnswer } from '@/utils/operatorQueue'
 // trinity-enterprise#610 §3g B3/B5: the Workspace's badge and a question's quick picks.

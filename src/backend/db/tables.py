@@ -1664,6 +1664,12 @@ operator_queue = Table(
     # turn. NULL (no wake owed / before the column) | "pending" (the agent was not
     # running — its next start re-dispatches) | "woken".
     Column("wake_state", Text),
+    # abilityai/trinity-enterprise#1367: an alert that replaced the agent's own
+    # pending alert is the same condition raised again. Platform-written in the
+    # replace's transaction, never read from the agent's input; NULL on every
+    # other row (readers fall back to `created_at` and a count of 1).
+    Column("first_raised_at", Text),     # ISO-Z: the first raise in the chain
+    Column("raise_count", Integer),      # how many times it was raised (>= 2 when set)
     Index(
         "uq_operator_queue_pending_subject",
         "agent_name", "subject",

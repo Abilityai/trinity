@@ -4615,6 +4615,26 @@ def _migrate_schedule_email_results(cursor, conn):
     conn.commit()
 
 
+def _migrate_operator_queue_raise_history(cursor, conn):
+    """abilityai/trinity-enterprise#1367 — a re-raised alert keeps its age.
+
+    Two nullable columns on `operator_queue`, written on the successor when an
+    agent's alert replaces its own pending alert: `first_raised_at` (the first
+    raise in the chain) and `raise_count`. No default, no backfill (a chain
+    raised before the columns is counted at raise time by walking `replaces`),
+    no index. Every reader falls back to `created_at` and a count of 1.
+
+    PostgreSQL twin: Alembic `0127_operator_queue_raise_history`.
+    """
+    for name, kind in (("first_raised_at", "TEXT"), ("raise_count", "INTEGER")):
+        _safe_add_column(
+            cursor, "operator_queue", name,
+            f"ALTER TABLE operator_queue ADD COLUMN {name} {kind}",
+            log_msg=f"Adding {name} to operator_queue for a re-raised alert's history...",
+        )
+    conn.commit()
+
+
 def _migrate_agent_skills_delivery_status(cursor, conn):
     """#2914 — the durable per-assignment injection verdict.
 
@@ -6592,4 +6612,5 @@ MIGRATIONS = [
     ("execution_continues_execution_id", _migrate_execution_continues_execution_id),
     ("guardrail_events_table", _migrate_guardrail_events_table),
     ("schedule_email_results", _migrate_schedule_email_results),
+    ("operator_queue_raise_history", _migrate_operator_queue_raise_history),
 ]

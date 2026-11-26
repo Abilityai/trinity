@@ -147,6 +147,34 @@ _EXPIRY_BATCH_MAX = 500
 _PENDING_PROPOSAL_SCAN = 200
 
 
+# abilityai/trinity-enterprise#1367: how far back a re-raised alert's chain of
+# `replaces` links is walked when its predecessor carries no history yet (a
+# chain raised before the columns existed). One primary-key read per link,
+# under the create's per-agent lock; a longer chain counts from where it stops.
+_RAISE_CHAIN_WALK_MAX = 100
+
+
+def _iso_z_or_none(value) -> Optional[str]:
+    """A stored timestamp as ISO-Z, or None when it is empty or does not parse.
+    `first_raised_at` is sorted and compared as text beside `created_at`
+    (Invariant #16), so only a normalised value is ever copied into it."""
+    if not value:
+        return None
+    try:
+        return to_utc_iso(parse_iso_timestamp(str(value)))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _raise_count_of(row) -> int:
+    """How many raises a row already stands for; anything unreadable is one."""
+    try:
+        count = int(row["raise_count"] or 1)
+    except (TypeError, ValueError, KeyError):
+        return 1
+    return count if count > 0 else 1
+
+
 def _canon_json(value) -> str:
     """Key-order- and whitespace-insensitive form of a stored proposal."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -276,6 +304,9 @@ class OperatorQueueOperations:
             "replaced_by": row["replaced_by"],
             # abilityai/trinity-enterprise#1108 AC #4 — the answer wake's status
             "wake_state": row["wake_state"],
+            # abilityai/trinity-enterprise#1367 — a re-raised alert's history
+            "first_raised_at": row["first_raised_at"],
+            "raise_count": row["raise_count"],
         }
 
     # Columns selected for a full queue-item record, in the canonical order.
@@ -326,6 +357,8 @@ class OperatorQueueOperations:
         operator_queue.c.replaces,  # #3247 — the replace link
         operator_queue.c.replaced_by,
         operator_queue.c.wake_state,  # abilityai/trinity-enterprise#1108 AC #4
+        operator_queue.c.first_raised_at,  # abilityai/trinity-enterprise#1367
+        operator_queue.c.raise_count,
     )
 
     def create_item(
@@ -411,6 +444,7 @@ class OperatorQueueOperations:
         exclude_request_id_prefixes=None,
         replaces: Optional[str] = None,
         guard_pending_proposal: bool = False,
+        carry_raise_history: bool = False,
     ) -> Dict:
         """Create an agent-raised ask, atomically per agent (trinity-enterprise#611).
 
@@ -474,6 +508,13 @@ class OperatorQueueOperations:
         count, so two concurrent raises with one proposal have exactly one
         winner; a refusal rolls the CAS back with everything else. The caller
         decides when it applies (an agent's approval with a non-empty proposal).
+
+        `carry_raise_history` (abilityai/trinity-enterprise#1367) — the caller
+        ALLOWS a replace to count as the same condition raised again; whether
+        it is one is decided here, on the rows this transaction holds: an
+        `alert` whose won compare-and-set ended an `alert`. The successor then
+        carries `first_raised_at` and `raise_count` (`_raise_history`), written
+        by the same insert, so every rollback above writes neither.
         """
         request_id, values = self._insert_values(
             agent_name, item, channel=channel, raised_by=raised_by,
@@ -505,6 +546,9 @@ class OperatorQueueOperations:
                     if refusal is not None:
                         # commits: the only write on this path is the expire-now
                         early = {**refusal, "row": None, "predecessor": predecessor}
+                    elif carry_raise_history:
+                        values.update(self._raise_history(
+                            conn, agent_name, predecessor, values["type"]))
                 if early is None:
                     if guard_pending_proposal and proposal is not None:
                         dup = self._pending_proposal_match(conn, agent_name, proposal)
@@ -565,6 +609,56 @@ class OperatorQueueOperations:
         if refusal["outcome"] == "not_own":
             return row, {"outcome": "replaces_not_own"}
         return row, {"outcome": "replaces_ended", "expired_now": refusal["expired_now"]}
+
+    @staticmethod
+    def _raise_history(conn, agent_name: str, pred: Dict, new_type: str) -> Dict:
+        """The `first_raised_at` / `raise_count` a successor carries when it is
+        the same condition raised again (abilityai/trinity-enterprise#1367), or
+        `{}` when it is not: only an `alert` replacing an `alert`.
+
+        Read off the predecessor when it already carries a count. Otherwise the
+        chain was raised before the columns existed, and it is counted here by
+        walking `replaces` backwards on the create's own connection: a link
+        counts only while it is this agent's `alert` and its `replaced_by`
+        names the row we came from, so another agent's row, a different kind
+        and a broken link all end the walk — as do a row retention already
+        deleted, a link seen before and `_RAISE_CHAIN_WALK_MAX` links. A link
+        that already carries a count ends it too, and hands over its own.
+        """
+        if new_type != "alert" or pred.get("type") != "alert":
+            return {}
+        first = _iso_z_or_none(pred.get("first_raised_at"))
+        count = _raise_count_of(pred)
+        if pred.get("raise_count") is None:
+            first = _iso_z_or_none(pred.get("created_at"))
+            seen = {pred["id"]}
+            child_id, link = pred["id"], pred.get("replaces")
+            for _ in range(_RAISE_CHAIN_WALK_MAX):
+                if not link or link in seen:
+                    break
+                older = conn.execute(
+                    select(
+                        operator_queue.c.id, operator_queue.c.agent_name, operator_queue.c.type,
+                        operator_queue.c.created_at, operator_queue.c.replaces,
+                        operator_queue.c.replaced_by, operator_queue.c.first_raised_at,
+                        operator_queue.c.raise_count,
+                    ).where(operator_queue.c.id == link)
+                ).mappings().first()
+                if (older is None or older["agent_name"] != agent_name
+                        or older["type"] != "alert" or older["replaced_by"] != child_id):
+                    break
+                seen.add(older["id"])
+                if older["raise_count"] is not None:
+                    first = (_iso_z_or_none(older["first_raised_at"])
+                             or _iso_z_or_none(older["created_at"]) or first)
+                    count += _raise_count_of(older)
+                    break
+                first = _iso_z_or_none(older["created_at"]) or first
+                count += 1
+                child_id, link = older["id"], older["replaces"]
+        elif first is None:
+            first = _iso_z_or_none(pred.get("created_at"))
+        return {"first_raised_at": first, "raise_count": count + 1}
 
     def _end_own_pending(
         self, conn, agent_name: str, row_id: str, *,
@@ -1199,17 +1293,21 @@ class OperatorQueueOperations:
         Oldest first: the stale duplicates a scheduled run piles up are the
         oldest, and newest-first would hide them behind "and N more". The id,
         type, who raised it and when it was filed — never a title, a question,
-        an answer or anything a person wrote.
+        an answer or anything a person wrote. An alert raised again reads as
+        filed when the condition was FIRST raised
+        (abilityai/trinity-enterprise#1367), so the agent can tell a standing
+        condition from a new one.
         """
+        waiting_since = func.coalesce(operator_queue.c.first_raised_at, operator_queue.c.created_at)
         stmt = (
             select(
                 operator_queue.c.request_id,
                 operator_queue.c.type,
                 operator_queue.c.raised_by,
-                operator_queue.c.created_at,
+                waiting_since.label("created_at"),
             )
             .where(and_(*_own_pending_conds(agent_name, exclude_request_id_prefixes)))
-            .order_by(operator_queue.c.created_at.asc(), operator_queue.c.request_id.asc())
+            .order_by(waiting_since.asc(), operator_queue.c.request_id.asc())
             .limit(limit)
         )
         with get_engine().connect() as conn:
@@ -1603,7 +1701,10 @@ class OperatorQueueOperations:
                 # pending from ended, so each key is NULL across the whole other
                 # group and NULL placement never decides an order (SQLite and
                 # PostgreSQL put NULLs at opposite ends).
-                case((is_pending, operator_queue.c.created_at), else_=None).asc(),
+                # abilityai/trinity-enterprise#1367: an alert raised again waits
+                # from its FIRST raise, so it keeps its place in this order.
+                case((is_pending, func.coalesce(operator_queue.c.first_raised_at,
+                                                operator_queue.c.created_at)), else_=None).asc(),
                 case((is_pending, None), else_=sort_time).desc(),
                 # #3059: the last key, so rows that tie on everything above
                 # (raised in the same instant) still order the same way on every
@@ -1627,7 +1728,12 @@ class OperatorQueueOperations:
     @staticmethod
     def _walk_sort_keys(watermark: str, snapshot: Optional[Dict[str, int]] = None):
         """The walk's sort key `(sec, prk, st)`, ordered `sec ASC, prk ASC,
-        st DESC, id ASC` — today's order, taken "as of" `watermark`.
+        st DESC, id ASC`, taken "as of" `watermark`. Within a priority band the
+        pending section runs NEWEST first — the opposite of `list_items`, which
+        has run oldest first since #3679 — so its key stays `created_at`, the
+        latest raise: an alert raised again (abilityai/trinity-enterprise#1367)
+        leads its band here, where sorting by its first raise would bury the
+        condition that has stood longest.
 
         A row is in the pending section (`sec = 0`) if it is pending NOW or
         ended after `watermark` (every pending → ended writer stamps
