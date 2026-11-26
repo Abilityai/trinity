@@ -22,8 +22,9 @@ trinity-enterprise#875), so a header it omits or forges can only narrow them.
 
 The shell (and running on Gemini/Codex, which no hook can scope) is owner tier,
 with one owner-controlled exception: visitors, by the per-agent guardrail
-`visitor_shell` (default on, so channel agents keep working). A shared person's
-turn never gets it (ruling 2026-10-19).
+`visitor_shell` (default on, so channel agents keep working; off while the
+setting cannot be read, trinity-enterprise#978). A shared person's turn never
+gets it (ruling 2026-10-19).
 
 A schedule run carries no `source_user_id`: the person behind it is the
 schedule's creator (`agent_schedules.owner_id`). A share holder may create a
@@ -812,13 +813,33 @@ def running_share_people(db, agent_name: str) -> set:
     return people
 
 
+def _visitor_shell_unreadable(agent_name: str, reason: str) -> bool:
+    logger.warning(f"event=visitor_shell_unreadable agent={agent_name} reason={reason} "
+                   f"shell=off")
+    return False
+
+
 def visitor_shell_allowed(db, agent_name: str) -> bool:
-    """The owner's choice for channel and public-link visitors (default on)."""
+    """The owner's choice for channel and public-link visitors (default on).
+
+    A setting that cannot be read turns the shell off for that turn (ruling
+    2026-11-25, trinity-enterprise#978): the read raising, a stored value that
+    is not JSON or not an object, or a `visitor_shell` that is not true or
+    false (the route writes booleans only). Logged, so an owner can find why a
+    channel agent lost its shell. A setting that is simply not there keeps the
+    default, so channel agents keep working."""
     try:
-        value = (db.get_guardrails_config(agent_name) or {}).get(VISITOR_SHELL_KEY, True)
-    except Exception:  # noqa: BLE001 - an unreadable setting keeps the default
-        value = True
-    return value is not False
+        config = db.get_guardrails_config(agent_name, strict=True)
+    except Exception as exc:  # noqa: BLE001 - unreadable: fail closed
+        return _visitor_shell_unreadable(agent_name, type(exc).__name__)
+    if config is None:
+        return True
+    if not isinstance(config, dict):
+        return _visitor_shell_unreadable(agent_name, "not_an_object")
+    value = config.get(VISITOR_SHELL_KEY, True)
+    if not isinstance(value, bool):
+        return _visitor_shell_unreadable(agent_name, "not_a_boolean")
+    return value
 
 
 def shell_allowed(db, agent_name: str, tier: str, kind: Optional[str]) -> bool:

@@ -118,7 +118,10 @@ ROWS = [
     (".claude/agents/a.md", policy.WRITE, None, policy.OWNER_TIER, None),
     (".claude/skills/x/SKILL.md", policy.WRITE, None, policy.OWNER_TIER, None),
     (".claude", policy.DELETE, policy.PROTECTED, policy.PROTECTED, policy.PROTECTED),
-    ("docs/CLAUDE.md", policy.WRITE, None, None, None),
+    # an instruction file name at any depth (trinity-enterprise#978, ruling 2026-11-25)
+    ("docs/CLAUDE.md", policy.WRITE, None, policy.OWNER_TIER, None),
+    ("docs/AGENTS.md", policy.DELETE, None, policy.OWNER_TIER, None),
+    ("docs/template.yaml", policy.WRITE, None, None, None),
     (".bashrc", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
     (".gitconfig", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
     (".config/git/config", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),

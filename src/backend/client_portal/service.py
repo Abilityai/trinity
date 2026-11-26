@@ -3649,6 +3649,18 @@ async def portal_chat(agent_name: str, message: str, email: str,
                 "Its owner can change that.",
                 category="turn_refused", retryable=False,
             )
+        if code == "TURN_CHECK_UNAVAILABLE":
+            # trinity-enterprise#978: the agent could not ask Trinity whose turn
+            # this was, so it did not start: nothing ran and nothing was billed,
+            # the one case where Retry is right. Not the AUTH copy below (which
+            # an older image's 503 used to reach), and fixed words rather than
+            # the agent's sentence, which names its runtime (#4482).
+            raise ClientPortalError(
+                502,
+                "The agent couldn't confirm who this message is for, so it didn't start. "
+                "Send it again in a moment.",
+                category="agent_unavailable", retryable=True,
+            )
         if code in ("AUTH", "BILLING"):
             # #2638: "re-sending re-fails" is only true while nothing changed
             # underneath. SUB-003 may have MOVED the agent onto a different

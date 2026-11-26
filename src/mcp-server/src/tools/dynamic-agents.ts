@@ -19,7 +19,7 @@
 
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
-import { EXECUTION_ID_PARAM_DESCRIPTION, runAgentChat } from "./chat.js";
+import { EXECUTION_ID_PARAM_DESCRIPTION, WAKE_PARAM_DESCRIPTION, runAgentChat } from "./chat.js";
 import { DELEGATION_CONTRACT } from "../delegation_contract.js";
 import type { ToolAccessPolicy } from "../access.js";
 
@@ -111,6 +111,12 @@ export function makeDedicatedChatTool(
         .string()
         .optional()
         .describe(EXECUTION_ID_PARAM_DESCRIPTION),
+      // #4538: declared for the same reason — undeclared, zod strips it and
+      // the dedicated tool could never decline a wake.
+      wake: z
+        .boolean()
+        .optional()
+        .describe(WAKE_PARAM_DESCRIPTION),
     }),
     execute: async (
       params: {
@@ -124,6 +130,7 @@ export function makeDedicatedChatTool(
         inject_result?: boolean;
         chat_session_id?: string;
         execution_id?: string;
+        wake?: boolean;
       },
       context: any
     ) => {
@@ -146,6 +153,7 @@ export function makeDedicatedChatTool(
           inject_result: params.inject_result,
           chat_session_id: params.chat_session_id,
           execution_id: params.execution_id,
+          wake: params.wake,
         },
         context,
         reportBackEnabled

@@ -45,6 +45,10 @@ class TaskExecutionErrorCode(str, Enum):
     # runtime cannot scope a shared person's (or a limited visitor's) turn. A
     # refusal, not an outage — answered 403 and never retried.
     TURN_REFUSED = "turn_refused"
+    # The agent could not ask the platform whose turn it is, so the turn did not
+    # start (trinity-enterprise#978). Answered 502 and typed; not a credential
+    # fault, so no subscription walk and no AUTH breaker count. Retrying works.
+    TURN_CHECK_UNAVAILABLE = "turn_check_unavailable"
     MAX_TURNS = "max_turns"          # The turn stopped at its turn cap — raise the cap or split the task; a retry repeats it (#3988, MESSAGE_ENVELOPE_SCHEMA §4)
     # Agent-to-agent hop past inter_agent_max_chain_depth (#2806). Refused before
     # a row exists, so it only ever appears on the X-Trinity-Error-Code header.
@@ -195,7 +199,11 @@ def terminal_from_callback_payload(payload: Any, execution_id: str) -> TerminalE
     # 503 → error_code "auth", which would trip the AUTH dispatch breaker. The
     # error text says what it really was.
     if error_code is not None and error_code.value == TaskExecutionErrorCode.AUTH.value:
-        from services.failure_classifier import is_model_rejection, is_prompt_too_long  # noqa: WPS433 — leaf, lazy like above
+        from services.failure_classifier import (  # noqa: WPS433 — leaf, lazy like above
+            is_model_rejection,
+            is_prompt_too_long,
+            is_turn_check_unavailable,
+        )
 
         reported = getattr(payload, "error", None) or ""
         if is_model_rejection(reported):
@@ -203,6 +211,10 @@ def terminal_from_callback_payload(payload: Any, execution_id: str) -> TerminalE
         # #3849: the agent labels its prompt-length 503 "auth" too.
         elif is_prompt_too_long(reported):
             error_code = TaskExecutionErrorCode.AGENT_ERROR
+        # trinity-enterprise#978: an image older than it answers "could not
+        # check whose turn this is" 503, labelled "auth".
+        elif is_turn_check_unavailable(reported):
+            error_code = TaskExecutionErrorCode.TURN_CHECK_UNAVAILABLE
 
     # #3988: the callback names the agent's turn-limit 422 by terminal_reason
     # only (result_callback._STATUS_MAP: 422 → (None, "max_turns")). The agent's
