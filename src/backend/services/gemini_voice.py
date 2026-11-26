@@ -552,6 +552,12 @@ def _tool_prompt(args: dict) -> str:
     return prompt
 
 
+# trinity-enterprise#1392: the trigger and the bound of a tool turn on a call
+# with no chat to run in. The bound sits under the 30 s the caller waits.
+VOICE_TOOL_TRIGGER = "voice"
+_VOICE_TOOL_TIMEOUT_SECONDS = 28
+
+
 def _is_workspace_bound(session: "VoiceSession") -> bool:
     """Can this call run a turn in a chat? Both halves or neither — a thread id
     with no email cannot be attributed and an email with no thread has nowhere
@@ -1403,7 +1409,7 @@ class GeminiVoiceService:
                     VoiceTranscriptEntry(role="system", text=f"[ran a task] {_tool_prompt(args)[:200]}")
                 )
                 result = await asyncio.wait_for(
-                    self._execute_tool(session.agent_name, tool_name, args),
+                    self._execute_tool(session, tool_name, args),
                     timeout=30.0,
                 )
         except asyncio.TimeoutError:
@@ -1456,46 +1462,65 @@ class GeminiVoiceService:
             except Exception as e:
                 logger.error(f"Failed to send tool response for {call_id}: {e}")
 
-    async def _execute_tool(self, agent_name: str, tool_name: str, args: dict) -> str:
-        """Route a tool call to the agent container via the task endpoint.
+    async def _execute_tool(self, session: VoiceSession, tool_name: str, args: dict) -> str:
+        """Run a tool call as a task on the agent, for a call with no chat to
+        run in (VoIP, the legacy Agent Detail session). A Workspace call does
+        NOT come here — the dispatcher routes it to `_dispatch_task_in_chat`.
 
-        The pre-ent#535 path, unchanged, and still the right one for a call with
-        no chat to run in (VoIP). A Workspace call does NOT come here — the
-        dispatcher routes it to `_run_task_in_chat` so the turn runs as the
-        agent in its own thread.
+        trinity-enterprise#1392: the turn runs through the task service, under
+        an execution row that names the person who started the call. It used to
+        reach the agent with no execution id: the agent made one up, the
+        platform had no row for it, so the turn-tier hook rated every such turn
+        a shared person (the owner's included), and while the managed hooks are
+        skipped (ent#1176) the refusal for a turn that may not hold the shell
+        never ran at all. Now the hook and that refusal rate the turn by the
+        person: the owner's may use the shell, a shared person's may not.
         """
-        from services.agent_client import get_agent_client, AgentNotReachableError, AgentRequestError
+        from services.task_execution_service import dispatch_and_await_terminal
 
+        agent_name = session.agent_name
         prompt = _tool_prompt(args)
         if not prompt:
             return "No prompt provided."
 
         logger.info(f"Voice tool call: agent={agent_name} tool={tool_name} prompt_chars={len(prompt)}")
-        # trinity-enterprise#751: this path reaches the agent without
-        # `execute_task` (no row, no requester identity), so a gated skill is
-        # refused here rather than put up for approval. The model voices it.
+        # trinity-enterprise#751: a gated skill is refused here rather than put
+        # up for approval: nobody on a call can wait for an approver. The model
+        # voices the refusal.
         from services import skill_gate_service
         try:
             await skill_gate_service.enforce(
                 agent_name, request_text=prompt,
                 requester=skill_gate_service.Requester(kind=skill_gate_service.KIND_OTHER,
                                                        key="voice-tool", label="A voice call"),
-                triggered_by="voice", refuse_only=True)
+                triggered_by=VOICE_TOOL_TRIGGER, refuse_only=True)
         except skill_gate_service.SkillGateError as e:
             return str(e)
         try:
-            client = get_agent_client(agent_name)
-            # #4156: the prompt is the caller's speech, and this path has no
-            # execution row for the rule to read, so auto-memory is always off.
-            response = await client.task(prompt, timeout=28.0, disable_auto_memory=True)
-            return response.response_text or "Task completed with no response."
-        except AgentNotReachableError:
-            return f"Agent {agent_name!r} is not currently running."
-        except AgentRequestError as e:
-            return f"Task error: {str(e)[:200]}"
+            # #4156: `voice` is a never-trigger for shared auto-memory, so the
+            # row turns it off, as the id-less call did by flag.
+            result = await dispatch_and_await_terminal(
+                agent_name=agent_name,
+                message=prompt,
+                triggered_by=VOICE_TOOL_TRIGGER,
+                source_user_id=session.user_id,
+                source_user_email=session.user_email,
+                timeout_seconds=_VOICE_TOOL_TIMEOUT_SECONDS,
+                wait_timeout=float(_VOICE_TOOL_TIMEOUT_SECONDS),
+                claim_budget=float(_VOICE_TOOL_TIMEOUT_SECONDS),
+                # The refuse-only check above is this request's gate.
+                gate_checked=True,
+            )
+        except skill_gate_service.SkillGateError as e:
+            return str(e)
         except Exception as e:
             logger.error(f"Voice tool execution error for {agent_name}: {e}")
             return f"Execution error: {str(e)[:200]}"
+        status = getattr(result, "status", None)
+        if str(getattr(status, "value", status) or "").lower() != "success":
+            error = (getattr(result, "error", "") or "").strip()
+            return f"Task error: {error[:200]}" if error else "The task did not finish."
+        return (getattr(result, "response", "") or "").strip() or "Task completed with no response."
 
     async def _dispatch_task_in_chat(self, session: VoiceSession, prompt: str) -> str:
         """The Workspace path (ent#551): start the turn in the bound thread and

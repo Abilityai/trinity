@@ -871,45 +871,47 @@ async def test_a_channel_message_held_by_the_gate_is_answered_in_the_conversatio
 
 def _voice(monkeypatch, gates):
     """`_execute_tool` with the real `enforce` over a stubbed gate map, and the
-    agent client patched where the tool's lazy import finds it."""
-    import services.agent_client as agent_client
+    task service's dispatch patched where the tool's lazy import finds it
+    (trinity-enterprise#1392: the turn runs under an execution row)."""
     import services.skill_gate_service as sgs
+    import services.task_execution_service as tes
     from services import gemini_voice as gv
 
     monkeypatch.setattr(sgs, "list_skill_gates", lambda agent: gates)
     monkeypatch.setattr(sgs.role_addressing, "owner_email", lambda agent: "owner@example.com")
     # trinity-enterprise#881: approvers here can open the agent; reach is pinned in test_ent881.
     monkeypatch.setattr(sgs, "_can_open", lambda agent, email: True)
-    client = MagicMock()
-    client.task = AsyncMock(return_value=SimpleNamespace(response_text="done"))
-    get_client = MagicMock(return_value=client)
-    monkeypatch.setattr(agent_client, "get_agent_client", get_client)
-    return gv.GeminiVoiceService.__new__(gv.GeminiVoiceService), client, get_client, sgs
+    dispatch = AsyncMock(return_value=SimpleNamespace(status="success", response="done", error=None))
+    monkeypatch.setattr(tes, "dispatch_and_await_terminal", dispatch)
+    session = SimpleNamespace(agent_name=AGENT, user_id=7, user_email="caller@example.com")
+    return gv.GeminiVoiceService.__new__(gv.GeminiVoiceService), session, dispatch, sgs
 
 
 class TestVoiceTool:
     def test_a_gated_prompt_is_refused_and_never_reaches_the_agent(self, monkeypatch):
         import services.skill_gate_service as sgs
 
-        svc, client, get_client, _ = _voice(monkeypatch, {"pay-invoice": sgs.SkillGate()})
+        svc, session, dispatch, _ = _voice(monkeypatch, {"pay-invoice": sgs.SkillGate()})
 
-        out = asyncio.run(svc._execute_tool(AGENT, "run_task",
+        out = asyncio.run(svc._execute_tool(session, "run_task",
                                             {"prompt": "please run /pay-invoice 100 EUR"}))
 
         assert "pay-invoice" in out and "can't be requested from here" in out
-        get_client.assert_not_called()
-        client.task.assert_not_awaited()
+        dispatch.assert_not_awaited()
 
     def test_an_ungated_prompt_reaches_the_agent(self, monkeypatch):
-        svc, client, get_client, _ = _voice(monkeypatch, {})
+        svc, session, dispatch, _ = _voice(monkeypatch, {})
 
-        out = asyncio.run(svc._execute_tool(AGENT, "run_task",
+        out = asyncio.run(svc._execute_tool(session, "run_task",
                                             {"prompt": "please run /pay-invoice 100 EUR"}))
 
         assert out == "done"
-        get_client.assert_called_once_with(AGENT)
-        client.task.assert_awaited_once_with("please run /pay-invoice 100 EUR", timeout=28.0,
-                                             disable_auto_memory=True)  # #4156
+        dispatch.assert_awaited_once()
+        kwargs = dispatch.await_args.kwargs
+        assert kwargs["agent_name"] == AGENT
+        assert kwargs["message"] == "please run /pay-invoice 100 EUR"
+        # The refuse-only check above was this request's gate.
+        assert kwargs["gate_checked"] is True
 
 
 # ---------------------------------------------------------------------------

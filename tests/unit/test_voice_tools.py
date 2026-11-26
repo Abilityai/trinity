@@ -229,112 +229,78 @@ class TestExecuteTool:
         to the body of each individual test.
         """
         sentinel = object()
-        original = sys.modules.get("services.agent_client", sentinel)
+        names = ("services.agent_client", "services.task_execution_service")
+        originals = {name: sys.modules.get(name, sentinel) for name in names}
         try:
             yield
         finally:
-            if original is sentinel:
-                sys.modules.pop("services.agent_client", None)
-            else:
-                sys.modules["services.agent_client"] = original
+            for name, original in originals.items():
+                if original is sentinel:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = original
+
+    @staticmethod
+    def _dispatch_stub(result=None, raises=None):
+        """trinity-enterprise#1392: the tool turn runs through the task service,
+        under an execution row. Stub the dispatch where the tool's lazy import
+        finds it."""
+        dispatch = AsyncMock(return_value=result, side_effect=raises)
+        tes = types.ModuleType("services.task_execution_service")
+        tes.dispatch_and_await_terminal = dispatch
+        sys.modules["services.task_execution_service"] = tes
+        return dispatch
+
+    @staticmethod
+    def _result(status="success", response="", error=None):
+        return types.SimpleNamespace(status=status, response=response, error=error)
 
     def test_success(self, svc):
         """Patching _execute_tool itself returns the expected value."""
         with patch.object(svc, "_execute_tool", AsyncMock(return_value="The answer is 42.")):
-            result = _run(svc._execute_tool("test-agent", "run_task", {"prompt": "What is 42?"}))
+            result = _run(svc._execute_tool(_make_session(), "run_task", {"prompt": "What is 42?"}))
         assert result == "The answer is 42."
 
     def test_success_real(self, svc):
-        """Test _execute_tool with a mocked get_agent_client."""
-        mock_response = MagicMock()
-        # AgentChatResponse exposes `.response_text`, not `.response` — guards the
-        # #979 regression where _execute_tool read the wrong attribute.
-        mock_response.response_text = "Task result text."
-        mock_client = MagicMock()
-        mock_client.task = AsyncMock(return_value=mock_response)
+        """The turn's response is what the model is handed, and the row names
+        the person who started the call."""
+        dispatch = self._dispatch_stub(self._result(response="Task result text."))
 
-        # Patch inside services.agent_client (the import target)
-        sys.modules.setdefault("services", types.ModuleType("services"))
-        agent_client_mod = types.ModuleType("services.agent_client")
-
-        class AgentNotReachableError(Exception): pass
-        class AgentRequestError(Exception): pass
-
-        agent_client_mod.get_agent_client = lambda name: mock_client
-        agent_client_mod.AgentNotReachableError = AgentNotReachableError
-        agent_client_mod.AgentRequestError = AgentRequestError
-        sys.modules["services.agent_client"] = agent_client_mod
-
-        result = _run(svc._execute_tool("test-agent", "run_task", {"prompt": "Do the thing"}))
+        result = _run(svc._execute_tool(_make_session(), "run_task", {"prompt": "Do the thing"}))
         assert result == "Task result text."
-        mock_client.task.assert_awaited_once()
+        dispatch.assert_awaited_once()
+        kwargs = dispatch.await_args.kwargs
+        assert kwargs["agent_name"] == "test-agent" and kwargs["message"] == "Do the thing"
+        assert (kwargs["source_user_id"], kwargs["source_user_email"]) == (1, "user@example.com")
 
     def test_empty_prompt(self, svc):
-        sys.modules.setdefault("services", types.ModuleType("services"))
-        agent_client_mod = types.ModuleType("services.agent_client")
-        agent_client_mod.get_agent_client = MagicMock()
-        agent_client_mod.AgentNotReachableError = Exception
-        agent_client_mod.AgentRequestError = Exception
-        sys.modules["services.agent_client"] = agent_client_mod
+        dispatch = self._dispatch_stub(self._result())
 
-        result = _run(svc._execute_tool("test-agent", "run_task", {}))
+        result = _run(svc._execute_tool(_make_session(), "run_task", {}))
         assert "No prompt" in result
-        agent_client_mod.get_agent_client.assert_not_called()
+        dispatch.assert_not_awaited()
 
     def test_prompt_truncated_to_max(self, svc):
         """Prompts longer than _TOOL_PROMPT_MAX are truncated before forwarding."""
-        mock_response = MagicMock()
-        mock_response.response_text = "ok"
-        mock_client = MagicMock()
-        mock_client.task = AsyncMock(return_value=mock_response)
-
-        agent_client_mod = types.ModuleType("services.agent_client")
-        agent_client_mod.get_agent_client = lambda name: mock_client
-        agent_client_mod.AgentNotReachableError = Exception
-        agent_client_mod.AgentRequestError = Exception
-        sys.modules["services.agent_client"] = agent_client_mod
+        dispatch = self._dispatch_stub(self._result(response="ok"))
 
         long_prompt = "x" * (_TOOL_PROMPT_MAX + 500)
-        _run(svc._execute_tool("test-agent", "run_task", {"prompt": long_prompt}))
-        call_args = mock_client.task.call_args
-        sent_prompt = call_args[0][0]
+        _run(svc._execute_tool(_make_session(), "run_task", {"prompt": long_prompt}))
+        sent_prompt = dispatch.await_args.kwargs["message"]
         assert len(sent_prompt) <= _TOOL_PROMPT_MAX + 3  # +3 for "..."
 
     def test_agent_not_reachable(self, svc):
-        class AgentNotReachableError(Exception): pass
-        class AgentRequestError(Exception): pass
+        """A turn that failed is voiced as an error with its reason."""
+        self._dispatch_stub(self._result(status="failed", error="Agent 'test-agent' is not running"))
 
-        agent_client_mod = types.ModuleType("services.agent_client")
-        agent_client_mod.AgentNotReachableError = AgentNotReachableError
-        agent_client_mod.AgentRequestError = AgentRequestError
-
-        def raise_unreachable(name):
-            mock = MagicMock()
-            mock.task = AsyncMock(side_effect=AgentNotReachableError("down"))
-            return mock
-        agent_client_mod.get_agent_client = raise_unreachable
-        sys.modules["services.agent_client"] = agent_client_mod
-
-        result = _run(svc._execute_tool("test-agent", "run_task", {"prompt": "hello"}))
-        assert "not currently running" in result
+        result = _run(svc._execute_tool(_make_session(), "run_task", {"prompt": "hello"}))
+        assert result == "Task error: Agent 'test-agent' is not running"
 
     def test_task_error(self, svc):
-        class AgentNotReachableError(Exception): pass
-        class AgentRequestError(Exception): pass
+        self._dispatch_stub(raises=RuntimeError("500 bad"))
 
-        agent_client_mod = types.ModuleType("services.agent_client")
-        agent_client_mod.AgentNotReachableError = AgentNotReachableError
-        agent_client_mod.AgentRequestError = AgentRequestError
-
-        def raise_request_error(name):
-            mock = MagicMock()
-            mock.task = AsyncMock(side_effect=AgentRequestError("500 bad"))
-            return mock
-        agent_client_mod.get_agent_client = raise_request_error
-        sys.modules["services.agent_client"] = agent_client_mod
-
-        result = _run(svc._execute_tool("test-agent", "run_task", {"prompt": "hello"}))
-        assert "Task error" in result
+        result = _run(svc._execute_tool(_make_session(), "run_task", {"prompt": "hello"}))
+        assert "Execution error" in result and "500 bad" in result
 
 
 # ── Tests: _execute_and_respond ───────────────────────────────────────────────

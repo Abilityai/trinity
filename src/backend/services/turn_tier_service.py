@@ -17,7 +17,7 @@ trinity-enterprise#875), so a header it omits or forges can only narrow them.
   share    anyone else, in one of two kinds:
              person   a person the agent is shared with
              visitor  a turn with no platform user: a channel (Slack, Telegram,
-                      WhatsApp), a public link, voice, a paid call
+                      WhatsApp), a public link, a paid call
   unknown  the execution does not exist, or belongs to another agent
 
 The shell (and running on Gemini/Codex, which no hook can scope) is owner tier,
@@ -41,6 +41,19 @@ the owner or an admin is `owner`, anyone else a shared `person`, never a
 visitor. Only that channel's email counts: a public-link turn shares
 `triggered_by="public"`, but its email is what the visitor typed, and reading
 it as an account would let a visitor claim the owner's tier.
+
+A room turn is rated the same way (trinity-enterprise#1392). The room stamps
+its row with the person whose post started the turn: `source_user_id` for a
+signed-in platform person, else the verified email of a Workspace participant
+(`source_channel="room"`). An agent's reply that wakes the next agent carries
+the same person, and an agent posting with its own key carries the person of
+the turn it is acting in. A room row that names nobody (the engine continuing
+an ask whose answerer is not seated) is a shared person with no account. A
+room turn is never a visitor: anyone in a room is someone the platform knows.
+
+A voice tool turn (the Agent Detail voice session and a phone call) runs under
+its own row, stamped with the person who started the call, and is rated as
+that person.
 
 Two more answers are `owner` with a kind, so the person stays on record
 (trinity-enterprise#1148):
@@ -86,7 +99,7 @@ import logging
 import unicodedata
 from typing import Callable, Dict, Iterable, NamedTuple, Optional, Tuple
 
-from config import PORTAL_SOURCE_CHANNEL
+from config import PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +159,12 @@ OWNER_CONFIGURED_TRIGGERS = frozenset({
 _NO_SCHEDULE_IDS = frozenset({"", "__manual__"})
 
 VISITOR_SHELL_KEY = "visitor_shell"
+
+# Surfaces whose `source_user_email` the platform wrote from a person it
+# authenticated, so the email may be read as an account: a Workspace thread and
+# a room (trinity-enterprise#1392). Every other row's email is what a visitor
+# typed or a channel reported.
+_PERSON_EMAIL_CHANNELS = frozenset({PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL})
 
 
 def _user_tier(db, user_id, agent_name: str) -> str:
@@ -603,12 +622,13 @@ def schedule_read_fields(lookups, agent_name: str, schedule, *, show_creator: bo
 
 
 def _workspace_person(db, execution) -> Tuple[bool, Optional[int]]:
-    """`(is_workspace_turn, user id)` for a Workspace turn: the platform account
-    of the signed-in person it was stamped with, or None when that email has no
-    account (an email-only client the agent is shared with). Not a Workspace
-    turn → `(False, None)`; an unreadable lookup → no account, which rates the
-    turn as a shared person — never higher."""
-    if _field(execution, "source_channel") != PORTAL_SOURCE_CHANNEL:
+    """`(is_workspace_turn, user id)` for a Workspace turn or a room turn with
+    no `source_user_id`: the platform account of the person it was stamped
+    with, or None when that email has no account (an email-only client the
+    agent is shared with) or the row names nobody. Neither surface →
+    `(False, None)`; an unreadable lookup → no account, which rates the turn as
+    a shared person — never higher, and never a visitor."""
+    if _field(execution, "source_channel") not in _PERSON_EMAIL_CHANNELS:
         return False, None
     email = _field(execution, "source_user_email")
     if not isinstance(email, str) or "@" not in email:

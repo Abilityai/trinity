@@ -8360,6 +8360,17 @@
       "description": "Found testing PR #3778 live: a Workspace turn (triggered_by=public, source_channel=portal, the signed-in email, no source_user_id) is rated as that person — owner/admin owner tier, a shared account a person (no shell even with visitor_shell on), an email-only client a person with no account — while a public-link or channel email never lifts a visitor and a schedule row keeps the creator rule; the route fence (restricted_agent_turn) meets the ledger, so a key with no header or naming an owner turn is fenced while a shared person's turn runs, only-owner or visitor-shell-on turns leave it open, an unreadable ledger fences, non-agent principals never are; the real SQLite ledger read carries source_channel/source_user_email. Mutations: dropping the Workspace rule turns 8 red; a header-only fence turns 3 red."
     },
     {
+      "file": "unit/test_ent1392_room_voice_turn_tier.py",
+      "feature": "trinity-enterprise#1392",
+      "added": "2026-11-26",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "A room turn and a voice tool turn are rated by the person they are for. The rule: a room row (source_channel=room) is rated by its source_user_id, else by the account of its email, else as a shared person with no account, never a visitor; a shared person gets no shell with visitor_shell on and the owner keeps it with visitor_shell off; a channel row is still a visitor. The stamp: a signed-in person is named by user id (also with no email), a Workspace participant and the engine's waker by verified email only, an agent's own key by the person of the turn it is acting in and never its owner, a failed lookup names nobody. The wake: the row _wake_agent dispatches is rated share/person for a shared person and owner for the owner and an admin. The voice tool: _execute_tool dispatches through dispatch_and_await_terminal stamped with the caller, the row is rated as the caller, keeps shared auto-memory off, a failed turn is voiced as an error, a blank prompt dispatches nothing. An AST scan finds no backend client.task call without an execution id, with a self-test on a synthetic file. With the fix reverted 22 of 30 turn red."
+    },
+    {
       "file": "unit/test_ent926_turn_tier.py",
       "feature": "abilityai/trinity-enterprise#926",
       "added": "2026-10-16",
