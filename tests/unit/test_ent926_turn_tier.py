@@ -287,11 +287,13 @@ def test_who_gets_the_shell(tier, kind, setting, expected):
     assert t.restricts_standing_work(db, AGENT, tier, kind) is (tier != "owner" and not expected)
 
 
-def test_an_unreadable_setting_keeps_the_default():
+def test_an_unreadable_setting_turns_the_shell_off():
+    """Ruling 2026-11-25 (trinity-enterprise#978): fail closed on a read error.
+    The full set of unreadable cases: test_ent978_typed_refusals_and_owner_names.py."""
     from services import turn_tier_service as t
     db = MagicMock()
     db.get_guardrails_config.side_effect = RuntimeError("db down")
-    assert t.shell_allowed(db, AGENT, "share", "visitor") is True
+    assert t.shell_allowed(db, AGENT, "share", "visitor") is False
 
 
 def test_the_route_tells_a_visitor_its_shell_answer():
@@ -302,17 +304,28 @@ def test_the_route_tells_a_visitor_its_shell_answer():
 
 # ---- a refused turn is a 403, never a retryable 503 (found live 2026-10-19) -------------
 
+def _typed_403(message="this agent runs on Gemini CLI"):
+    resp = MagicMock()
+    resp.status_code = 403
+    resp.json.return_value = {"detail": {"message": message, "error_code": "turn_refused"}}
+    return resp
+
+
 def test_an_agent_403_classifies_as_turn_refused():
+    """From the typed body only (trinity-enterprise#978 item 3). `.value`: the
+    str-Enum members compare equal, so `==` on the members proves nothing."""
     from services import chat_execution_service as ces
-    from services.execution_envelope import TaskExecutionErrorCode as C
-    assert ces._classify_agent_http_failure(403, "this agent runs on Gemini CLI") == C.TURN_REFUSED
-    assert ces._classify_agent_http_failure(503, "x") == C.AUTH          # unchanged
+    msg = "this agent runs on Gemini CLI"
+    assert ces._classify_agent_http_failure(403, msg, _typed_403(msg)).value == "turn_refused"
+    assert ces._classify_agent_http_failure(403, msg).value != "turn_refused"    # a bare 403
+    assert ces._classify_agent_http_failure(503, "x").value == "auth"           # unchanged
 
 
 def test_the_chat_path_answers_403_with_the_agents_sentence():
     from services import chat_execution_service as ces
+    msg = "runs on Gemini CLI, owner only"
     with pytest.raises(ces.ChatDispatchError) as exc:
-        asyncio.run(ces._apply_sub003_autoswitch("agent-a", "runs on Gemini CLI, owner only", 403, "e1"))
+        asyncio.run(ces._apply_sub003_autoswitch("agent-a", msg, 403, "e1", response=_typed_403(msg)))
     assert exc.value.status_code == 403
     assert "Gemini CLI" in str(exc.value.detail)
 

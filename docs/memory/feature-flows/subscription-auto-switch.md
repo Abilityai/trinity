@@ -588,8 +588,11 @@ persisted: a `docker restart` reverts to the DB baseline by construction.
   reads any 403 as `auth`, but a 403 whose body is typed `error_code: "turn_refused"` is the agent
   refusing the turn for who it is for (a runtime that cannot scope it, or a Claude agent whose guardrails
   are not running): no credential changes that, so it returns `None` before the status rule. The
-  agent's "could not ask the platform" answer is a 502, never a 503, for the same reason. Pinned on
-  both push paths with a subscription in the pool (`test_3470_subscription_walk.py`).
+  agent's "could not ask the platform" answer is a 502, never a 503, for the same reason, typed
+  `turn_check_unavailable` on every runtime (trinity-enterprise#978); an older image's 503 with the
+  same sentence does not walk either (`is_turn_check_unavailable_response`). Pinned on both push
+  paths with a subscription in the pool (`test_3470_subscription_walk.py`,
+  `test_ent978_typed_refusals_and_owner_names.py`).
 - **A container-fault 503 never walks.** `classify_switch_failure` reads a bare
   503 as `auth` (#285); the agent also answers 503 for *"Claude Code is not
   available in this container"* / *"Permission bypass failed"*. Looping a

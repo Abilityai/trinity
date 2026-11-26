@@ -60,7 +60,7 @@ def _db(monkeypatch):
     monkeypatch.setattr(dep.db, "get_user_by_email", lambda email: BY_EMAIL.get(email))
     monkeypatch.setattr(dep.db, "can_user_share_agent", lambda u, a: u == "owner")
     monkeypatch.setattr(dep.db, "get_schedule", lambda sid: SCHEDULES.get(sid))
-    monkeypatch.setattr(dep.db, "get_guardrails_config", lambda a: {})   # visitor_shell on
+    monkeypatch.setattr(dep.db, "get_guardrails_config", lambda a, strict=False: {})   # visitor_shell on
     RUNNING.clear()
     monkeypatch.setattr(dep.db, "get_running_turn_attribution", lambda agent: list(RUNNING))
 

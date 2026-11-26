@@ -10004,6 +10004,19 @@
         "credentials"
       ],
       "description": "The assistant panel's first-session cards, mounted, with tool cards built from and checked against a real instance's toolset: a confirm card says in one sentence what happens and its button names the action ('Run its first task', 'Switch it on', 'Delete it', never 'Confirm'), with the tool's parameters only behind a Details toggle; the Claude card is titled 'Connect Claude', says whether a subscription or an API key was saved and shows no variable name; the save report, the line told to the assistant, the fleet in the turn's context and a proposed switch leave out hidden example agents and system agents, and name the examples again once the person asked to see them; when only hidden agents are off the new credential the assistant is told every agent the person can see is on it, never every agent; a schedule change that sends no zone names the schedule's stored zone (none when unknown, never UTC by default), and a schedule that delivers its results says where they go."
+    },
+    {
+      "file": "unit/test_ent978_typed_refusals_and_owner_names.py",
+      "feature": "trinity-enterprise#978",
+      "added": "2026-11-25",
+      "categories": [
+        "unit",
+        "backend",
+        "agent-server",
+        "guardrails",
+        "security"
+      ],
+      "description": "trinity-enterprise#978 items 2-5. (2) Gemini CLI, Codex and Claude Code answer a turn check that could not ask the platform with a 502 typed turn_check_unavailable, never a 503; the async record names it (its own terminal_reason, not empty_result; trinity#4778) and the pull record carries it; the code is in the execution vocabulary and the pull taxonomy; no subscription walk reads it, on the sync push, /chat (answered 502) or the pull sink, and an older image's 503 with the agent's sentence is recognised (anchored marker, pinned against the producer, mirrored in the scheduler classifier); the Workspace says send it again (agent_unavailable, retryable, fixed words). (3) TURN_REFUSED only from a typed turn_refused body on both paths; a bare 403 is not one. (4) visitor_shell is off and logged when the setting cannot be read (read error, broken JSON through get_guardrails_config(strict=True), a non-object, a non-boolean), through the real database facade; a missing setting keeps the default. (5) CLAUDE.md, CLAUDE.local.md, AGENTS.md and GEMINI.md at any depth are instructions: owner tier to write or delete, flagged for the share tier, instructions.manage for an agent key; template.yaml and lookalikes stay ordinary."
     }
   ]
 }
