@@ -181,8 +181,9 @@ class IdempotencyOperations:
         The read half of ``claim``: same row, same TTL cutoff, no delete and no
         insert, so looking can never take a claim or start a dispatch (the
         hazard #2671 names). Returns {state, execution_id, claim_token,
-        updated_at} — ``updated_at`` is the instant ``claim`` reports as the
-        claim's ``updated_at``.
+        updated_at, snapshot} — ``updated_at`` is the instant ``claim`` reports
+        as the claim's ``updated_at``; ``snapshot`` is the stored one decoded
+        as ``claim`` decodes it (#4538), None when absent or unreadable.
         """
         with get_engine().connect() as conn:
             row = conn.execute(
@@ -191,6 +192,7 @@ class IdempotencyOperations:
                     idempotency_keys.c.execution_id,
                     idempotency_keys.c.claim_token,
                     idempotency_keys.c.updated_at,
+                    idempotency_keys.c.response_snapshot,
                 ).where(and_(
                     idempotency_keys.c.scope == scope,
                     idempotency_keys.c.idempotency_key == key,
@@ -199,11 +201,18 @@ class IdempotencyOperations:
             ).mappings().first()
         if row is None:
             return None
+        snapshot = None
+        if row["response_snapshot"]:
+            try:
+                snapshot = json.loads(row["response_snapshot"])
+            except (ValueError, TypeError):
+                snapshot = None
         return {
             "state": row["status"],
             "execution_id": row["execution_id"],
             "claim_token": row["claim_token"],
             "updated_at": row["updated_at"],
+            "snapshot": snapshot,
         }
 
     def attach_execution(

@@ -759,7 +759,8 @@ def peek(scope: str, key: Optional[str]) -> Optional[IdempotencyDecision]:
     None when there is no live row. A row comes back shaped like the replay
     ``begin`` would return, so ``reclaim_in_flight`` can compare-and-delete it
     by its owner token. Unlike ``begin`` this does NOT fail open: a read error
-    raises, and the caller decides which way an unknown answer falls.
+    raises, and the caller decides which way an unknown answer falls. The stored
+    snapshot comes back with it (#4538).
     """
     if not key:
         return None
@@ -769,6 +770,7 @@ def peek(scope: str, key: Optional[str]) -> Optional[IdempotencyDecision]:
     return IdempotencyDecision(
         enabled=True, replay=True, in_flight=res.get("state") == STATE_IN_FLIGHT,
         scope=scope, key=key, execution_id=res.get("execution_id"),
+        snapshot=res.get("snapshot"),
         claim_token=res.get("claim_token"), claimed_at=res.get("updated_at"),
     )
 

@@ -85,7 +85,9 @@ _TITLE_MAX_CHARS = 200
 # idempotency claim released so the agent's next start re-dispatches it. The
 # platform never reached the container (`network`), never admitted the turn
 # (`capacity` — a full durable backlog too, `circuit_open`,
-# `ephemeral_exhausted`), or the agent could not start one (`auth`, `billing`).
+# `ephemeral_exhausted`), or the agent could not start one (`auth`, `billing`,
+# and `turn_check_unavailable`: it could not ask the platform whose turn it
+# was, which an older image answered as an `auth` 503 — trinity-enterprise#978).
 # Every other class is a turn that ran and ended badly, which its own execution
 # row reports: a `timeout` in particular means a turn ran. Spelled from the
 # enum so a renamed member fails at import, never silently stops matching.
@@ -96,6 +98,7 @@ NO_TURN_ERROR_CODES = frozenset({
     TaskExecutionErrorCode.BILLING.value,
     TaskExecutionErrorCode.AUTH.value,
     TaskExecutionErrorCode.EPHEMERAL_EXHAUSTED.value,
+    TaskExecutionErrorCode.TURN_CHECK_UNAVAILABLE.value,
 })
 
 # Strong refs for background dispatches: a bare create_task can be garbage

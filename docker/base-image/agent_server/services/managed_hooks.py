@@ -224,8 +224,8 @@ async def require_hooks_or_owner(execution_id: Optional[str]) -> None:
                 f"kind={kind} cause={cause}")
     if tier == "unreachable":
         # 502, never 503: a 503 from a Claude agent reads as an auth failure on
-        # every caller (the subscription walk, the AUTH breaker code).
-        raise HTTPException(status_code=502,
-                            detail={"message": turn_scope.COULD_NOT_CHECK.format(runtime=RUNTIME_LABEL)})
+        # every caller (the subscription walk, the AUTH breaker code). Typed
+        # like the other runtimes' answer (trinity-enterprise#978).
+        raise HTTPException(status_code=502, detail=turn_scope.could_not_check(RUNTIME_LABEL))
     text = schedule_refusal(schedule) if schedule else REFUSED
     raise HTTPException(status_code=403, detail={"message": text, "error_code": turn_scope.ERROR_CODE})

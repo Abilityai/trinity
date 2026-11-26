@@ -144,6 +144,30 @@ def _is_agent_auth_answer(error_lower: str) -> bool:
     return any(text.startswith(prefix) for prefix in AGENT_AUTH_FAILURE_PREFIXES)
 
 
+# trinity-enterprise#978: the agent could not ask the platform whose turn it
+# is, so the turn did not start. A current image answers 502 typed
+# `turn_check_unavailable`; an older one answered 503 with this sentence, and a
+# 503 read as auth. No credential changes it. The agent's own words
+# (`turn_scope.COULD_NOT_CHECK`), anchored at the start after an optional
+# `[code] ` tag, so an error that merely quotes them keeps its class. Pinned
+# against the producer by tests/unit/test_ent978_typed_refusals_and_owner_names.py.
+TURN_CHECK_UNAVAILABLE_MARKERS = [
+    "trinity could not be reached to check whose turn this is",
+]
+
+
+def is_turn_check_unavailable(error_message: str) -> bool:
+    """Return True if `error_message` is the agent's "could not check whose
+    turn this is" answer (trinity-enterprise#978)."""
+    if not error_message:
+        return False
+    text = error_message.lower().lstrip()
+    tag = _CODE_TAG.match(text)
+    if tag:
+        text = text[tag.end():]
+    return any(text.startswith(marker) for marker in TURN_CHECK_UNAVAILABLE_MARKERS)
+
+
 def is_prompt_too_long(error_message: str) -> bool:
     """Return True if `error_message` is the API rejecting the prompt's length
     — no credential can fix it, so SUB-003 must not switch on it (#3849). The

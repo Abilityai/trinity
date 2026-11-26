@@ -156,7 +156,7 @@ class _FakeDb:
     def get_resource_limits(self, name):
         return None
 
-    def get_guardrails_config(self, name):
+    def get_guardrails_config(self, name, strict=False):
         return None
 
 

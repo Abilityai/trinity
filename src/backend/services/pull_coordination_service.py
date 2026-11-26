@@ -600,6 +600,7 @@ def _switch_failure_kind(
     from services.failure_classifier import (
         is_model_rejection,
         is_prompt_too_long,
+        is_turn_check_unavailable,
         is_turn_limit,
     )
 
@@ -609,6 +610,10 @@ def _switch_failure_kind(
     # no credential changes a turn cap or a prompt's length.
     if is_turn_limit(error_text) or is_prompt_too_long(error_text):
         return None
+    # trinity-enterprise#978: a worker older than it reports "could not check
+    # whose turn this is" (a 503) as `auth`.
+    if is_turn_check_unavailable(error_text):
+        return None
     return _SWITCH_FAILURE_KINDS.get((error_code or "").strip().lower())
 
 
@@ -617,14 +622,22 @@ def _recode_credential_independent_auth(error_code: str, error_text: str) -> str
 
     Mirrors ``execution_envelope.terminal_from_callback_payload`` (#1083): a
     model rejection is ``model_unsupported`` (#3012), a prompt-length refusal
-    ``agent_error`` (#3849); anything else keeps ``auth``.
+    ``agent_error`` (#3849), a turn check that could not ask the platform
+    ``turn_check_unavailable`` (trinity-enterprise#978); anything else keeps
+    ``auth``.
     """
-    from services.failure_classifier import is_model_rejection, is_prompt_too_long
+    from services.failure_classifier import (
+        is_model_rejection,
+        is_prompt_too_long,
+        is_turn_check_unavailable,
+    )
 
     if is_model_rejection(error_text):
         return "model_unsupported"
     if is_prompt_too_long(error_text):
         return "agent_error"
+    if is_turn_check_unavailable(error_text):
+        return "turn_check_unavailable"
     return error_code
 
 

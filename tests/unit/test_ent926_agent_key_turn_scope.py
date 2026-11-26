@@ -203,7 +203,7 @@ OWNER_UNNAMED = [
 @pytest.fixture
 def visitor_shell(monkeypatch):
     setting = {}
-    monkeypatch.setattr(dep.db, "get_guardrails_config", lambda agent: setting)
+    monkeypatch.setattr(dep.db, "get_guardrails_config", lambda agent, strict=False: setting)
     return setting
 
 

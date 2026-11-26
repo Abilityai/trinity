@@ -72,6 +72,8 @@ def test_an_ordinary_write_is_allowed_without_asking_anyone(hook, monkeypatch):
 
 
 @pytest.mark.parametrize("path", ["/home/developer/CLAUDE.md", "/home/developer/.claude/agents/a.md",
+                                  # an instruction name at any depth (trinity-enterprise#978)
+                                  "/home/developer/docs/CLAUDE.md", "/home/developer/workspace/AGENTS.md",
                                   "/home/developer/.claude/skills/x/SKILL.md", "/home/developer/.bashrc",
                                   "/home/developer/.local/lib/python3.13/site-packages/zz.pth"])
 @pytest.mark.parametrize("tool", ["Write", "Edit", "MultiEdit"])

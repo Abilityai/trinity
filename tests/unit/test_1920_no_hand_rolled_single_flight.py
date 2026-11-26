@@ -129,7 +129,9 @@ _ALLOWED = {
     "services/event_dispatch_service.py": "trinity:evt_fires:{source}:{subscriber}:alerted once-per-window alert "
     "flag (#2973) — a once-guard, not a mutex: no release, no token, TTL-expiry with the budget window only",
     "services/caller_wake_service.py": "{wake budget key}:alerted once-per-window 'wakes capped' notification "
-    "marker (#4357) — a once-guard, not a mutex: no release, no token, TTL-expiry with the wake window only",
+    "marker (#4357) — a once-guard, not a mutex: no release, no token, TTL-expiry with the wake window only; "
+    "and trinity:wake_missed:{caller} put back when its delivery was cancelled (#4538) — a parked-ending marker, "
+    "not a lock: NX only so a newer parked ending wins",
     "services/chat_execution_service.py": "terminate_audit:{agent}:{execution_id} audit-row DEDUP claim (#4475) — "
     "a once-guard, not a mutex: nothing waits on or renews it, it expires after 24 h, and it is deleted only when "
     "the audit write fails so a repeat terminate can record the turn. Fails OPEN by design (a duplicate audit "
