@@ -10063,7 +10063,7 @@
         "unit",
         "operator-queue"
       ],
-      "description": "The raised line, mounted: 'raised N times · first raised 3d ago' on the Operating Room card for a pending alert raised more than once (a platform alert keeps its seen line), the Workspace Inbox row's badge in the place of 'Replaces' and with no visible link, and the ask card's line beside 'Replaces'; the Operating Room order and the Inbox urgency order read the first raise, the Inbox newest-first order keeps the latest."
+      "description": "The raised line, mounted: 'raised N times · first raised 3d ago' on the Operating Room card for a pending alert raised more than once (a platform alert keeps its seen line), the Workspace Inbox row's own line under the badge row (never inside it, whatever badges the row carries, in the place of 'Replaces' and with no visible link; a row with no raise has no extra line), and the ask card's line beside 'Replaces'; the Operating Room order and the Inbox urgency order read the first raise, the Inbox newest-first order keeps the latest."
     }
   ]
 }

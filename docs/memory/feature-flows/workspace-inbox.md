@@ -130,10 +130,14 @@ Sign-in / reload on bare /workspace
                       (Answered · you / Expired / …) replaces it in place — a row is one
                       height in every state, nothing below it moves on answer;
                       an alert the agent raised again (trinity-enterprise#1367) carries
-                      "Raised N times · first raised 3d ago" in the place of the
-                      "Replaces …" badge (workspaceRaisedText; the open card keeps both
-                      lines); the count and the date go to whoever the alert reaches,
-                      the replaced ask is named only to a viewer who could already see it
+                      "Raised N times · first raised 3d ago" on its OWN line under the
+                      badge row (workspaceRaisedText), never a badge inside it: beside a
+                      priority and an expiry badge it wrapped and the row grew, so a
+                      re-raised row is one height whatever badges it carries and a row
+                      with no raise has no such line; it stands in the place of the
+                      "Replaces …" badge (the open card keeps both lines); the count and
+                      the date go to whoever the alert reaches, the replaced ask is named
+                      only to a viewer who could already see it
                       a row being crossed off (prop `crossing`: key → done | leaving) is
                       li.grid > div.min-h-0 > div.pb-1 > button: `done` only marks it
                       (data-crossing); `leaving` adds grid-rows-[0fr] opacity-0 +
@@ -436,7 +440,7 @@ an ask that ends while selected; a deep-linked `?item=`; previews read failing m
 | `src/frontend/tests/unit/portalInboxRooms.spec.js`, `portalInboxRooms.mount.spec.js`, `portalInboxRoomsShell.mount.spec.js` | ent#959: member rooms in Unread / All, non-member rooms never drawn or fetched, the pane reads the room after render, `roomTranscriptComplete`, a room past the page bound or short of its count stays partial and unread, the room view reads a multi-page room only once all of it is loaded and never on a failed open, opening a room from the sidebar writes no read, Mark all read by kind, the footer note gone, the count-parity property with rooms, the open room's `read` through the shell |
 | `src/frontend/tests/unit/portalInboxStore.spec.js` | `fetchChatState({previews})`, `markChatReadStrict` |
 | `src/frontend/tests/unit/portalInbox.mount.spec.js` (answer, then next) | the beat → advance → collapse → drop sequence with its states and classes; next below / above; `?sort=` and `?from=` order; the kept filter; "All caught up" with and without ended rows, and its next action per session; ended rows skipped and a far row scrolled to; a failed answer (409, 403), four poll endings and Dismiss move nothing; reduced motion; All (the row stays, the selection moves); an ask that is not a row; a confirm after the reader moved on; double and stale confirms; a new visit mid-sequence; no timer after unmount; gate / "Got it" / credential; the 300 ms guard; stacked history, last ask and focus. 46 call-site mutations across this change, all red |
-| `src/frontend/tests/unit/reraisedAlert.mount.spec.js` | trinity-enterprise#1367: the raised badge in the place of "Replaces", the ask card's line, the urgency order on the first raise and Newest on the latest |
+| `src/frontend/tests/unit/reraisedAlert.mount.spec.js` | trinity-enterprise#1367: the raised line on its own row under the badges, in the place of "Replaces"; the ask card's line, the urgency order on the first raise and Newest on the latest |
 | `src/frontend/tests/unit/portalInboxRowHeight.mount.spec.js` | #4229 one badge per state; the crossing row's `done` / `leaving` arms, the clip only while leaving, both reduced-motion classes, the gap inside the track |
 | `src/frontend/tests/unit/portalAskWakePending.mount.spec.js` | the "Agent not yet woken" line; #4502: "Sent." for a stopped or missing agent from a roster re-read after the answer, the sentence kept for a running one, "Sent." only when the re-read fails (resolves without a verdict, or throws) or does not answer in 1.5 s, nothing drawn while it is out, no read without a wake, no "Sent" line and no read when a surface takes the answer over or the card is gone, the hook on the success path only |
 | `src/frontend/tests/unit/portalRosterRefreshVerdict.spec.js` | #4502: `refreshRoster()` resolves `true` only for a read that succeeded; a failed quiet refresh keeps the last roster and reports nothing |

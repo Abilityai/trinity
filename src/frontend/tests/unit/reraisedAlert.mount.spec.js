@@ -9,7 +9,8 @@
  * label keep the latest raise (`created_at`).
  *
  * Mounted (#2918): the Operating Room card's line, the Workspace Inbox row's
- * badge (in the place of "Replaces …") and the ask card's line.
+ * line (its own, under the badge row, in the place of the "Replaces …" badge)
+ * and the ask card's line.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -154,32 +155,53 @@ describe('QueueCard', () => {
 describe('the Workspace Inbox row', () => {
   const item = (a) => ({ key: `ask:${a.id}`, type: 'ask', id: a.id, agent_name: a.agent_name,
     title: a.title, status: a.status, at: a.created_at, ask: a })
+  const badges = (id) => wrapper.find(`[data-testid="inbox-row-badges-ask:${id}"]`)
+  const raisedLine = (id) => wrapper.find(`[data-testid="inbox-row-raised-ask:${id}"]`)
 
-  it('a re-raised alert carries the raised badge in the place of "Replaces"', async () => {
+  it('a re-raised alert says so on its own line under the badge row, never inside it', async () => {
     const again = ask('again', { ...RAISED, replaces: 'export-1' })
     wrapper = mount(PortalInboxList, { props: { items: [item(again)] } })
     await flushPromises()
-    const badge = wrapper.find('[data-testid="inbox-row-raised-ask:again"]')
-    expect(badge.text()).toBe('Raised 12 times · first raised 3d ago')
+    expect(raisedLine('again').text()).toBe('Raised 12 times · first raised 3d ago')
+    // outside the wrapping badge row, right under it: the row's height cannot
+    // depend on which other badges sit beside it
+    expect(badges('again').find('[data-testid="inbox-row-raised-ask:again"]').exists()).toBe(false)
+    expect(badges('again').element.nextElementSibling).toBe(raisedLine('again').element)
+    // it stands in the place of "Replaces", and the badge line is never empty (#4229)
     expect(wrapper.find('[data-testid="inbox-row-replaces-ask:again"]').exists()).toBe(false)
-    // one badge line, never an extra "Unanswered" beside it
-    expect(wrapper.find('[data-testid="inbox-row-pending-ask:again"]').exists()).toBe(false)
+    expect(badges('again').text()).toBe('Unanswered')
   })
 
-  it('the badge needs no visible "Replaces" link: a new addressee reads the history too', async () => {
+  it('the line stays out of the badge row whatever badges the row carries', async () => {
+    const soon = new Date(NOW + 30 * 60 * 1000).toISOString()
+    const loud = ask('loud', { ...RAISED, replaces: 'export-1', priority: 'critical', expires_at: soon })
+    wrapper = mount(PortalInboxList, { props: { items: [item(loud)] } })
+    await flushPromises()
+    expect(badges('loud').find('[data-testid="inbox-row-badge-priority"]').exists()).toBe(true)
+    expect(badges('loud').find('[data-testid="inbox-row-badge-expiry"]').exists()).toBe(true)
+    expect(badges('loud').text()).not.toContain('Raised')
+    expect(badges('loud').element.nextElementSibling).toBe(raisedLine('loud').element)
+  })
+
+  it('needs no visible "Replaces" link: a new addressee reads the history too', async () => {
     const taken = ask('taken', { ...RAISED, replaces: null })
     wrapper = mount(PortalInboxList, { props: { items: [item(taken)] } })
     await flushPromises()
-    expect(wrapper.find('[data-testid="inbox-row-raised-ask:taken"]').text()).toBe('Raised 12 times · first raised 3d ago')
-    expect(wrapper.find('[data-testid="inbox-row-pending-ask:taken"]').exists()).toBe(false)
+    expect(raisedLine('taken').text()).toBe('Raised 12 times · first raised 3d ago')
+    expect(badges('taken').text()).toBe('Unanswered')
   })
 
-  it('a replacement that is not a repeat keeps its "Replaces" badge', async () => {
+  it('a row with no raise has no extra line', async () => {
     const swapped = ask('swapped', { kind: 'approval', replaces: 'payout-1' })
-    wrapper = mount(PortalInboxList, { props: { items: [item(swapped)] } })
+    const ended = ask('ended', { ...RAISED, status: 'cancelled', ended_by: 'operator', ended_at: LATEST })
+    wrapper = mount(PortalInboxList, { props: { items: [item(ask('plain')), item(swapped), item(ended)] } })
     await flushPromises()
+    for (const id of ['plain', 'swapped', 'ended']) {
+      expect(raisedLine(id).exists()).toBe(false)
+      expect(badges(id).element.nextElementSibling).toBe(null)
+    }
+    // a replacement that is not a repeat keeps its "Replaces" badge
     expect(wrapper.find('[data-testid="inbox-row-replaces-ask:swapped"]').text()).toBe('Replaces payout-1')
-    expect(wrapper.find('[data-testid="inbox-row-raised-ask:swapped"]').exists()).toBe(false)
   })
 })
 
