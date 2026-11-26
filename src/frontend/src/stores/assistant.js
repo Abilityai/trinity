@@ -21,7 +21,7 @@ import { defineStore } from 'pinia'
 import api from '../api'
 import { useOnboardingStore } from './onboarding'
 import { buildContext, buildFleet, describePage } from '../utils/assistantContext'
-import { acceptCards, buildOutcome, cardButton, cardLabel, cardNote, credentialLine, outcomeLine, runCard, useClaude, validBuild, webLink } from '../utils/assistantCards'
+import { acceptCards, buildOutcome, cardButton, cardLabel, cardNote, CLAUDE_KINDS, claudeCard, claudeKindFor, credentialLine, outcomeLine, runCard, useClaude, validBuild, webLink } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
 import { useAuthStore } from './auth'
 import { useFirstRunStore } from './firstRun'
@@ -472,9 +472,13 @@ export const useAssistantStore = defineStore('assistant', {
         useAgentsStore().fetchAgents().catch(() => {})
         // ent#1390: a switch is never offered for an agent the person cannot see.
         const hidden = this.outOfSight(after)
-        const cards = acceptCards(data.cards, after)
-          .map((c) => (c.action === 'use-claude' ? { ...c, agents: c.agents.filter((n) => !hidden.has(n)) } : c))
-          .filter((c) => c.action !== 'use-claude' || c.agents.length > 0)
+        const accepted = acceptCards(data.cards, after)
+        // ent#1399: a switch names the kind the instance saved or holds, never the assistant's guess.
+        const kinds = accepted.some((c) => c.action === 'use-claude') ? await this.claudeKinds() : {}
+        const cards = accepted
+          .map((c) => (c.action === 'use-claude'
+            ? { ...c, kind: claudeKindFor(c, kinds), agents: c.agents.filter((n) => !hidden.has(n)) } : c))
+          .filter((c) => c.action !== 'use-claude' || (c.kind && c.agents.length > 0))
         const reply = {
           id: newId(),
           role: 'assistant',
@@ -664,6 +668,24 @@ export const useAssistantStore = defineStore('assistant', {
       this.waiting = ''
       if (waiting && this.agreed) await this.send(waiting, route)
       else if (this.agreed) await this.loadStatus()      // nothing asked yet: let it say where to start
+    },
+
+    /**
+     * ent#1399: which Claude credential a switch card may name. `saved` is the
+     * kind this conversation's Claude card saved last, as the save reported it;
+     * only when there is none is the instance asked what it holds (`held`:
+     * undefined when it could not say).
+     */
+    async claudeKinds() {
+      const entries = this.messages.flatMap((m) => m.cards || [])
+      const saved = entries.filter((e) => claudeCard(e.card) && e.state === 'done' && Object.hasOwn(CLAUDE_KINDS, e.kind || '')).at(-1)?.kind
+      if (saved) return { saved }
+      try {
+        const { data } = await api.get(`${BASE}/credential`, { params: { name: 'CLAUDE_SUBSCRIPTION' } })
+        return { held: typeof data?.current === 'string' || data?.current === null ? data.current : undefined }
+      } catch {
+        return { held: undefined }
+      }
     },
 
     /** Write the conversation down. Cheap, and called on every change. */

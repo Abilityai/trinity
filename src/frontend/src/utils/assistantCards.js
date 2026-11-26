@@ -345,6 +345,23 @@ export function validUseClaude(raw, fleet) {
   return { action: 'use-claude', kind: raw.kind, agents: [...new Set(raw.agents)] }
 }
 
+/**
+ * trinity-enterprise#1399: the kind a `use-claude` card switches agents onto is
+ * the instance's, never the assistant's guess. The assistant reads the name the
+ * card was asked under (ANTHROPIC_API_KEY), and on the walk of 2026-11-25 it
+ * offered "this API key" after a subscription was saved; the confirm was refused.
+ * `saved`: the kind this conversation's Claude card saved last. `held`: what the
+ * instance holds ("subscription", "api_key", "subscription_and_api_key", null),
+ * or undefined when it could not be read. Answers the kind, or null when the
+ * instance holds none, so there is nothing a confirm could switch them onto.
+ */
+export function claudeKindFor(card, { saved, held } = {}) {
+  if (Object.hasOwn(CLAUDE_KINDS, saved || '')) return saved
+  if (held === null) return null
+  if (Object.hasOwn(CLAUDE_KINDS, held || '')) return held
+  return card.kind        // both held, or unreadable: either kind is one the instance may hold
+}
+
 /** What the instance said about its existing agents, in the words the assistant is given: names, never a value. */
 export function notUsingWords(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return ''
@@ -546,9 +563,10 @@ const TOOL_COPY = Object.freeze({
   toggle_agent_schedule: (a, { fleet }) => {
     const which = scheduleTitle(a, fleet)
     const its = `${str(a.agent_name)}'s schedule${which ? ` ${which}` : ''}`
+    // ent#1399: the title in plain words too, not the tool's name.
     return a.enabled === false
-      ? { sentence: `Switches off ${its}: it does not run until it is switched on again.`, button: 'Switch it off' }
-      : { sentence: `Switches on ${its}: it runs at its times from now on.`, button: 'Switch it on' }
+      ? { title: `Switch off ${its}`, sentence: `Switches off ${its}: it does not run until it is switched on again.`, button: 'Switch it off' }
+      : { title: `Switch on ${its}`, sentence: `Switches on ${its}: it runs at its times from now on.`, button: 'Switch it on' }
   },
   update_agent_schedule: (a, { fleet }) => {
     const which = scheduleTitle(a, fleet)
@@ -596,6 +614,8 @@ export function cardLabel(card, fleet, { firstSession = false } = {}) {
   if (card.action === 'credential') return `${card.name} for ${card.agent || 'this instance'}`
   if (card.action === 'use-claude') return `Use ${CLAUDE_KINDS[card.kind]} on these agents: ${card.agents.join(', ')}`
   if (card.action === 'tool') {
+    const own = toolCopy(card, { fleet }).title
+    if (own) return own
     const { title, details } = toolWords(card)
     const first = details.find((d) => ['name', 'agent name', 'agent'].includes(d.key)) || details[0]
     return first ? `${title}: ${first.value.slice(0, 80)}` : title
