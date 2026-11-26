@@ -33,8 +33,13 @@ behind: on a login that fetches, each session's own fetch lands before its
 first tool call and decides that session, so the first restricted turn after
 an organization adds a setting, or on a new agent, is not refused. After an
 organization removes it, restricted turns stay refused until an owner's turn
-refreshes the cache. Never raises; never reports a key name or value from the
-cache.
+refreshes the cache. The same lag may repeat on an agent whose subscription
+pool holds subscriptions from different Claude organizations when only some of
+them deliver server-managed settings: on every switch between them, the first
+restricted turn after a switch to one that delivers them is not refused, and
+after a switch away restricted turns stay refused until an owner's turn
+refreshes the cache (not reproduced). Never raises; never reports a key name
+or value from the cache.
 """
 from __future__ import annotations
 

@@ -554,8 +554,10 @@ every 10 minutes under the `fleetimage:leader` lease (fail-open); started in
 breaker bookkeeping) and keeps **one** alert, `managed_hooks_skipped:fleet` (high), naming the agents whose
 `guardrails_registration` reads `skipped`: Claude Code is not applying the managed hooks, so the agent
 refuses restricted turns ([agent-runtime.md](../architecture/agent-runtime.md)). Docker unreadable leaves
-the alert as it is; an agent with no answer holds it only if the last reading named it (or before this
-process's first reading). An image from before the field reads clean.
+the alert as it is; an agent with no answer holds it only if the alert's pending row names it. The named
+set is read from that row (`context.agents`) on every pass, never kept in the process (#4778), so a backend
+restart or a lease move does not let an agent the alert never named keep it open; a row whose list cannot
+be read lets any silent agent hold it. An image from before the field reads clean.
 
 Related: `409 env_unreadable` (credential sink, Nevermined delegation) names the older agent image and
 the restart when the agent's read answer carries no `missing` list (`agent_env_read.image_predates_missing`).
