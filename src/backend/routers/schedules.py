@@ -255,8 +255,10 @@ def _schedule_response(schedule, agent_name: str, current_user: User,
     )
 
 
-# #4281: Gemini CLI and Codex run no turn-tier hook, so they refuse a
-# shared person's turn before it starts (`agent_server/services/turn_scope.py`).
+# #4281: Gemini CLI, Codex and OpenCode run no turn-tier hook, so they refuse a
+# shared person's turn before it starts (`agent_server/services/turn_scope.py`;
+# OpenCode since trinity-enterprise#1384, before which this refusal was the only
+# thing in its way).
 # A shared-person schedule switched on there would only ever fail.
 _CANNOT_RUN_ON_RUNTIME = "schedule_cannot_run_for_creator_on_runtime"
 

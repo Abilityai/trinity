@@ -92,7 +92,7 @@ Trinity also redacts credentials again on the way out: in chat replies from Clau
 
 When someone the agent is shared with is chatting with it, a `PreToolUse` hook on `Read`, `Grep`, `Glob`, `NotebookRead`, `Write`, `Edit`, `MultiEdit` and `NotebookEdit` holds the file tools to the paths that person could open in the [Files tab](agent-files.md), and the `Bash` tool is refused. The hook asks the platform whose turn is running; only an owner-tier turn (the owner, an admin, or work the owner set up) gets past an owner-tier path or the shell. If the platform cannot answer, the call is refused. What a shared person's turn may do is described in [Agent Sharing](../sharing-and-access/agent-sharing.md#what-the-agent-does-for-someone-you-share-it-with).
 
-Gemini CLI and Codex run no Claude Code hooks, so on those runtimes the agent refuses a shared person's turn before the CLI starts, with a message saying the owner can switch the agent to Claude Code.
+Gemini CLI, Codex and OpenCode run no Claude Code hooks, so on those runtimes the agent refuses a shared person's turn before the CLI starts, with a message saying the owner can switch the agent to Claude Code.
 
 ### 5. Turn Limits
 

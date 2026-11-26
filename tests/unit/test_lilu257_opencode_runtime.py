@@ -50,6 +50,19 @@ from agent_server.models import ExecutionMetadata  # noqa: E402
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _an_owners_turn(monkeypatch):
+    """Every turn in this file is the owner's. The runtime asks the platform
+    whose turn it is before it starts the CLI (trinity-enterprise#1384, pinned
+    in `test_ent1384_opencode_turn_scope.py`); with no platform to ask, a test
+    that passes an execution id would be refused."""
+    from agent_server.services import turn_scope
+
+    async def owner(agent, run):
+        return "owner", True, None, None
+    monkeypatch.setattr(turn_scope, "fetch_turn", owner)
+
+
 def _lines(*events) -> list:
     return [json.dumps(e) for e in events]
 

@@ -198,7 +198,7 @@ def test_update_enable_and_disable_answer_the_rating(client, world):
 
 # ---- a schedule that could never run is not switched on ----------------------------------
 
-@pytest.mark.parametrize("runtime", ["gemini-cli", "codex"])
+@pytest.mark.parametrize("runtime", ["gemini-cli", "codex", "opencode"])
 def test_a_share_holders_schedule_is_refused_on_a_runtime_that_cannot_run_it(client, world, monkeypatch, runtime):
     on_runtime(monkeypatch, runtime)
     before = len(db.list_agent_schedules(world.agent))
@@ -210,7 +210,7 @@ def test_a_share_holders_schedule_is_refused_on_a_runtime_that_cannot_run_it(cli
     assert len(db.list_agent_schedules(world.agent)) == before
 
 
-@pytest.mark.parametrize("runtime", ["gemini-cli", "codex"])
+@pytest.mark.parametrize("runtime", ["gemini-cli", "codex", "opencode"])
 def test_turning_one_on_is_refused_there_too(client, world, monkeypatch, runtime):
     sid = created(client, world, "mate", enabled=False)["id"]
     on_runtime(monkeypatch, runtime)
