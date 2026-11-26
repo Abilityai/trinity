@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from ..models import AgentInfo
 from ..safe_yaml import AliasPolicy, load_hardened_yaml
 from ..state import agent_state
+from ..runtime_names import is_claude_runtime
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -128,6 +129,16 @@ def _guardrails_registration() -> str:
     return "ok"
 
 
+def _read_only_enforcement() -> dict:
+    """Abilityai/lilu#654: OpenCode enforces read-only mode through the
+    per-turn ``opencode.json`` (``permission`` denies on ``edit`` and
+    ``bash``), not through a Claude hook — so it reports ``"config"``. Other
+    runtimes report nothing here (their payload is unchanged)."""
+    if str(agent_state.agent_runtime or "").lower() == "opencode":
+        return {"read_only_enforcement": "config"}
+    return {}
+
+
 SKILL_GATE_REGISTRATION = "/etc/claude-code/managed-settings.d/50-skill-gate.json"
 SKILL_GATE_HOOK_FILES = ("/opt/trinity/hooks/skill-gate.py", "/opt/trinity/hooks/_skill_gate.py")
 
@@ -156,6 +167,22 @@ def _skill_gate_hook() -> str:
     if any(os.access(path, os.W_OK) for path, _st in stats):
         return "writable"
     return "ok"
+
+
+# trinity-enterprise#1176: the files can be intact while Claude Code skips them
+# (a server-managed settings payload outranks the managed files). Applied after
+# the checks above, so a missing or loosened file keeps its own value first.
+MANAGED_HOOK_FIELDS = ("guardrails_registration", "skill_gate_hook")
+
+
+def _with_managed_hooks_state(body: Dict[str, Any]) -> Dict[str, Any]:
+    from ..services import managed_hooks
+
+    if managed_hooks.state() == managed_hooks.SKIPPED:
+        for field in MANAGED_HOOK_FIELDS:
+            if body.get(field) == "ok":
+                body[field] = managed_hooks.SKIPPED
+    return body
 
 
 VENDOR_TELEMETRY_OPT_OUT = "/etc/claude-code/managed-settings.d/70-vendor-telemetry.json"
@@ -251,7 +278,12 @@ async def get_agent_info():
     return AgentInfo(
         name=agent_state.agent_name,
         status="running",
-        claude_version=runtime_version if agent_state.agent_runtime == "claude-code" else None,
+        # Abilityai/lilu#257: the field is Claude-named for wire compatibility,
+        # but the QUESTION is "is this agent's runtime CLI present". The old
+        # literal `== "claude-code"` also excluded the equally-valid `claude`
+        # alias, so an agent created with `runtime: claude` reported null here
+        # while being a perfectly healthy Claude agent.
+        claude_version=runtime_version if is_claude_runtime(agent_state.agent_runtime) else None,
         mcp_servers=mcp_servers,
         uptime=None  # TODO: Calculate uptime
     )
@@ -265,7 +297,7 @@ async def health_check():
     running executions, history size) so a curl against /health is enough to
     spot accumulator leaks without strace or pprof. #333.
     """
-    return {
+    return _with_managed_hooks_state({
         "status": "healthy",
         "agent_name": agent_state.agent_name,
         "runtime": agent_state.agent_runtime,
@@ -287,7 +319,8 @@ async def health_check():
         # agent-controlled strings on this unauthenticated endpoint.
         "clone_status": _clone_status(),
         # #3105: "ok"|"missing"|"not_root_owned"|"writable" — stat of the
-        # guardrail registration on every request, not only at boot.
+        # guardrail registration on every request, not only at boot; and
+        # "skipped" (trinity-enterprise#1176) when Claude Code is not applying it.
         "guardrails_registration": _guardrails_registration(),
         # trinity-enterprise#752: the same, for the gated-skill hook, plus
         # "unsupported_runtime" (no hooks on Codex / Gemini).
@@ -295,8 +328,11 @@ async def health_check():
         # trinity-enterprise#1093: the same, for Claude Code's vendor-traffic
         # opt-out, plus "altered" when it no longer sets every name on.
         "vendor_telemetry_opt_out": _vendor_telemetry_opt_out(),
+        # Abilityai/lilu#654: how read-only mode is enforced, emitted for
+        # OpenCode only so the Claude/Codex payloads stay byte-identical.
+        **_read_only_enforcement(),
         "diagnostics": _diagnostics(),
-    }
+    })
 
 
 @router.get("/api/template/info")

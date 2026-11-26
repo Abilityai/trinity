@@ -209,6 +209,13 @@ _ADDED_SINCE_SPLIT = {
     ("/api/settings/mcp-external-access", ("GET",), "get_mcp_external_access"),
     ("/api/settings/mcp-external-access", ("PUT",), "update_mcp_external_access"),
     ("/api/settings/mcp-external-access", ("DELETE",), "delete_mcp_external_access"),
+    # Abilityai/lilu#653 — the platform OpenCode provider tier (OpenRouter key,
+    # default Ollama base URL), in `provider_keys` beside its key siblings.
+    ("/api/settings/opencode-provider", ("GET",), "get_opencode_provider_settings"),
+    ("/api/settings/api-keys/openrouter", ("PUT",), "update_openrouter_key"),
+    ("/api/settings/api-keys/openrouter", ("DELETE",), "delete_openrouter_key"),
+    ("/api/settings/opencode-provider/base-url", ("PUT",),
+     "update_opencode_default_base_url"),
 }
 
 

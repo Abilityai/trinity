@@ -3,16 +3,27 @@
     <NavBar />
 
     <main class="flex-1 flex overflow-hidden">
-      <!-- System Views Sidebar -->
-      <SystemViewsSidebar
-        @create="openCreateModal"
-        @edit="openEditModal"
-      />
-
       <!-- relative: anchor for the type-to-filter pill + query-empty overlay
            (ent#261) — this column does NOT scroll (panes scroll internally),
            so absolutely-positioned chrome here never scrolls away. -->
       <div class="relative flex flex-col flex-1 overflow-hidden">
+        <!-- trinity-enterprise#1355: the example agents, kept off the first screen, on request -->
+        <div v-if="networkStore.hiddenExamples.length" class="absolute right-3 bottom-3 z-20" data-testid="dashboard-examples-hidden">
+          <BaseButton variant="secondary" size="sm" @click="showExamples">Show the example agents Trinity came with</BaseButton>
+        </div>
+        <!-- Getting started, where there is no assistant to hold it (ent#238).
+             Floating in the corner, out of the page flow: the entitlement
+             answer lands a round-trip after paint, and here it moves nothing. -->
+        <div
+          v-if="assistantStore.corner === 'help' && onboardingStore.visible"
+          class="absolute left-3 bottom-3 z-20 w-60 max-h-[60vh] overflow-y-auto shadow-lg rounded-lg"
+          data-testid="dashboard-checklist"
+        >
+          <BaseCard flush class="py-1 [&>div]:mt-0 [&>div]:border-t-0">
+            <ActivationChecklist />
+          </BaseCard>
+        </div>
+
         <!-- Compact Header -->
         <div class="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-4 py-2">
           <!-- #2197 — `flex-wrap` + `gap-y-2`: the last resort when the #1830
@@ -66,6 +77,9 @@
                  line after the first. Single-row rendering above ~1024px is
                  unchanged: flex only wraps once it must. -->
             <div class="flex flex-wrap items-center gap-2 min-w-0">
+              <!-- Which agents are shown: all, or one system's. -->
+              <SystemViewsMenu @create="openCreateModal" @edit="openEditModal" />
+
               <!-- Create Agent (trinity-enterprise#260) — chassis-level so agent
                    creation is reachable from every mode, not just the List tab.
                    The label degrades to icon-only below `md` (pre-decided in the
@@ -321,7 +335,7 @@
 
     <!-- Grid View (trinity-enterprise#47) — magnetic tile canvas. v-if so its
          polling and timers tear down whenever the mode is not active. -->
-    <div v-if="viewMode === 'grid'" class="relative bg-white dark:bg-gray-800 shadow-sm dark:shadow-gray-900 flex-1 min-h-0">
+    <div v-if="viewMode === 'grid'" data-testid="grid-view" class="relative bg-white dark:bg-gray-800 shadow-sm dark:shadow-gray-900 flex-1 min-h-0">
       <!-- Loading skeleton: immediate feedback while the fleet list loads -->
       <div
         v-if="isFleetLoading && agents.length === 0"
@@ -361,7 +375,7 @@
           </button>
         </div>
       </div>
-      <FleetGrid v-else ref="fleetGridRef" :agents="visibleAgents" :org-agents="ownerFilteredAgents" />
+      <FleetGrid v-else ref="fleetGridRef" :agents="visibleAgents" :org-agents="ownerFilteredAgents" :arrivals="arrivals" />
     </div>
 
     <!-- List View (trinity-enterprise#260) — the Agents page consolidated into
@@ -413,6 +427,7 @@
         v-else
         ref="listPanelRef"
         :agents="visibleAgents"
+        :arrivals="arrivals"
         :available-tags="availableTags"
         @tags-changed="fetchAvailableTags"
         @clear-chassis-filters="clearChassisFilters"
@@ -516,13 +531,20 @@ import NavBar from '@/components/NavBar.vue'
 import HostTelemetry from '@/components/HostTelemetry.vue'
 import ReplayTimeline from '@/components/ReplayTimeline.vue'
 import SkeletonLoader from '@/components/SkeletonLoader.vue'
-import SystemViewsSidebar from '@/components/SystemViewsSidebar.vue'
+import SystemViewsMenu from '@/components/SystemViewsMenu.vue'
+import BaseCard from '@/components/base/BaseCard.vue'
+import BaseButton from '@/components/base/BaseButton.vue'
+import ActivationChecklist from '@/components/onboarding/ActivationChecklist.vue'
+import { useAssistantStore } from '@/stores/assistant'
+import { useOnboardingStore } from '@/stores/onboarding'
 import SystemViewEditor from '@/components/SystemViewEditor.vue'
 import FirstRunOverlay from '@/components/onboarding/FirstRunOverlay.vue'
 import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useNetworkStore } from '@/stores/network'
+import { useFirstRunStore } from '@/stores/firstRun'
+import { SHOW_EXAMPLES_KEY, examplesToHide } from '@/utils/firstSession'
 import { useAuthStore } from '@/stores/auth'
 import { useSystemViewsStore } from '@/stores/systemViews'
 import { storeToRefs } from 'pinia'
@@ -535,6 +557,36 @@ import { useNotification } from '@/composables/useNotification'
 
 const networkStore = useNetworkStore()
 const systemViewsStore = useSystemViewsStore()
+const assistantStore = useAssistantStore()
+const onboardingStore = useOnboardingStore()
+// trinity-enterprise#1355: where the assistant leads the first session, the
+// agents the install came with stay off this screen until the person has an
+// agent of their own, or asks to see them.
+const firstRunStore = useFirstRunStore()
+const examplesShown = ref(readExamplesShown())
+function readExamplesShown() {
+  try {
+    return localStorage.getItem(SHOW_EXAMPLES_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+function showExamples() {
+  examplesShown.value = true
+  try {
+    localStorage.setItem(SHOW_EXAMPLES_KEY, 'true')
+  } catch { /* shown for this visit */ }
+}
+const ownAgentCount = computed(() => networkStore.agents
+  .filter((a) => !a.is_system && !(firstRunStore.seededAgents || []).includes(a.name)).length)
+watch(
+  () => examplesToHide(assistantStore.status, firstRunStore.seededAgents, ownAgentCount.value, examplesShown.value),
+  (names) => networkStore.setHiddenExamples(names),
+  { immediate: true },
+)
+onUnmounted(() => networkStore.setHiddenExamples([]))
+// The checklist fetches its own steps once mounted; it is mounted only once there are some to show.
+watch(() => assistantStore.corner, (c) => { if (c === 'help') onboardingStore.fetchChecklist() }, { immediate: true })
 const route = useRoute()
 const router = useRouter()
 
@@ -626,7 +678,8 @@ const {
   playbackPosition,
   timelineStart,
   timelineEnd,
-  currentTime
+  currentTime,
+  arrivals
 } = storeToRefs(networkStore)
 
 // Persisted state: Time range (default 24h, persisted to localStorage)

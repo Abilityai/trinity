@@ -1,7 +1,9 @@
 <template>
   <div class="flex flex-col h-full relative">
     <!-- Header with session selector -->
-    <div class="flex items-center justify-between px-6 py-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
+    <!-- #4140: the toolbar wraps at phone width; on one row the model picker
+         pushed New Chat past the card's right edge. -->
+    <div class="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
       <div class="flex items-center space-x-3">
         <!-- Session selector dropdown -->
         <div class="relative" ref="dropdownRef">
@@ -167,11 +169,13 @@ import { ref, computed, nextTick, onMounted, onUnmounted, onActivated, onDeactiv
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useSkillsStore } from '../stores/skills'
+import { useAgentsStore } from '../stores/agents'
 import { ChatMessages, ChatInput, ChatEmptyState } from './chat'
 import { shouldCancelOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../utils/turnCancel'
 import ModelSelector from './ModelSelector.vue'
 import { apiErrorMessage } from '../utils/apiError'
 import { isGateRefusal, pendingApprovalMessage, storedChatMessage } from '../utils/skillGate'
+import { mergeSessionMessages, panelMessage } from '../utils/chatSessionMerge'
 import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } from '../utils/execution-status'
 
 const props = defineProps({
@@ -196,6 +200,7 @@ const props = defineProps({
 
 const authStore = useAuthStore()
 const skillsStore = useSkillsStore()   // #2703: per-agent "skills changed" ticks
+const agentsStore = useAgentsStore()   // #4537: per-agent "a reply landed" ticks
 
 // Voice lives in the Workspace (#2559). This panel used to mount the orb and
 // run a parallel call: its own start route, its own transcript home
@@ -370,13 +375,7 @@ const selectSession = async (session, closeDropdown = true) => {
     })
 
     // Load messages from session (already ordered ASC by backend)
-    messages.value = (response.data.messages || []).map(storedChatMessage).map(msg => ({
-      role: msg.role,
-      content: msg.content,
-      timestamp: msg.timestamp,
-      source: msg.source || 'text',
-      held: msg.held,
-    }))
+    messages.value = (response.data.messages || []).map(storedChatMessage).map(panelMessage)
   } catch (err) {
     console.error('Failed to load session:', err)
     error.value = 'Failed to load conversation history'
@@ -844,6 +843,43 @@ onMounted(() => {
 // already reloads on start.
 watch(() => skillsStore.changedAt[props.agentName], (tick, prev) => {
   if (tick && tick !== prev && props.agentStatus === 'running') loadPlaybooks()
+})
+
+// #4537 — a reply was written into this agent's chat outside a turn this panel
+// is waiting on (a wake reporting back on a delegation). Re-read the session on
+// screen, in place: no loading state, and the list changes only when the server
+// holds a message the screen does not show (`mergeSessionMessages`), so nothing
+// a person is reading moves.
+//
+// While a turn is in flight (or a session is loading) the re-read waits for it:
+// a turn's end pushes its own reply locally and never refetches the messages,
+// so a reply that landed meanwhile would otherwise not appear until a reload.
+let refreshWaitingFor = null
+const refreshOpenSession = async (sessionId) => {
+  if (!sessionId || sessionId !== currentSessionId.value) return
+  if (loading.value) { refreshWaitingFor = sessionId; return }
+  try {
+    const response = await axios.get(`/api/agents/${props.agentName}/chat/sessions/${sessionId}`, {
+      headers: authStore.authHeader
+    })
+    const fresh = (response.data.messages || []).map(storedChatMessage).map(panelMessage)
+    if (sessionId !== currentSessionId.value) return
+    // A turn began while this read was out: it is read again when that ends.
+    if (loading.value) { refreshWaitingFor = sessionId; return }
+    const merged = mergeSessionMessages(messages.value, fresh)
+    if (merged) messages.value = merged
+  } catch (err) {
+    console.error('Failed to refresh session:', err)
+  }
+}
+watch(() => agentsStore.chatReplyAt[props.agentName], (tick, prev) => {
+  if (tick && tick.at !== prev?.at) refreshOpenSession(tick.sessionId)
+})
+watch(loading, (busy) => {
+  if (busy || !refreshWaitingFor) return
+  const sessionId = refreshWaitingFor
+  refreshWaitingFor = null
+  refreshOpenSession(sessionId)
 })
 
 onUnmounted(() => {

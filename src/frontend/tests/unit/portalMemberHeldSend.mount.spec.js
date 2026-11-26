@@ -33,7 +33,7 @@ vi.mock('axios', () => {
 })
 
 import PortalConversation from '@/components/portal/PortalConversation.vue'
-import { useClientPortalStore } from '@/stores/clientPortal'
+import { portalHttp, useClientPortalStore } from '@/stores/clientPortal'
 import { usePortalProgressStore } from '@/stores/portalProgress'
 
 globalThis.ResizeObserver = globalThis.ResizeObserver || class {
@@ -49,6 +49,26 @@ const OPERATOR = { name: 'scout', playbooks: [], owner: 'alice', availability: '
 let wrapper
 let store
 let progress
+let warn
+// The progress GET, at the HTTP seam the store reads through.
+const progressGets = () => portalHttp.get.mock.calls.filter(([url]) => String(url).endsWith('/progress'))
+function progressReads(stateOrFn) {
+  portalHttp.get.mockImplementation((url) => {
+    if (!String(url).endsWith('/progress')) return Promise.resolve({ data: {} })
+    const state = typeof stateOrFn === 'function' ? stateOrFn() : stateOrFn
+    if (state instanceof Promise) return state
+    if (state === 'error') return Promise.reject(new Error('network'))
+    return Promise.resolve({ data: { active: true, all_done: false,
+                                     steps: [{ key: 'assistant_ready', state }] } })
+  })
+}
+function deferred() {
+  let resolve
+  const promise = new Promise((r) => { resolve = r })
+  return { promise, resolve }
+}
+const rereadWarnings = () => warn.mock.calls.filter(([m]) => /re-read/.test(String(m)))
+const doneBody = { data: { active: true, all_done: false, steps: [{ key: 'assistant_ready', state: 'done' }] } }
 function seed(name, state) {
   progress.byAgent[name] = { loading: false, loaded: true, error: null, active: true, all_done: false,
                              steps: [{ key: 'assistant_ready', state }] }
@@ -63,8 +83,11 @@ beforeEach(() => {
   store.fetchHistory = vi.fn(async () => ({ sessionId: 's1', messages: [] }))
   store.streamPortalExecution = vi.fn(async () => {})
   store.startPortalChat = vi.fn(async () => ({ execution_id: 'e1', session_id: 's1' }))
+  portalHttp.get.mockReset()
+  portalHttp.get.mockImplementation(() => Promise.resolve({ data: {} }))
+  warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
 })
-afterEach(() => { wrapper?.unmount(); wrapper = null; vi.useRealTimers() })
+afterEach(() => { wrapper?.unmount(); wrapper = null; vi.useRealTimers(); warn.mockRestore() })
 
 async function mountAndSend(agent, text = 'hello there') {
   wrapper = shallowMount(PortalConversation, {
@@ -98,8 +121,9 @@ describe('ent#1201 a send while the member assistant is starting', () => {
     expect(held().exists()).toBe(false)
   })
 
-  it('is handed back as text after three minutes', async () => {
+  it('is handed back as text after three minutes when a re-read still says starting', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
+    progressReads('in_progress')
     seed(MEMBER.name, 'in_progress')
     await mountAndSend(MEMBER)
     expect(held().exists()).toBe(true)
@@ -108,6 +132,7 @@ describe('ent#1201 a send while the member assistant is starting', () => {
     expect(store.startPortalChat).not.toHaveBeenCalled()
     expect(held().exists()).toBe(false)
     expect(wrapper.find('textarea').element.value).toBe('hello there')
+    expect(progressGets().length).toBeGreaterThan(0)   // it asked before giving up
   })
 
   it('is handed back at once if the start failed', async () => {
@@ -155,6 +180,116 @@ describe('ent#1201 a send while the member assistant is starting', () => {
     await mountAndSend(OPERATOR)
     expect(store.startPortalChat).toHaveBeenCalledTimes(1)
     expect(held().exists()).toBe(false)
+  })
+})
+
+describe('ent#1220 a held send re-reads the card instead of trusting one event', () => {
+  it('sends, not hands back, when the re-read at three minutes says ready', async () => {
+    progressReads('in_progress')
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    seed(MEMBER.name, 'in_progress')
+    await mountAndSend(MEMBER)
+    vi.advanceTimersByTime(3 * 60 * 1000 - 1000)   // every poll so far: still starting
+    await flushPromises()
+    expect(store.startPortalChat).not.toHaveBeenCalled()
+
+    progressReads('done')                          // the ready event was lost
+    vi.advanceTimersByTime(1000)
+    await flushPromises()
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)   // the watch and the hand-back: one send
+    expect(store.startPortalChat.mock.calls[0][1]).toBe('hello there')
+    expect(wrapper.find('textarea').element.value).toBe('')
+    expect(held().exists()).toBe(false)
+  })
+
+  it('goes out within thirty seconds of a lost ready event, and says the poll caught it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    seed(MEMBER.name, 'in_progress')
+    await mountAndSend(MEMBER)
+    progressReads('done')
+    vi.advanceTimersByTime(30 * 1000)
+    await flushPromises()
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+    expect(rereadWarnings()).toHaveLength(1)
+
+    // The hold is over: no more polling, no hand-back.
+    const reads = progressGets().length
+    vi.advanceTimersByTime(5 * 60 * 1000)
+    await flushPromises()
+    expect(progressGets().length).toBe(reads)
+    expect(wrapper.find('textarea').element.value).toBe('')
+  })
+
+  it('an event-driven flip sends without the warning', async () => {
+    progressReads('in_progress')
+    seed(MEMBER.name, 'in_progress')
+    await mountAndSend(MEMBER)
+    seed(MEMBER.name, 'done')
+    await flushPromises()
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+    expect(rereadWarnings()).toHaveLength(0)
+  })
+
+  it('awaits a read already in flight at the hand-back instead of acting on the stale card', async () => {
+    progressReads('in_progress')
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    seed(MEMBER.name, 'in_progress')
+    await mountAndSend(MEMBER)
+    vi.advanceTimersByTime(3 * 60 * 1000 - 1000)
+    await flushPromises()
+
+    const slow = deferred()
+    progressReads(() => slow.promise)
+    void progress.fetchProgress(MEMBER.name, { force: true })   // e.g. a WS trigger's read
+    vi.advanceTimersByTime(1000)                                // the ceiling fires mid-read
+    await flushPromises()
+    expect(wrapper.find('textarea').element.value).toBe('')     // not handed back on stale state
+
+    slow.resolve(doneBody)
+    await flushPromises()
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('textarea').element.value).toBe('')
+  })
+
+  it('hands back when the re-read fails: unknown is not ready', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    progressReads('error')
+    seed(MEMBER.name, 'in_progress')
+    await mountAndSend(MEMBER)
+    vi.advanceTimersByTime(3 * 60 * 1000)
+    await flushPromises()
+    expect(store.startPortalChat).not.toHaveBeenCalled()
+    expect(wrapper.find('textarea').element.value).toBe('hello there')
+  })
+
+  it('leaving mid re-read sends nothing and keeps the words as the draft', async () => {
+    progressReads('in_progress')
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    store.clientEmail = 'member@example.com'
+    seed(MEMBER.name, 'in_progress')
+    await mountAndSend(MEMBER)
+    vi.advanceTimersByTime(3 * 60 * 1000 - 1000)
+    await flushPromises()
+    const slow = deferred()
+    progressReads(() => slow.promise)
+    vi.advanceTimersByTime(1000)
+    await flushPromises()
+
+    wrapper.unmount()
+    wrapper = null
+    slow.resolve(doneBody)
+    await flushPromises()
+    expect(store.startPortalChat).not.toHaveBeenCalled()
+
+    progressReads('in_progress')
+    setActivePinia(createPinia())
+    useClientPortalStore().clientEmail = 'member@example.com'
+    const back = shallowMount(PortalConversation, {
+      props: { agent: MEMBER, sessionId: 's1' }, global: { renderStubDefaultSlot: true },
+    })
+    await flushPromises()
+    expect(back.find('textarea').element.value).toBe('hello there')
+    back.unmount()
   })
 })
 

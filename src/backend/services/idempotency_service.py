@@ -753,6 +753,26 @@ def begin(scope: str, key: Optional[str]) -> IdempotencyDecision:
     return IdempotencyDecision(enabled=False, replay=False, in_flight=False)
 
 
+def peek(scope: str, key: Optional[str]) -> Optional[IdempotencyDecision]:
+    """Read a claim without taking it (#4733; the read half #2671 proposes).
+
+    None when there is no live row. A row comes back shaped like the replay
+    ``begin`` would return, so ``reclaim_in_flight`` can compare-and-delete it
+    by its owner token. Unlike ``begin`` this does NOT fail open: a read error
+    raises, and the caller decides which way an unknown answer falls.
+    """
+    if not key:
+        return None
+    res = db.idempotency_peek(scope, key)
+    if res is None:
+        return None
+    return IdempotencyDecision(
+        enabled=True, replay=True, in_flight=res.get("state") == STATE_IN_FLIGHT,
+        scope=scope, key=key, execution_id=res.get("execution_id"),
+        claim_token=res.get("claim_token"), claimed_at=res.get("updated_at"),
+    )
+
+
 def attach_execution(decision: IdempotencyDecision, execution_id: Optional[str]) -> None:
     """Record the execution_id on a fresh claim once it's known (best-effort)."""
     if not decision.enabled or decision.replay or not execution_id:

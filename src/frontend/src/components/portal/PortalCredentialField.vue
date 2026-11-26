@@ -78,6 +78,9 @@ const props = defineProps({
   // The pending `credential` ask (the Workspace projection).
   ask: { type: Object, required: true },
   testidPrefix: { type: String, default: 'portal-credential' },
+  // The Inbox's "the reader answered this" hook (see PortalAsks). A function
+  // prop: an emit is dropped once this field has unmounted mid-request.
+  notifyAnswered: { type: Function, default: null },
 })
 const emit = defineEmits(['provided'])
 
@@ -132,7 +135,9 @@ async function submit() {
   error.value = ''
   sending.value = true
   try {
-    const answered = await store.provideCredential(props.ask.id, secret)
+    const askId = props.ask.id
+    const answered = await store.provideCredential(askId, secret)
+    props.notifyAnswered?.(askId, answered)
     emit('provided', answered)
   } catch (err) {
     error.value = refusalCopy(err)

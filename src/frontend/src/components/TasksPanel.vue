@@ -3,15 +3,20 @@
        the short-viewport fallback scroller (overflow-y-auto is load-bearing:
        without it, fixed chrome + the list's min-height would hard-clip the
        composer — the page itself cannot scroll in fullscreen mode). Degrades to
-       natural height outside a flex parent (flex-1 inert). -->
-  <div class="p-6 flex-1 flex flex-col gap-6 overflow-y-auto">
-    <!-- Header with Queue Status -->
-    <div class="flex justify-between items-center">
-      <div>
+       natural height outside a flex parent (flex-1 inert).
+       `relative` (#4140): the list skeleton's `sr-only` labels are absolute; with
+       no positioned ancestor they escaped every overflow-hidden box and grew the
+       locked page while the list loaded. -->
+  <div class="relative p-6 flex-1 flex flex-col gap-6 overflow-y-auto">
+    <!-- Header with Queue Status. #3602: both rows wrap, so at phone width the
+         controls drop under the title instead of pushing Refresh past the
+         panel edge. gap, not space-x, so a wrapped control has no stray margin. -->
+    <div class="flex flex-wrap justify-between items-center gap-3">
+      <div class="min-w-0">
         <h3 class="text-lg font-medium text-gray-900 dark:text-white">Tasks</h3>
         <p class="text-sm text-gray-500 dark:text-gray-400">All executions — chats, tasks, schedules, and agent-to-agent</p>
       </div>
-      <div class="flex items-center space-x-3">
+      <div class="flex flex-wrap items-center gap-3">
         <!-- Trigger Type Filter -->
         <select
           v-model="triggerFilter"
@@ -93,7 +98,7 @@
       <!-- Model & Timeout Selectors -->
       <div class="flex items-center space-x-3 mb-3">
         <div class="flex-1">
-          <ModelSelector v-model="selectedModel" label="Model" compact />
+          <ModelSelector v-model="selectedModel" label="Model" placeholder="Default model" compact />
         </div>
         <div>
           <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Timeout<span v-if="timeoutCapped" data-testid="task-timeout-cap" :title="`This agent's execution timeout caps every task at ${formatTimeout(agentTimeoutCap)}`"> · agent cap {{ formatTimeout(agentTimeoutCap) }}</span></label>
@@ -246,6 +251,8 @@
                   :self-approved="!!task.gate_self_approved"
                   :by-viewer="!!task.gate_self_approved_by_viewer"
                 />
+                <!-- #4281: a schedule run that did not have owner tier. -->
+                <RestrictedRunMarker :turn-integrity="task.turn_integrity" testid="task-run-restricted" />
                 <!-- Time -->
                 <span class="text-xs text-gray-500 dark:text-gray-400">
                   {{ formatRelativeTime(task.started_at) }}
@@ -566,6 +573,7 @@ import ModelSelector from './ModelSelector.vue'
 import LoadFailed from './LoadFailed.vue'
 import OwnRowsNote from './OwnRowsNote.vue'  // trinity-enterprise#875
 import ExecutionGateMarker from './skills/ExecutionGateMarker.vue'  // trinity-enterprise#754
+import RestrictedRunMarker from './RestrictedRunMarker.vue'  // #4281
 import { apiErrorMessage } from '../utils/apiError'
 import { isGateRefusal, pendingApprovalMessage } from '../utils/skillGate'
 
@@ -621,7 +629,11 @@ const triggerFilter = ref('all') // Filter by triggered_by type (AUDIT-001)
 
 // Model selection (MODEL-001)
 const taskModelKey = computed(() => `trinity-task-model-${props.agentName}`)
-const selectedModel = ref(localStorage.getItem(`trinity-task-model-${props.agentName}`) || 'claude-sonnet-4-6')
+// #4757: empty by default — the task names no model and the backend resolves it
+// (the agent's own default, else the platform default, stepped down for an agent
+// whose Claude Code is too old to run it). A hard-coded id here would be sent
+// as an explicit model and bypass both.
+const selectedModel = ref(localStorage.getItem(`trinity-task-model-${props.agentName}`) || '')
 watch(selectedModel, (val) => {
   localStorage.setItem(taskModelKey.value, val)
 })

@@ -21,12 +21,26 @@
     main: Continue · Where it stands · Work on it · Metrics · My chats
     side: Steward · Health · Needs you · Members · Agents & rooms
 
+  trinity-enterprise#1233: a goal written as milestones gets one row per
+  milestone ABOVE that grid, under the goal, with the latest health update
+  above the list (ProjectMilestones). A row opens the Tasks tab filtered to
+  it. A project without milestones shows exactly the Overview above; a person
+  who can change the goal gets "Add milestones" beside Edit.
+
   trinity-enterprise#896: the Overview leads with Continue (my newest linked
   chat, or Start with the first agent, the others one click away — the first
   focusable control after the tabs), one dismissable line says how a project
   moves, and the Steward card replaces the bare header label. The goal, like
   every other agent-written text in the Workspace, renders as markdown through
   `PortalMarkdown` (#3692).
+
+  trinity-enterprise#1235: a person starts and stops the project (P11). The
+  header carries the state (Not started / Running / Stopped / Done / Archived)
+  with who changed it and when, Start project / Stop project for edit rights,
+  and the mode (Track / Propose / Auto) — a selector for edit rights, read-only
+  for everyone else. Stopping asks first and names the runs still finishing;
+  a stopped project says so above the tabs. In Propose and Auto the runs the
+  steward proposed wait on the Overview, after "Where it stands".
 -->
 <template>
   <div class="mx-auto w-full max-w-5xl px-4 sm:px-8 py-6" data-testid="project-page">
@@ -54,15 +68,23 @@
         <span aria-hidden="true"> / </span><span>{{ p.name }}</span>
       </nav>
 
-      <header class="flex flex-col gap-4 sm:flex-row sm:items-start">
+      <!-- #4597: the header stacks at every width. Side by side, the action
+           group sized to its one-line max-content width and squeezed the
+           title and goal into a narrow column; on desktop it is its own
+           right-aligned row above the title instead (mobile keeps it last). -->
+      <header class="flex flex-col gap-4">
         <div class="min-w-0 flex-1 space-y-2">
           <div class="flex flex-wrap items-center gap-2">
             <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100 break-words">{{ p.name }}</h1>
-            <BaseBadge :variant="STATUS_BADGE[p.status] || 'neutral'" dot>{{ statusLabel(p.status) }}</BaseBadge>
+            <BaseBadge :variant="STATE_BADGE[state] || 'neutral'" dot data-testid="project-state">{{ stateLabel(state) }}</BaseBadge>
             <BaseBadge v-if="!guest">{{ visibilityLabel(p.visibility) }}</BaseBadge>
             <BaseBadge v-else variant="info">Guest</BaseBadge>
-            <BaseBadge v-if="p.archived_at" variant="locked">Archived</BaseBadge>
+            <BaseBadge v-if="!guest && !canSetMode" data-testid="project-mode">Mode: {{ modeLabel(mode) }}</BaseBadge>
           </div>
+          <p v-if="!guest && (stateByWho || modeLine)" class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+            <span v-if="stateByWho" data-testid="project-state-by">{{ stateByWho }}<template v-if="p.status_at">, <span :title="absolute(p.status_at)">{{ relative(p.status_at) }}</span></template></span>
+            <span v-if="modeLine" data-testid="project-mode-hint">{{ modeLine }}</span>
+          </p>
           <!-- #3692: the goal is markdown (people and agents write it so);
                the shared renderer sanitizes it the way chat content is. -->
           <div class="max-w-3xl text-sm text-gray-700 dark:text-gray-300" data-testid="project-goal">
@@ -94,20 +116,30 @@
             <span :title="absolute(p.updated_at)">Updated {{ relative(p.updated_at) }}</span>
           </p>
         </div>
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2 sm:order-first sm:justify-end" data-testid="project-actions">
+          <BaseButton
+            v-if="lifecycle.primary"
+            :variant="lifecycle.primary.verb === 'stop' ? 'secondary' : 'primary'"
+            :loading="lifecycleBusy"
+            :loading-label="lifecycle.primary.verb === 'stop' ? 'Stopping…' : 'Starting…'"
+            :data-testid="`project-${lifecycle.primary.verb}`"
+            @click="lifecycle.primary.verb === 'stop' ? (stopConfirm = true) : startProject()"
+          >{{ lifecycle.primary.label }}</BaseButton>
+          <BaseButton v-if="lifecycle.markDone" variant="ghost" data-testid="project-mark-done" @click="markDone">Mark done</BaseButton>
           <BaseSelect
-            v-if="p.can?.edit && !p.archived_at"
-            id="project-status"
-            :model-value="p.status"
+            v-if="canSetMode"
+            id="project-mode"
+            :model-value="mode"
             variant="ghost"
-            aria-label="Status"
-            @update:model-value="setStatus"
+            aria-label="Mode"
+            data-testid="project-mode-select"
+            @update:model-value="setMode"
           >
-            <option value="active">Active</option>
-            <option value="paused">Paused</option>
-            <option value="done">Done</option>
+            <option v-if="!PROJECT_MODES.includes(mode)" :value="mode" disabled>Mode: Unknown</option>
+            <option v-for="m in PROJECT_MODES" :key="m" :value="m">Mode: {{ modeLabel(m) }}</option>
           </BaseSelect>
           <BaseButton v-if="p.can?.edit && !p.archived_at" variant="ghost" data-testid="project-edit" @click="editOpen = true">Edit</BaseButton>
+          <BaseButton v-if="!guest && p.can?.edit && !p.archived_at && !milestones.length && p.steward?.kind !== 'agent'" variant="ghost" data-testid="project-milestones-start" @click="editMilestone(null)">Add milestones</BaseButton>
           <BaseButton v-if="!guest" variant="secondary" data-testid="project-members-open" @click="membersOpen = true">Members &amp; access</BaseButton>
           <BaseButton
             v-if="p.can?.archive"
@@ -120,14 +152,46 @@
 
       <InlineError v-if="actionError" :message="actionError" @dismiss="actionError = ''" />
 
+      <!-- ent#1235: one line, only on a stopped project (T8: a message in an
+           existing task chat still reaches its agent — said, not hidden). -->
+      <div
+        v-if="!guest && state === 'stopped'"
+        class="rounded-lg bg-status-warning-100 px-4 py-3 text-sm text-status-warning-700 dark:bg-status-warning-500/16 dark:text-status-warning-300"
+        role="status"
+        data-testid="project-stopped-banner"
+      >
+        This project is stopped. Nothing new starts — no task run, and the steward isn't woken for it — until someone with edit rights starts it again. Runs already under way finish, and a message in an existing task chat still reaches its agent.
+      </div>
+
       <!-- A bounded box: OverflowTabs sizes its "More" menu from its own width. -->
       <div v-if="!guest" class="w-full min-w-0">
         <OverflowTabs :tabs="TABS" :model-value="tab" data-testid="project-tabs" @update:model-value="tab = $event" />
       </div>
 
-      <ProjectTasks v-if="!guest && tab === 'tasks'" :project="p" :project-id="p.id" @open-thread="(t) => $emit('open-thread', t)" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" :members="p.members || []" :is-creator="p.my_role === 'creator'" />
+      <!-- ent#1234: the steward's kickoff plan waiting on a person, previewed whole;
+           with an agent steward and no plan yet, how to get one. -->
+      <ProjectPlanProposal
+        v-if="!guest"
+        v-show="tab === 'overview'"
+        :project="p"
+        :my-email="myEmail"
+        @write-plan="editMilestone(null)"
+      />
+
+      <!-- ent#1233: the goal's milestones, directly under the goal on the Overview. -->
+      <ProjectMilestones
+        v-if="!guest && milestones.length"
+        v-show="tab === 'overview'"
+        :project="p"
+        :my-email="myEmail"
+        @open-milestone="openMilestone"
+        @edit-milestone="editMilestone"
+      />
+
+      <ProjectTasks v-if="!guest && tab === 'tasks'" v-model:milestone-filter="taskMilestone" :project="p" :project-id="p.id" @open-thread="(t) => $emit('open-thread', t)" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" :members="p.members || []" :is-creator="p.my_role === 'creator'" />
       <ProjectLog v-if="!guest && tab === 'log'" :project="p" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
       <ProjectMaterial v-if="!guest && tab === 'material'" :project="p" :my-email="myEmail" :agents="usableAgents" />
+      <ProjectRuns v-if="!guest && tab === 'runs'" :project-id="p.id" :agents="p.agents || []" />
 
       <div v-show="guest || tab === 'overview'" class="grid grid-cols-1 gap-4 lg:grid-cols-3 lg:items-start" data-testid="project-overview">
         <!-- ===================== main stack ===================== -->
@@ -180,6 +244,14 @@
           </BaseCard>
 
           <ProjectRollupCard v-if="!guest" :project="p" @open-tasks="tab = 'tasks'" />
+
+          <ProjectRunsWaiting
+            v-if="!guest && mode !== 'track'"
+            :project-id="p.id"
+            :can-contribute="p.can?.contribute === true"
+            :archived="Boolean(p.archived_at)"
+            :my-email="myEmail"
+          />
 
           <BaseCard data-testid="project-work-on-it">
             <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Work on it</h2>
@@ -284,6 +356,13 @@
       :my-email="myEmail"
       :agents="rosterAgents"
     />
+    <ProjectMilestoneModal
+      v-if="page.data && p.can?.edit"
+      v-model="milestoneModal.open"
+      :project-id="p.id"
+      :milestone="milestoneModal.milestone"
+      :count="milestones.length"
+    />
     <ConfirmDialog
       v-model:visible="archiveConfirm"
       title="Archive this project?"
@@ -292,6 +371,15 @@
       cancel-text="Keep it open"
       variant="warning"
       @confirm="archive"
+    />
+    <ConfirmDialog
+      v-model:visible="stopConfirm"
+      title="Stop this project?"
+      :message="stopMessage(p)"
+      confirm-text="Stop project"
+      cancel-text="Keep it running"
+      variant="warning"
+      @confirm="stopProject"
     />
   </div>
 </template>
@@ -313,19 +401,26 @@ import ProjectCreateModal from './ProjectCreateModal.vue'
 import ProjectTasks from './ProjectTasks.vue'
 import ProjectLog from './ProjectLog.vue'
 import ProjectMaterial from './ProjectMaterial.vue'
+import ProjectRuns from './ProjectRuns.vue'
 import ProjectHealthCard from './ProjectHealthCard.vue'
 import ProjectRollupCard from './ProjectRollupCard.vue'
 import ProjectMetricsCard from './ProjectMetricsCard.vue'
 import ProjectNeedsYouCard from './ProjectNeedsYouCard.vue'
 import ProjectStewardCard from './ProjectStewardCard.vue'
+import ProjectPlanProposal from './ProjectPlanProposal.vue'
+import ProjectRunsWaiting from './ProjectRunsWaiting.vue'
+import ProjectMilestones from './ProjectMilestones.vue'
+import ProjectMilestoneModal from './ProjectMilestoneModal.vue'
 import OverflowTabs from '@/components/OverflowTabs.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import {
-  STATUS_BADGE, statusLabel, visibilityLabel, agentStateLabel, workOnItOptions, continueChoice,
+  visibilityLabel, agentStateLabel, workOnItOptions, continueChoice,
   projectErrorMessage, HOW_IT_MOVES_KEY, roleLine, joinRequestState,
+  STATE_BADGE, PROJECT_MODES, projectState, stateLabel, stateBy, lifecycleActions, stopMessage,
+  projectMode, modeLabel, modeHint,
 } from './projectsUtils'
 
 const AGENT_BADGE = { active: 'success', pending: 'warning', declined: 'neutral' }
@@ -345,9 +440,14 @@ const TABS = [
   { id: 'tasks', label: 'Tasks' },
   { id: 'log', label: 'Log' },
   { id: 'material', label: 'Files & reports' },
+  { id: 'runs', label: 'Runs' },
 ]
 const tab = ref('overview')
+// ent#1233: the Tasks tab's milestone filter ('' all · 'none' · a milestone id).
+const taskMilestone = ref('')
 const archiveConfirm = ref(false)
+const stopConfirm = ref(false)
+const lifecycleBusy = ref(false)
 const actionError = ref('')
 const starting = ref('')
 
@@ -358,6 +458,21 @@ const view = computed(() => viewState({
 const p = computed(() => page.value.data || { members: [], agents: [], my_chats: [], rooms: [] })
 const rosterAgents = computed(() => portal.agents.map((a) => a.name))
 const guest = computed(() => p.value.guest === true)
+// ent#1235: the lifecycle and the mode, read tolerantly (an unknown value offers nothing).
+const state = computed(() => projectState(p.value))
+const stateByWho = computed(() => stateBy(p.value, props.myEmail))
+const lifecycle = computed(() => lifecycleActions(p.value))
+const mode = computed(() => projectMode(p.value))
+const canSetMode = computed(() => !guest.value && p.value.can?.edit === true && !p.value.archived_at)
+const modeLine = computed(() => modeHint(mode.value))
+// trinity-enterprise#1233: the goal's milestones, and the one dialog that edits them.
+const milestones = computed(() => (guest.value ? [] : p.value.milestones || []))
+const milestoneModal = ref({ open: false, milestone: null })
+function editMilestone(m) { milestoneModal.value = { open: true, milestone: m || null } }
+function openMilestone(id) {
+  taskMilestone.value = id
+  tab.value = 'tasks'
+}
 // trinity-enterprise#1132 part 2: Ask to join.
 const join = computed(() => joinRequestState(p.value))
 const joining = ref(false)
@@ -427,7 +542,14 @@ async function guarded(fn) {
   actionError.value = ''
   try { await fn() } catch (err) { actionError.value = projectErrorMessage(err) }
 }
-const setStatus = (status) => guarded(() => store.update(props.projectId, { status }))
+async function lifecycleVerb(fn) {
+  lifecycleBusy.value = true
+  try { await guarded(fn) } finally { lifecycleBusy.value = false }
+}
+const startProject = () => lifecycleVerb(() => store.startProject(props.projectId))
+const stopProject = () => lifecycleVerb(() => store.stopProject(props.projectId))
+const markDone = () => guarded(() => store.update(props.projectId, { status: 'done' }))
+const setMode = (m) => guarded(() => store.setMode(props.projectId, m))
 const archive = () => guarded(() => store.setArchived(props.projectId, true))
 const restore = () => guarded(() => store.setArchived(props.projectId, false))
 </script>

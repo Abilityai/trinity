@@ -15,6 +15,7 @@ from sqlalchemy import select, update, func
 
 from ..engine import get_engine
 from ..tables import agent_ownership
+from utils import request_memo
 
 
 class ResourcesMixin:
@@ -106,13 +107,15 @@ class ResourcesMixin:
 
         Args:
             agent_name: Name of the agent
-            max_tasks: Maximum parallel tasks (must be 1-10)
+            max_tasks: Maximum parallel tasks (must be >= 1; the upper bound is
+                the admin-set fleet ceiling, enforced by the router)
 
         Returns:
             True if update succeeded
         """
-        # Validate range
-        if max_tasks < 1 or max_tasks > 10:
+        # Lower bound only: the upper bound is the fleet ceiling (#506),
+        # validated by the router, not a hardcoded 10 (#4564).
+        if max_tasks < 1:
             return False
 
         stmt = (
@@ -201,6 +204,7 @@ class ResourcesMixin:
     # Execution Timeout (TIMEOUT-001)
     # =========================================================================
 
+    @request_memo.memoized_method
     def get_execution_timeout(self, agent_name: str) -> int:
         """
         Get execution_timeout_seconds for an agent (default: 3600 = 60 minutes).
@@ -222,6 +226,29 @@ class ResourcesMixin:
         if row:
             return row["execution_timeout_seconds"]
         return 3600  # Default 60 minutes (#665)
+
+    def get_execution_timeouts(self, agent_names) -> Dict[str, int]:
+        """`{agent: execution_timeout_seconds}` for these agents in ONE query
+        (#4672) — the batch form of `get_execution_timeout`, with the same
+        default for an agent that has no row. Inside a `request_memo.scope()`
+        it also answers the per-agent read for the rest of the scope."""
+        names = [n for n in dict.fromkeys(agent_names or []) if isinstance(n, str) and n]
+        found: Dict[str, int] = {}
+        if names:
+            stmt = select(
+                agent_ownership.c.agent_name,
+                func.coalesce(agent_ownership.c.execution_timeout_seconds, 3600).label("execution_timeout_seconds"),
+            ).where(
+                agent_ownership.c.agent_name.in_(names)
+                & (agent_ownership.c.deleted_at.is_(None))
+            )
+            with get_engine().connect() as conn:
+                for row in conn.execute(stmt).mappings():
+                    found.setdefault(row["agent_name"], row["execution_timeout_seconds"])
+        out = {name: found.get(name, 3600) for name in names}
+        for name, seconds in out.items():
+            self.get_execution_timeout.prime(name, value=seconds)
+        return out
 
     def get_all_execution_timeouts(self) -> Dict[str, int]:
         """

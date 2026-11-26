@@ -34,20 +34,57 @@ schedule it, so every one of these is a hard stand-down:
   ``skipped_not_running``; the ending stays readable through
   ``get_execution_result`` when the caller next runs.
 
-**The storm bound.** The idempotency key is ``caller_wake:{caller}:{bucket}``
-over a 15-second window, NOT the callee's execution id. A cleanup sweep can
-terminate hundreds of stale rows in one cycle, and keying per callee would bill
-one turn for each. One turn per caller per window instead, and the frame says
-plainly that other runs may have ended in the same window — so the caller reads
-``list_recent_executions`` rather than being told a half-truth.
+**The storm bound: one wake per caller at a time (#4733).** Every wake — a
+first ending's and a parked one's — claims the caller's one hold,
+``caller_wake:{caller}:running``, NOT a key per callee execution: a cleanup
+sweep can terminate hundreds of stale rows in one cycle, and keying per callee
+would bill one turn for each. The hold was a 15-second window key until #4733;
+a wake outlived its window, and an ending in a later one started a second wake
+beside it. The frame still says plainly that other runs may have ended around
+this one, so the caller reads ``list_recent_executions`` rather than being told
+a half-truth.
+
+**The hold is a DB fact, never a stuck key.** The caller is held while a
+``caller_wake`` row of it is queued, running or pending a retry, or while a
+claim is younger than ``HOLD_GRACE_SECONDS`` — the gap between the claim and
+that row's insert. A claim older than that with no live row is reclaimed by
+its owner token. That is what frees the caller after a clean backend stop,
+which cancels the holder and writes the wake row FAILED without a terminal
+fan-out. The holder releases the claim when its dispatch returns, and the wake
+row's own terminal releases it too, but only a claim taken at or before that
+row's admission (``queued_at``, else ``started_at``; both re-stamp rules keep
+``queued_at``) — never a later wake's.
+
+**A collision is parked, never dropped (#4536).** An ending that ended at or
+before the running wake's claim, and reached here within ``FOLD_SKEW_SECONDS``
+of ending, folds into that wake — its ``list_recent_executions`` shows it. Any
+other ending while the caller is held is parked in Redis
+(``trinity:wake_missed:{caller}``, latest wins, audited ``parked``) and
+delivered once when the wake ends: from the wake row's own terminal and from
+the holder after it returns or raises an ``Exception``. A holder cancelled or
+closed with its loop leaves the marker. Bound: one running wake plus one
+pending per caller. Redis trouble on the park is audited ``skipped_window``.
+
+**At capacity the wake is parked, not a failed row (#4733).** Before the wake
+row exists, the caller's slots are read: full, and one of its runs is running,
+means admission would refuse, so the ending is parked (``parked``,
+``reason="at_capacity"``) and delivered when any run of the caller ends: every
+terminal fan-out reaches this hook (a person's run and a platform turn
+included), and a push ``/chat``, which writes its terminal without one, drains
+it where its slot is released (``drain_after_slot_release``). A full meter with
+no running run is a slot no run holds (expired, or leaked until it is
+reclaimed), so that dispatches and admission decides. A pilot is never refused
+for a slot (its wake queues), so it is not checked. A refusal that races the
+check is the one FAILED row left; its ending is parked too, except on a pilot,
+where a refusal means a full backlog.
 
 **The wake stands where the delegator stood (#4357).** A wake continues the
 delegator's own work, so it carries the delegator's standing, not one more hop:
 ``max(callee − 1, MAX(running caller), 0)``, NULL counted as 0. The callee row
 was stamped ``1 + MAX(running caller)`` at dispatch, so ``callee − 1`` is the
 depth the delegator stood at when it delegated; the live MAX keeps a wake from
-standing below a deep turn of the caller that is still running (a collapsed
-window can read the shallower ending). It was ``callee + 1``, and the wake turn's
+standing below a deep turn of the caller that is still running (a folded
+ending can be the shallower one). It was ``callee + 1``, and the wake turn's
 next delegation is ``1 + MAX(running)`` over a set that includes the wake row, so
 every delegate→wake round added two and an orchestrator working through wakes
 was refused after about four rounds. A wake is therefore at most ``max − 1``
@@ -60,19 +97,72 @@ exactly as before.
 another, so a per-pair hourly budget does: ``caller_wake_max_per_hour`` (default
 120, ``0`` or less = unlimited) wakes from one callee into one delegator per
 one-hour Redis window, the #2973 event-budget shape. It is spent only by a wake
-about to be dispatched — a collapsed window spends nothing. A wake past it is
+about to be dispatched — an ending folded or parked spends nothing. A wake past it is
 skipped, audited ``skipped_budget``, and the delegator gets one notification
 per window; the ending stays readable through ``get_execution_result``. Redis
 trouble fails open: the budget must not cost an agent the wake it was promised.
+
+**Whose turn the wake is (trinity-enterprise#1216).** The wake carried nobody,
+so ``turn_tier_service.turn_actor`` rated it a visitor's turn, and the ledger
+rule (``dependencies.acting_turn_user_id``, ent#926) then hid every execution
+row from the delegator's own key for as long as the wake ran — the wake turn
+could not read the result it was woken for. The callee row records who the
+delegation was for (``turn_origin_user_id`` at dispatch), so the wake carries
+that person when they are owner tier on the delegator, and nobody otherwise:
+
+* the owner's own work (the agent's owner, an admin, a provider-rated member)
+  wakes as an owner turn and reads at the full view;
+* a person the delegator is only shared with, a person who cannot open it at
+  all (a hub's member, whose delegating turn ran ``delegated``), and a visitor
+  wake as the no-person turn they always were. No column records the
+  delegating turn, so its exact standing cannot be rebuilt here, and a
+  non-owner's wake is left unchanged rather than re-rated on a guess.
+
+``source_user_email`` stays off the row either way (ent#886).
+
+**The wake stands as the turn that delegated (trinity-enterprise#1225).** The
+callee row records the caller's turn that dispatched it
+(``continues_execution_id``, written only while that turn ran). The wake
+carries that link and nobody on the row, and ``turn_tier_service.turn_actor``
+rates it exactly as the delegating turn: a shared person's delegation wakes as
+that person (reads narrowed to them, no shell), a ``delegated`` turn's keeps
+owner tier, a visitor's stays a visitor's. The person rule above is the
+fallback for a callee row with no link (one written before the column, or by
+a key that named no running turn).
+
+**The wake is the next step of a conversation (#4537).** A person asks an
+agent in chat to "ask X and tell me what it said"; the agent delegates and
+replies that it will report back. The wake then ran cut off from that
+conversation at both ends, and this closes both:
+
+* *what it knows* — the frame carries the delegating turn: what the agent was
+  asked and what it replied then (its plan), read off the turn the callee row
+  links (``continues_execution_id``). A wake that delegates again links the
+  next callee to the wake itself, so the request is read from the head of that
+  chain — the first turn that is not a platform continuation — and the reply
+  from the turn that delegated last. Both are the delegator's own rows
+  (``agent_name`` is checked at every hop), sanitized and capped.
+* *where its reply goes* — when the head of the chain is a person's turn in an
+  agent chat thread (the row names it, ``chat_session_id``), the wake's reply is
+  written into that thread as the agent's next message. It is written at the
+  wake row's own terminal, the hook every terminal writer reaches, so a wake
+  that outlives its dispatcher (pull, restart, timeout) still reports; once per
+  wake (an idempotency claim on the wake id); SUCCESS only — a failed wake stays
+  on the execution row for the operator.
+
+Workspace, Slack and Telegram conversations are not written here: a delegated
+run already reports back into those through the inherited channel context
+(``channel_completion_report``).
 
 Never raises: this runs on the path of an already-billed terminal.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import time
-from typing import Any, List, Optional
+from datetime import datetime, timezone
+from typing import Any, List, Optional, Tuple
 
 from utils.credential_sanitizer import sanitize_text
 
@@ -88,12 +178,20 @@ RESERVED_TRIGGERS = frozenset({
     "event",              # event_dispatch_service.RESERVED_EVENT_TRIGGER
     "operator_response",  # operator_resume_service.TRIGGERED_BY
     "operator_ending",    # operator_resume_service.TRIGGERED_BY_ENDING
+    "project_steward",    # trinity-enterprise#1236: the platform's project steward wake
 })
 
-# One wake per caller per window. 15s is short enough that a caller waiting on
-# one delegation is woken promptly, and long enough that a sweep of hundreds of
-# stale rows collapses into a handful of turns.
-WAKE_BUCKET_SECONDS = 15
+# #4733: one wake per caller at a time. A claim with no live wake row behind it
+# holds the caller for this long — the gap between the claim and the wake row's
+# insert, which is a few awaits.
+HOLD_GRACE_SECONDS = 120
+
+# An ending folds into the running wake only when it ended by that wake's claim
+# AND reached the hook this soon after ending: a row written late with an
+# earlier `completed_at` (a retained result, the agent's own finish instant)
+# was listed as running, so it is parked instead. 15 s is the old window.
+FOLD_SKEW_SECONDS = 15
+
 
 # #4357: the per-pair hourly wake budget (the #2973 event-budget shape).
 _WAKE_BUDGET_SETTING = "caller_wake_max_per_hour"
@@ -104,13 +202,31 @@ _WAKE_KEY_PREFIX = "trinity:wake_fires:"
 SUMMARY_MAX = 2000
 ASK_IDS_MAX = 10
 
+# #4537: how much of the delegating turn the frame quotes (each of the request
+# and the reply), and how far back a chain of continuations is followed.
+ORIGIN_TEXT_MAX = 1500
+ORIGIN_HOPS_MAX = 8
 
-def _bucket_for(now: float) -> int:
-    return int(now // WAKE_BUCKET_SECONDS)
+
+# #4536/#4733: an ending that arrives while a wake of its caller runs, or while
+# the caller has no free slot, is parked here (latest wins) and delivered when
+# that wake or a run of the caller ends. 24 h, the idempotency TTL, so no wake
+# turn outlives its marker.
+_MISSED_KEY_PREFIX = "trinity:wake_missed:"
+_MISSED_TTL_SECONDS = 86400
+
+# Strong references to follow-on wakes until they finish.
+_FOLLOW_ONS: set = set()
+
+# `_claimed_wake`'s answer when admission refused the wake for a slot and the
+# ending was parked: no wake ran, and the holder must not drain it straight back.
+_PARKED_AT_CAPACITY = object()
 
 
-def _idempotency_key(caller: str, now: Optional[float] = None) -> str:
-    return f"caller_wake:{caller}:{_bucket_for(now if now is not None else time.time())}"
+def _hold_key(caller: str) -> str:
+    """#4733: the caller's one hold. Never `attach_execution` to it — that
+    moves `updated_at`, which every reader here takes as the claim instant."""
+    return f"caller_wake:{caller}:running"
 
 
 # --- seams (each one its own function so a test can stub it) ---------------
@@ -177,12 +293,6 @@ def _begin_idempotency(scope: str, key: str):
     return idempotency_service.begin(scope, key)
 
 
-def _complete_idempotency(decision, execution_id) -> None:
-    from services import idempotency_service
-
-    idempotency_service.complete(decision, execution_id, None)
-
-
 def _fail_idempotency(decision) -> None:
     from services import idempotency_service
 
@@ -193,6 +303,66 @@ def _agent_scope(agent_name: str) -> str:
     from services import idempotency_service
 
     return idempotency_service.make_agent_scope(agent_name)
+
+
+def _peek_idempotency(scope: str, key: str):
+    from services import idempotency_service
+
+    return idempotency_service.peek(scope, key)
+
+
+def _reclaim_idempotency(decision) -> bool:
+    from services import idempotency_service
+
+    return bool(idempotency_service.reclaim_in_flight(decision))
+
+
+def _wake_row_live(caller: str) -> bool:
+    """A wake row of ``caller`` is still queued, running or pending a retry."""
+    from database import db
+    from models import TaskExecutionStatus as S
+
+    return db.has_execution_with_status(
+        caller, (S.QUEUED, S.RUNNING, S.PENDING_RETRY), TRIGGERED_BY_CALLER_WAKE)
+
+
+def _caller_running(caller: str) -> bool:
+    from database import db
+    from models import TaskExecutionStatus as S
+
+    return db.has_execution_with_status(caller, (S.RUNNING,))
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+async def _has_free_slot(caller: str) -> bool:
+    """Would admission take a wake of ``caller`` now? (#4733, the capacity ruling)
+
+    No only when the slot meter is full AND one of the caller's runs is
+    running: the meter still counts a slot whose TTL ran out until admission
+    cleans it, and without a running run there is also no run whose end would
+    deliver a parked ending. A pilot queues its wake and is never refused for a
+    slot, so it is not checked. Fails open: an unreadable meter dispatches, and
+    admission decides, as before.
+    """
+    try:
+        from services.pull_pilot import pull_owns_dispatch
+
+        if pull_owns_dispatch(caller, TRIGGERED_BY_CALLER_WAKE):
+            return True
+        from database import db
+        from services.capacity_manager import get_capacity_manager
+
+        max_tasks = await asyncio.to_thread(db.get_max_parallel_tasks, caller)
+        state = await get_capacity_manager().get_slot_state(caller, max_tasks)
+        if int(getattr(state, "available_slots", 1)) > 0:
+            return True
+        return not await asyncio.to_thread(_caller_running, caller)
+    except Exception as e:  # noqa: BLE001 — admission still guards the slot
+        logger.debug("#4733: slot check for %s failed (%s); dispatching", caller, type(e).__name__)
+        return True
 
 
 def _running_depth(agent_name: str) -> int:
@@ -219,6 +389,31 @@ def _standing_depth(caller: str, callee_depth: Any) -> int:
         logger.debug("#4357: running depth unreadable for %s", caller)
         running = 0
     return max(from_callee, running, 0)
+
+
+def _standing_person(caller: str, row) -> Optional[int]:
+    """The person the wake carries (ent#1216): the callee row's, and only when
+    that person is owner tier on ``caller``; None for everyone else.
+
+    Rated with the real ``turn_actor`` over the row the wake will be — the
+    delegator, that person, no source agent — so the delegation rule cannot
+    lift it and the member provider counts. Anything that cannot be read
+    carries nobody: the wake is still owed, and this never guesses upward.
+    """
+    person = getattr(row, "source_user_id", None)
+    if person is None:
+        return None
+    try:
+        from database import db
+        from services import turn_tier_service
+
+        tier = turn_tier_service.turn_actor(
+            db, caller, execution={"agent_name": caller, "source_user_id": person}
+        )[0]
+    except Exception:  # noqa: BLE001 — never raise on the billed terminal path
+        logger.debug("ent#1216: standing unreadable for %s", caller)
+        return None
+    return person if tier == turn_tier_service.OWNER else None
 
 
 def _wake_budget_limit() -> int:
@@ -287,6 +482,237 @@ async def _within_wake_budget(callee: str, caller: str) -> Optional[int]:
     return limit
 
 
+def _spawn_followon(coro) -> None:
+    """Run a follow-on wake as its own task, never nested inside the drain."""
+    import asyncio
+
+    task = asyncio.get_running_loop().create_task(coro)
+    _FOLLOW_ONS.add(task)
+    task.add_done_callback(_FOLLOW_ONS.discard)
+
+
+def _as_utc(value):
+    from datetime import datetime, timezone
+
+    from utils.helpers import parse_iso_timestamp
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        return parse_iso_timestamp(str(value))
+    except Exception:  # noqa: BLE001 — unreadable counts as "not covered"
+        return None
+
+
+def _ended_by(row, claimed_at) -> bool:
+    """This run ended at or before ``claimed_at``, so a wake claimed then shows
+    it in ``list_recent_executions``. Unknown either way: not covered."""
+    ended = _as_utc(getattr(row, "completed_at", None))
+    claimed = _as_utc(claimed_at)
+    return ended is not None and claimed is not None and ended <= claimed
+
+
+def _covered(row, idem) -> bool:
+    """Folds into the wake holding ``idem`` (#4536): ended by its claim, and
+    reached here promptly — a late write back-dated before the claim was listed
+    as running, so it is not covered (#4733)."""
+    if not _ended_by(row, getattr(idem, "claimed_at", None)):
+        return False
+    ended = _as_utc(getattr(row, "completed_at", None))
+    return (_now() - ended).total_seconds() <= FOLD_SKEW_SECONDS
+
+
+# --- the caller's hold (#4733) ---------------------------------------------
+
+def _young(hold) -> bool:
+    """A claim inside the gap before its wake row exists. Unknown age: young."""
+    claimed = _as_utc(getattr(hold, "claimed_at", None))
+    return claimed is None or (_now() - claimed).total_seconds() < HOLD_GRACE_SECONDS
+
+
+def _wake_live(caller: str) -> bool:
+    """A wake row of ``caller`` is queued, running or pending a retry. An
+    unreadable answer holds the caller: a parked ending waits, two wakes never run."""
+    try:
+        return bool(_wake_row_live(caller))
+    except Exception:  # noqa: BLE001
+        logger.warning("#4733: wake rows of %s unreadable; holding", caller)
+        return True
+
+
+def _caller_busy(caller: str) -> bool:
+    """Is a wake of ``caller`` running, or about to? Reads only — never claims."""
+    if _wake_live(caller):
+        return True
+    try:
+        hold = _peek_idempotency(_agent_scope(caller), _hold_key(caller))
+    except Exception:  # noqa: BLE001
+        logger.warning("#4733: hold of %s unreadable; holding", caller)
+        return True
+    return bool(hold is not None and getattr(hold, "in_flight", False) and _young(hold))
+
+
+def _stale(hold, caller: str) -> bool:
+    return (getattr(hold, "replay", False) and getattr(hold, "in_flight", False)
+            and not _young(hold) and not _wake_live(caller))
+
+
+def _claim_hold(scope: str, key: str, caller: str):
+    """Claim the caller's hold, reclaiming one whose wake is gone: older than
+    the grace with no live wake row (a holder cancelled by a backend stop).
+
+    None when a stale hold could not be reclaimed: the wake then runs without
+    one, as when the claim itself fails. Answering "held" there would park the
+    ending while ``_caller_busy`` answers "free" and drains it straight back —
+    a loop with no end.
+    """
+    hold = _begin_idempotency(scope, key)
+    if not _stale(hold, caller):
+        return hold
+    if _reclaim_idempotency(hold):
+        logger.info("#4733: reclaimed a stale wake hold of %s", caller)
+    hold = _begin_idempotency(scope, key)
+    if not _stale(hold, caller):
+        return hold
+    logger.warning("#4733: a stale wake hold of %s could not be reclaimed; waking without it",
+                   caller)
+    return None
+
+
+def _release_hold_of(wake_row) -> None:
+    """A wake row's terminal frees the hold its own dispatch took, and no other.
+
+    The hold is that wake's only when it was claimed at or before the row's
+    admission (``queued_at`` survives the pull claim and the limiter park,
+    which re-stamp ``started_at``) and no other wake of the caller is live. A
+    later wake claimed after this row was admitted; its hold stays. Never raises.
+    """
+    caller = getattr(wake_row, "agent_name", None)
+    try:
+        hold = _peek_idempotency(_agent_scope(caller), _hold_key(caller))
+        if hold is None or not getattr(hold, "in_flight", False):
+            return
+        admitted = (_as_utc(getattr(wake_row, "queued_at", None))
+                    or _as_utc(getattr(wake_row, "started_at", None)))
+        claimed = _as_utc(getattr(hold, "claimed_at", None))
+        if admitted is None or claimed is None or claimed > admitted:
+            return
+        if _wake_live(caller):
+            return
+        _reclaim_idempotency(hold)
+    except Exception:  # noqa: BLE001 — the grace and the live-row read still free it
+        logger.exception("#4733: releasing the hold of %s failed", caller)
+
+
+async def _mark_parked(caller: str, callee: str, execution_id: str, policy_source,
+                       **details) -> bool:
+    """Write the parked marker (latest wins) and its audit. False when Redis
+    refused it — the drop is audited ``skipped_window``."""
+    marker = f"{_MISSED_KEY_PREFIX}{caller}"
+    try:
+        _wake_budget_redis().set(marker, execution_id, ex=_MISSED_TTL_SECONDS)
+    except Exception as e:  # noqa: BLE001 — fail-open, but the drop is recorded
+        logger.warning("#4536: could not park %s for %s (%s); not woken", execution_id, caller, e)
+        await _audit(caller=caller, callee=callee, callee_execution_id=execution_id,
+                     execution_id=None, status="skipped_window", error=type(e).__name__,
+                     policy_source=policy_source, **details)
+        return False
+    await _audit(caller=caller, callee=callee, callee_execution_id=execution_id,
+                 execution_id=None, status="parked", error=None, policy_source=policy_source,
+                 **details)
+    return True
+
+
+async def _park(caller: str, callee: str, execution_id: str, policy_source) -> None:
+    """Hold an ending for the running wake to deliver when it ends (#4536)."""
+    if not await _mark_parked(caller, callee, execution_id, policy_source):
+        return
+    # The holder may have ended and drained between our check and the SET.
+    # Still held: its end drains the marker. Free: nobody will, so take it.
+    if await asyncio.to_thread(_caller_busy, caller):
+        return
+    await _drain_missed(caller)
+
+
+async def _park_at_capacity(caller: str, callee: str, execution_id: str, idem,
+                            policy_source) -> None:
+    """No slot for the wake: park the ending instead of a FAILED wake row (#4733).
+
+    The hold is released first — no wake runs. A run of the caller is running
+    (``_has_free_slot`` says so), and its end delivers the marker; if it ended
+    between the check and the SET, the re-check takes the slot it freed."""
+    if idem is not None:
+        try:
+            _fail_idempotency(idem)
+        except Exception:  # noqa: BLE001
+            logger.exception("#4733: idempotency release failed")
+    if not await _mark_parked(caller, callee, execution_id, policy_source, reason="at_capacity"):
+        return
+    await _deliver_if_a_slot_freed(caller)
+
+
+async def _deliver_if_a_slot_freed(caller: str) -> None:
+    """After a capacity park: the run that held the slot may have ended between
+    the check and the SET, and its own drain then found no marker. Take the
+    slot it freed. Each pass needs the meter to change, so this cannot spin."""
+    if await _has_free_slot(caller) and not await asyncio.to_thread(_caller_busy, caller):
+        await _drain_missed(caller)
+
+
+def drain_after_slot_release(agent_name: Optional[str]) -> None:
+    """A slot of ``agent_name`` was released by a turn that writes its terminal
+    without the fan-out — a push ``/chat`` (#4733, E1). Deliver a wake parked
+    for a free slot, as any other run's end does. Fire-and-forget; never raises."""
+    if not agent_name:
+        return
+    coro = _drain_if_idle(agent_name)
+    try:
+        _spawn_followon(coro)
+    except Exception:  # noqa: BLE001 — no running loop: the next end delivers it
+        coro.close()
+        logger.debug("#4733: no loop to drain a parked wake of %s", agent_name)
+
+
+async def _drain_if_idle(agent_name: Optional[str]) -> None:
+    """Any run's end may free the slot a parked wake waits for (#4733, E1).
+
+    One Redis read per terminal; the rows are read only when something is
+    parked. While a wake of the agent runs, its own end delivers instead."""
+    if not agent_name:
+        return
+    try:
+        client = _wake_budget_redis()
+        if client is None or not client.exists(f"{_MISSED_KEY_PREFIX}{agent_name}"):
+            return
+    except Exception:  # noqa: BLE001 — a hint read; the next end tries again
+        return
+    if await asyncio.to_thread(_caller_busy, agent_name):
+        return
+    await _drain_missed(agent_name)
+
+
+async def _drain_missed(caller: str) -> None:
+    """Deliver the ending parked for ``caller``, if any (#4536).
+
+    Called when a wake ends — from the wake row's own terminal and from the
+    holder once its dispatch returns — and when any run of the caller ends.
+    The marker is taken with GETDEL, so one parked ending is delivered once;
+    its follow-on claims the caller's hold like any other wake.
+    """
+    try:
+        parked = _wake_budget_redis().getdel(f"{_MISSED_KEY_PREFIX}{caller}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("#4536: could not drain parked wake for %s: %s", caller, e)
+        return
+    if not parked:
+        return
+    if isinstance(parked, bytes):
+        parked = parked.decode()
+    _spawn_followon(maybe_wake_caller(parked, _expect_caller=caller))
+
+
 async def _dispatch_wake(**kwargs):
     from services.task_execution_service import dispatch_and_await_terminal
 
@@ -318,22 +744,167 @@ async def _audit(**details) -> None:
 
 # --- the frame -------------------------------------------------------------
 
-def _summary_of(row) -> str:
-    raw = getattr(row, "error", None) or getattr(row, "response", None) or ""
+# --- the conversation the wake belongs to (#4537) ---------------------------
+
+def _delegating_turns(caller: str, origin_id: Any) -> Tuple[Any, Any]:
+    """``(origin, root)`` for a wake of ``caller``: the caller's turn that
+    delegated, and the turn at the head of the continuation chain — the first
+    one a platform continuation did not start. Either is None when it cannot be
+    read; every row on the way must be the caller's own. Never raises."""
+    origin = root = None
+    seen: set = set()
+    current = origin_id
+    for _ in range(ORIGIN_HOPS_MAX):
+        if not isinstance(current, str) or not current or current in seen:
+            break
+        seen.add(current)
+        try:
+            turn = _read_row(current)
+        except Exception as e:  # noqa: BLE001 — context is optional, the wake is not
+            logger.debug("#4537: reading turn %s failed: %s", current, e)
+            break
+        if turn is None or getattr(turn, "agent_name", None) != caller:
+            break
+        if origin is None:
+            origin = turn
+        if str(getattr(turn, "triggered_by", None) or "") not in RESERVED_TRIGGERS:
+            root = turn
+            break
+        current = getattr(turn, "continues_execution_id", None)
+    return origin, root
+
+
+def _thread_id_of(execution_id: str) -> Optional[str]:
+    from database import db
+
+    return db.get_execution_chat_session_id(execution_id)
+
+
+def _thread(session_id: str):
+    from database import db
+
+    return db.get_chat_session(session_id)
+
+
+def _reply_thread(caller: str, root: Any):
+    """The agent chat thread a wake's reply belongs in, or None.
+
+    Only a person's own turn in a thread of this agent: the row names the
+    thread, no agent started the turn, and the thread is that person's."""
+    if root is None or getattr(root, "source_agent_name", None):
+        return None
+    person = getattr(root, "source_user_id", None)
+    if person is None:
+        return None
+    try:
+        session_id = _thread_id_of(root.id)
+        if not session_id:
+            return None
+        session = _thread(session_id)
+    except Exception as e:  # noqa: BLE001 — no thread is the old behaviour
+        logger.debug("#4537: thread lookup for %s failed: %s", getattr(root, "id", None), e)
+        return None
+    if session is None or getattr(session, "agent_name", None) != caller:
+        return None
+    if str(getattr(session, "user_id", "")) != str(person):
+        return None
+    return session
+
+
+def _quoted(text: Any) -> str:
+    """A turn's text for the frame: sanitized, then capped, keeping the END —
+    a chat request that carries earlier turns as context ends with the
+    person's newest words."""
+    raw = str(text or "").strip()
     if not raw:
         return ""
+    clean = sanitize_text(raw[-ORIGIN_TEXT_MAX * 2:])
+    if len(clean) > ORIGIN_TEXT_MAX or len(raw) > ORIGIN_TEXT_MAX * 2:
+        return "[…] " + clean[-ORIGIN_TEXT_MAX:]
+    return clean
+
+
+def _conversation_lines(origin: Any, root: Any, to_thread: bool) -> List[str]:
+    asked = _quoted(getattr(root, "message", None)) if root is not None else ""
+    replied = _quoted(getattr(origin, "response", None)) if origin is not None else ""
+    lines: List[str] = []
+    if asked or replied:
+        lines += ["", "This run was delegated from a turn of your own. Continue that work — "
+                      "the wake is its next step, not a new request."]
+    if asked:
+        lines += ["", "What you were asked in that conversation (quoted, the request you "
+                      "were already working on):", "", asked]
+    if replied:
+        lines += ["", "What you replied when you delegated (your plan then):", "", replied]
+    if to_thread:
+        lines += ["", "Your reply to this wake is posted, verbatim, as your next message in "
+                      "the chat where you were asked. Write it for the person reading that chat."]
+    return lines
+
+
+async def _post_wake_reply(wake_row: Any) -> bool:
+    """Write a finished wake's reply into the chat thread its delegation came
+    from (#4537). Once per wake; SUCCESS only. Never raises."""
+    try:
+        caller = getattr(wake_row, "agent_name", None)
+        wake_id = getattr(wake_row, "id", None)
+        status = getattr(wake_row, "status", None)
+        status = status.value if hasattr(status, "value") else str(status)
+        if not caller or not wake_id or status != "success":
+            return False
+        if not (getattr(wake_row, "response", None) or "").strip():
+            return False
+        # Database reads: off the event loop (#4674).
+        _origin, root = await asyncio.to_thread(
+            _delegating_turns, caller, getattr(wake_row, "continues_execution_id", None))
+        session = await asyncio.to_thread(_reply_thread, caller, root)
+        if session is None:
+            return False
+        claim = _begin_idempotency(_agent_scope(caller), f"caller_wake_reply:{wake_id}")
+        if getattr(claim, "replay", False):
+            return False
+        try:
+            from services import chat_persistence_service
+
+            written = await chat_persistence_service.post_platform_turn_reply(
+                agent_name=caller, session=session, row=wake_row)
+        except Exception:
+            _fail_idempotency(claim)
+            raise
+        if written:
+            from services import idempotency_service
+
+            idempotency_service.complete(claim, wake_id, {"chat_session_id": session.id})
+        else:
+            _fail_idempotency(claim)
+        return bool(written)
+    except Exception as e:  # noqa: BLE001 — the wake's terminal already stands
+        logger.warning("#4537: posting the wake reply for %s failed (%s)",
+                       getattr(wake_row, "id", None), type(e).__name__)
+        return False
+
+
+def _summary_of(row) -> Tuple[str, Optional[int]]:
+    """The callee's words, redacted and capped — and, only when the cap cut
+    them, the length of the full text (ent#1216), so the frame can say so."""
+    raw = getattr(row, "error", None) or getattr(row, "response", None) or ""
+    if not raw:
+        return "", None
+    text = str(raw)
     # Redact credentials at this single chokepoint, then cap — the #1578 order:
     # sanitize a bounded slice, then truncate, so a secret cannot survive by
     # sitting past the cap.
-    return sanitize_text(str(raw)[: SUMMARY_MAX * 2])[:SUMMARY_MAX]
+    clean = sanitize_text(text[: SUMMARY_MAX * 2])
+    cut = len(text) > SUMMARY_MAX * 2 or len(clean) > SUMMARY_MAX
+    return clean[:SUMMARY_MAX], (len(text) if cut else None)
 
 
-def _framed_wake(row, ask_ids: List[str]) -> str:
+def _framed_wake(row, ask_ids: List[str], conversation: Optional[List[str]] = None) -> str:
     callee = getattr(row, "agent_name", "?")
     execution_id = getattr(row, "id", "?")
     status = getattr(row, "status", "?")
     status = status.value if hasattr(status, "value") else str(status)
-    summary = _summary_of(row)
+    summary, full_length = _summary_of(row)
 
     lines = [
         f"A run you delegated to `{callee}` has ended: `{execution_id}` → **{status}**.",
@@ -351,10 +922,14 @@ def _framed_wake(row, ask_ids: List[str]) -> str:
         ]
     if summary:
         lines += ["", "Its own words on how it ended:", "", summary]
+        if full_length is not None:
+            # ent#1216: a silent cut read as the run's own answer stopping there.
+            lines += ["", f"[cut here: the first {len(summary):,} of {full_length:,} characters]"]
+    lines += conversation or []
     lines += [
         "",
         f"Read the full result with `get_execution_result('{callee}', '{execution_id}')`. "
-        "Other delegated runs may have ended in the same window as this one — "
+        "Other delegated runs may have ended around the same time as this one — "
         "`list_recent_executions` is the complete list.",
     ]
     return "\n".join(lines)
@@ -362,12 +937,21 @@ def _framed_wake(row, ask_ids: List[str]) -> str:
 
 # --- the hook --------------------------------------------------------------
 
-async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
-    """Wake the agent that delegated ``execution_id``, at most once per window.
+async def maybe_wake_caller(
+    execution_id: Optional[str],
+    *,
+    _expect_caller: Optional[str] = None,
+) -> Optional[str]:
+    """Wake the agent that delegated ``execution_id``, one wake per caller at a time.
 
     Returns the wake's execution id, or None when nothing is owed a wake, the
-    caller has not opted in, is not running, the window was already claimed, or
-    the dispatch failed. Never raises — the terminal is already recorded.
+    caller has not opted in, is not running, a wake of it is running (the
+    ending then folds into it or is parked for it to deliver, #4536/#4733), it
+    has no free slot (parked, #4733), or the dispatch failed. Never raises — the
+    terminal is already recorded.
+
+    ``_expect_caller`` is the drain's: a parked ending is woken only for the
+    caller it was parked for.
     """
     if not execution_id:
         return None
@@ -380,6 +964,20 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
     if row is None:
         return None
 
+    triggered_by = getattr(row, "triggered_by", None)
+    if triggered_by and str(triggered_by) == TRIGGERED_BY_CALLER_WAKE:
+        # #4536: a wake's own end delivers what was parked while it ran. It
+        # wakes nobody for itself (the recursion break below still holds).
+        # #4537: and its reply goes back to the chat the delegation came from.
+        await _post_wake_reply(row)
+        if getattr(row, "agent_name", None):
+            await asyncio.to_thread(_release_hold_of, row)   # #4733: its own hold only
+            await _drain_missed(row.agent_name)
+        return None
+    if _expect_caller is None:
+        # #4733 (E1): any run's end may free the slot a parked wake waits for.
+        await _drain_if_idle(getattr(row, "agent_name", None))
+
     caller = getattr(row, "source_agent_name", None)
     callee = getattr(row, "agent_name", None)
     # The caller is read from the row's principal-derived column and nowhere
@@ -388,10 +986,11 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
     # agent to bill (SELF-EXEC-001).
     if not caller or not callee or caller == callee:
         return None
+    if _expect_caller is not None and caller != _expect_caller:
+        return None
     if getattr(row, "fan_out_id", None):
         return None
 
-    triggered_by = getattr(row, "triggered_by", None)
     if triggered_by and str(triggered_by) in RESERVED_TRIGGERS:
         return None
 
@@ -419,22 +1018,64 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
         return None
 
     idem = None
+    scope = _agent_scope(caller)
+    key = _hold_key(caller)
     try:
-        idem = _begin_idempotency(_agent_scope(caller), _idempotency_key(caller))
+        idem = _claim_hold(scope, key, caller)
     except Exception:  # noqa: BLE001
         logger.exception("ent#1102: idempotency begin failed — dispatching anyway")
 
     if idem is not None and getattr(idem, "replay", False):
+        if getattr(idem, "in_flight", False) and (
+                _expect_caller is not None or not _covered(row, idem)):
+            # #4536/#4733: a wake of this caller is still running and this run
+            # ended after it claimed — it may never see it. Park, never drop.
+            # A drained ending was owed delivery by name, so it never folds
+            # into a claim that may yet not dispatch (a budget cap, an error).
+            await _park(caller, callee, execution_id, verdict.source)
+            return None
         logger.info(
-            "ent#1102: %s already woken in this window — no second wake for %s",
-            caller, execution_id,
+            "ent#1102: %s is being woken — no second wake for %s", caller, execution_id,
         )
         return None
+    if idem is not None and _wake_live(caller):
+        # #4733: the hold is free, but a wake row of this caller still runs (a
+        # holder whose wait gave up first). The row is the fact; park for it.
+        _fail_idempotency(idem)
+        await _park(caller, callee, execution_id, verdict.source)
+        return None
+    if not await _has_free_slot(caller):
+        await _park_at_capacity(caller, callee, execution_id, idem, verdict.source)
+        return None
 
+    wake_id = None
+    try:
+        wake_id = await _claimed_wake(row, caller, callee, execution_id, verdict, idem)
+    except asyncio.CancelledError:
+        # #4536: a stopping loop would never run the follow-on, and GETDEL
+        # would lose the marker. Leave it for the wake row's terminal.
+        raise
+    except Exception:
+        # GeneratorExit (a coroutine closed with its loop) passes through: the
+        # wake row's terminal drains, as for a cancel.
+        await _drain_missed(caller)
+        raise
+    if wake_id is _PARKED_AT_CAPACITY:
+        # #4733: a run's end delivers it, not this holder — unless that run
+        # ended before the marker landed, when its drain found nothing.
+        await _deliver_if_a_slot_freed(caller)
+        return None
+    # #4536: deliver what was parked while this claim was held (the wake
+    # row's terminal drains it too).
+    await _drain_missed(caller)
+    return wake_id
+
+
+async def _claimed_wake(row, caller, callee, execution_id, verdict, idem):
     capped_at = await _within_wake_budget(callee, caller)
     if capped_at is not None:
-        # Released, not completed: no turn ran, so the window holds nothing to
-        # replay — a later ending in it is skipped by the same budget anyway.
+        # Released, not completed: no turn ran, so the hold covers nothing. An
+        # ending that folded into it meanwhile is not woken (a stated limit).
         if idem is not None:
             try:
                 _fail_idempotency(idem)
@@ -448,16 +1089,36 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
     ask_ids = _pending_ask_ids(execution_id)
     callee_depth = getattr(row, "chain_depth", None)
     chain_depth = _standing_depth(caller, callee_depth)
+    # ent#1225: the wake continues the caller's turn that delegated, and is
+    # rated as it. ent#1216 is the fallback for a callee row with no link: an
+    # owner's delegation wakes as the owner's turn, every other one as nobody.
+    origin = getattr(row, "continues_execution_id", None)
+    if isinstance(origin, str) and origin:
+        standing = "origin"
+        attribution = {"continues_execution_id": origin}
+    else:
+        person = _standing_person(caller, row)
+        standing = "owner" if person is not None else "none"
+        attribution = {"source_user_id": person} if person is not None else {}
+
+    # #4537: the wake carries the turn that delegated, and is told when its
+    # reply goes back to that chat. Read from the link only — the ent#1216
+    # fallback names a person, not a turn.
+    # Database reads: off the event loop (#4674).
+    turn, root = await asyncio.to_thread(_delegating_turns, caller, origin)
+    replies_to_chat = await asyncio.to_thread(_reply_thread, caller, root) is not None
+    conversation = _conversation_lines(turn, root, replies_to_chat)
 
     try:
         result = await _dispatch_wake(
             agent_name=caller,
-            message=_framed_wake(row, ask_ids),
+            message=_framed_wake(row, ask_ids, conversation),
             # ent#751: the skill gate reads person text only, and no person
             # wrote this — the platform did. ent#886/#715: no source_user_email.
             request_text="",
             triggered_by=TRIGGERED_BY_CALLER_WAKE,
             chain_depth=chain_depth,
+            **attribution,
         )
     except Exception as exc:  # noqa: BLE001
         if idem is not None:
@@ -468,18 +1129,43 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
         logger.exception("ent#1102: wake raised for caller=%s callee=%s", caller, execution_id)
         await _audit(caller=caller, callee=callee, callee_execution_id=execution_id,
                      execution_id=None, status="dispatch_error", error=type(exc).__name__,
-                     policy_source=verdict.source)
+                     policy_source=verdict.source, standing=standing)
         return None
 
     if idem is not None:
         try:
-            _complete_idempotency(idem, result.execution_id)
+            # #4536/#4733: a finished wake covers nothing that ends after it,
+            # so the caller's hold is released and the next ending wakes at
+            # once. GETDEL already gives one follow-on per parked ending.
+            _fail_idempotency(idem)
         except Exception:  # noqa: BLE001
-            logger.exception("ent#1102: idempotency complete failed")
+            logger.exception("ent#1102: idempotency settle failed")
 
     await _audit(caller=caller, callee=callee, callee_execution_id=execution_id,
                  execution_id=result.execution_id, status=result.status,
                  error=result.error, policy_source=verdict.source,
                  ask_ids=ask_ids, chain_depth=chain_depth,
-                 callee_chain_depth=callee_depth)
+                 callee_chain_depth=callee_depth, standing=standing)
+    if await asyncio.to_thread(_refused_for_a_slot, caller, result) and await _mark_parked(
+            caller, callee, execution_id, verdict.source, reason="at_capacity"):
+        return _PARKED_AT_CAPACITY      # #4733: the slot check lost a race
     return result.execution_id
+
+
+def _refused_for_a_slot(caller: str, result) -> bool:
+    """Admission refused this wake because every slot was taken (#4733): the
+    FAILED row is the stated limit, and the ending is parked for a run's end.
+    Off a pilot, CAPACITY is only ever the full slot pool; a pilot's is a full
+    backlog or an unclaimed queue, which repeat, so it is not parked. Nor is
+    one without a running run, whose end is what delivers it."""
+    from services.execution_envelope import TaskExecutionErrorCode
+
+    code = getattr(result, "error_code", None)
+    if str(getattr(code, "value", code)) != TaskExecutionErrorCode.CAPACITY.value:
+        return False
+    try:
+        from services.pull_pilot import pull_owns_dispatch
+
+        return not pull_owns_dispatch(caller, TRIGGERED_BY_CALLER_WAKE) and _caller_running(caller)
+    except Exception:  # noqa: BLE001 — unknown: leave the FAILED row as it was
+        return False

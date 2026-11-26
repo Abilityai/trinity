@@ -10,8 +10,10 @@
  *   reading        opening a chat row emits `mark-read` exactly once, and the row
  *                  stays selected, drawn read, in place (principle 5); an
  *                  AUTO-selection on landing is not a read
- *   answering      goes through `store.answerAsk`, and the ended ask stays drawn
- *                  in place until the selection changes (D8)
+ *   answering      goes through `store.answerAsk`; the reader's OWN confirmed
+ *                  answer crosses its row off and opens the next ask ("answer,
+ *                  then next"), while an ask that ends any other way stays
+ *                  drawn in place (D8, principle 5)
  *   Mark all read  settles through `markChatReadStrict` and names the failed count
  *   phone          Back returns to the list and focus returns to the row (D12)
  */
@@ -44,10 +46,18 @@ import PortalInboxPane from '@/components/portal/PortalInboxPane.vue'
 
 globalThis.ResizeObserver = globalThis.ResizeObserver || class { observe() {} unobserve() {} disconnect() {} }
 
+// Each query gets its own answer: one flag for all of them read a phone as
+// "reduced motion" too. `(pointer: coarse)` keeps following `phone` (what every
+// phone test here relied on) unless a test sets it.
 let phone = false
+let reduced = false
+let coarse = null
 function stubMatchMedia() {
   window.matchMedia = (q) => ({
-    matches: phone, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+    matches: /prefers-reduced-motion/.test(q)
+      ? reduced
+      : (/pointer:\s*coarse/.test(q) && coarse !== null ? coarse : phone),
+    media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
   })
 }
 
@@ -66,6 +76,8 @@ const ask = (id, over = {}) => ({
 let store, router, wrapper
 beforeEach(async () => {
   phone = false
+  reduced = false
+  coarse = null
   stubMatchMedia()
   localStorage.clear()
   setActivePinia(createPinia())
@@ -488,24 +500,7 @@ describe('rows keep their place for one tab visit (§3g S1)', () => {
     expect(document.activeElement?.getAttribute('data-inbox-row')).toBe('thread:t2')
   })
 
-  it('A7: answering an ask on All does not move it', async () => {
-    store.asks = [ask('a1', { created_at: iso(1) }), ask('a2', { created_at: iso(30) })]
-    store.asksLoaded = true
-    store.answerAsk = vi.fn(async (id) => {
-      const answered = { ...store.asks.find((a) => a.id === id), status: 'answered', ended_by: 'you', ended_at: new Date().toISOString() }
-      store.asks = store.asks.map((a) => (a.id === id ? answered : a))
-      return answered
-    })
-    const threads = [thread('t1', { last_message_at: iso(10) })]
-    const w = await mountInbox({ threads }, { query: { tab: 'all', item: 'ask:a2' } })
-    const order = () => w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))
-    expect(order()).toEqual(['ask:a1', 'thread:t1', 'ask:a2'])
-    await w.find('[data-testid="inbox-ask-input-a2"]').setValue('yes')
-    await w.find('[data-testid="inbox-ask-input-a2"]').element.form.dispatchEvent(new Event('submit'))
-    await flushPromises()
-    expect(store.answerAsk).toHaveBeenCalled()
-    expect(order()).toEqual(['ask:a1', 'thread:t1', 'ask:a2'])
-  })
+  // A7 (answering an ask on All) is with the other answer specs, below.
 
   it('A12: a poll that reads a row elsewhere keeps the order and ghosts it until the tab is left', async () => {
     const threads = [
@@ -640,64 +635,740 @@ describe('a chat is read only after the pane has rendered it (§3g S5, D-3)', ()
   })
 })
 
-describe('answering an ask in the pane (D8)', () => {
-  it('goes through store.answerAsk, and the ended ask stays in place until the tab is left (§3g T1)', async () => {
+describe('answer, then next: the reader\'s own answer crosses its row off (the one exception to principle 5)', () => {
+  // The beat, the collapse and the guard are timers; only setTimeout is faked,
+  // so `flushPromises` (which holds the real scheduler) still settles the POST.
+  const BEAT = 150
+  const COLLAPSE = 200
+  const HOLD = 300
+  beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }) })
+  afterEach(() => { vi.useRealTimers() })
+
+  const ended = (id, over = {}) => ({
+    ...store.asks.find((a) => a.id === id), status: 'answered', ended_by: 'you', ended_at: new Date().toISOString(), ...over,
+  })
+  const answering = (over = {}) => vi.fn(async (id) => {
+    const answered = ended(id, over)
+    store.asks = store.asks.map((a) => (a.id === id ? answered : a))
+    return answered
+  })
+  // Newest first: a1, a2, a3.
+  const three = () => [ask('a1', { created_at: iso(1) }), ask('a2', { created_at: iso(5) }), ask('a3', { created_at: iso(9) })]
+  const rows = (w) => w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))
+  const current = (w) => w.findAll('[data-inbox-row]')
+    .filter((r) => r.attributes('aria-current') === 'true').map((r) => r.attributes('data-inbox-row'))
+  const li = (w, key) => w.find(`[data-testid="inbox-row-${key}"]`).element.closest('li')
+  const item = () => router.currentRoute.value.query.item
+  const announced = (w) => w.find('[data-testid="inbox-announce"]').text()
+  const tick = async (ms) => { vi.advanceTimersByTime(ms); await flushPromises() }
+  // Past the beat, the collapse and the next ask's guard.
+  const settle = async () => { await tick(BEAT); await tick(COLLAPSE); await tick(HOLD) }
+  const send = async (w, id, text = 'yes') => {
+    await w.find(`[data-testid="inbox-ask-input-${id}"]`).setValue(text)
+    await w.find(`[data-testid="inbox-ask-input-${id}"]`).element.form.dispatchEvent(new Event('submit'))
+    await flushPromises()
+  }
+  // A row is named by its key, anything else by its test id.
+  const focused = () => document.activeElement?.getAttribute('data-inbox-row') || document.activeElement?.getAttribute('data-testid')
+
+  it('holds the ended badge for a beat, then opens the next ask by replace and collapses the row out', async () => {
+    store.asks = three()
+    store.asksLoaded = true
+    store.answerAsk = answering()
+    const push = vi.spyOn(router, 'push')
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    push.mockClear()
+    expect(current(w)).toEqual(['ask:a1']) // the desktop preview, not in the URL
+    expect(item()).toBeUndefined()
+
+    await send(w, 'a1')
+    expect(store.answerAsk).toHaveBeenCalledWith('a1', expect.anything())
+    // The done beat: the row is still there, drawn ended, still selected.
+    expect(rows(w)).toEqual(['ask:a1', 'ask:a2', 'ask:a3'])
+    expect(has(w, 'inbox-row-ended-ask:a1')).toBe(true)
+    expect(li(w, 'ask:a1').getAttribute('data-crossing')).toBe('done')
+    expect(li(w, 'ask:a1').hasAttribute('inert')).toBe(false)
+    expect(current(w)).toEqual(['ask:a1'])
+    // The card's own "Sent" line is not drawn in the Inbox: the pane moves on.
+    expect(has(w, 'inbox-ask-confirmation')).toBe(false)
+
+    await tick(BEAT)
+    // The pane switches as the collapse starts; the URL names the next ask (also
+    // from a preview), written by replace.
+    expect(current(w)).toEqual(['ask:a2'])
+    expect(item()).toBe('ask:a2')
+    expect(push).not.toHaveBeenCalled()
+    expect(has(w, 'inbox-ask-input-a2')).toBe(true)
+    const leaving = li(w, 'ask:a1')
+    expect(leaving.getAttribute('data-crossing')).toBe('leaving')
+    expect(leaving.className).toContain('grid-rows-[0fr]')
+    expect(leaving.hasAttribute('inert')).toBe(true)
+    expect(focused()).toBe('inbox-pane-heading')
+    expect(announced(w)).toBe('Answered. Next: Ask a2.')
+    // The rail follows the new selection, never the answered ask again.
+    expect(w.emitted('update:preview')?.at(-1)).toEqual(['ask:a2'])
+
+    await tick(COLLAPSE)
+    expect(rows(w)).toEqual(['ask:a2', 'ask:a3'])
+    expect(current(w)).toEqual(['ask:a2'])
+    // Split: Back does not step through the answered ask.
+    router.back()
+    await flushPromises()
+    expect(item()).not.toBe('ask:a1')
+  })
+
+  it('the next ask is the one below; from the last row, the one above', async () => {
+    store.asks = three()
+    store.asksLoaded = true
+    store.answerAsk = answering()
+    const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:a2' } })
+    await send(w, 'a2')
+    await settle()
+    expect(current(w)).toEqual(['ask:a3'])
+    expect(rows(w)).toEqual(['ask:a1', 'ask:a3'])
+    await send(w, 'a3')
+    await settle()
+    expect(current(w)).toEqual(['ask:a1'])
+    expect(rows(w)).toEqual(['ask:a1'])
+  })
+
+  it('a deep-linked ask is crossed off exactly as a clicked one is', async () => {
+    // Action opens Newest first, so a1 (older) is second.
+    store.asks = [ask('a1', { created_at: iso(20) }), ask('a2', { created_at: iso(1) })]
+    store.asksLoaded = true
+    store.answerAsk = answering()
+    // Reload / deep link: the URL names the item, nobody clicked it.
+    const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:a1' } })
+    await send(w, 'a1')
+    expect(store.answerAsk).toHaveBeenCalledWith('a1', expect.anything())
+    // The beat: still second, where the reader last saw it, drawn ended.
+    expect(rows(w)).toEqual(['ask:a2', 'ask:a1'])
+    expect(has(w, 'inbox-row-ended-ask:a1')).toBe(true)
+    await settle()
+    expect(rows(w)).toEqual(['ask:a2'])
+    expect(item()).toBe('ask:a2') // the last row: the one above
+  })
+
+  it('follows the order the reader sees: ?sort=urgency', async () => {
+    // Newest would read [fresh, mid, old]; Urgency reads [old, mid, fresh].
+    store.asks = [
+      ask('old', { priority: 'critical', created_at: iso(300) }),
+      ask('mid', { priority: 'high', created_at: iso(30) }),
+      ask('fresh', { priority: 'low', created_at: iso(2) }),
+    ]
+    store.asksLoaded = true
+    store.answerAsk = answering()
+    const w = await mountInbox({}, { query: { tab: 'action', sort: 'urgency', item: 'ask:mid' } })
+    expect(rows(w)).toEqual(['ask:old', 'ask:mid', 'ask:fresh'])
+    await send(w, 'mid')
+    await settle()
+    expect(item()).toBe('ask:fresh')
+  })
+
+  it('?from=: the next ask is that agent\'s, and a filter the reader\'s own answers emptied is KEPT, with a way to everyone', async () => {
+    store.asks = [
+      ask('r1', { agent_name: 'relay', created_at: iso(2) }),
+      ask('s1', { created_at: iso(4) }),
+      ask('r2', { agent_name: 'relay', created_at: iso(6) }),
+    ]
+    store.asksLoaded = true
+    store.answerAsk = answering()
+    const w = await mountInbox({ labels: { relay: 'Relay Bot' } }, { query: { tab: 'action', from: 'relay', item: 'ask:r1' } })
+    expect(rows(w)).toEqual(['ask:r1', 'ask:r2'])
+    await send(w, 'r1')
+    await settle()
+    expect(item()).toBe('ask:r2') // never scout's s1
+    await send(w, 'r2')
+    await settle()
+    expect(router.currentRoute.value.query.from).toBe('relay')
+    expect(item()).toBeUndefined()
+    const empty = w.find('[data-testid="inbox-empty"]')
+    expect(empty.text()).toContain('Nothing is waiting on you from Relay Bot')
+    expect(w.find('[data-testid="inbox-empty-link"]').text()).toBe('Show all agents')
+    expect(announced(w)).toBe('Answered. Nothing is waiting on you from Relay Bot.')
+  })
+
+  it('the last ask: "All caught up", never a blank pane; a client is pointed at what came back', async () => {
     store.asks = [ask('q1')]
     store.asksLoaded = true
-    store.answerAsk = vi.fn(async (id) => {
-      const answered = { ...store.asks.find((a) => a.id === id), status: 'answered', ended_by: 'you', ended_at: new Date().toISOString() }
-      store.asks = store.asks.map((a) => (a.id === id ? answered : a))
-      return answered
-    })
-    const w = await mountInbox({}, { query: { tab: 'action' } })
-    // The desktop preview (§3g S5): selected, not in the URL.
-    expect(router.currentRoute.value.query.item).toBeUndefined()
-    expect(w.find('[data-testid="inbox-row-ask:q1"]').attributes('aria-current')).toBe('true')
-
-    await w.find('[data-testid="inbox-ask-input-q1"]').setValue('yes, go')
-    await w.find('[data-testid="inbox-ask-input-q1"]').element.form.dispatchEvent(new Event('submit'))
-    await flushPromises()
-    expect(store.answerAsk).toHaveBeenCalledWith('q1', expect.anything())
-
-    // No longer pending → no longer Action's membership, but still drawn, ended.
-    expect(has(w, 'inbox-row-ask:q1')).toBe(true)
-    expect(has(w, 'inbox-row-ended-ask:q1')).toBe(true)
-
-    // The selection moving on no longer drops it (T1: a ghost lives for the
-    // tab visit)…
-    await router.replace({ path: '/workspace/inbox', query: { tab: 'action' } })
-    await flushPromises()
-    expect(has(w, 'inbox-row-ended-ask:q1')).toBe(true)
-    // …leaving the tab does.
+    store.answerAsk = answering()
+    const threads = [thread('t1', { unread: 2 })]
+    const w = await mountInbox({ threads }, { query: { tab: 'action' } })
+    await send(w, 'q1')
+    expect(rows(w)).toEqual(['ask:q1']) // the beat
+    await tick(BEAT)
+    expect(has(w, 'inbox-pane')).toBe(false)
+    expect(current(w)).toEqual([])
+    expect(announced(w)).toBe('Answered. All caught up.')
+    // The only row has no rows below to bring up: it goes with the beat, and the
+    // empty state is there at once — no 200 ms with neither a row nor the words.
+    expect(rows(w)).toEqual([])
+    expect(has(w, 'inbox-empty')).toBe(true)
+    await tick(COLLAPSE)
+    expect(rows(w)).toEqual([])
+    expect(item()).toBeUndefined()
+    expect(has(w, 'inbox-pane-none')).toBe(false)
+    const empty = w.find('[data-testid="inbox-empty"]')
+    expect(empty.text()).toContain('All caught up')
+    const link = w.find('[data-testid="inbox-empty-link"]')
+    expect(link.text()).toBe('See what came back')
+    expect(link.attributes('href')).toBe('/workspace/inbox?tab=unread')
+    // Leaving the tab and coming back is a new visit: the plain empty copy.
     await router.replace({ path: '/workspace/inbox', query: { tab: 'all' } })
     await flushPromises()
     await router.replace({ path: '/workspace/inbox', query: { tab: 'action' } })
     await flushPromises()
-    expect(has(w, 'inbox-row-ask:q1')).toBe(false)
+    expect(w.find('[data-testid="inbox-empty"]').text()).toContain('Nothing needs your answer')
+    expect(has(w, 'inbox-empty-link')).toBe(false)
   })
-})
 
-describe('a selection restored from the URL (D8)', () => {
-  it('a deep-linked ask is held in place once answered, exactly as a clicked one is', async () => {
-    // trinity-enterprise#856: Action opens Newest first, so a1 (older) is second.
-    store.asks = [ask('a1', { created_at: iso(20) }), ask('a2', { created_at: iso(1) })]
+  it('the last ask: a client with nothing unread gets no link; a platform session keeps Operations', async () => {
+    store.asks = [ask('q1')]
     store.asksLoaded = true
-    store.answerAsk = vi.fn(async (id) => {
-      const answered = { ...store.asks.find((a) => a.id === id), status: 'answered', ended_by: 'you', ended_at: new Date().toISOString() }
-      store.asks = store.asks.map((a) => (a.id === id ? answered : a))
-      return answered
-    })
-    // Reload / deep link: the URL names the item, nobody clicked it.
-    const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:a1' } })
-    await w.find('[data-testid="inbox-ask-input-a1"]').setValue('yes')
-    await w.find('[data-testid="inbox-ask-input-a1"]').element.form.dispatchEvent(new Event('submit'))
+    store.answerAsk = answering()
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    await send(w, 'q1')
+    await settle()
+    expect(w.find('[data-testid="inbox-empty"]').text()).toContain('All caught up')
+    expect(has(w, 'inbox-empty-link')).toBe(false)
+    await w.setProps({ isPlatform: true })
+    expect(w.find('[data-testid="inbox-empty-link"]').text()).toBe('Open Operations')
+    // A click on the active tab is a new visit: the plain empty copy again.
+    w.findComponent({ name: 'OverflowTabs' }).vm.$emit('update:modelValue', 'action')
     await flushPromises()
-    expect(store.answerAsk).toHaveBeenCalledWith('a1', expect.anything())
-    expect(has(w, 'inbox-row-ask:a1')).toBe(true)
+    expect(w.find('[data-testid="inbox-empty"]').text()).toContain('Nothing needs your answer')
+  })
+
+  it('with only ended rows left the pane says "All caught up" and no ended row is selected', async () => {
+    store.asks = [ask('a1', { created_at: iso(1) }), ask('a2', { created_at: iso(5) })]
+    store.asksLoaded = true
+    store.answerAsk = answering()
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    // A poll: someone else answered a2. It keeps its place as a ghost.
+    store.asks = store.asks.map((a) => (a.id === 'a2' ? ended('a2', { ended_by: 'someone_else', answered_by: 'Dana' }) : a))
+    await flushPromises()
+    await send(w, 'a1')
+    await settle()
+    expect(rows(w)).toEqual(['ask:a2'])
+    expect(current(w)).toEqual([])
+    expect(item()).toBeUndefined()
+    expect(has(w, 'inbox-pane')).toBe(false)
+    expect(has(w, 'inbox-pane-none')).toBe(false)
+    expect(w.find('[data-testid="inbox-caught-up"]').text()).toContain('All caught up')
+    // A new ask arriving is previewed again: the caught-up block is not sticky.
+    store.asks = [...store.asks, ask('a9', { created_at: iso(0) })]
+    await flushPromises()
+    expect(current(w)).toEqual(['ask:a9'])
+    expect(has(w, 'inbox-caught-up')).toBe(false)
+  })
+
+  it('ended rows are skipped when the next ask is picked, and a row that is not adjacent is scrolled to', async () => {
+    const scrolled = []
+    Element.prototype.scrollIntoView = function scrollIntoView() { scrolled.push(this.getAttribute('data-inbox-row')) }
+    try {
+      store.asks = three()
+      store.asksLoaded = true
+      store.answerAsk = answering()
+      const w = await mountInbox({}, { query: { tab: 'action' } })
+      await send(w, 'a1')
+      // A poll lands mid-beat: a2 expired.
+      store.asks = store.asks.map((a) => (a.id === 'a2' ? { ...a, status: 'expired', ended_at: new Date().toISOString() } : a))
+      await flushPromises()
+      scrolled.length = 0
+      await tick(BEAT)
+      expect(item()).toBe('ask:a3')
+      expect(scrolled).toEqual([]) // nothing scrolls while the row collapses
+      await tick(COLLAPSE)
+      expect(rows(w)).toEqual(['ask:a2', 'ask:a3'])
+      expect(scrolled).toEqual(['ask:a3'])
+    } finally { delete Element.prototype.scrollIntoView }
+  })
+
+  it.each([
+    [409, { code: 'already_resolved', message: 'This ask was just answered elsewhere.' }],
+    [403, { code: 'not_addressee', message: 'This ask is addressed to someone else.' }],
+  ])('a failed answer (%i) moves nothing: the ask stays selected with its error', async (status, detail) => {
+    store.asks = three()
+    store.asksLoaded = true
+    store.answerAsk = vi.fn(async () => { throw Object.assign(new Error('refused'), { response: { status, data: { detail } } }) })
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    await send(w, 'a1')
+    await tick(1000)
+    expect(store.answerAsk).toHaveBeenCalledTimes(1)
+    expect(rows(w)).toEqual(['ask:a1', 'ask:a2', 'ask:a3'])
+    expect(current(w)).toEqual(['ask:a1'])
+    expect(has(w, 'inbox-row-pending-ask:a1')).toBe(true)
+    expect(li(w, 'ask:a1').hasAttribute('data-crossing')).toBe(false)
+    expect(w.find('[data-testid="inbox-ask-a1"]').text()).toContain(detail.message)
+    expect(item()).toBeUndefined()
+    expect(announced(w)).toBe('')
+  })
+
+  it.each([
+    ['someone else answered it', { status: 'answered', ended_by: 'someone_else', answered_by: 'Dana' }],
+    ['the reader answered it in another tab', { status: 'answered', ended_by: 'you' }],
+    ['it expired', { status: 'expired', ended_by: null }],
+    ['the agent withdrew it', { status: 'cancelled', ended_by: 'agent', agent_ending: 'withdrawn', ending_reason: 'No longer needed' }],
+  ])('an ask a poll brings back ended keeps its ghost and its selection: %s', async (_name, over) => {
+    store.asks = three()
+    store.asksLoaded = true
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    store.asks = store.asks.map((a) => (a.id === 'a1' ? { ...a, ended_at: new Date().toISOString(), ...over } : a))
+    await flushPromises()
+    await tick(1000)
+    expect(rows(w)).toEqual(['ask:a1', 'ask:a2', 'ask:a3'])
+    expect(current(w)).toEqual(['ask:a1'])
     expect(has(w, 'inbox-row-ended-ask:a1')).toBe(true)
-    // …and it keeps its place: second, where the reader last saw it.
-    const keys = w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))
-    expect(keys).toEqual(['ask:a2', 'ask:a1'])
+    expect(li(w, 'ask:a1').hasAttribute('data-crossing')).toBe(false)
+    expect(item()).toBeUndefined()
+    expect(announced(w)).toBe('')
+  })
+
+  it('Dismiss is not an answer: the row keeps its place (and its Undo stays reachable)', async () => {
+    store.asks = three()
+    store.asksLoaded = true
+    store.dismissAsk = vi.fn((id) => {
+      store.asks = store.asks.map((a) => (a.id === id ? { ...a, status: 'dismissed', ended_by: 'you' } : a))
+    })
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    await w.find('[data-testid="inbox-ask-dismiss-a1"]').trigger('click')
+    await tick(1000)
+    expect(store.dismissAsk).toHaveBeenCalledWith('a1')
+    expect(rows(w)).toEqual(['ask:a1', 'ask:a2', 'ask:a3'])
+    expect(current(w)).toEqual(['ask:a1'])
+  })
+
+  it('prefers-reduced-motion: the row is removed straight away and the next ask selected, with no beat and no collapse', async () => {
+    reduced = true
+    stubMatchMedia()
+    store.asks = three()
+    store.asksLoaded = true
+    store.answerAsk = answering()
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    await send(w, 'a1') // no timer is advanced
+    expect(rows(w)).toEqual(['ask:a2', 'ask:a3'])
+    expect(current(w)).toEqual(['ask:a2'])
+    expect(item()).toBe('ask:a2')
+    expect(announced(w)).toBe('Answered. Next: Ask a2.')
+  })
+
+  it('A7: on All the answered ask does not move, and the selection goes to the next pending ask, never to a chat', async () => {
+    store.asks = [ask('a1', { created_at: iso(1) }), ask('a2', { created_at: iso(30) })]
+    store.asksLoaded = true
+    store.answerAsk = answering()
+    const threads = [thread('t1', { last_message_at: iso(10) })]
+    const w = await mountInbox({ threads }, { query: { tab: 'all', item: 'ask:a2' } })
+    expect(rows(w)).toEqual(['ask:a1', 'thread:t1', 'ask:a2'])
+    const scrolled = []
+    Element.prototype.scrollIntoView = function scrollIntoView() { scrolled.push(this.getAttribute('data-inbox-row')) }
+    try {
+      await send(w, 'a2')
+      expect(store.answerAsk).toHaveBeenCalled()
+      scrolled.length = 0
+      await settle()
+      // The next ask is not the adjacent row (a chat sits between): it is scrolled to.
+      expect(scrolled).toEqual(['ask:a1'])
+    } finally { delete Element.prototype.scrollIntoView }
+    // a2 is still a member of All (ended asks stay 7 days): the row stays put.
+    expect(rows(w)).toEqual(['ask:a1', 'thread:t1', 'ask:a2'])
+    expect(has(w, 'inbox-row-ended-ask:a2')).toBe(true)
+    expect(li(w, 'ask:a2').hasAttribute('data-crossing')).toBe(false)
+    // Nothing is below it; the chat above is skipped; the pending ask is next.
+    expect(item()).toBe('ask:a1')
+    // No pending ask left: the selection stays on the ask just answered.
+    await send(w, 'a1')
+    await settle()
+    expect(rows(w)).toEqual(['ask:a1', 'thread:t1', 'ask:a2'])
+    expect(item()).toBe('ask:a1')
+    expect(announced(w)).toBe('Answered.')
+  })
+
+  it('an answered ask that is not a row of this view stays selected (a deep link on Unread)', async () => {
+    store.asks = [ask('a1'), ask('a2', { created_at: iso(20) })]
+    store.asksLoaded = true
+    store.answerAsk = answering()
+    const w = await mountInbox({ threads: [thread('t1', { unread: 1 })] }, { query: { tab: 'unread', item: 'ask:a1' } })
+    await send(w, 'a1')
+    await settle()
+    expect(item()).toBe('ask:a1')
+    expect(has(w, 'inbox-ask-ending')).toBe(true)
+    expect(has(w, 'inbox-ask-confirmation')).toBe(false)
+    expect(announced(w)).toBe('Answered.')
+  })
+
+  it('an answer confirmed after the reader selected another row crosses the row off and moves nothing else', async () => {
+    store.asks = three()
+    store.asksLoaded = true
+    let release
+    store.answerAsk = vi.fn((id) => new Promise((resolve) => {
+      release = () => {
+        const answered = ended(id)
+        store.asks = store.asks.map((a) => (a.id === id ? answered : a))
+        resolve(answered)
+      }
+    }))
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    await send(w, 'a1') // the POST is in flight
+    const other = w.find('[data-testid="inbox-row-ask:a3"]')
+    other.element.focus()
+    await other.trigger('click') // the pane is keyed by the item: a1's card unmounts
+    await flushPromises()
+    expect(has(w, 'inbox-ask-input-a1')).toBe(false)
+    release()
+    await flushPromises()
+    expect(li(w, 'ask:a1').getAttribute('data-crossing')).toBe('done')
+    await tick(BEAT)
+    expect(current(w)).toEqual(['ask:a3'])
+    expect(item()).toBe('ask:a3')
+    expect(focused()).toBe('ask:a3')
+    expect(announced(w)).toBe('Answered.')
+    await tick(COLLAPSE)
+    expect(rows(w)).toEqual(['ask:a2', 'ask:a3'])
+    expect(current(w)).toEqual(['ask:a3'])
+  })
+
+  it('the confirm arriving twice advances once', async () => {
+    store.asks = three()
+    store.asksLoaded = true
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    store.asks = store.asks.map((a) => (a.id === 'a1' ? ended('a1') : a))
+    await flushPromises()
+    const notify = w.findComponent(PortalInboxPane).props('notifyAnswered')
+    notify('a1')
+    notify('a1')
+    await settle()
+    expect(rows(w)).toEqual(['ask:a2', 'ask:a3'])
+    expect(current(w)).toEqual(['ask:a2'])
+    // A second pass would find the selection already moved and say so instead.
+    expect(announced(w)).toBe('Answered. Next: Ask a2.')
+  })
+
+  it('a confirm for an ask the server still calls pending moves nothing', async () => {
+    store.asks = three()
+    store.asksLoaded = true
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    w.findComponent(PortalInboxPane).props('notifyAnswered')('a1')
+    await settle()
+    expect(rows(w)).toEqual(['ask:a1', 'ask:a2', 'ask:a3'])
+    expect(current(w)).toEqual(['ask:a1'])
+  })
+
+  it('an answered ask the server no longer lists is crossed off too', async () => {
+    store.asks = three()
+    store.asksLoaded = true
+    store.answerAsk = vi.fn(async (id) => { store.asks = store.asks.filter((a) => a.id !== id); return null })
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    await send(w, 'a1')
+    await settle()
+    expect(rows(w)).toEqual(['ask:a2', 'ask:a3'])
+    expect(item()).toBe('ask:a2')
+  })
+
+  it('a click on the active tab during the beat starts a new visit and ends the sequence', async () => {
+    store.asks = three()
+    store.asksLoaded = true
+    store.answerAsk = answering()
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    await send(w, 'a1')
+    w.findComponent({ name: 'OverflowTabs' }).vm.$emit('update:modelValue', 'action')
+    await flushPromises()
+    expect(rows(w)).toEqual(['ask:a2', 'ask:a3']) // a new visit has no ghost
+    await settle()
+    expect(rows(w)).toEqual(['ask:a2', 'ask:a3'])
+    expect(announced(w)).toBe('')
+    expect(w.find('li[data-crossing]').exists()).toBe(false)
+  })
+
+  it('a sort change during the beat is a new visit too: the sequence stops and nothing is announced', async () => {
+    store.asks = three()
+    store.asksLoaded = true
+    store.answerAsk = answering()
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    await send(w, 'a1')
+    await router.replace({ path: '/workspace/inbox', query: { tab: 'action', sort: 'urgency' } })
+    await flushPromises()
+    await settle()
+    expect(rows(w).sort()).toEqual(['ask:a2', 'ask:a3'])
+    expect(announced(w)).toBe('')
+    expect(w.find('li[data-crossing]').exists()).toBe(false)
+  })
+
+  it('unmounting mid-beat leaves no timer and writes nothing afterwards', async () => {
+    store.asks = three()
+    store.asksLoaded = true
+    store.answerAsk = answering()
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    await send(w, 'a1')
+    const replace = vi.spyOn(router, 'replace')
+    vi.advanceTimersByTime(0) // jsdom's own zero-delay selection timer, set by the focus
+    expect(vi.getTimerCount()).toBe(1) // the beat
+    w.unmount()
+    wrapper = null
+    expect(vi.getTimerCount()).toBe(0)
+    await tick(1000)
+    expect(replace).not.toHaveBeenCalled()
+  })
+
+  it('a confirm that arrives after the Inbox itself is gone does nothing (the reader opened a chat meanwhile)', async () => {
+    store.asks = three()
+    store.asksLoaded = true
+    let release
+    store.answerAsk = vi.fn((id) => new Promise((resolve) => {
+      release = () => {
+        const answered = ended(id)
+        store.asks = store.asks.map((a) => (a.id === id ? answered : a))
+        resolve(answered)
+      }
+    }))
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    await send(w, 'a1') // the POST is in flight
+    w.unmount()
+    wrapper = null
+    await router.push('/workspace/c/t9')
+    await flushPromises()
+    vi.advanceTimersByTime(0)
+    const replace = vi.spyOn(router, 'replace')
+    release()
+    await flushPromises()
+    expect(vi.getTimerCount()).toBe(0)
+    await tick(1000)
+    expect(replace).not.toHaveBeenCalled()
+    expect(router.currentRoute.value.fullPath).toBe('/workspace/c/t9')
+  })
+
+  it('a credential confirmed after the reader selected another row still crosses its row off', async () => {
+    store.asks = [
+      ask('c1', { kind: 'credential', credential_name: 'SERVICE_TOKEN', created_at: iso(1) }),
+      ask('a2', { created_at: iso(5) }),
+      ask('a3', { created_at: iso(9) }),
+    ]
+    store.asksLoaded = true
+    let release
+    store.provideCredential = vi.fn((id) => new Promise((resolve) => {
+      release = () => {
+        const answered = ended(id)
+        store.asks = store.asks.map((a) => (a.id === id ? answered : a))
+        resolve(answered)
+      }
+    }))
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    await w.find('[data-testid="portal-credential-input-c1"]').setValue('s3cret')
+    await w.find('[data-testid="portal-credential-form-c1"]').trigger('submit')
+    await flushPromises()
+    await w.find('[data-testid="inbox-row-ask:a3"]').trigger('click') // the field unmounts mid-request
+    await flushPromises()
+    release()
+    await flushPromises()
+    await settle()
+    expect(rows(w)).toEqual(['ask:a2', 'ask:a3'])
+    expect(item()).toBe('ask:a3')
+  })
+
+  describe('every answer control advances', () => {
+    it('a one-click gate approval', async () => {
+      store.asks = [
+        ask('g1', { kind: 'approval', options: ['Approve', 'Reject'], decided_by_options: true, created_at: iso(1) }),
+        ask('a2', { created_at: iso(5) }),
+      ]
+      store.asksLoaded = true
+      store.answerAsk = answering({ answer: 'Approve' })
+      const w = await mountInbox({}, { query: { tab: 'action' } })
+      await w.findAll('[data-testid="inbox-ask-option-g1"]')[0].trigger('click')
+      await flushPromises()
+      expect(store.answerAsk).toHaveBeenCalledWith('g1', expect.objectContaining({ response: 'Approve' }))
+      await settle()
+      expect(rows(w)).toEqual(['ask:a2'])
+      expect(item()).toBe('ask:a2')
+    })
+
+    it('"Got it" on a notice', async () => {
+      store.asks = [ask('n1', { kind: 'alert', created_at: iso(1) }), ask('a2', { created_at: iso(5) })]
+      store.asksLoaded = true
+      store.answerAsk = answering()
+      const w = await mountInbox({}, { query: { tab: 'action' } })
+      await w.find('[data-testid="inbox-ask-ack-n1"]').trigger('click')
+      await flushPromises()
+      await settle()
+      expect(rows(w)).toEqual(['ask:a2'])
+      expect(item()).toBe('ask:a2')
+    })
+
+    it('a credential', async () => {
+      store.asks = [
+        ask('c1', { kind: 'credential', credential_name: 'SERVICE_TOKEN', created_at: iso(1) }),
+        ask('a2', { created_at: iso(5) }),
+      ]
+      store.asksLoaded = true
+      store.provideCredential = vi.fn(async (id) => {
+        const answered = ended(id)
+        store.asks = store.asks.map((a) => (a.id === id ? answered : a))
+        return answered
+      })
+      const w = await mountInbox({}, { query: { tab: 'action' } })
+      await w.find('[data-testid="portal-credential-input-c1"]').setValue('s3cret')
+      await w.find('[data-testid="portal-credential-form-c1"]').trigger('submit')
+      await flushPromises()
+      expect(store.provideCredential).toHaveBeenCalledWith('c1', 's3cret')
+      await settle()
+      expect(rows(w)).toEqual(['ask:a2'])
+      expect(item()).toBe('ask:a2')
+      // The value goes to the store and nowhere else: not the live region, not the page.
+      expect(announced(w)).toBe('Answered. Next: Ask a2.')
+      expect(document.body.innerHTML).not.toContain('s3cret')
+    })
+  })
+
+  it('the next ask ignores input for 300 ms after an advance opens it, so a late second click answers nothing', async () => {
+    store.asks = [
+      ask('g1', { kind: 'approval', options: ['Approve', 'Reject'], decided_by_options: true, created_at: iso(1) }),
+      ask('g2', { kind: 'approval', options: ['Approve', 'Reject'], decided_by_options: true, created_at: iso(5) }),
+      ask('g3', { kind: 'approval', options: ['Approve', 'Reject'], decided_by_options: true, created_at: iso(9) }),
+    ]
+    store.asksLoaded = true
+    store.answerAsk = answering({ answer: 'Approve' })
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    const approve = (id) => w.findAll(`[data-testid="inbox-ask-option-${id}"]`)[0].trigger('click')
+    await approve('g1')
+    await flushPromises()
+    await tick(BEAT) // g2 is on screen, its Approve where g1's was
+    await approve('g2')
+    await flushPromises()
+    expect(store.answerAsk).toHaveBeenCalledTimes(1)
+    // …and the click it ignored left nothing armed on the card.
+    expect(w.findAll('[data-testid="inbox-ask-option-g2"]')[0].attributes('aria-pressed')).toBe('false')
+    await tick(HOLD)
+    await approve('g2')
+    await flushPromises()
+    expect(store.answerAsk).toHaveBeenCalledTimes(2)
+    // A row the reader opens themselves is never held — not even the ask the
+    // last advance opened (g3), once they leave it and come back.
+    await settle()
+    expect(item()).toBe('ask:g3')
+    store.asks = [...store.asks, ask('g4', { kind: 'approval', options: ['Approve', 'Reject'], decided_by_options: true, created_at: iso(20) })]
+    await flushPromises()
+    await w.find('[data-testid="inbox-row-ask:g4"]').trigger('click')
+    await flushPromises()
+    await w.find('[data-testid="inbox-row-ask:g3"]').trigger('click')
+    await flushPromises()
+    await approve('g3')
+    await flushPromises()
+    expect(store.answerAsk).toHaveBeenCalledTimes(3)
+    expect(store.answerAsk).toHaveBeenLastCalledWith('g3', expect.anything())
+  })
+
+  describe('stacked (§3g A6)', () => {
+    it('the pane moves to the next ask with no history entry: one Back returns to the list, Forward reopens the ask on screen', async () => {
+      phone = true
+      stubMatchMedia()
+      store.asks = three()
+      store.asksLoaded = true
+      store.answerAsk = answering()
+      const push = vi.spyOn(router, 'push')
+      const w = await mountInbox({}, { query: { tab: 'action' } })
+      push.mockClear()
+      await w.find('[data-testid="inbox-row-ask:a1"]').trigger('click')
+      await flushPromises()
+      expect(push).toHaveBeenCalledTimes(1)
+      await send(w, 'a1')
+      await tick(BEAT)
+      expect(item()).toBe('ask:a2')
+      expect(focused()).toBe('inbox-pane-heading') // on touch too
+      await tick(COLLAPSE)
+      await tick(HOLD)
+      await send(w, 'a2')
+      await settle()
+      expect(item()).toBe('ask:a3')
+      expect(push).toHaveBeenCalledTimes(1)
+      await w.find('[data-testid="inbox-pane-back"]').trigger('click')
+      await flushPromises()
+      expect(item()).toBeUndefined()
+      expect(focused()).toBe('ask:a3')
+      router.forward()
+      await flushPromises()
+      expect(item()).toBe('ask:a3')
+    })
+
+    it('after the only ask the pane goes back to the list, on the empty state', async () => {
+      phone = true
+      stubMatchMedia()
+      store.asks = [ask('q1')]
+      store.asksLoaded = true
+      store.answerAsk = answering()
+      const w = await mountInbox({}, { query: { tab: 'action' } })
+      await w.find('[data-testid="inbox-row-ask:q1"]').trigger('click')
+      await flushPromises()
+      await send(w, 'q1')
+      await tick(BEAT)
+      await flushPromises()
+      expect(item()).toBeUndefined()
+      expect(router.currentRoute.value.path).toBe('/workspace/inbox')
+      expect(focused()).toBe('inbox-list-column')
+      expect(w.find('[data-testid="inbox-empty"]').text()).toContain('All caught up')
+    })
+
+    it('after the last ask the pane goes back to the list, and focus never lands on the row that is leaving', async () => {
+      phone = true
+      stubMatchMedia()
+      store.asks = [ask('q1', { created_at: iso(1) }), ask('q2', { created_at: iso(5) })]
+      store.asksLoaded = true
+      store.answerAsk = answering()
+      const w = await mountInbox({}, { query: { tab: 'action' } })
+      // A poll: q2 expired. It keeps its place as an ended row.
+      store.asks = store.asks.map((a) => (a.id === 'q2' ? { ...a, status: 'expired', ended_at: new Date().toISOString() } : a))
+      await flushPromises()
+      await w.find('[data-testid="inbox-row-ask:q1"]').trigger('click')
+      await flushPromises()
+      const calls = []
+      const orig = HTMLElement.prototype.focus
+      const spy = vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (...a) {
+        calls.push({ inert: !!this.closest('[inert]') })
+        return orig.apply(this, a)
+      })
+      try {
+        await send(w, 'q1')
+        calls.length = 0
+        await tick(BEAT)
+        await flushPromises()
+        expect(item()).toBeUndefined()
+        expect(router.currentRoute.value.path).toBe('/workspace/inbox')
+        expect(li(w, 'ask:q1').hasAttribute('inert')).toBe(true) // still collapsing
+        expect(calls.length).toBeGreaterThan(0)
+        expect(calls.every((c) => !c.inert)).toBe(true)
+        expect(focused()).toBe('ask:q2') // the row now in its place
+        await tick(COLLAPSE)
+        expect(rows(w)).toEqual(['ask:q2'])
+        expect(w.find('[data-testid="inbox-list-total"]').text()).toBe('All caught up')
+      } finally { spy.mockRestore() }
+    })
+
+    it('a row that holds focus when it starts to leave hands it to the next row', async () => {
+      phone = true
+      stubMatchMedia()
+      store.asks = three()
+      store.asksLoaded = true
+      let release
+      store.answerAsk = vi.fn((id) => new Promise((resolve) => {
+        release = () => {
+          const answered = ended(id)
+          store.asks = store.asks.map((a) => (a.id === id ? answered : a))
+          resolve(answered)
+        }
+      }))
+      const w = await mountInbox({}, { query: { tab: 'action' } })
+      await w.find('[data-testid="inbox-row-ask:a1"]').trigger('click')
+      await flushPromises()
+      await send(w, 'a1')
+      await w.find('[data-testid="inbox-pane-back"]').trigger('click') // Back while the POST is in flight
+      await flushPromises()
+      expect(focused()).toBe('ask:a1')
+      release()
+      await flushPromises()
+      await tick(BEAT)
+      expect(item()).toBeUndefined() // nothing opens: the reader left the ask
+      expect(focused()).toBe('ask:a2')
+      await tick(COLLAPSE)
+      expect(rows(w)).toEqual(['ask:a2', 'ask:a3'])
+    })
   })
 })
 

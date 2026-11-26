@@ -4,11 +4,11 @@
 
 ## How do I see what all my agents are doing at once?
 
-The main Dashboard at `/` monitors every agent in real time. Three view modes render the same fleet — **Timeline**, **Grid**, and **List** — switched from the control pinned at the far right of the header, or by pressing `v` to cycle through them; Timeline is the default and your choice persists per browser. Press `/` anywhere on the page to type-filter the fleet by name (`Esc` clears), and use the shared Tags, Owner, and Time-range filters, which apply to all three modes and never reset when you switch. Agent-to-agent collaboration shows up in the Timeline as the Agent-Triggered trigger type; there is no separate activity feed or live node graph. See [Dashboard](../operations/dashboard.md).
+The main Dashboard at `/` monitors every agent in real time. Three view modes render the same fleet — **Timeline**, **Grid**, and **List** — switched from the control pinned at the far right of the header, or by pressing `v` to cycle through them; until you pick one it opens in Grid, and your choice persists per browser. Press `/` anywhere on the page to type-filter the fleet by name (`Esc` clears), and use the shared Tags, Owner, and Time-range filters, which apply to all three modes and never reset when you switch. Agent-to-agent collaboration shows up in the Timeline as the Agent-Triggered trigger type; there is no separate activity feed or live node graph. See [Dashboard](../operations/dashboard.md).
 
 ## What's the difference between the Timeline, Grid, and List dashboard views?
 
-Timeline (the default) arranges execution boxes per agent chronologically, color-coded by trigger type, with per-row completion rate, cost, and slot count, a time-range filter, and live progress for running executions. Grid is a tile canvas: each agent is a card with its avatar, runtime badge, inline Running and Autonomy toggles, and live status chips (git sync health, pending operator-queue items, subscription pressure) — drag tiles to rearrange, or use Tidy and Reset — and the same canvas carries fleet-level **info tiles**, shown or hidden from a **Tiles ▾** menu. List is the former standalone Agents page: one row per agent with **Name**, **Status**, **Controls**, **Success**, and **Exec / Sched** columns plus a capacity meter, sortable and filterable, with inline toggles and bulk tag actions. See [Dashboard](../operations/dashboard.md).
+Timeline arranges execution boxes per agent chronologically, color-coded by trigger type, with per-row completion rate, cost, and slot count, a time-range filter, and live progress for running executions. Grid is a tile canvas: each agent is a card with its avatar, runtime badge, inline Running and Autonomy toggles, and live status chips (git sync health, pending operator-queue items, subscription pressure) — drag tiles to rearrange, or use Tidy and Reset — and the same canvas carries fleet-level **info tiles**, shown or hidden from a **Tiles ▾** menu. List is the former standalone Agents page: one row per agent with **Name**, **Status**, **Controls**, **Success**, and **Exec / Sched** columns plus a capacity meter, sortable and filterable, with inline toggles and bulk tag actions. See [Dashboard](../operations/dashboard.md).
 
 ## Where did the Agents page go?
 
@@ -69,6 +69,10 @@ The periodic health-check loop is disabled by default. On the Health tab of the 
 ## Why is my agent shown as unhealthy?
 
 Health aggregates three layers — Docker (container status, resource usage, OOM detection), network (HTTP reachability with latency), and business (runtime availability, context usage, stuck executions). An agent is **unhealthy** when it's unreachable, its health endpoint returns a server error, its runtime isn't available, or its workspace clone failed; it's **critical** when the container is missing, stopped, or was killed by the out-of-memory killer; it's **degraded** for softer problems like very high CPU, context usage above 95%, or stuck executions. The Health tab lists the specific issues per agent, and you can force a fresh check per agent or fleet-wide with **Check All**. See [Monitoring](../operations/monitoring.md).
+
+## Why does the Health tab show some agents as unknown?
+
+Either Trinity has no health reading for the agent, or its reading is too old to trust. A reading older than three check intervals (90 seconds by default) reads `unknown`, and its issues say how old it is and what it last said, plus *monitoring is off* when the health-check loop is stopped. The summary cards always add up to the total number of agents. Turn on monitoring, or run **Check All**, to get fresh readings. See [Monitoring](../operations/monitoring.md#health-tab-operations-page).
 
 ## Why is my new GitHub-template agent unhealthy even though its container is running?
 

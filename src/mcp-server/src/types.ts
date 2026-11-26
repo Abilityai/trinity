@@ -131,6 +131,10 @@ export interface McpAuthContext extends Record<string, unknown> {
   // exhaustive against `mcp_api_keys.scope`; anything not listed must be
   // treated as least-privileged, never as `user`.
   scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous" | "ops" | "ops_write";
+  // Populated for EVERY key scope, and it is the key OWNER's role: an
+  // agent-scoped key owned by an admin has `userRole === "admin"`. Never read
+  // it without first checking the scope allowlist.
+  userRole?: string;     // Role of the key owner ("admin", "creator", "user") — set from /api/mcp/validate
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
   // #2392: X-Trinity-Execution-Id of THIS request (turn id or "manual"); wins over an agent-supplied execution_id.
   executionId?: string;
@@ -300,6 +304,15 @@ export interface Schedule {
   // ent#498: deliver this schedule's output into that person's Workspace
   // conversation with the agent. Absent = no delivery.
   deliver_to_workspace_email?: string;
+  // #4281: the tier this schedule's runs get, computed live from its creator.
+  // `shared_person` runs have no shell and no owner-added tools; null means
+  // the backend could not compute it (never a guessed "owner").
+  runs_as?: "owner" | "shared_person" | null;
+  runs_as_reason?: { code: string; message: string } | null;
+  created_by_you?: boolean;
+  // The creator's display name, else username: only for the agent's owner
+  // tier and for an agent key that is not acting for a shared person.
+  created_by?: string | null;
 }
 
 export interface ScheduleCreate {
@@ -371,6 +384,9 @@ export interface ScheduleExecution {
   // #2958: JSON array of auto-compaction events ({trigger, pre_tokens,
   // post_tokens, duration_ms, timestamp}); null when the turn did not compact.
   compact_metadata?: string | null;
+  // #4281: JSON object; `restricted_turn` is set on a run held to a shared
+  // person's access by the schedule that started it.
+  turn_integrity?: string | null;
   source_agent_name?: string;
   source_user_email?: string;
   // AUDIT-001: MCP key origin tracking — used by #914 chat-timeout
@@ -385,6 +401,9 @@ export interface ScheduleExecution {
   attempt_number?: number;
   retry_of_execution_id?: string;
   retry_scheduled_at?: string;
+  // ent#1105: the project an edition attributed this run to — present only
+  // when the reader may see that project; absent otherwise.
+  project_id?: string | null;
 }
 
 /** The aggregated result a completed `POST /fan-out` returns. */

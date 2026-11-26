@@ -8,7 +8,7 @@ Agents are created from templates or from scratch. Each agent runs as an isolate
 
 **Template sources** define where agent blueprints come from:
 
-- **GitHub Template** -- A repository in `github:Org/repo` format. Supports branch selection with `github:Org/repo@branch`. **Public** repos clone with **no GitHub token** -- Trinity clones them anonymously. This is **source-mode only**: an anonymous clone can't push back, so pushing, Working-Branch mode, and fork-to-own still require a token. Private repos require a GitHub PAT.
+- **GitHub Template** -- A repository in `github:Org/repo` format. Supports a branch or a tag with `github:Org/repo@ref` (dots allowed, for example `@v1.2.0` or `@releases/v1.2.0`). A tag pins the agent to that release: it never pulls, neither on the automatic cycle nor from **Pull**, and moving it to another ref means recreating it. When a branch and a tag share a name, the branch wins. A ref that is neither is refused with `400` *Branch or tag '…' not found*. **Public** repos clone with **no GitHub token** -- Trinity clones them anonymously. This is **source-mode only**: an anonymous clone can't push back, so pushing, Working-Branch mode, and fork-to-own still require a token. Private repos require a GitHub PAT.
 - **Admin-Configured Templates** -- GitHub repos configured by an admin in Settings. Metadata (name, description, resources, MCP servers) is fetched from each repo's `template.yaml` via the GitHub API and cached for 10 minutes. These appear as cards on the **Library** page's Agent Templates tab (`/library?tab=templates`; the old `/templates` path redirects there).
 - **Local Templates** -- Auto-discovered from the `config/agent-templates/` directory and shown as a curated **Starter Templates** group on the Library's Agent Templates tab. The recommended starters (`scout`, `sage`, `scribe`) are ordered first; internal test and demo fixtures (marked `hidden: true` in their `template.yaml`) are hidden from the list but stay creatable by id.
 - **From Scratch** -- Creates a minimal agent with a default `CLAUDE.md`.
@@ -25,10 +25,12 @@ A default install therefore shows starter templates plus whatever the registry o
 
 | File | Purpose |
 |------|---------|
-| `template.yaml` | Agent metadata: `display_name`, `description`, `resources`, `credentials`, `credential_setup`, `schedules`, `runtime` |
+| `template.yaml` | Agent metadata: `display_name`, `description`, `resources`, `credentials`, `credential_setup`, `schedules`, `library_skills`, `runtime` |
 | `CLAUDE.md` | Agent instructions and system prompt |
 | `.mcp.json.template` | MCP config template with `${VAR}` placeholders for credential injection |
 | `.env.example` | Example credentials file listing required environment variables |
+| `.trinity/setup.sh` | Optional. Installs packages and system dependencies on every container start. It runs after the agent server is up and is protected from the orphan-process sweep for as long as it runs, so a long install (large wheels, CUDA) is not killed mid-way; do not `exec` its last step, which drops that protection. Its exit code and times are written to `~/.trinity/setup-status.json`, and the compatibility report's soft check F-014 fails when the last run exited non-zero. The default temp directory (`~/.tmp`, except the Codex home inside it) is emptied at each boot |
+| `avatar.webp` / `avatar.png` | Optional. Installed as the agent's default avatar at creation (see [Agent Avatars](../advanced/agent-avatars.md)) |
 
 All bundled templates ship the canonical `.gitignore`, so an agent created from one never auto-commits caches, virtualenvs, or local databases into its repository. An agent created from any GitHub repository with auto-sync on gets the same rules merged into its `.gitignore` right after creation, before the first sync cycle can commit runtime state or credential files. `.claude/settings.json` is not on that list, so a template's project settings are committed; Trinity keeps a copy out of a commit only when its content would break other clones or carries a credential — see [GitHub Sync](../integrations/github-sync.md#what-happens-to-claudesettingsjson).
 
@@ -64,7 +66,7 @@ When you create an agent, Trinity performs these steps in order:
 
 ### Compatibility Validation
 
-Once an agent is running, Trinity validates its workspace against best-practice conventions and surfaces the results in the **Overview** tab on the Agent Detail page. This is advisory — it never blocks creation or deployment.
+Once an agent is running, Trinity validates its workspace against best-practice conventions and surfaces the results in **Settings › General** on the Agent Detail page (owners only). This is advisory — it never blocks creation or deployment.
 
 The check covers things like a present and valid `template.yaml`, a non-gitignored `.claude/` directory, defined playbooks, and accidentally committed secrets, grouped into findings ranked HARD / SOFT / INFO. Claude-specific checks (such as `CLAUDE.md` and `.claude/` skills) are skipped for Codex and Gemini agents.
 
@@ -125,6 +127,29 @@ Rules worth knowing:
 
 The manifest is agent-writable, so it is parsed defensively: names and marketplace sources are validated (no embedded credentials, no path traversal), a malformed block is reported rather than acted on, and every install runs with a timeout and never prompts.
 
+### Declared Library Skills
+
+A template can name skills from the platform skills library that its agent should hold, in a `library_skills:` list in `template.yaml`:
+
+```yaml
+library_skills:
+  - user-research
+  - research-planning
+```
+
+When an agent is created from the template, Trinity assigns each named skill the library has to the new agent, with the agent's owner as the assigner, and delivers them as soon as the agent is up. They are ordinary assignments from then on: they show on the agent's **Skills** tab, you can unassign them there, and they follow library updates like any other assigned skill. This is the alternative to copying the skills into the template's own `.claude/skills/`, which freezes them at the copied version.
+
+Rules worth knowing:
+
+- Names only, up to 50. Skill sets (`set:<name>`) are not accepted here and are reported as an error in the template catalogue.
+- A name the library doesn't have is skipped and logged; the agent is still created. Make sure the skills source that provides them is added in **Settings → Agents → Skills Library** first.
+- When an agent creates the agent, it needs the **Skill managers** permission (the same permission it needs to assign skills directly; see [Skills and Playbooks](../automation/skills-and-playbooks.md)). Without it, the agent is created with none of the declared skills, and the refusal is recorded in the audit log.
+- Ephemeral agents don't get library skills.
+- The list is read at creation only. Adding or removing names in `template.yaml` later doesn't change agents that already exist; assign or unassign on their Skills tab instead.
+- If the agent takes longer than 15 minutes to come up, the skills stay assigned and are delivered on its next start.
+
+See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+
 ### Deploy a bare repository, then onboard it in place
 
 A `github:owner/repo` template does not need a `template.yaml` — Trinity creates the agent from the repository as it is. Because the `trinity@abilityai` plugin is pre-installed in the agent image and re-ensured on every boot, that agent can then make itself Trinity-compatible from inside its own container: run `/trinity:onboard` in its chat and choose **Onboard in place**. It writes `template.yaml`, `.env.example`, `.gitignore`, and `.mcp.json.template` and pushes them back to the repository (an agent with no push token prints the patch and says the result is container-local — in source mode, files written inside the container do not survive a reset unless pushed). The walkthrough lives in [Abilities Marketplace](../automation/abilities-marketplace.md) under the `trinity` plugin. Whether the pre-installed plugin was present, withheld (with the reason), or switched off is reported by the compatibility check on the Overview tab.
@@ -157,7 +182,7 @@ The check is advisory — the agent exists either way, and you can re-run the an
 
 1. Click **Create Agent** in the Dashboard header, or **Use Template** on the Library page. The **New agent** dialog opens at one fixed size: a source list on the left, the selected source and its details on the right. Each pane scrolls on its own; the header, the footer and the list never move, whatever you pick.
 2. Pick a source in the left pane. **Search templates** narrows the list by name, description or repository. The list has a **Start** group — **Blank agent** (selected by default) and **Import a GitHub repository** — followed by **Featured** (fork-to-own templates), **Local templates** (the bundled starters) and **GitHub templates** (the admin-configured or registry list). The right pane names the selection with a badge (**Local template**, **GitHub template**, or **Your own copy** for a fork-to-own template) and its description. For **Import a GitHub repository**, a **Repository** field (`owner/repo` or a full GitHub URL) and the import intent (clone / fork / copy) appear under the name; a clone also asks **What is this repository?** (see above), and a fork or a fork-to-own template asks for the destination repository and a token.
-3. Enter a **Name** — the name shown across the UI, for example `My Research Agent`. The **ID** row under the field previews the permanent slug Trinity will create (`my-research-agent`): spaces and other unsupported characters become hyphens and everything is lowercased. It is used in URLs, containers and API keys and cannot be changed later. **Edit** lets you type a different ID; **Use name** derives it from the name again. A name or ID with no ASCII letter or digit formats to nothing, so **Create agent** stays disabled and the field asks for at least one letter or number.
+3. Enter a **Name** — the name shown across the UI, for example `My Research Agent`. The **ID** row under the field previews the permanent slug Trinity will create (`my-research-agent`): spaces and other unsupported characters become hyphens and everything is lowercased. It is used in URLs, containers and API keys and cannot be changed later. Picking a GitHub source fills the Name in for you: **Import a GitHub repository** uses the repository name without the owner, and a GitHub template uses the `name:` in its `template.yaml`, else its repository name. A name you typed yourself is never replaced, and an ID you entered under **Edit** is kept. Blank and local templates start empty. **Edit** lets you type a different ID; **Use name** derives it from the name again. A name or ID with no ASCII letter or digit formats to nothing, so **Create agent** stays disabled and the field asks for at least one letter or number.
 4. The read-only **Runtime** row says what the agent will run on: **Claude Code** for a blank agent, otherwise *set by the template* (or repository) — Claude Code unless its `template.yaml` declares another. There is no runtime picker in the dialog.
 5. Click **Create agent**, then review the inline compatibility result and, for a GitHub-backed agent, the git-mode notice. The new agent appears on the Dashboard at once.
 

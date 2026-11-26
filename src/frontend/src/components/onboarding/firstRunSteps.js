@@ -145,6 +145,12 @@ export function stepsForSession(ctx = {}) {
 export function isFirstRunOverlayVisible(ctx = {}) {
   if (!ctx.flagsLoaded || !ctx.profileVerified || !ctx.firstRunLoaded) return false
   if (ctx.forced) return true // ?onboarding=1 / Settings → General → Re-run setup
+  // trinity-enterprise#1355: where the assistant leads the first session it is
+  // the only wizard, so this dialog never opens by itself; it is still there on
+  // request. Until it is known whether the assistant is offered, wait: opening
+  // and then yielding to it would be the two-wizard start this rule removes.
+  // `assistantDecided` absent (an older caller) counts as decided.
+  if (ctx.assistantDecided === false || ctx.assistantLeads) return false
   if (ctx.closed) return false
   const skipped = ctx.skipped || []
   return applicableSteps(ctx).some((s) => !s.ridesAlong && !skipped.includes(s.key))
@@ -200,17 +206,26 @@ export function litNodes(states = {}) {
 
 // --- per-browser state, every read/write guarded (private mode, blocked storage)
 
-export function readFirstRunClosed() {
+// "Closed" is remembered against the install it was closed on (the server's
+// short `install` mark), so a fresh install at the same address offers setup
+// again. A bare '1' was written before installs were told apart (and is what
+// is written while an install has no mark yet); it still counts as closed, so
+// an upgrade does not reopen setup on everyone. A mark kept for some OTHER
+// install never counts, including when this one cannot name itself.
+export function readFirstRunClosed(install) {
   try {
-    return localStorage.getItem(FIRST_RUN_CLOSED_KEY) === '1'
+    const kept = localStorage.getItem(FIRST_RUN_CLOSED_KEY)
+    if (!kept) return false
+    if (kept === '1') return true
+    return Boolean(install) && kept === install
   } catch {
     return false
   }
 }
 
-export function persistFirstRunClosed() {
+export function persistFirstRunClosed(install) {
   try {
-    localStorage.setItem(FIRST_RUN_CLOSED_KEY, '1')
+    localStorage.setItem(FIRST_RUN_CLOSED_KEY, install || '1')
     return true
   } catch (e) {
     console.warn('[firstRun] could not persist close:', e?.message || e)

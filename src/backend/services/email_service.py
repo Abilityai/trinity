@@ -7,11 +7,12 @@ Supports multiple providers:
 - sendgrid: SendGrid API
 """
 import asyncio
+import os
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import logging
-from typing import Optional, Sequence, Tuple
+from typing import Awaitable, Callable, Optional, Sequence, Tuple
 
 from config import (
     EMAIL_PROVIDER,
@@ -24,9 +25,51 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
+def _console_body_allowed() -> bool:
+    """Read per send, so a test or an operator's restart-free change applies."""
+    return os.getenv("EMAIL_CONSOLE_LOG_BODY", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 # Socket timeout for each SMTP connect/read (#3637). Without it a slow or
 # unreachable server holds the send thread until the OS gives up on the socket.
 SMTP_TIMEOUT_SECONDS = 30
+
+
+# -- relay -------------------------------------------------------------------
+# An install with no mail provider configured cannot deliver anything itself:
+# the `console` provider prints the message to the log. A module may register a
+# relay, something able to deliver a small set of STRUCTURED mails for this
+# install (a kind and a few short fields, never a subject or a body, so the
+# relay words the mail itself). It is consulted only when no provider of this
+# install's own can deliver; a configured provider always wins.
+_relay: Optional[dict] = None
+
+
+class EmailRefused(Exception):
+    """The relay refused a mail and said why (trinity-enterprise#1391).
+
+    ``code`` is the relay's reason code, ``message`` a sentence written for the
+    person. A relay's ``send`` may raise this instead of answering False; it
+    reaches only a caller that asked for it (``send_html(raise_refusal=True)``),
+    every other caller still reads False."""
+
+    def __init__(self, code: str, message: str, status_code: int = 422):
+        super().__init__(message)
+        self.code, self.message, self.status_code = code, message, status_code
+
+
+def register_relay(available: Callable[[], bool], send: Callable[[str, str, dict], Awaitable[bool]]) -> None:
+    """Register the relay. ``available()`` is cheap and synchronous (it is read
+    on the unauthenticated auth-mode path); ``send(kind, to, fields)`` delivers
+    one mail and answers whether it did. ``available`` may not raise; ``send``
+    may raise only ``EmailRefused``, for a refusal with a reason."""
+    global _relay
+    _relay = {"available": available, "send": send}
+
+
+def clear_relay() -> None:
+    global _relay
+    _relay = None
 
 
 class EmailService:
@@ -58,14 +101,65 @@ class EmailService:
             settings_service.get_email_from_address(),
         )
 
+    def code_is_logged(self) -> bool:
+        """Is a sign-in code readable in the backend log on this install?
+
+        Only when an operator chose the `console` provider AND asked for mail
+        bodies to be printed (`EMAIL_CONSOLE_LOG_BODY`, a development setting).
+        Everywhere else a code that was not delivered is not written anywhere.
+        The Login page reads this (via `GET /api/auth/mode`) so it never sends
+        someone to the log for a code that is not there.
+        """
+        try:
+            provider, _, _ = self._runtime_config()
+        except Exception:  # noqa: BLE001 — copy only; never fail the mode read
+            return False
+        return provider == "console" and _console_body_allowed()
+
     def can_deliver(self) -> bool:
-        """Can this install actually deliver an email right now? (#3655)
+        """Can this install deliver an email right now, by a provider of its own
+        or through a registered relay?"""
+        return self._provider_can_deliver() or self._relay_available()
+
+    @staticmethod
+    def _relay_available() -> bool:
+        if not _relay:
+            return False
+        try:
+            return bool(_relay["available"]())
+        except Exception:  # noqa: BLE001 - a relay that cannot answer is not there
+            logger.warning("[email] the relay could not say whether it is available", exc_info=True)
+            return False
+
+    async def _relayed(self, kind: str, to_email: str, fields: dict, *,
+                       raise_refusal: bool = False) -> Optional[bool]:
+        """Deliver through the relay when this install has no provider of its
+        own. None when the relay does not apply (the caller sends as before);
+        otherwise whether it delivered. A relay that fails is NOT reported as
+        sent: the `console` provider answering True for a mail nobody received
+        is the thing `can_deliver` exists to stop (#3655)."""
+        if self._provider_can_deliver() or not self._relay_available():
+            return None
+        try:
+            return bool(await _relay["send"](kind, to_email, fields))
+        except EmailRefused as refused:
+            logger.warning("[email] relay refused a %s mail: %s", kind, refused.code)
+            if raise_refusal:
+                raise
+            return False
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[email] relay failed for a %s mail: %s", kind, type(e).__name__)
+            return False
+
+    def _provider_can_deliver(self) -> bool:
+        """Can a provider of this install's own deliver an email right now? (#3655)
 
         False when the provider resolved per send is `console`, unknown, or
-        missing what it needs — every one of those falls back to printing the
-        message to the backend log while the send reports success. The Login
-        page reads it (install-level, via `GET /api/auth/mode`) to stop saying
-        "we sent a code" when nothing was sent. An unreadable config answers
+        missing what it needs. None of those sends anything: `console` logs
+        who and what (the body only when `EMAIL_CONSOLE_LOG_BODY` is set), and
+        a provider missing its configuration reports the mail as not sent. The
+        Login page reads it (install-level, via `GET /api/auth/mode`) to stop
+        saying "we sent a code" when nothing was sent. An unreadable config answers
         True, so the page behaves exactly as it did before.
         """
         try:
@@ -105,6 +199,16 @@ class EmailService:
         else:
             subject = f"Your {context_label or 'Trinity'} verification code"
 
+        relayed = await self._relayed("code", to_email, {
+            "code": code, "label": f"Trinity ({agent_name})" if agent_name else (context_label or "Trinity")})
+        if relayed is not None:
+            if not relayed:
+                # Say it was not sent, and nothing more: a sign-in code written to the log is one
+                # hop from whoever reads the logs. (The `console` provider prints one only when a
+                # developer set EMAIL_CONSOLE_LOG_BODY; a relay that refused is not that choice.)
+                logger.warning("Verification code not sent: the mail relay refused or did not answer.")
+            return relayed
+
         body = self._get_verification_email_body(code, agent_name=agent_name, context_label=context_label)
         html_body = self._get_verification_email_html(code, agent_name=agent_name, context_label=context_label)
 
@@ -143,9 +247,7 @@ class EmailService:
             elif provider == "resend":
                 return await self._send_resend(to_email, subject, body, html_body, resend_key, from_address)
             else:
-                logger.error(f"Unknown email provider: {provider}")
-                # Fall back to console
-                return self._send_console(to_email, subject, body)
+                return self._not_sent(to_email, subject, f"unknown email provider {provider!r}")
         except Exception as e:
             logger.error(f"Failed to send email to {to_email}: {e}")
             return False
@@ -232,6 +334,8 @@ If you didn't request this code, you can safely ignore this email.
         intro: str,
         paragraphs: Optional[Sequence[Optional[str]]] = None,
         cta: Optional[Tuple[str, str]] = None,
+        relay: Optional[Tuple[str, dict]] = None,
+        raise_refusal: bool = False,
     ) -> bool:
         """Send a mail rendered on the shared shell, with a plain-text twin.
 
@@ -242,7 +346,17 @@ If you didn't request this code, you can safely ignore this email.
         plain-text body is the same content unescaped, with ``label: url`` for
         the call to action. Delivery goes through ``send_email`` (provider
         resolution, best-effort semantics) unchanged.
+
+        ``relay`` is the same mail as ``(kind, fields)`` for a registered relay,
+        which words it itself. Used only when this install has no provider of
+        its own; a mail given no ``relay`` is never relayed. With
+        ``raise_refusal`` a relay's refusal raises ``EmailRefused`` (its reason
+        reaches the person) instead of answering False.
         """
+        if relay:
+            relayed = await self._relayed(relay[0], to_email, relay[1], raise_refusal=raise_refusal)
+            if relayed is not None:
+                return relayed
         from html import escape
 
         lines = [p.strip() for p in (paragraphs or []) if p and p.strip()]
@@ -270,17 +384,34 @@ If you didn't request this code, you can safely ignore this email.
         return await self.send_email(to_email, subject, body, html_body=html_body)
 
     def _send_console(self, to_email: str, subject: str, body: str) -> bool:
-        """Print email to console (development mode)."""
-        logger.info(f"=" * 60)
-        logger.info(f"EMAIL (console mode)")
+        """The `console` provider: an operator chose to send no mail.
+
+        Who and what is logged; the BODY is not. A body carries sign-in codes,
+        invite links and whatever an agent wrote, and the backend's log is read
+        by more than the person the mail was for (the container log, the log
+        files, anything they are shipped to). On a development machine, set
+        `EMAIL_CONSOLE_LOG_BODY=true` to print it.
+        """
+        logger.info("=" * 60)
+        logger.info("EMAIL (console mode)")
         logger.info(f"To: {to_email}")
         logger.info(f"Subject: {subject}")
-        logger.info(f"-" * 60)
-        logger.info(body)
-        logger.info(f"=" * 60)
-        print(f"\n[EMAIL to {to_email}] Subject: {subject}")
-        print(f"Body: {body}\n")
+        logger.info("-" * 60)
+        if _console_body_allowed():
+            logger.info(body)
+        else:
+            logger.info("(body not logged: set EMAIL_CONSOLE_LOG_BODY=true on a development machine to print it)")
+        logger.info("=" * 60)
         return True
+
+    @staticmethod
+    def _not_sent(to_email: str, subject: str, why: str) -> bool:
+        """A provider that is configured but cannot send. The mail is NOT
+        delivered and the send says so: nothing is printed in its place, least
+        of all the body. (`can_deliver` already reports this state to the UI.)"""
+        logger.error("Email not sent to %s (subject: %s): %s. The message body is not logged.",
+                     to_email, subject, why)
+        return False
 
     def _send_smtp(
         self,
@@ -292,9 +423,8 @@ If you didn't request this code, you can safely ignore this email.
     ) -> bool:
         """Send email via SMTP."""
         if not all([SMTP_HOST, SMTP_USER, SMTP_PASSWORD]):
-            logger.error("SMTP configuration incomplete. Set SMTP_HOST, SMTP_USER, SMTP_PASSWORD")
-            # Fall back to console in development
-            return self._send_console(to_email, subject, body)
+            return self._not_sent(to_email, subject,
+                                  "SMTP configuration incomplete (set SMTP_HOST, SMTP_USER, SMTP_PASSWORD)")
 
         try:
             msg = MIMEMultipart("alternative")
@@ -332,9 +462,7 @@ If you didn't request this code, you can safely ignore this email.
     ) -> bool:
         """Send email via SendGrid API."""
         if not SENDGRID_API_KEY:
-            logger.error("SendGrid API key not configured")
-            # Fall back to console
-            return self._send_console(to_email, subject, body)
+            return self._not_sent(to_email, subject, "SendGrid API key not configured")
 
         try:
             import httpx
@@ -367,8 +495,7 @@ If you didn't request this code, you can safely ignore this email.
                     return False
 
         except ImportError:
-            logger.error("httpx not installed, falling back to console")
-            return self._send_console(to_email, subject, body)
+            return self._not_sent(to_email, subject, "httpx is not installed")
         except Exception as e:
             logger.error(f"SendGrid send failed: {e}")
             return False
@@ -384,9 +511,7 @@ If you didn't request this code, you can safely ignore this email.
     ) -> bool:
         """Send email via Resend API."""
         if not api_key:
-            logger.error("Resend API key not configured")
-            # Fall back to console
-            return self._send_console(to_email, subject, body)
+            return self._not_sent(to_email, subject, "Resend API key not configured")
 
         try:
             import httpx
@@ -419,8 +544,7 @@ If you didn't request this code, you can safely ignore this email.
                     return False
 
         except ImportError:
-            logger.error("httpx not installed, falling back to console")
-            return self._send_console(to_email, subject, body)
+            return self._not_sent(to_email, subject, "httpx is not installed")
         except Exception as e:
             logger.error(f"Resend send failed: {e}")
             return False

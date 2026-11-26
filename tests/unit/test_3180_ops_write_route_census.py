@@ -338,6 +338,7 @@ NO_TRINITY_CREDENTIAL = {
     "routers/agents.py::agent_heartbeat": OWN_VALIDATOR,
     "routers/agents.py::agent_execution_result": OWN_VALIDATOR,
     "routers/agents.py::agent_execution_turn_tier": OWN_VALIDATOR + " (trinity-enterprise#926)",
+    "routers/guardrail_events.py::post_guardrail_events": OWN_VALIDATOR + " (trinity-enterprise#165)",
     "routers/mcp_keys.py::validate_mcp_api_key_http_endpoint": OWN_VALIDATOR + " (introspection: grants nothing)",
     "routers/public.py::tls_allowed": UNAUTHENTICATED,
     "routers/public.py::get_public_link_info": OTHER_CREDENTIAL + " (public link token)",
@@ -355,10 +356,12 @@ NO_TRINITY_CREDENTIAL = {
     "routers/files.py::head_shared_file": OTHER_CREDENTIAL + " (signed file id)",
     "routers/setup.py::get_setup_status": UNAUTHENTICATED,
     "routers/setup.py::set_admin_password": UNAUTHENTICATED + " (first-run only)",
+    "routers/setup.py::get_registration_terms": UNAUTHENTICATED + " (first-run only, trinity-enterprise#1329)",
     "routers/internal.py::internal_agent_pre_check": OTHER_CREDENTIAL + " (X-Internal-Secret)",
     "routers/internal.py::internal_agent_brief_readiness": OTHER_CREDENTIAL + " (X-Internal-Secret)",
     "routers/internal.py::execute_task_internal": OTHER_CREDENTIAL + " (X-Internal-Secret)",
     "routers/internal.py::validate_execution": OTHER_CREDENTIAL + " (X-Internal-Secret)",
+    "routers/internal.py::schedule_retry_dropped": OTHER_CREDENTIAL + " (X-Internal-Secret)",
     "routers/internal.py::log_audit_entry": OTHER_CREDENTIAL + " (X-Internal-Secret)",
     "routers/internal.py::mcp_exposed_agents": OTHER_CREDENTIAL + " (X-Internal-Secret)",
     "routers/internal.py::mcp_external_access": OTHER_CREDENTIAL + " (X-Internal-Secret)",
@@ -627,12 +630,14 @@ class TestNeverGrantableFamilies:
             "heartbeat": "Heartbeat requires the agent's own MCP key",
             "result_callback": "Result callback requires the agent's own MCP key",
             "turn_tier": "Turn tier requires the agent's own MCP key",
+            "guardrail_events": "Guardrail events require the agent's own MCP key",
             "pull_next_task": "Pull seam requires a valid X-Internal-Secret or the agent's own MCP key",
             "pull_task_result": "Pull seam requires a valid X-Internal-Secret or the agent's own MCP key",
         }
         for door, detail in own_key.items():
             assert ow[door]["status"] == 403 and ow[door]["detail"] == detail, (door, ow[door])
         assert agent["heartbeat"]["status"] == 200, agent["heartbeat"]
+        assert agent["guardrail_events"]["status"] == 200, agent["guardrail_events"]
         assert agent["pull_next_task"]["status"] == 200, agent["pull_next_task"]
         # Past the key check, refused only because the execution does not exist.
         for door in ("result_callback", "turn_tier", "pull_task_result"):

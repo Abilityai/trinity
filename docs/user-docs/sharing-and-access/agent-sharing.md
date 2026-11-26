@@ -23,6 +23,8 @@ Two owner-only surfaces on the Agent Detail page control who can reach an agent:
 
 When you add someone with no account, Trinity emails them an invitation that says who invited them and which agent, and links to the Workspace sign-in. Use **Resend invite** on their Pending row to send it again, up to 3 times an hour. If email isn't set up for sign-in on your instance, no invitation goes out and the panel says so, so tell them how to sign in yourself.
 
+The invitation's link is built from `FRONTEND_URL` (in `.env`) only. If `FRONTEND_URL` is empty, the email carries no link and tells the person to use your Trinity sign-in page. The Public URL is never used for invitations, because the public chat address serves chat only and would answer the Workspace with an error. Set `FRONTEND_URL` whenever you set a Public URL.
+
 On instances licensed for it, Settings › People also shows a **People this agent serves** section above this list: the agent's primary person, its other stakeholders, and the seat the agent holds or serves. Assigning someone there also shares the agent with them, because an assignment by itself grants no access; a row for someone the agent is not shared with carries a warning and **Share with them**. Without the entitlement the section is absent, and non-admins see it read-only.
 
 The per-recipient DM toggle above is complemented on the channel side by the per-channel Slack consent — see [Slack Integration](../integrations/slack-integration.md). Platform-wide proactive-messaging rate caps are admin-configurable in **Settings**.
@@ -32,7 +34,7 @@ The per-recipient DM toggle above is complemented on the channel side by the per
 | Level | Permissions |
 |-------|-------------|
 | **Owner** | Full control -- create, delete, configure, share, manage credentials and schedules. |
-| **Shared operator** | Interact only -- chat, run tasks, view files (except credential files) and logs. Cannot modify config, credentials, or permissions. |
+| **Shared operator** | Interact only -- chat, run tasks, start and stop the agent, view files (except credential files) and the executions they started. Cannot modify config, credentials, or permissions. |
 | **Admin** | Full access to all agents regardless of ownership. |
 
 ### What someone you share an agent with can do
@@ -42,6 +44,18 @@ The per-recipient DM toggle above is complemented on the channel side by the per
 - They cannot open or download credential files: `.env`, `.mcp.json`, SSH and cloud credentials, key and certificate files (`*.key`, `*.pem`, `*.p12`, `*.pfx`) and the agent runtimes' login files. Trying shows a message saying so.
 - To see or change a credential, they ask the agent's owner or an admin. Managing credentials (set, inject, import, export) is for the owner or an admin.
 - If opening the agent's files shows "This agent needs a restart to apply an update", they ask the agent's owner or an admin to stop and start it in Trinity.
+- They see only their own work: the executions, task history, live streams and queued prompts **they** started. They do not see the owner's turns or anyone else's, the container log, the activity timeline or the agent's full chat history. Runs with no person behind them (Slack, Telegram, voice, public-link and scheduled runs) are not in their list. The Tasks panel says "you see the tasks you started".
+- They can stop a run only when it is wholly theirs. Changing the agent's model, a forced git pull and managing a schedule's webhook (unless they created that schedule) stay with the owner or an admin. Starting and stopping the agent stay open to them.
+
+### What the agent does for someone you share it with
+
+An agent acts for whoever is chatting with it, so Trinity holds the agent to that person's limits for the length of their turn. Trinity decides this from the execution record, not from anything the person or the agent says:
+
+- **The owner, an admin, or work the owner set up** (a schedule, reminder, loop, webhook or event subscription the owner created) — the agent can do everything it normally can.
+- **A person the agent is shared with** — the agent's file tools reach only the paths that person could open in the Files tab, so it will not edit its own instructions, skills or startup files for them. It gets **no shell**. It cannot set up standing work for them (schedules, loops, reminders, event subscriptions), create or deploy agents, or read anyone else's executions. On a **Gemini CLI or Codex** agent their message is refused before it runs, with a reason that says the owner can switch the agent to Claude Code; those runtimes cannot limit what a turn does.
+- **A channel or public-link visitor** (Slack, Telegram, WhatsApp, a public link, voice, a paid call) — the file tools reach the share paths. Whether the agent may also use the shell, run on Gemini or Codex, and set up standing work depends on the owner's **Channel and public visitors may run commands** switch under **Settings › Guardrails** (on by default). See [Agent Guardrails](../agents/agent-guardrails.md#visitors-and-the-shell).
+
+When the agent refuses something for these reasons it says so, so the person can ask the owner. A turn the platform starts to continue earlier work (for example the agent waking up when an ask it raised is answered, or when a delegated run finishes) is held to the same limits as the turn it continues. If the person who answered an ask could not stand as the asking turn (a shared person answering the owner's ask, say), the wake-up is held to a shared person's limits.
 
 Enforcement notes:
 

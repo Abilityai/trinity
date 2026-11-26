@@ -26,9 +26,12 @@ export const useAuthStore = defineStore('auth', {
     // Runtime mode detection (from backend)
     emailAuthEnabled: null,  // Email-based authentication
     emailCodeLoginEnabled: null,  // ent#849: email-code form allowed (SSO policy can turn it off)
-    // #3655: can this install deliver email? false = no provider, codes go to the backend log.
+    // #3655: can this install deliver email? false = no provider, so no code is sent.
     // null (not read yet, or an older backend) reads as "yes", the old behaviour.
     emailDeliveryAvailable: null,
+    // An undelivered code is readable in the backend log: a development install only
+    // (`console` provider with EMAIL_CONSOLE_LOG_BODY). False on an older backend too.
+    emailCodeInLog: false,
     modeDetected: false,
     // Enterprise 2FA (#5): set when a login returns an MFA challenge instead
     // of a token. { token, enrolled, enrollmentRequired }. The Login view
@@ -102,6 +105,7 @@ export const useAuthStore = defineStore('auth', {
         this.emailCodeLoginEnabled = this.emailAuthEnabled &&
           response.data.email_code_login_enabled !== false
         this.emailDeliveryAvailable = response.data.email_delivery_available !== false
+        this.emailCodeInLog = response.data.email_code_in_log === true
         this.modeDetected = true
 
         console.log(`🔐 Auth mode: EMAIL=${this.emailAuthEnabled}`)
@@ -431,6 +435,14 @@ export const useAuthStore = defineStore('auth', {
           expiresInSeconds: response.data.expires_in_seconds
         }
       } catch (error) {
+        // #4603: over the shared per-address budget. Not an access failure:
+        // the page shows the sentence beside the form, not the "Access Denied" card.
+        if (error.response?.status === 429) {
+          const detail = typeof error.response.data?.detail === 'string'
+            ? error.response.data.detail
+            : 'Too many sign-in code requests. Try again in 10 minutes.'
+          return { success: false, overBudget: true, error: detail }
+        }
         console.error('Request email code failed:', error)
         let detail = error.response?.data?.detail || 'Failed to send verification code'
         if (detail === 'email_code_disabled') detail = await this._emailCodeTurnedOff()

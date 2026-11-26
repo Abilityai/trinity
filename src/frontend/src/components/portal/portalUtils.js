@@ -2282,12 +2282,26 @@ export function composerAvailabilityNotice(agent, { memberTier = viewerIsMemberT
 //     promise the turn succeeded. A failure after this point surfaces as a
 //     FAILED execution row and an audit entry on the operator's side.
 //
+//   * #4502 — an agent that is NOT RUNNING is not picking anything up.
+//     `resume_requested` says a wake was requested; whether it could be
+//     delivered is `wake_state`, which the answer response never carries (the
+//     dispatch that learns the agent is stopped runs after it). So the caller
+//     passes the roster's `availability` for the agent: `stopped` and
+//     `unavailable` say only "Sent.", and so does a row that already reads
+//     `wake_state: 'pending'`. `unknown` (Docker could not be asked) and an
+//     agent the roster does not list keep the sentence — the dispatch itself
+//     still tries in that case. And `verified: false` — the caller could not
+//     read the roster just now — says only "Sent.": a roster from page load is
+//     not evidence the agent is still running.
+//
 // Returns null when there is nothing honest to say, so the caller renders
 // nothing rather than an empty line.
-export function answerConfirmation(answered, agentLabel = null) {
+const NOT_RUNNING = new Set(['stopped', 'unavailable'])
+export function answerConfirmation(answered, agentLabel = null, { availability = null, verified = true } = {}) {
   if (!answered || answered.status !== 'answered') return null
   const who = (agentLabel || answered.agent_name || 'the agent')
-  return answered.resume_requested === true
+  const deferred = answered.wake_state === 'pending' || NOT_RUNNING.has(availability) || verified === false
+  return answered.resume_requested === true && !deferred
     ? `Sent — ${who} is picking this up.`
     : 'Sent.'
 }
@@ -2434,20 +2448,22 @@ export function assistantRow({ content = '', id = null, my_rating = null,
 // would never grow, the poll would idle out, and a turn that answered would
 // be reported as "check shortly". The baseline is the id of the newest TYPED
 // assistant row (`replyBaseline`); a reply is new when that id changed. A
-// spoken reply (`source === 'voice'`) is never this turn's answer. The count
+// row with any `source` — spoken (`voice`), a completion report, a message the
+// agent sent between turns (`proactive`, ent#1221) — is never this turn's
+// answer: typed is `!source`, the backend's `_TYPED = "source IS NULL"`. The count
 // survives only as the fallback for a row with no id (the best-effort write).
 export function latestTypedReply(messages) {
   const rows = Array.isArray(messages) ? messages : []
   for (let i = rows.length - 1; i >= 0; i--) {
     const m = rows[i]
-    if (m && m.role === 'assistant' && m.source !== 'voice') return m
+    if (m && m.role === 'assistant' && !m.source) return m
   }
   return null
 }
 
 function typedReplyCount(messages) {
   return (Array.isArray(messages) ? messages : [])
-    .filter((m) => m && m.role === 'assistant' && m.source !== 'voice').length
+    .filter((m) => m && m.role === 'assistant' && !m.source).length
 }
 
 // What a reply must differ from: taken BEFORE dispatch, from the same rows the
@@ -2520,15 +2536,19 @@ function replyFields(row) {
 // turn's earlier replies). A reply stays where it is when its question is not
 // in the window or carries no id, or when the move would cross a voice call's
 // rows, whose folding depends on their position.
-export function pairRepliesWithQuestions(messages) {
+// trinity-enterprise#594: `executionIdOf` reads the turn id off a row — the
+// stored `execution_id` by default, the mapped `executionId` when the rows are
+// the transcript's own (a page prepended above the window is paired again).
+const storedExecutionId = (m) => m?.execution_id
+export function pairRepliesWithQuestions(messages, { executionIdOf = storedExecutionId } = {}) {
   const out = []
   for (const m of Array.isArray(messages) ? messages : []) {
-    const eid = m && m.role === 'assistant' && !m.source ? m.execution_id : null
+    const eid = m && m.role === 'assistant' && !m.source ? executionIdOf(m) : null
     if (eid) {
-      const qi = out.findIndex((x) => x && x.role === 'user' && !x.source && x.execution_id === eid)
+      const qi = out.findIndex((x) => x && x.role === 'user' && !x.source && executionIdOf(x) === eid)
       if (qi !== -1) {
         let at = qi + 1
-        while (at < out.length && out[at]?.execution_id === eid) at += 1
+        while (at < out.length && executionIdOf(out[at]) === eid) at += 1
         if (at < out.length && out.slice(at).every((x) => !x?.source)) {
           out.splice(at, 0, m)
           continue

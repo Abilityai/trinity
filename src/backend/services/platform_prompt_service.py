@@ -203,7 +203,7 @@ Until it is removed, an entry appended to the `requests` array of `~/.trinity/op
 }
 ```
 
-The operator's answer is written back into the entry: `status: "responded"` with `response`, `response_text` and `responded_at` — never who answered. On an approval, `response` is one of your options or the reserved value `(something else)`, which comes with the person's instruction in `response_text`. An item that has waited past the operator's aging bound carries a `platform.aging_since` timestamp written by Trinity — read it, never write to `platform`. While Trinity is holding new entries from this file, the file carries a `platform.ingestion` block: `reason` is `queue_full` (you already have `max_pending` open requests — wait for one to end), `rate_limited` (too many too fast — they are read again shortly), `invalid_id` (an entry's `id` is malformed and will never be read — fix it), or `invalid_options` / `invalid_title` (an entry breaks the ask caps: more than 5 options, an option over 60 characters or that reads as `(something else)`, or a title over 120 characters — the entry ids are listed under those keys beside `reason`, whatever the reason; shorten or split them, and they will not be read until they fit), and `since` says when the hold began. Held entries stay `pending` and are read again every few seconds; the block is removed once nothing is held. `ask_operator` refuses the same cases immediately, with the reason. After processing a response, update the item's status to `"acknowledged"`. Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items. An ID you raised with `ask_operator` is never read from the file.
+The operator's answer is written back into the entry: `status: "responded"` with `response`, `response_text` and `responded_at` — never who answered. On an approval, `response` is one of your options or the reserved value `(something else)`, which comes with the person's instruction in `response_text`. An item that has waited past the operator's aging bound carries a `platform.aging_since` timestamp written by Trinity — read it, never write to `platform`. While Trinity is holding new entries from this file, the file carries a `platform.ingestion` block: `reason` is `queue_full` (you already have `max_pending` open requests — wait for one to end), `rate_limited` (too many too fast — they are read again shortly), `invalid_id` (an entry's `id` is malformed and will never be read — fix it), `invalid_options` / `invalid_title` (an entry breaks the ask caps: more than 5 options, an option over 60 characters or that reads as `(something else)`, or a title over 120 characters — the entry ids are listed under those keys beside `reason`, whatever the reason; shorten or split them, and they will not be read until they fit), or `role_cannot_open_agent` / `no_person` / `invalid_credential` (a `type: "credential"` entry cannot be read: nobody who could fill it can open you in their Workspace, no single person can be asked, or the entry breaks the rules of a credential ask — the entry ids are listed under those keys; remove the entry and raise it with `ask_for_credential`, whose refusal names the reason and the remedy), and `since` says when the hold began. Held entries stay `pending` and are read again every few seconds; the block is removed once nothing is held. `ask_operator` refuses the same cases immediately, with the reason. After processing a response, update the item's status to `"acknowledged"`. Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items. An ID you raised with `ask_operator` is never read from the file.
 
 #### When to Use
 
@@ -254,7 +254,7 @@ You run as `developer` (UID 1000) in your own container. `/home/developer` is yo
 Paths the platform creates or reads in your home:
 - `data/` — runtime data; the export/import boundary, gitignored once you declare `data_paths`
 - `public/` — the only folder `share_file` reads
-- `uploads/` — files people attach in chat or through the API
+- `uploads/<session>/`, `inbox/<who>/`: people's files; uncommitted
 - `shared-out/`, `shared-in/<agent>/` — shared folders, when enabled
 - `content/` — media your canvas references
 - `.trinity/` — shared with the platform: `setup.sh` (runs at every start; never put secrets in it), `plugins.yaml`, `persistent-state.yaml`, `operator-queue.json`, `pipelines/`. People cannot edit it from the Files tab; you can.
@@ -593,13 +593,39 @@ _CODEX_MCP_ORIENTATION = (
     "\n\n---\n\n"
 )
 
+# OpenCode is a THIRD naming scheme, and it is neither of the other two
+# (Abilityai/lilu#257 step 2). It namespaces every MCP tool as
+# ``<server-id>_<tool>`` — MEASURED, not assumed: a real turn on
+# ``ollama/gemma4:12b`` against the pinned v1.18.32 emitted
+# ``{"type":"tool_use","part":{"tool":"trinity_list_agents",…}}``. So the
+# Claude prefix is rewritten to the server id rather than stripped: a Codex-
+# style bare ``list_agents`` is an unknown tool to OpenCode, and the
+# Claude-style ``mcp__trinity__list_agents`` is too. The server id is
+# ``trinity`` because that is the key ``trinity_mcp._inject_claude_mcp``
+# writes into ``.mcp.json``, which is what ``opencode_mcp`` translates from.
+_OPENCODE_RUNTIMES = frozenset({"opencode"})
+_OPENCODE_MCP_PREFIX = "trinity_"
+
+_OPENCODE_MCP_ORIENTATION = (
+    "## MCP Tools (OpenCode runtime)\n\n"
+    "A Trinity MCP server named `trinity` is configured for you. OpenCode "
+    "namespaces its tools by server id, so call them as `trinity_<tool>` — "
+    "`trinity_list_agents`, `trinity_chat_with_agent`, `trinity_share_file`, "
+    "`trinity_report`, `trinity_list_reports`, `trinity_get_report`, "
+    "`trinity_write_user_memory`, `trinity_set_reminder`, "
+    "`trinity_run_agent_loop` — exactly as they appear in your tool list. Do "
+    "not add any other vendor-specific prefix."
+    "\n\n---\n\n"
+)
+
 
 def _adapt_instructions_for_runtime(instructions: str, runtime: str) -> str:
     """Rewrite the MCP-tool references in ``instructions`` for ``runtime``.
 
     Codex → strip the Claude-only ``mcp__trinity__`` prefix and prepend a short
-    orientation note. Claude/Gemini/unknown keep the canonical naming (the
-    plan's ``default claude-code`` behavior). Any runtime without the file
+    orientation note. OpenCode → rewrite that prefix to its server-scoped
+    ``trinity_`` form and prepend its own note. Claude/Gemini/unknown keep the
+    canonical naming (the plan's ``default claude-code`` behavior). Any runtime without the file
     guardrail hook gets the honest protected-paths sentence (trinity-enterprise#945).
     Any runtime without the Claude Code subagent launcher is offered its own
     tools instead of `Agent`/`Task` (trinity-enterprise#643).
@@ -616,6 +642,10 @@ def _adapt_instructions_for_runtime(instructions: str, runtime: str) -> str:
         )
     if runtime_key in _CODEX_RUNTIMES:
         return _CODEX_MCP_ORIENTATION + instructions.replace("mcp__trinity__", "")
+    if runtime_key in _OPENCODE_RUNTIMES:
+        return _OPENCODE_MCP_ORIENTATION + instructions.replace(
+            "mcp__trinity__", _OPENCODE_MCP_PREFIX
+        )
     return instructions
 
 
@@ -941,6 +971,9 @@ class ExecutionContext:
     role_id: Optional[str] = None
     stakeholders: Optional[List[str]] = None
     proactive_consent: Optional[bool] = None
+    # trinity-enterprise#1221: whether any channel could deliver to the primary.
+    # Only an explicit False changes the line; None renders as before.
+    proactive_reachable: Optional[bool] = None
     # trinity-enterprise#611: asks this agent raised that ended in the last day —
     # `{request_id, disposition, disposed_at}` each, no human text. Auto-filled
     # from the DB; stateless, so a wake that was lost (a crash, a stopped agent)
@@ -1134,6 +1167,11 @@ def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
     unresolved bit (``None`` — a provider may validly answer a name and a role
     and nothing else) renders the restrictive clause, exactly like ``False``,
     because a permission statement that nobody made is not a permission.
+
+    Consent is not reachability (trinity-enterprise#1221): with consent but an
+    explicit ``proactive_reachable is False`` — no channel can deliver to them —
+    the line says so instead of "permitted", so the agent does not send into a
+    refusal. Unknown reachability (``None``) keeps the consent wording.
     """
     display = _sanitize_field(ctx.primary_user_display, max_len=MAX_DISPLAY_NAME_LEN)
     if not display:
@@ -1142,6 +1180,11 @@ def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
     role = _sanitize_field(ctx.role_id, max_len=MAX_ROLE_ID_LEN)
     if role:
         line = f"{line} (role: {role})"
+    if ctx.proactive_consent is True and ctx.proactive_reachable is False:
+        return (
+            f"{line} — consented to proactive contact, but no channel reaches "
+            "them; do not message them — it waits for their next turn"
+        )
     if ctx.proactive_consent is True:
         return f"{line} — proactive contact permitted"
     return (
@@ -1493,6 +1536,11 @@ def compose_system_prompt(
                     ctx.proactive_consent
                     if ctx.proactive_consent is not None
                     else assignment.get("proactive_consent")
+                ),
+                proactive_reachable=(
+                    ctx.proactive_reachable
+                    if ctx.proactive_reachable is not None
+                    else assignment.get("proactive_reachable")
                 ),
                 ended_asks=(
                     ctx.ended_asks

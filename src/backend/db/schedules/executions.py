@@ -23,6 +23,7 @@ from utils.helpers import (
     utc_now_iso,
 )
 from ._common import _norm_ts
+from utils import request_memo
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,9 @@ class ScheduleExecutionsMixin:
             # Verified AAuth peer of an inbound A2A call (ent#862); NULL otherwise.
             a2a_caller_identity=row["a2a_caller_identity"]
                 if "a2a_caller_identity" in row_keys else None,
+            # The platform-recorded turn this row continues (ent#1225).
+            continues_execution_id=row["continues_execution_id"]
+                if "continues_execution_id" in row_keys else None,
         )
 
     # =========================================================================
@@ -209,6 +213,27 @@ class ScheduleExecutionsMixin:
             ).scalar()
         return int(value or 0)
 
+    def has_execution_with_status(
+        self, agent_name: str, statuses, triggered_by: Optional[str] = None,
+    ) -> bool:
+        """True when `agent_name` has a row in one of `statuses` (#4733).
+
+        Optionally only rows of one trigger. One indexed EXISTS — the caller
+        wake reads "is a wake of this agent still queued or running?" and "is
+        any run of it running?" from the rows, never from a Redis hint.
+        """
+        conditions = [
+            schedule_executions.c.agent_name == agent_name,
+            schedule_executions.c.status.in_([str(getattr(s, "value", s)) for s in statuses]),
+        ]
+        if triggered_by is not None:
+            conditions.append(schedule_executions.c.triggered_by == triggered_by)
+        with get_engine().connect() as conn:
+            found = conn.execute(
+                select(schedule_executions.c.id).where(and_(*conditions)).limit(1)
+            ).first()
+        return found is not None
+
     def get_deepest_running_chain_row(self, agent_name: str) -> Optional[Dict]:
         """The RUNNING row of `agent_name` that `get_max_running_chain_depth` reads (#4357).
 
@@ -253,6 +278,7 @@ class ScheduleExecutionsMixin:
                 schedule_executions.c.source_channel,
                 schedule_executions.c.source_user_email,
                 schedule_executions.c.source_agent_name,
+                schedule_executions.c.continues_execution_id,
             )
             .where(and_(
                 schedule_executions.c.agent_name == agent_name,
@@ -874,6 +900,7 @@ class ScheduleExecutionsMixin:
         with get_engine().connect() as conn:
             return int(conn.execute(stmt).scalar() or 0)
 
+    @request_memo.memoized_method
     def get_execution(self, execution_id: str) -> Optional[ScheduleExecution]:
         """Get a specific execution by ID."""
         stmt = select(schedule_executions).where(
@@ -882,6 +909,36 @@ class ScheduleExecutionsMixin:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_schedule_execution(row) if row else None
+
+    def get_executions_by_ids(self, execution_ids) -> Dict[str, Optional[ScheduleExecution]]:
+        """`{id: execution or None}` in ONE query (#4672) — the batch form of
+        `get_execution`. Inside a `request_memo.scope()` it also answers the
+        per-id read for the rest of the scope."""
+        ids = [i for i in dict.fromkeys(str(i) for i in (execution_ids or []) if i)]
+        found: Dict[str, ScheduleExecution] = {}
+        if ids:
+            stmt = select(schedule_executions).where(schedule_executions.c.id.in_(ids))
+            with get_engine().connect() as conn:
+                for row in conn.execute(stmt).mappings():
+                    found[str(row["id"])] = self._row_to_schedule_execution(row)
+        out = {i: found.get(i) for i in ids}
+        for execution_id, execution in out.items():
+            self.get_execution.prime(execution_id, value=execution)
+        return out
+
+    def get_turn_attribution(self, execution_id: str) -> Optional[Dict]:
+        """One execution's rating columns (`turn_tier_service.LEDGER_COLUMNS`)
+        and its `status`, or None — the turn a continuation follows
+        (trinity-enterprise#1225), without the row's response and log."""
+        c = schedule_executions.c
+        stmt = select(
+            c.id, c.agent_name, c.source_user_id, c.schedule_id, c.triggered_by,
+            c.source_channel, c.source_user_email, c.source_agent_name,
+            c.continues_execution_id, c.status,
+        ).where(c.id == execution_id)
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return dict(row) if row else None
 
     def get_execution_gate_state(self, execution_id: str) -> Optional[tuple]:
         """`(agent_name, status)` of one execution, or None — the two columns

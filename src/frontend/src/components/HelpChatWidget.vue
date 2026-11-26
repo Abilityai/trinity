@@ -1,7 +1,7 @@
 <template>
   <!-- Floating help button -->
   <button
-    v-if="!isOpen && !hideLauncher"
+    v-if="!embedded && !isOpen && !hideLauncher && anyChannel"
     @click="openChat"
     class="fixed bottom-6 right-6 w-14 h-14 bg-action-primary-600 hover:bg-action-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-105 focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2 z-50"
     aria-label="Open help chat"
@@ -21,15 +21,17 @@
     leave-to-class="opacity-0 translate-y-4"
   >
     <div
-      v-if="isOpen"
+      v-if="(isOpen || embedded) && anyChannel"
       ref="panelRef"
-      class="fixed bottom-6 right-6 w-96 max-w-[calc(100vw-3rem)] h-[32rem] max-h-[calc(100vh-6rem)] bg-white dark:bg-gray-800 rounded-xl shadow-2xl flex flex-col z-50 border border-gray-200 dark:border-gray-700"
+      :class="embedded
+        ? 'flex flex-col flex-1 min-h-0'
+        : 'fixed bottom-6 right-6 w-96 max-w-[calc(100vw-3rem)] h-[32rem] max-h-[calc(100vh-6rem)] bg-white dark:bg-gray-800 rounded-xl shadow-2xl flex flex-col z-50 border border-gray-200 dark:border-gray-700'"
       role="dialog"
       aria-label="Help chat"
       @keydown.escape="closeChat"
     >
-      <!-- Header -->
-      <div class="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-action-primary-600 rounded-t-xl">
+      <!-- Header (the host draws its own when this is embedded) -->
+      <div v-if="!embedded" class="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-action-primary-600 rounded-t-xl">
         <div class="flex items-center space-x-2">
           <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -62,10 +64,10 @@
         </div>
       </div>
 
-      <!-- Mode tabs (only when bug reporting is enabled) -->
-      <div v-if="bugReportingEnabled" class="flex border-b border-gray-200 dark:border-gray-700 shrink-0" role="tablist">
+      <!-- Mode tabs (only when more than one channel is on, #4499) -->
+      <div v-if="visibleTabs.length > 1" class="flex border-b border-gray-200 dark:border-gray-700 shrink-0" role="tablist">
         <button
-          v-for="tab in tabs"
+          v-for="tab in visibleTabs"
           :key="tab.id"
           role="tab"
           :aria-selected="mode === tab.id"
@@ -305,6 +307,11 @@
         </div>
       </template>
     </div>
+    <p
+      v-else-if="embedded && askOnly && buildInfo"
+      class="p-4 text-sm opacity-70"
+      data-testid="ask-off"
+    >Asking the documentation is switched off on this instance.</p>
   </Transition>
 </template>
 
@@ -323,7 +330,7 @@ const INSTALL_KEY = 'trinity_install_id'
 // operators can repoint (VITE_BUG_INTAKE_URL) or disable in-app reporting
 // (VITE_BUG_REPORTING_ENABLED=false) at build time.
 const BUG_INTAKE_URL = import.meta.env.VITE_BUG_INTAKE_URL || 'https://intake.abilityai.dev/v1/report-bug'
-const bugReportingEnabled = String(import.meta.env.VITE_BUG_REPORTING_ENABLED ?? 'true') !== 'false'
+const bugReportingBuilt = String(import.meta.env.VITE_BUG_REPORTING_ENABLED ?? 'true') !== 'false'
 const MAX_TITLE = 120
 const MAX_DESC = 4000
 
@@ -336,11 +343,17 @@ const tabs = [
 
 // #3446: the host asks the launcher to stand down where it would cover one of
 // the page's own controls. The open panel is unaffected.
-defineProps({
+const props = defineProps({
   hideLauncher: { type: Boolean, default: false },
+  // Drawn inside another panel as one of its tabs: no launcher, no header of
+  // its own, always showing, and it fills the space it is given.
+  embedded: { type: Boolean, default: false },
+  // Only the documentation's Ask, with no tabs: the host has its own way to
+  // send a bug, an idea or feedback.
+  askOnly: { type: Boolean, default: false },
 })
 
-const isOpen = ref(false)
+const isOpen = ref(props.embedded)
 const mode = ref('ask')
 
 // --- Ask (Q&A) state ---
@@ -364,6 +377,17 @@ const bugDeduped = ref(false)
 const pendingPayload = ref(null)
 
 const { info: buildInfo, load: loadBuildInfo } = useBuildInfo()
+
+// #4499: both channels post to a vendor-operated host, so the operator's
+// run-time switches decide them (`GET /api/version` → `help`, from
+// BUG_REPORTING_ENABLED / ASK_TRINITY_ENABLED / DO_NOT_TRACK). A channel is on
+// only for a literal `true`: until the answer arrives, when it fails, and on a
+// backend that sends no `help`, nothing is shown and nothing can be sent. The
+// build-time flag can still turn reporting off; it can no longer turn it on.
+const docsQaEnabled = computed(() => buildInfo.value?.help?.docs_qa === true)
+const bugReportingEnabled = computed(() => bugReportingBuilt && buildInfo.value?.help?.bug_reporting === true)
+const visibleTabs = computed(() => tabs.filter((t) => (t.id === 'ask' ? docsQaEnabled.value : !props.askOnly && bugReportingEnabled.value)))
+const anyChannel = computed(() => visibleTabs.value.length > 0)
 
 const panelRef = ref(null)
 const messagesRef = ref(null)
@@ -414,7 +438,7 @@ const openChat = () => {
   nextTick(() => { inputRef.value?.focus() })
 }
 
-const closeChat = () => { isOpen.value = false }
+const closeChat = () => { if (!props.embedded) isOpen.value = false }
 
 const startNewConversation = () => {
   messages.value = []
@@ -440,7 +464,7 @@ const scrollToBottom = () => {
 
 const sendMessage = async () => {
   const question = inputMessage.value.trim()
-  if (!question || loading.value) return
+  if (!question || loading.value || !docsQaEnabled.value) return
 
   error.value = null
   lastUserMessage.value = question
@@ -557,7 +581,7 @@ async function reviewReport() {
 }
 
 async function submitReport() {
-  if (bugSubmitting.value || !pendingPayload.value) return
+  if (bugSubmitting.value || !pendingPayload.value || !bugReportingEnabled.value) return
   bugSubmitting.value = true
   bugError.value = ''
   try {
@@ -633,7 +657,14 @@ onMounted(() => {
     sessionId.value = savedSession
   }
   document.addEventListener('keydown', handleKeydown)
+  // #4499: the switches; a failed read leaves every channel off.
+  loadBuildInfo().catch(() => {})
 })
+
+// #4499: never sit on a tab that is switched off.
+watch(visibleTabs, (list) => {
+  if (list.length && !list.some((t) => t.id === mode.value)) mode.value = list[0].id
+}, { immediate: true })
 
 onUnmounted(() => {
   document.removeEventListener('keydown', handleKeydown)

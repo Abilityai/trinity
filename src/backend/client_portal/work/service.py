@@ -31,6 +31,8 @@ from typing import Dict, Iterable, List, Optional
 
 from config import PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL
 from database import db as core_db
+from services.channel_completion_report import TIMEOUT_RE as _TIMEOUT_RE, person_safe_failure
+from utils import request_memo
 from utils.helpers import parse_iso_timestamp
 
 from .. import db as portal_db
@@ -56,7 +58,6 @@ STALE_FLOOR_SECONDS = 30 * 60
 
 IN_FLIGHT = frozenset({"running", "queued", "pending_retry"})
 _TERMINAL = frozenset({"success", "failed", "error", "cancelled", "skipped"})
-_TIMEOUT_RE = re.compile(r"timed?\s*-?\s*out|timeout", re.IGNORECASE)
 _WS_RE = re.compile(r"\s+")
 
 
@@ -140,15 +141,6 @@ def clean_title(message: Optional[str]) -> str:
     if not text:
         return "(no message)"
     return text if len(text) <= TITLE_MAX else text[: TITLE_MAX - 1].rstrip() + "…"
-
-
-def clean_error(error_summary: Optional[str]) -> Optional[str]:
-    """The failed row's one-liner, masked and bounded; None when there is none."""
-    from utils.credential_sanitizer import sanitize_text
-    text = _WS_RE.sub(" ", sanitize_text(str(error_summary or ""))).strip()
-    if not text:
-        return None
-    return text if len(text) <= ERROR_MAX else text[: ERROR_MAX - 1].rstrip() + "…"
 
 
 # ----------------------------------------------------------- activity (#620)
@@ -323,9 +315,16 @@ def _project(row: dict, *, email: str, roster: set, turn_timeout: int,
         can_stop=can_stop(kind, status, mine=mine, on_roster=on_roster, stale=stale),
         delegated_by=mask(row.get("source_agent_name"), roster),
         loop_id=row.get("loop_id") if kind == "loop" else None,
-        error=clean_error(row.get("error_summary") or row.get("error")) if status in ("failed", "error") else None,
+        # #4482: never the row's error — it carries the subscription walk trail.
+        error=_person_safe_error(row) if status in ("failed", "error") else None,
         steps=None,
     )
+
+
+def _person_safe_error(row: dict) -> str:
+    text = person_safe_failure("failed", row.get("error_summary") or row.get("error"))
+    # A passed-through refusal can be long; the card is a bounded layout.
+    return text if len(text) <= ERROR_MAX else text[: ERROR_MAX - 1].rstrip() + "…"
 
 
 def _resolve_timeout(agent_name: Optional[str]) -> int:
@@ -452,6 +451,18 @@ async def get_work(email: str, names: List[str], chat_id: Optional[str] = None) 
             timeouts[key] = _resolve_timeout(agent)
         return timeouts[key]
 
+    # #4672: one read for every agent's turn timeout, not one per agent the
+    # rows name (this is polled every 12 s while anything is live). The
+    # per-agent resolver is unchanged; it finds the answer already read.
+    ledger = list(running_rows) + list(queued_rows) + list(children) + list(recent_rows)
+    with request_memo.scope():
+        try:
+            core_db.get_execution_timeouts([r.get("agent_name") for r in ledger])
+        except Exception:  # noqa: BLE001 — a failed warm-up falls back to per-agent reads
+            logger.warning("[#4672] work: timeout prefetch failed", exc_info=True)
+        for row in ledger:
+            timeout_for(row.get("agent_name"))
+
     # Now: the participants' in-flight rows, plus the chat's children (a child
     # may live on an agent outside the roster — it is still a step, unnamed).
     seen = set()
@@ -558,13 +569,25 @@ async def get_work_activity(email: str, names: List[str]) -> PortalWorkActivity:
     now = datetime.now(timezone.utc)
     items: Dict[str, WorkActivity] = {}
     own = _own_rows(email) if agents else None
-    for agent, by_id in _activity_by_agent(agents).items():
-        for eid, entry in by_id.items():
-            # ent#875: a shared agent's beat lists every running turn; a line is
-            # returned only for a turn that is the viewer's (owned agents: all).
-            if agent not in own["own_rows_exempt_agents"] and not _execution_is_viewers(eid, agent, own):
-                continue
-            cleaned = clean_activity(entry, roster, now=now)
-            if cleaned is not None:
-                items[str(eid)] = cleaned
+    activity = _activity_by_agent(agents)
+    # #4672: this is polled every few seconds while a card is live. The
+    # executions on agents that are only SHARED with the viewer are read in one
+    # query; `_execution_is_viewers` then decides each, exactly as before.
+    with request_memo.scope():
+        narrowed = [eid for agent, by_id in activity.items()
+                    if agent not in own["own_rows_exempt_agents"] for eid in by_id]
+        if narrowed:
+            try:
+                core_db.get_executions_by_ids(narrowed)
+            except Exception:  # noqa: BLE001 — falls back to per-execution reads, which fail closed
+                logger.warning("[#4672] work activity: execution prefetch failed", exc_info=True)
+        for agent, by_id in activity.items():
+            for eid, entry in by_id.items():
+                # ent#875: a shared agent's beat lists every running turn; a line is
+                # returned only for a turn that is the viewer's (owned agents: all).
+                if agent not in own["own_rows_exempt_agents"] and not _execution_is_viewers(eid, agent, own):
+                    continue
+                cleaned = clean_activity(entry, roster, now=now)
+                if cleaned is not None:
+                    items[str(eid)] = cleaned
     return PortalWorkActivity(agents=agents, items=items)

@@ -115,6 +115,15 @@ export const useProjectsStore = defineStore('projects', () => {
       _keepStewardOutcome(id, out?.data)
       return out
     })
+  // ent#1235: a person starts and stops the project (P11); the mode is a PATCH.
+  const startProject = (id) => _write(id, () => portalHttp.post(url(id, '/start'), {}, { headers: headers() }))
+  // ent#1234: answer an agent's request waiting on me (the kickoff plan) through
+  // the one Workspace ask endpoint the Inbox uses, then re-read the project — an
+  // approved plan's milestones and tasks are the server's, never built here.
+  const answerProposal = (id, askId, response, reason = null) =>
+    _write(id, () => useClientPortalStore().answerAsk(askId, { response, responseText: reason }))
+  const stopProject = (id) => _write(id, () => portalHttp.post(url(id, '/stop'), {}, { headers: headers() }))
+  const setMode = (id, mode) => update(id, { mode })
   const setArchived = (id, archived) =>
     _write(id, () => portalHttp.post(url(id, archived ? '/archive' : '/restore'), {}, { headers: headers() }))
   const addMember = (id, email) =>
@@ -144,14 +153,34 @@ export const useProjectsStore = defineStore('projects', () => {
   const tasks = ref({})    // id → { rows, loaded, error }
   const logs = ref({})     // id → { rows, loaded, error }
 
+  // trinity-enterprise#957: the tasks are now polled, so two reads of one
+  // project can be in flight at once. Only the NEWEST one writes — on success
+  // and on failure alike, or a slow old read (or its error) lands on top of
+  // rows a later read already proved fresh. Counted per project.
+  const _tasksSeq = {}
+
   async function fetchTasks(id) {
-    const prev = tasks.value[id] || { rows: [], loaded: false, error: null }
+    const seq = (_tasksSeq[id] = (_tasksSeq[id] || 0) + 1)
     try {
       const { data } = await portalHttp.get(url(id, '/tasks'), { headers: headers(), params: { status: 'all' } })
-      tasks.value = { ...tasks.value, [id]: { rows: data.tasks || [], loaded: true, error: null } }
+      if (seq !== _tasksSeq[id]) return
+      tasks.value = { ...tasks.value, [id]: { rows: data.tasks || [], loaded: true, error: null, errorStatus: null } }
     } catch (err) {
-      tasks.value = { ...tasks.value, [id]: { ...prev, error: projectErrorMessage(err) } }
+      if (seq !== _tasksSeq[id]) return
+      const prev = tasks.value[id] || { rows: [], loaded: false, error: null }
+      tasks.value = { ...tasks.value, [id]: { ...prev, error: projectErrorMessage(err), errorStatus: err?.response?.status || null } }
     }
+  }
+
+  // The server's answer to a write IS the task: put it in the rows at once, so
+  // a saved change never reads as unsaved while (or if) the re-read fails.
+  function _mergeTask(id, task) {
+    const cur = tasks.value[id]
+    if (!cur || !task || !task.id) return
+    const rows = cur.rows.some((r) => r.id === task.id)
+      ? cur.rows.map((r) => (r.id === task.id ? { ...r, ...task } : r))
+      : [...cur.rows, task]
+    tasks.value = { ...tasks.value, [id]: { ...cur, rows } }
   }
 
   async function fetchTask(id, taskId) {
@@ -159,20 +188,64 @@ export const useProjectsStore = defineStore('projects', () => {
     return data
   }
 
+  // trinity-enterprise#1233: a task write moves its milestone's counts and state,
+  // so a page that shows milestones is re-read in the background (data kept).
+  function _refreshMilestones(id) {
+    if (pageState(id).data?.milestones?.length) void fetchProject(id)
+  }
+
   async function createTask(id, body) {
     const { data } = await portalHttp.post(url(id, '/tasks'), body, { headers: headers() })
     await Promise.all([fetchTasks(id), fetchLog(id)])
+    _refreshMilestones(id)
     return data
   }
 
   async function updateTask(id, taskId, body) {
     const { data } = await portalHttp.patch(url(id, `/tasks/${encodeURIComponent(taskId)}`), body, { headers: headers() })
+    _mergeTask(id, data)
     await Promise.all([fetchTasks(id), fetchLog(id)])
+    _refreshMilestones(id)
+    return data
+  }
+
+  // A board move (trinity-enterprise#957): the status, answered as soon as
+  // the server has it. The re-reads reconcile in the background — a card does
+  // not stay "Saving…" for the length of a log read it does not need.
+  // `note` rides along when the move needs its reason on record (Done without a
+  // wait for verification): it lands in the task's log beside the status change.
+  async function moveTask(id, taskId, status, note = '') {
+    const body = note ? { status, note } : { status }
+    const { data } = await portalHttp.patch(url(id, `/tasks/${encodeURIComponent(taskId)}`), body, { headers: headers() })
+    _mergeTask(id, data)
+    void Promise.all([fetchTasks(id), fetchLog(id)])
+    _refreshMilestones(id)
     return data
   }
 
   async function addTaskNote(id, taskId, body) {
     await portalHttp.post(url(id, `/tasks/${encodeURIComponent(taskId)}/log`), { body }, { headers: headers() })
+  }
+
+  // trinity-enterprise#1240: the GitHub issues and PRs a task's work happens in.
+  // The answer is the task's full ref list; the row in the list follows it.
+  function _setTaskRefs(id, taskId, refs) {
+    const st = tasks.value[id]
+    if (!st) return
+    const rows = st.rows.map((t) => (t.id === taskId ? { ...t, refs } : t))
+    tasks.value = { ...tasks.value, [id]: { ...st, rows } }
+  }
+
+  async function addTaskRefs(id, taskId, refs) {
+    const { data } = await portalHttp.post(url(id, `/tasks/${encodeURIComponent(taskId)}/refs`), { refs }, { headers: headers() })
+    _setTaskRefs(id, taskId, data.refs || [])
+    return data
+  }
+
+  async function removeTaskRef(id, taskId, refId) {
+    await portalHttp.delete(url(id, `/tasks/${encodeURIComponent(taskId)}/refs/${encodeURIComponent(refId)}`), { headers: headers() })
+    const row = (tasks.value[id]?.rows || []).find((t) => t.id === taskId)
+    if (row) _setTaskRefs(id, taskId, (row.refs || []).filter((r) => r.id !== refId))
   }
 
   async function fetchLog(id) {
@@ -235,6 +308,13 @@ export const useProjectsStore = defineStore('projects', () => {
     return data
   }
 
+  // ent#1163 — a GitHub epic becomes a project, once (its sub-issues the tasks).
+  async function importEpic(epic) {
+    const { data } = await portalHttp.post(`${BASE}/import/epic`, { epic: String(epic || '').trim() }, { headers: headers() })
+    void fetchList()
+    return data
+  }
+
   // --- v3: health, linked metrics, the steward digest --------------------------------
   const setHealth = (id, state, note) =>
     _write(id, () => portalHttp.post(url(id, '/health'), { state, note }, { headers: headers() }))
@@ -255,6 +335,12 @@ export const useProjectsStore = defineStore('projects', () => {
     _write(id, () => portalHttp.post(url(id, '/steward-access/request'), {}, { headers: headers() }))
   const grantStewardAccess = (id, email) =>
     _write(id, () => portalHttp.post(url(id, '/steward-access/grant'), { email }, { headers: headers() }))
+  // trinity-enterprise#1236: a person starts or pauses Trinity waking the agent
+  // steward. Through `_write`, so the card re-reads its `wake` block.
+  const startStewardWake = (id) =>
+    _write(id, () => portalHttp.post(url(id, '/steward/resume'), {}, { headers: headers() }))
+  const pauseStewardWake = (id) =>
+    _write(id, () => portalHttp.post(url(id, '/steward/pause'), {}, { headers: headers() }))
 
   // --- ent#1193: context — briefs prepared for the project's agents ------------------
   // Writes go through `_write`, so the page read (its `context` list) refreshes.
@@ -284,10 +370,36 @@ export const useProjectsStore = defineStore('projects', () => {
     return data
   }
 
-  async function metricOptions(id) {
-    const { data } = await portalHttp.get(url(id, '/metric-options'), { headers: headers() })
+  // ent#1235: the proposed runs waiting for a person's go, and the batch decision.
+  // Each id is decided on its own; the answer is one outcome per id.
+  async function fetchRunsWaiting(id) {
+    const { data } = await portalHttp.get(url(id, '/runs/waiting'), { headers: headers() })
+    return data.runs || []
+  }
+  async function decideRuns(id, verb, ids, note = null) {
+    const { data } = await portalHttp.post(url(id, `/runs/${verb === 'decline' ? 'decline' : 'approve'}`),
+      { ids, ...(note ? { note } : {}) }, { headers: headers() })
+    void fetchTasks(id)
+    return data.results || []
+  }
+
+  // `all` (trinity-enterprise#1233): metrics already on the Metrics card too — a milestone target's picker.
+  async function metricOptions(id, { all = false } = {}) {
+    const { data } = await portalHttp.get(url(id, '/metric-options'),
+      all ? { headers: headers(), params: { all: true } } : { headers: headers() })
     return data.agents || []
   }
+
+  // --- trinity-enterprise#1233: the goal as milestones (a person with edit rights) ----
+  const milestoneUrl = (id, mid, tail = '') => url(id, `/milestones/${encodeURIComponent(mid)}${tail}`)
+  const createMilestone = (id, body) =>
+    _write(id, async () => (await portalHttp.post(url(id, '/milestones'), body, { headers: headers() })).data)
+  const updateMilestone = (id, mid, body) =>
+    _write(id, async () => (await portalHttp.patch(milestoneUrl(id, mid), body, { headers: headers() })).data)
+  const deleteMilestone = (id, mid) =>
+    _write(id, () => portalHttp.delete(milestoneUrl(id, mid), { headers: headers() }))
+  const setMilestoneTargets = (id, mid, targets) =>
+    _write(id, async () => (await portalHttp.put(milestoneUrl(id, mid, '/targets'), { targets }, { headers: headers() })).data)
 
   // trinity-enterprise#1155 — the person fields' scoped reads (one people search).
   async function fetchProjectPeople(id, q, purpose) {
@@ -319,16 +431,46 @@ export const useProjectsStore = defineStore('projects', () => {
     }
   }
 
+  // ent#1105: a project's runs. Keyed by project; `filters` is what the rows
+  // were fetched with, so a filter change replaces them and "Load more"
+  // (`{ more: true }`) appends the next page via `next_cursor`. A failed
+  // refetch keeps what is on screen and sets `error` (stale, never empty).
+  const runs = ref({})     // id → { rows, totals, window, retention_days, next_cursor, filters, loaded, loading, error }
+
+  async function fetchRuns(id, filters = {}, { more = false } = {}) {
+    const prev = runs.value[id] || { rows: [], totals: null, next_cursor: null, filters: {}, loaded: false, loading: false, error: null }
+    const params = {}
+    for (const [k, v] of Object.entries(filters)) {
+      if (v !== undefined && v !== null && v !== '') params[k] = v
+    }
+    if (more && prev.next_cursor) params.cursor = prev.next_cursor
+    runs.value = { ...runs.value, [id]: { ...prev, loading: true } }
+    try {
+      const { data } = await portalHttp.get(url(id, '/executions'), { headers: headers(), params })
+      const rows = more ? [...prev.rows, ...(data.rows || [])] : (data.rows || [])
+      runs.value = { ...runs.value, [id]: {
+        rows, totals: data.totals || null, window: data.window || null,
+        retention_days: data.retention_days ?? null, next_cursor: data.next_cursor || null,
+        filters: { ...filters }, loaded: true, loading: false, error: null,
+      } }
+    } catch (err) {
+      runs.value = { ...runs.value, [id]: { ...prev, loading: false, error: projectErrorMessage(err) } }
+    }
+  }
+
   return {
     list, listLoaded, listLoading, listError, stewardOutcomes,
     fetchList, pageState, fetchProject, forLink, fetchForLink,
-    create, update, setArchived, addMember, removeMember, addAgent, removeAgent, link, unlink,
-    tasks, logs, fetchTasks, fetchTask, createTask, updateTask, addTaskNote, fetchLog, addLogEntry,
-    addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject,
+    create, update, setArchived, startProject, stopProject, answerProposal, setMode, fetchRunsWaiting, decideRuns, addMember, removeMember, addAgent, removeAgent, link, unlink,
+    tasks, logs, fetchTasks, fetchTask, createTask, updateTask, moveTask, addTaskNote, fetchLog, addLogEntry,
+    addTaskRefs, removeTaskRef,
+    addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject, importEpic,
     setHealth, linkMetric, unlinkMetric, metricOptions, stewarding, fetchStewarding,
-    requestStewardAccess, grantStewardAccess, requestToJoin, requestAgent,
+    createMilestone, updateMilestone, deleteMilestone, setMilestoneTargets,
+    requestStewardAccess, grantStewardAccess, startStewardWake, pauseStewardWake, requestToJoin, requestAgent,
     startPreview, startTask,
     writeContext, readContext, updateContext, deleteContext, markItemForAgents,
     fetchProjectPeople, fetchCompanyPeople, fetchStewardOptions,
+    runs, fetchRuns,
   }
 })

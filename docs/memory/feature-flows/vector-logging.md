@@ -12,7 +12,7 @@ As a platform operator, I want all container logs automatically captured and org
 
 - **Infrastructure**: Automatic - Vector captures all Docker container logs via Docker socket
 - **Query**: CLI via `docker exec trinity-vector` with `jq`/`grep`
-- **Health**: `GET http://localhost:8686/health` (Vector API)
+- **Health**: `docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health` (Vector's API listens on its container's loopback and is not published; trinity-enterprise#1314)
 - **Admin API**: `GET /api/logs/stats`, `GET /api/logs/retention`, `POST /api/logs/archive`
 
 ## Architecture
@@ -221,8 +221,7 @@ vector:
     - /var/run/docker.sock:/var/run/docker.sock:ro
     - ./config/vector.yaml:/etc/vector/vector.yaml:ro
     - trinity-logs:/data/logs
-  ports:
-    - "8686:8686"  # Vector API (health checks)
+  # No `ports:` — the API is for the container's own healthcheck only
   networks:
     - trinity-network
   security_opt:
@@ -348,10 +347,10 @@ docker exec trinity-vector cat /data/logs/platform-2026-01-20.json | tail -100 |
 
 ```bash
 # Vector health
-curl http://localhost:8686/health
+docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health
 
 # Vector topology
-curl http://localhost:8686/api/v1/topology
+docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/api/v1/topology
 ```
 
 ## Log Retention & Archival
@@ -705,7 +704,7 @@ docker exec trinity-vector sh -c "echo '' > /data/logs/agents-$TODAY.json"
    - Verify: `docker exec trinity-vector sh -c "grep trinity-backend /data/logs/platform-$(date +%Y-%m-%d).json | tail -1" | jq '.parsed'`
 
 6. **Verify Health Endpoint**
-   - Action: `curl http://localhost:8686/health`
+   - Action: `docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health`
    - Expected: Returns health status
    - Verify: Non-error HTTP response
 

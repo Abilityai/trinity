@@ -237,6 +237,11 @@ class Schedule(BaseModel):
     webhook_secret_encrypted: Optional[str] = None
     # ent#498: the Workspace delivery target. Nullable on every existing row.
     deliver_to_workspace_email: Optional[str] = None
+    # ent#1391: who each run's result is mailed to (their id; the address is
+    # read from their account at each send), and why the last mail did not go.
+    email_results_user_id: Optional[int] = None
+    email_results_error: Optional[str] = None
+    email_results_error_at: Optional[str] = None
 
 
 class ScheduleExecution(BaseModel):
@@ -318,6 +323,9 @@ class ScheduleExecution(BaseModel):
     # ent#862 — verified AAuth peer identity of an inbound A2A caller
     # (`aauth:<local>@<host>`); None for bearer/non-A2A rows.
     a2a_caller_identity: Optional[str] = None
+    # ent#1225 — the platform-recorded turn this row continues (a wake, an ask
+    # resume or ending, a gate notice; a delegated callee's caller turn).
+    continues_execution_id: Optional[str] = None
 
 
 # =========================================================================
@@ -765,7 +773,8 @@ class EmailWhitelistAdd(BaseModel):
 
 class EmailLoginRequest(BaseModel):
     """Request a login code via email."""
-    email: str
+    # ent#1253: bounded before the per-address limiter is charged (RFC 5321 path limit).
+    email: str = Field(max_length=254)
 
 
 class EmailLoginVerify(BaseModel):

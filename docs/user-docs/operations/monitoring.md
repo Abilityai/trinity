@@ -30,12 +30,27 @@ Multi-layer health monitoring for the agent fleet with real-time alerts, automat
 
 Fleet health lives on the **Health** tab of the [Operations page](operating-room.md) (`/operations?tab=health`). The tab is admin-only — non-admin users do not see it, and deep links to `?tab=health` fall back to the default tab. The legacy `/monitoring` route redirects there.
 
-The tab shows summary cards (Total Agents, Healthy, Degraded, Unhealthy, Critical), active alerts, and a per-agent health list with a status filter. Admins can trigger a fleet-wide check with **Check All** or a single-agent check from each row.
+The tab shows summary cards (Total Agents, Healthy, Degraded, Unhealthy, Critical), active alerts, and a per-agent health list with a status filter. The cards always add up to the total: an agent with no health reading counts as `unknown`. A reading older than three check intervals (90 seconds by default, `stale_after_seconds` on the API) also reads `unknown`, and its issues lead with its age and last status, plus *monitoring is off* when the loop is stopped, so old readings are never shown as `healthy`. Admins can trigger a fleet-wide check with **Check All** or a single-agent check from each row.
 
 - **Active Alerts** lists every alert its header counts. A long list scrolls inside the panel (about five rows tall, reachable from the keyboard) instead of growing the page.
 - An agent whose transport circuit breaker is not closed carries a **Breaker open** or **Breaker dormant** badge on its row, with the number of failed connection attempts. Open means the agent is not answering and requests fail fast until a probe succeeds; dormant means the platform has stopped probing it after too many failed probes — run a health check on the agent to reset it. A closed breaker shows nothing.
 - Real-time WebSocket updates push health state changes as they occur.
 - Individual agent health is visible in both the agent header and the Agents listing page.
+
+### Guardrails card
+
+Below the health list, the **Guardrails (24 h)** card counts what the agents' [guardrail hooks](../agents/agent-guardrails.md#guardrail-events) refused or hid in the last 24 hours: the total, and one badge per kind (for example *Refused* or *Credential hidden*). It refreshes with the rest of the tab.
+
+The card never treats silence as good news. It says "No guardrail events in the last 24 h" only when at least one agent is reporting its guardrail events. When no agent reports, the total shows a dash and the card says why. Agents that cannot report are listed by name, each with its reason:
+
+| What the card says | Meaning |
+|---|---|
+| This agent isn't reporting guardrail events (older image) | No report has ever arrived. The agent runs an image older than the event forwarder. |
+| The system agent doesn't report guardrail events | The built-in system agent runs without a connection back to the platform's event store by design. Nothing to fix. |
+| Not reporting since *time* | The agent reported before and has been silent since (more than 15 minutes). |
+| Guardrail hooks run on the Claude Code runtime only | A Codex or Gemini agent. It has no guardrail hooks, so it can never have an event. |
+
+The card also lists agents that had events, loudest first. Click a name to open that agent's **Settings › Guardrails**, where **Recent events** lists them.
 
 ### Enabling Monitoring
 
@@ -223,6 +238,7 @@ Agents can query monitoring data through these MCP tools:
 | `/api/monitoring/cleanup-status` | GET | Cleanup service status (admin) |
 | `/api/monitoring/cleanup-trigger` | POST | Force a cleanup run (admin) |
 | `/api/agents/{name}/heartbeat` | POST | Agent liveness heartbeat (sent by the agent itself every ~5s) |
+| `/api/ops/guardrail-stats?hours=24` | GET | Guardrail event counts per kind and per agent, each agent's reporting state and coverage. A person only (not an agent, system or ops key). An admin sees every agent; anyone else sees the agents they own. `hours` is 1–2160 |
 
 Full API reference: http://localhost:8000/docs
 

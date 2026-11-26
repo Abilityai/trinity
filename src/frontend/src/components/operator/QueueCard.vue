@@ -148,7 +148,7 @@
            dismissed (p18); the queue's poll never clears it. -->
       <div v-if="notAddressee" class="px-4 pb-3">
         <InlineError
-          :message="store.QUEUE_RESPONSE_NOT_ADDRESSEE"
+          :message="store.notAddresseeText || store.QUEUE_RESPONSE_NOT_ADDRESSEE"
           data-testid="queue-not-addressee-notice"
           @dismiss="store.notAddresseeItemId = null"
         />

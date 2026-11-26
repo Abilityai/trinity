@@ -83,6 +83,42 @@ def get_agent_runtime(name: str) -> str:
         return "claude-code"
 
 
+def get_agent_claude_code_version(name: str) -> Optional[str]:
+    """The Claude Code version the agent's base image was built with, or None
+    (#4757). Read from the ``trinity.claude-code-version`` image label, which
+    Docker merges into the container's labels; an image built before the label
+    existed carries none. Never raises — None means "not proven"."""
+    container = get_agent_container(name)
+    if container is None:
+        return None
+    try:
+        return container.labels.get("trinity.claude-code-version") or None
+    except Exception:
+        return None
+
+
+def read_runtime_model(name: str) -> Optional[str]:
+    """The container's ``AGENT_RUNTIME_MODEL`` (its template's ``runtime.model``),
+    or None (#4442). Running or stopped; blocking, so call it off the loop.
+
+    Only that one key is taken. The env also holds credentials, so neither the
+    env nor ``attrs`` is returned or logged, and a failure logs its type only
+    (a traceback can carry ``attrs``).
+    """
+    try:
+        container = get_agent_container(name)
+        if container is None:
+            return None
+        env = ((container.attrs or {}).get("Config") or {}).get("Env") or []
+    except Exception as e:  # noqa: BLE001 — no exc_info, see above
+        logger.warning("could not read %s's runtime model: %s", name, type(e).__name__)
+        return None
+    for item in env:
+        if isinstance(item, str) and item.startswith("AGENT_RUNTIME_MODEL="):
+            return item.partition("=")[2].strip() or None
+    return None
+
+
 def kind_from_labels(labels) -> Optional[str]:
     """trinity-enterprise#1007: the create-time kind from `trinity.kind`.
 

@@ -73,6 +73,7 @@ from typing import Any, Optional
 
 from database import db
 from db.loops import TERMINAL_STATUSES as _LOOP_TERMINAL_STATUSES
+from services import execution_attribution  # ent#1105
 from services.runtime_secret_scrub import get_staged_values, scrub_text
 from services.skill_gate_errors import SkillGateError
 from services.task_execution_service import get_task_execution_service
@@ -892,6 +893,9 @@ class LoopService:
             )
             return False
 
+        # ent#1105: an edition may attribute the iteration from its row. The
+        # loop record carries no project, so there is nothing to inherit here.
+        execution_attribution.record_row(execution)
         if db.start_loop_run(loop_id, run_number, execution_id=execution.id) is None:
             await self._abandon_superseded_dispatch(loop_id, run_number, execution.id)
             return False

@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { useClientPortalStore } from './clientPortal'
 import { WORK_POLL_MS, liveItems } from '../components/portal/portalWork'
 import { ACTIVITY_POLL_MS } from '../utils/workActivity'
+import { markChanged } from '../utils/inflight'
 
 /**
  * The Workspace rail's Work feed (trinity-enterprise#525): what a chat's
@@ -132,6 +133,10 @@ export const usePortalWorkStore = defineStore('portalWork', () => {
   async function refresh() {
     const names = participants.value
     if (!names.length) return
+    // #4671: this read answers whatever a pending push-driven one was waiting
+    // to ask — it is issued AFTER the push arrived. Without the cancel a turn
+    // end read the feed here and again 2 s later from the debounce.
+    if (_debounceTimer) { clearTimeout(_debounceTimer); _debounceTimer = null }
     const portal = useClientPortalStore()
     const token = ++_fetchToken
     loading.value = true
@@ -208,7 +213,12 @@ export const usePortalWorkStore = defineStore('portalWork', () => {
     if (!name || !participants.value.includes(name)) return
     const isLoop = data.type === 'loop_run_completed' || data.type === 'loop_completed'
     const isActivity = data.type === 'agent_activity'
-    if (isLoop || isActivity) scheduleRefresh()
+    if (isLoop || isActivity) {
+      // #4671: a push IS a change — the read it schedules (or any read issued
+      // from here on) must not join one that left before it.
+      markChanged()
+      scheduleRefresh()
+    }
   }
 
   function clear() {

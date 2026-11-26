@@ -48,9 +48,12 @@ services:
       - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}  # For Gemini-powered agents
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}  # OpenCode agents: OpenRouter key fallback (Settings takes precedence)
+      - OPENCODE_DEFAULT_PROVIDER_BASE_URL=${OPENCODE_DEFAULT_PROVIDER_BASE_URL:-}  # OpenCode agents: default provider (Ollama) root URL fallback
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # For platform image generation (IMG-001)
       # Gemini model overrides (#1130) — non-empty defaults so an unset var doesn't inject "" (#1076)
       - GEMINI_TEXT_MODEL=${GEMINI_TEXT_MODEL:-gemini-3.5-flash}              # image-gen prompt refinement
+      - GEMINI_IMAGE_MODEL=${GEMINI_IMAGE_MODEL:-gemini-nano-banana-2.1}              # image-gen model
       - GEMINI_TRANSCRIPTION_MODEL=${GEMINI_TRANSCRIPTION_MODEL:-gemini-3.5-flash}  # Telegram voice transcription
       - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.8-live}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
@@ -234,6 +237,9 @@ services:
       - OTEL_METRIC_EXPORT_INTERVAL=${OTEL_METRIC_EXPORT_INTERVAL:-60000}
       # Email Service Configuration (for public link verification)
       - EMAIL_PROVIDER=${EMAIL_PROVIDER:-resend}
+      # Development only: print mail bodies in console mode (see .env.example).
+      # This file is the only compose stack that passes it through.
+      - EMAIL_CONSOLE_LOG_BODY=${EMAIL_CONSOLE_LOG_BODY:-}
       - RESEND_API_KEY=${RESEND_API_KEY:-}
       - SMTP_FROM=${SMTP_FROM:-noreply@trinity.example.com}
       # SMTP transport (EMAIL_PROVIDER=smtp) — read by src/backend/config.py (#771)
@@ -272,6 +278,13 @@ services:
       - TRINITY_ALLOW_SQLITE=${TRINITY_ALLOW_SQLITE:-}
       - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
       - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
+      # #4671 / #4674: the event-loop probe (services/loop_health.py). A loop
+      # blocked past the stall threshold is logged with the worker pid and the
+      # blocking stack; a background cycle slower than the tick threshold is
+      # named. Defaults are in the module.
+      - EVENT_LOOP_PROBE_ENABLED=${EVENT_LOOP_PROBE_ENABLED:-true}
+      - EVENT_LOOP_STALL_THRESHOLD_MS=${EVENT_LOOP_STALL_THRESHOLD_MS:-150}
+      - LOOP_TICK_WARN_MS=${LOOP_TICK_WARN_MS:-250}
       # Credential Encryption
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:-}
       - CREDENTIAL_ENCRYPTION_KEY_SECONDARY=${CREDENTIAL_ENCRYPTION_KEY_SECONDARY:-}  # #267 rotation fallback
@@ -303,6 +316,11 @@ services:
       - ALLOW_PDF_UPLOADS=${ALLOW_PDF_UPLOADS:-false}
       - OPERATOR_INTAKE_ENABLED=${OPERATOR_INTAKE_ENABLED:-true}
       - DO_NOT_TRACK=${DO_NOT_TRACK:-0}
+      # #4499: the help widget's report intake and the docs Q&A service (the Ask
+      # tab and the `ask_trinity` MCP tool), switched at run time. DO_NOT_TRACK
+      # turns both off. The frontend and the MCP server read the same variables.
+      - BUG_REPORTING_ENABLED=${BUG_REPORTING_ENABLED:-true}
+      - ASK_TRINITY_ENABLED=${ASK_TRINITY_ENABLED:-true}
       - OPERATOR_INTAKE_URL=${OPERATOR_INTAKE_URL:-https://intake.abilityai.dev/v1/operator-intake}
       # Tier-2 opt-in fleet telemetry sharing (ent#12): consent-gated aggregate
       # egress. TELEMETRY_SHARING_ENABLED=false is the hard kill switch
@@ -671,6 +689,9 @@ services:
       # unreachable value to effectively disable the tool (it degrades to a
       # structured error, never a crash).
       - ASK_TRINITY_ENDPOINT=${ASK_TRINITY_ENDPOINT:-}
+      # #4499: off (or DO_NOT_TRACK set) = `ask_trinity` is not registered.
+      - ASK_TRINITY_ENABLED=${ASK_TRINITY_ENABLED:-true}
+      - DO_NOT_TRACK=${DO_NOT_TRACK:-0}
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}  # SEC-001: for audit logging to backend
     depends_on:
       - backend
@@ -793,8 +814,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./config/vector.yaml:/etc/vector/vector.yaml:ro
       - trinity-logs:/data/logs
-    ports:
-      - "8686:8686"  # Vector API (health checks)
+    # No published port. The API (the health endpoint) is for this
+    # container alone: the healthcheck below asks it over the container's own
+    # loopback, and `config/vector.yaml` binds it there. Nothing else needs it.
     networks:
       - trinity-platform   # Vector reads via Docker socket, not network — platform side
     security_opt:
@@ -830,16 +852,21 @@ services:
     container_name: trinity-otel-collector
     logging: *default-logging
     restart: unless-stopped
-    ports:
-      - "4317:4317"   # gRPC receiver (OTLP)
-      - "4318:4318"   # HTTP receiver (OTLP)
-      - "8889:8889"   # Prometheus metrics exporter
-      - "13133:13133" # Health check endpoint
+    # No published ports. Agents push OTLP to `trinity-otel-collector:4317`
+    # by Docker DNS on the agent network; nothing goes through the host.
     volumes:
       - ./config/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
     networks:
-      - trinity-platform
-      - trinity-agent      # Agents push metrics directly to the collector
+      # The alias exists on the platform network only, and it is what the
+      # Prometheus exporter listens on (config/otel-collector.yaml). So the
+      # read side, which carries fleet-wide usage data, is on the network
+      # agents are not on, and the backend reads it there as
+      # `trinity-otel-metrics:8889`. The container name resolves on both
+      # networks and must not be used for the read.
+      trinity-platform:
+        aliases:
+          - trinity-otel-metrics
+      trinity-agent: {}    # Agents push metrics directly to the collector
     labels:
       - "trinity.platform=infrastructure"
       - "trinity.service=otel-collector"

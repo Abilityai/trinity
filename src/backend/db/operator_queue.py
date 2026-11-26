@@ -26,6 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from .engine import get_engine, make_insert
 from .tables import operator_queue
 from .queue_mentions import not_a_tag_clause
+from utils import request_memo
 from utils.helpers import utc_now_iso, iso_cutoff, parse_iso_timestamp, to_utc_iso
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,20 @@ _TIMEOUT_REASON = case(
 # an agent row that merely names its type `mention` stays an ordinary, listed
 # ask. NULL-safe: a row with no type is a legacy agent row and stays listed.
 _NOT_A_MENTION = not_a_tag_clause()
+
+
+def _address_conds(expect: Optional[Dict]) -> list:
+    """trinity-enterprise#1096: the extra compare-and-set clauses an ending
+    takes when it decided on the row's address — each stored column equal to
+    the raw text the caller read (NULL as NULL). Nothing when `expect` is None."""
+    if expect is None:
+        return []
+    conds = []
+    for key in ("addressed_to_email", "resolved_to", "context"):
+        if key in expect:
+            col, raw = getattr(operator_queue.c, key), expect[key]
+            conds.append(col.is_(None) if raw is None else col == raw)
+    return conds
 
 
 def _own_pending_conds(agent_name: str, exclude_request_id_prefixes=None) -> list:
@@ -798,6 +813,27 @@ class OperatorQueueOperations:
             row = self._find_pending_by_subject(conn, agent_name, subject)
         return self._row_to_item(row) if row else None
 
+    def list_pending_by_subject_prefix(self, subject_prefix: str) -> List[Dict]:
+        """Every pending row whose `subject` starts with `subject_prefix`, any
+        agent (#4635) — a platform emitter's view of its own open alerts, e.g.
+        `"dispatch_queue_stalled:"`. Platform-internal: never route-exposed.
+
+        Matched with `substr`, which is exact and case-sensitive on SQLite and
+        PostgreSQL alike; a LIKE pattern would treat each `_` as a wildcard and,
+        on SQLite, ignore case. No limit: the partial unique index keeps one
+        pending row per subject, so a kind's prefix returns at most one row per
+        key. (The stall monitor's reconcile used to read 1,000 pending rows of
+        every kind and filter them here in Python, which missed its own rows on
+        a busy queue.)"""
+        stmt = select(*self._SELECT_COLS).where(and_(
+            operator_queue.c.status == "pending",
+            operator_queue.c.subject.isnot(None),
+            func.substr(operator_queue.c.subject, 1, len(subject_prefix)) == subject_prefix,
+        ))
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_item(r) for r in rows]
+
     def _find_pending_by_subject(self, conn, agent_name: str, subject: str):
         return conn.execute(
             select(*self._SELECT_COLS).where(and_(
@@ -1030,6 +1066,7 @@ class OperatorQueueOperations:
         _note_commit_lag(now)
         return {"batch_id": batch_id, "rows": [self._row_to_item(r) for r in rows]}
 
+    @request_memo.memoized_method
     def get_item(self, item_id: str) -> Optional[Dict]:
         """Get a single queue item by ID."""
         stmt = select(*self._SELECT_COLS).where(operator_queue.c.id == item_id)
@@ -1039,6 +1076,24 @@ class OperatorQueueOperations:
         if not row:
             return None
         return self._row_to_item(row)
+
+    def get_items(self, item_ids) -> Dict[str, Optional[Dict]]:
+        """`{id: item or None}` in ONE query (#4671) — the batch form of
+        `get_item`. Inside a `request_memo.scope()` it also answers the per-id
+        read for the rest of the scope, so a list resolves the asks its rows
+        link to (`replaces` / `replaced_by`) once instead of per row."""
+        ids = [i for i in dict.fromkeys(item_ids or []) if isinstance(i, str) and i]
+        found: Dict[str, Dict] = {}
+        if ids:
+            stmt = select(*self._SELECT_COLS).where(operator_queue.c.id.in_(ids))
+            with get_engine().connect() as conn:
+                for row in conn.execute(stmt).mappings():
+                    item = self._row_to_item(row)
+                    found[item["id"]] = item
+        out = {i: found.get(i) for i in ids}
+        for item_id, item in out.items():
+            self.get_item.prime(item_id, value=item)
+        return out
 
     def get_item_for_agent_by_request_id(self, agent_name: str, request_id: str) -> Optional[Dict]:
         """One agent's ask by the id the AGENT chose (trinity-enterprise#611).
@@ -1695,8 +1750,15 @@ class OperatorQueueOperations:
         responded_by_email: str,
         divergence_acknowledged: bool = False,
         terminal: bool = False,
+        expect_address: Optional[Dict] = None,
     ) -> Optional[Dict]:
         """Record a response to a queue item.
+
+        `expect_address` (trinity-enterprise#1096) — the stored address the
+        caller decided on (`addressed_to_email`, `resolved_to` and, when given,
+        `context`, all raw): the compare-and-set also requires them unchanged,
+        so an answer read before a re-address moved the row loses like any
+        other race (`_status_conflict` with the row still pending).
 
         `terminal` (#2372): the row has no agent audience (a platform-minted
         alert — the caller decides, this layer knows no prefixes), so the
@@ -1743,6 +1805,7 @@ class OperatorQueueOperations:
                             operator_queue.c.expires_at.is_(None),
                             operator_queue.c.expires_at > now,
                         ),
+                        *_address_conds(expect_address),
                     )
                 )
                 .values(
@@ -1789,8 +1852,11 @@ class OperatorQueueOperations:
         disposed_by_email: str,
         reason: Optional[str] = None,
         disposition: str = "cancelled",
+        expect_address: Optional[Dict] = None,
     ) -> Optional[Dict]:
         """Cancel a pending queue item, recording who ended it (trinity-enterprise#611).
+
+        `expect_address` (trinity-enterprise#1096): as `respond_to_item`'s.
 
         `disposition` (trinity-enterprise#748) is `cancelled` (an operator ended
         it) or `dismissed` (the person it was addressed to chose not to answer).
@@ -1813,6 +1879,7 @@ class OperatorQueueOperations:
                     and_(
                         operator_queue.c.id == item_id,
                         operator_queue.c.status == "pending",
+                        *_address_conds(expect_address),
                     )
                 )
                 .values(

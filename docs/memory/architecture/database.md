@@ -144,6 +144,8 @@ Access-control flow (#311): `ChannelAdapter.resolve_verified_email()` maps nativ
 
 **channel_client_blocks** (trinity-enterprise#21 — an owner's per-agent block on one channel client): `id`, `agent_name`, `channel`, `client_id` (the channel-native sender id the router sees), `blocked_at`, `blocked_by_id`, `blocked_by_email`, `reason`; `UNIQUE(agent_name, channel, client_id)`. Read by `message_router` before every other gate step; CASCADE in the agent-cleanup registry.
 
+**guardrail_events** (trinity-enterprise#165, GUARD-005 — one row per guardrail event an agent's own key reported): `id`, `agent_name`, `event_id`, `occurred_at` (agent-reported), `received_at` (server), `kind`, `hook`, `tool`, `code`, `execution_id` (attribution only, **no FK** — execution rows have their own retention), `details` (JSON object of the allowlisted fields); `UNIQUE(agent_name, event_id)` (idempotent resend). Indexes `(agent_name, occurred_at)` (the read), `(execution_id)` (the counts), `(received_at)` (the sweep — keyed on the server clock so an agent-reported far-future time cannot make a row immortal). Dual-track: SQLite `guardrail_events_table` + Alembic `0125_guardrail_events`. CASCADE in the agent-cleanup registry; `guardrail_event_retention_days` (default 90).
+
 **mcp_api_keys:**
 ```sql
 CREATE TABLE mcp_api_keys (
@@ -187,6 +189,11 @@ CREATE TABLE agent_schedules (
     webhook_auth_enabled INTEGER DEFAULT 0,      -- ent#77: gate signature verification in the public trigger
     deliver_to_workspace_email TEXT,             -- ent#498: land this schedule's output in one
                                                 --   person's Main Workspace chat; NULL = no delivery
+    email_results_user_id INTEGER,               -- ent#1391: mail each run's result to this person (set only
+                                                --   by them, via .../email-me); the address is read from their
+                                                --   account at each send; NULL = no mail
+    email_results_error TEXT,                    -- ent#1391: why the last result mail did not go (NULL = it went)
+    email_results_error_at TEXT,
     deleted_at TEXT,                             -- #834: NULL = live; set = soft-deleted
     FOREIGN KEY (owner_id) REFERENCES users(id)
 );

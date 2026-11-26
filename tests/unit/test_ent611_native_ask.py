@@ -417,8 +417,14 @@ class TestRaiseAsk:
             _raise(ask, self.AGENT, _body(f"ra-{role}", to=role))
         assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, f"ra-{role}") is None
 
-    def test_a_provider_that_fills_the_role_addresses_the_person(self, ask):
+    def test_a_provider_that_fills_the_role_addresses_the_person(self, ask, monkeypatch):
+        import client_portal.service as portal_service
         from services import assignment_provider
+
+        # #4501: an approver is recorded only if they can open the agent; this
+        # one has no platform account, so the agent is shared with them.
+        monkeypatch.setattr(portal_service, "agent_on_roster",
+                            lambda agent_name, email, include_owned=True: True)
 
         class _P:
             def assignment_for(self, agent, trig):

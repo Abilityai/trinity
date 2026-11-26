@@ -507,8 +507,8 @@ async def get_agent_health(
         business=business,
         issues=issues,
         recent_alerts=[],  # TODO: Fetch from notifications
-        uptime_percent_24h=round(uptime, 2) if uptime else None,
-        avg_latency_24h_ms=round(avg_latency, 2) if avg_latency else None,
+        uptime_percent_24h=round(uptime, 2) if uptime is not None else None,
+        avg_latency_24h_ms=round(avg_latency, 2) if avg_latency is not None else None,
         circuit_breaker=circuit_breaker,
     )
     detail.metrics = _declared_metrics_block(agent_name)

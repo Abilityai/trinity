@@ -10,7 +10,8 @@ Fix: ``task_execution_service.execute_task()`` resolves ``model=None`` →
 ``settings_service.get_platform_default_model()`` before forwarding to the
 agent. The agent-side fallback in ``headless_executor.py`` and
 ``claude_code.py`` is now a safety-net for direct agent-server calls only and
-uses ``"claude-sonnet-4-6"`` rather than the bare ``"sonnet"`` alias.
+uses a full model id (``DEFAULT_CLAUDE_MODEL``, Sonnet 5.5 since #4757) rather
+than the bare ``"sonnet"`` alias.
 
 These tests are source/AST-level (no backend required) and will catch an
 accidental revert or inadvertent re-introduction of the ``"sonnet"`` bare
@@ -69,10 +70,10 @@ def _func_source(full_src: str, func_node) -> str:
 
 
 class TestSettingsServiceConstants:
-    """PLATFORM_DEFAULT_MODEL_VALUE must equal 'claude-sonnet-4-6'."""
+    """PLATFORM_DEFAULT_MODEL_VALUE must equal 'claude-sonnet-5-5' (#4757)."""
 
     def test_platform_default_model_value_constant(self):
-        """PLATFORM_DEFAULT_MODEL_VALUE must be the full Sonnet 4.6 model ID."""
+        """PLATFORM_DEFAULT_MODEL_VALUE must be the full Sonnet 5.5 model ID (#4757)."""
         tree = _tree(_SETTINGS_SERVICE)
         for node in ast.walk(tree):
             if (
@@ -84,8 +85,8 @@ class TestSettingsServiceConstants:
                 assert isinstance(node.value, ast.Constant), (
                     "PLATFORM_DEFAULT_MODEL_VALUE must be a string literal"
                 )
-                assert node.value.value == "claude-sonnet-4-6", (
-                    f"Expected 'claude-sonnet-4-6', got {node.value.value!r}. "
+                assert node.value.value == "claude-sonnet-5-5", (
+                    f"Expected 'claude-sonnet-5-5', got {node.value.value!r}. "
                     "Changing this default is a breaking change for all null-model schedules."
                 )
                 return
@@ -185,7 +186,7 @@ class TestTaskExecutionServiceModelResolution:
 
 
 class TestHeadlessExecutorFallback:
-    """The safety-net fallback in _setup_headless_command must be 'claude-sonnet-4-6'."""
+    """The safety-net fallback in _setup_headless_command must be a full model id."""
 
     def test_no_bare_sonnet_string_in_setup_command(self):
         """_setup_headless_command must not assign the bare 'sonnet' alias."""
@@ -201,19 +202,24 @@ class TestHeadlessExecutorFallback:
             ):
                 raise AssertionError(
                     "_setup_headless_command() assigns bare 'sonnet' string — "
-                    "the original #831 bug. The safety-net must use 'claude-sonnet-4-6'."
+                    "the original #831 bug. The safety-net must use DEFAULT_CLAUDE_MODEL."
                 )
 
     def test_safety_net_uses_full_model_id(self):
-        """The model=None branch must set 'claude-sonnet-4-6', not a bare alias."""
+        """The model=None branch must set DEFAULT_CLAUDE_MODEL (a full id), not a bare alias.
+
+        The executed proof is test_4757_sonnet_55_default.py
+        (``--model`` in the real argv); this pins the name on top of it.
+        """
         src = _src(_HEADLESS_EXECUTOR)
         tree = ast.parse(src)
         func = _find_function(tree, "_setup_headless_command")
         body = _func_source(src, func)
-        assert "claude-sonnet-4-6" in body, (
-            "_setup_headless_command safety-net must assign 'claude-sonnet-4-6'. "
+        assert "model = DEFAULT_CLAUDE_MODEL" in body, (
+            "_setup_headless_command safety-net must assign DEFAULT_CLAUDE_MODEL. "
             "It appears the fix was reverted."
         )
+        assert 'DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5"' in src
 
 
 # ---------------------------------------------------------------------------
@@ -222,17 +228,17 @@ class TestHeadlessExecutorFallback:
 
 
 class TestClaudeCodeDefaults:
-    """claude_code.py must return 'claude-sonnet-4-6', not 'sonnet'."""
+    """claude_code.py must return a full model id (DEFAULT_CLAUDE_MODEL), not 'sonnet'."""
 
     def test_get_default_model_returns_full_id(self):
-        """AgentState.get_default_model() must return 'claude-sonnet-4-6', not a bare alias."""
+        """get_default_model() must return DEFAULT_CLAUDE_MODEL, not a bare alias."""
         src = _src(_CLAUDE_CODE)
         tree = ast.parse(src)
         func = _find_function(tree, "get_default_model")
         body = _func_source(src, func)
         # Must contain the full model ID
-        assert "claude-sonnet-4-6" in body, (
-            "get_default_model() must return 'claude-sonnet-4-6' (full Anthropic API ID). "
+        assert "return DEFAULT_CLAUDE_MODEL" in body, (
+            "get_default_model() must return DEFAULT_CLAUDE_MODEL (full Anthropic API ID). "
             "The bare 'sonnet' alias is not a valid production model ID."
         )
         # Must NOT return the bare alias
@@ -258,7 +264,7 @@ class TestClaudeCodeDefaults:
             ):
                 raise AssertionError(
                     "execute_claude_code() assigns bare 'sonnet' as model fallback — "
-                    "re-introduces #831 bug. Use 'claude-sonnet-4-6'."
+                    "re-introduces #831 bug. Use DEFAULT_CLAUDE_MODEL."
                 )
 
 

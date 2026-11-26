@@ -6,7 +6,7 @@ Install Trinity, log in as the admin, and meet the starter fleet a fresh install
 
 ## Concepts
 
-- **Admin Account** -- The primary account with full platform access. It is created from `ADMIN_PASSWORD` in `.env` when the backend first starts; the installer (`start.sh`) requires that value, so on a normal install the account exists before you open the browser. `.env` stays the source of truth: every backend start re-applies `ADMIN_PASSWORD`, so to change the admin password edit that line and restart the backend (there is no change-password form in the UI). The exception is a cloud install created without a password — a DigitalOcean Marketplace 1-Click droplet, a Vultr Marketplace server, or an AWS install: it boots with **no admin account**, and the first person to open it in a browser creates one (on AWS, only after proving the instance ID). The admin signs in with the username `admin` (or `ADMIN_USERNAME`) **or** a registered email address, plus the password.
+- **Admin Account** -- The primary account with full platform access. It is created from `ADMIN_PASSWORD` in `.env` when the backend first starts; the installer (`start.sh`) requires that value, so on a normal install the account exists before you open the browser. To change the admin password, use **Settings → General → Password** (see [Changing the admin password](#changing-the-admin-password)); the new password survives restarts. A backend start re-applies `ADMIN_PASSWORD` only when the value in `.env` differs from the one it last applied, so editing that line and recreating the backend still sets a new password or recovers a forgotten one. The exception is a cloud install created without a password — a DigitalOcean Marketplace 1-Click droplet, a Vultr Marketplace server, or an AWS install: it boots with **no admin account**, and the first person to open it in a browser creates one (on AWS, only after proving the instance ID). The admin signs in with the username `admin` (or `ADMIN_USERNAME`) **or** a registered email address, plus the password.
 - **First-run form** -- A one-page "Create your admin account" screen at `/setup` that appears **only on an install with no admin account** — a one-click marketplace or AWS install claimed in the browser, a blank `ADMIN_PASSWORD` brought up without the installer, or a hand-rolled backend. It refuses to run once a usable admin exists, whatever the setup flag says.
 - **Email Login** -- A passwordless authentication method where users receive a one-time code via email. Requires an email service to be configured.
 - **Starter fleet** -- The agents a fresh install seeds for you: the Cornelius second-brain agent plus a three-agent starter team. Nothing to configure; deleting them does not bring them back.
@@ -60,13 +60,15 @@ Install Trinity, log in as the admin, and meet the starter fleet a fresh install
 
 If the backend started with a **blank** `ADMIN_PASSWORD`, every page redirects to a one-page **"Create your admin account"** form at `/setup` until an admin exists. These installs land here:
 
-- **A DigitalOcean droplet created without a password** (the Marketplace 1-Click, or the `trinity-do-create.sh` installer). This is by design: the 1-Click create page has no input form, so the image boots with `ADMIN_PASSWORD` blank and `ADMIN_PASSWORD_SOURCE=browser`, and the droplet's login banner prints the URL to claim it — never a password. A 1-Click droplet you gave a password at create time (cloud-init user-data) has its admin provisioned at boot and never shows the form; that password stays in the droplet's user-data for the droplet's life ([#3942](https://github.com/abilityai/trinity/issues/3942)). A Vultr Marketplace server behaves the same way.
+- **A DigitalOcean droplet created without a password** (the Marketplace 1-Click, or the `trinity-do-create.sh` installer). This is by design: the 1-Click create page has no input form, so the image boots with `ADMIN_PASSWORD` blank and `ADMIN_PASSWORD_SOURCE=browser`, and the droplet's login banner prints the URL to claim it — never a password. A 1-Click droplet you gave a password at create time (cloud-init user-data) has its admin provisioned at boot and never shows the form; that password stays in the droplet's user-data for the droplet's life. A Vultr Marketplace server behaves the same way.
 - **An AWS install created without a password** (`start.sh --provision --cloud aws`, the CloudFormation stack, or the AWS Marketplace AMI). The form also asks for the EC2 instance ID — see **Instance-ID claim** below.
 - **A bare `docker compose up -d` or a hand-rolled backend** brought up with the password blank. The installer does not allow this on a normal install. A hosted compose started by hand with a blank password and no `ADMIN_PASSWORD_SOURCE=browser` marker is refused: set `ADMIN_PASSWORD` in `.env` and restart, or run `./scripts/deploy/start.sh --hosted`.
 
-On the form, enter your **admin email** (required — it becomes your sign-in identity), a password (12+ characters with uppercase, lowercase, number, and special character; a live checklist guides you), confirm it, and optionally your company name and an opt-in to security and product update emails. Submitting signs you straight in and opens the Dashboard. In the background, Trinity then deploys the system agent (`trinity-system`) and seeds the [starter fleet](#your-starter-fleet) — on these installs both wait until the admin exists, because they are owned by it. The form disables itself permanently after the account is created, and the backend refuses it outright whenever a usable admin already exists — so an install that booted with `ADMIN_PASSWORD` set is never in this window.
+On the form, enter your **admin email** (required — it becomes your sign-in identity, and it can also sign in by emailed code, so use an address you control), a password (12+ characters with uppercase, lowercase, number, and special character; a live checklist guides you, and the strength meter reads **Excellent** only once all five are met — with one missing it names it, for example *Needs 12+ characters*), confirm it, and optionally your company name and an opt-in to security and product update emails. Submitting signs you straight in and opens the Dashboard. In the background, Trinity then deploys the system agent (`trinity-system`) and seeds the [starter fleet](#your-starter-fleet) — on these installs both wait until the admin exists, because they are owned by it. The form disables itself permanently after the account is created, and the backend refuses it outright whenever a usable admin already exists — so an install that booted with `ADMIN_PASSWORD` set is never in this window.
 
 **Instance-ID claim.** An install whose `.env` sets `ADMIN_PASSWORD_SOURCE=instance-id` adds one field to the form: the server's **EC2 instance ID**, found in the AWS console under **EC2 → Instances**. Provisioning stores that ID in a `setup-claim` file in the data directory, and the form works only when you enter the same ID. Any mismatch gets one answer, *That instance ID does not match this server.*, and repeated wrong guesses are rate-limited like failed logins. Email is optional on this path; without one, the admin signs in as `admin` with the password. The stored ID is deleted once the account exists. If the file is missing, every attempt is refused. An AWS install with no password takes this mode by default: `start.sh --provision --cloud aws` (which the AWS Marketplace AMI and the CloudFormation stack also run) reads the ID from the instance metadata service and writes the file. Supply `ADMIN_PASSWORD` to skip the claim. Other clouds never use it.
+
+**If you received a setup link by email.** Some instances are set up from a link emailed to their owner instead of the instance ID. Open the link, choose a password, and you are signed in. The email address is fixed by the link, and the link works once, for that address only. If the page says the link isn't valid any more, the instance was already set up or a newer link was sent: open the latest link from your email, or ask whoever sent it for a new one. If you reload the page partway through, open the link from your email again; the setup code is not kept in the browser.
 
 On a claimed droplet, `.env` keeps `ADMIN_PASSWORD` blank on purpose — the password lives only in the database, and reboots and `start.sh --hosted` updates leave it alone. Forgot it? Set `ADMIN_PASSWORD` in `.env` and recreate the backend container (`./scripts/deploy/start.sh --hosted`, or `docker compose up -d backend`); `docker compose restart` does not re-read `.env`. The backend adopts the value on that boot.
 
@@ -76,9 +78,34 @@ On a claimed droplet, `.env` keeps `ADMIN_PASSWORD` blank on purpose — the pas
 
 **Admin login:** Enter username `admin` **or the admin's registered email**, plus the password.
 
-**Email login (passwordless):** Enter your email address, receive a 6-digit verification code, and submit it to log in. This requires email service configuration. On an install that cannot send email — the default `console` provider, or a provider missing its key or SMTP settings — the code step says so instead of "We sent a code": *No email provider is configured on this install, so no email was sent.* The code for an allowed address is in the backend log (`docker compose logs backend`, the `EMAIL (console mode)` block), and an **Admin Login** button there switches to the password form. The admin manages allowed email addresses under **Settings → Access → Email Whitelist**. Each entry is one full email address, matched without regard to case — there are no domain or wildcard entries. An entry that is not one address (empty, containing spaces, without exactly one `@` with text on both sides, or over 254 characters) is refused with the reason shown beside the field, and the API answers `422` with the same one-sentence reason. Intranet addresses such as `user@localhost` are accepted. **Remove** works on every row, including older entries that contain unusual characters such as `/`.
+**Email login (passwordless):** Enter your email address, receive a 6-digit verification code, and submit it to log in. This requires email service configuration. On an install that cannot send email — the default `console` provider, or a provider missing its key or SMTP settings — the code step says so instead of "We sent a code": *No email provider is configured on this install, so no email was sent.* The code is not written anywhere you can read, and an **Admin Login** button there switches to the password form. Only a development install that sets `EMAIL_CONSOLE_LOG_BODY=true` prints the code to the backend log, and the page names the log (`docker compose logs backend`, the `EMAIL (console mode)` block) only then. The admin manages allowed email addresses under **Settings → Access → Email Whitelist**. Each entry is one full email address, matched without regard to case — there are no domain or wildcard entries. An entry that is not one address (empty, containing spaces, without exactly one `@` with text on both sides, or over 254 characters) is refused with the reason shown beside the field, and the API answers `422` with the same one-sentence reason. Intranet addresses such as `user@localhost` are accepted. **Remove** works on every row, including older entries that contain unusual characters such as `/`.
 
 Password login is rate-limited: five failed attempts on one account within 15 minutes lock that account out until the window passes (a looser per-address limit — 30 failures in 5 minutes — guards shared networks without locking out everyone behind one address).
+
+### Changing the admin password
+
+**Settings → General → Password** changes the password of the account you are signed in as. It appears only for an account that has a password (the admin); an email-only account has none and never gains one.
+
+1. Enter the **Current password**, the **New password** (the same rules as the first-run form: 12+ characters with uppercase, lowercase, number and special character) and **Confirm new password**.
+2. Optionally tick **Also revoke the MCP API keys I created**. A password change does not sign MCP keys out; your agents' own keys are not affected either way.
+3. Click **Change password**.
+
+Changing the password signs every other session of the account out, on every browser and device, and closes their open live connections (event streams and terminals); the session you changed it from stays signed in. If any keys you created still work afterwards, the panel says how many and links to **Settings → MCP Keys**. Five wrong current passwords within 15 minutes block further attempts for the window.
+
+The new password survives restarts. If `.env` still holds the old `ADMIN_PASSWORD`, the panel reminds you to update the file too, so the MCP server's password sign-in and any scripts that read it keep working. Putting a **new** value in `.env` and recreating the backend still overrides an in-app change, which is how you recover a forgotten password. An admin cannot reset another person's password: no other account has one.
+
+### Terms of use
+
+Every person who signs in is asked to accept the instance's terms of use once, before they can do anything else — the admin included, on whichever door they come in by: the admin panel, the email sign-in or the [Workspace](../sharing-and-access/workspace.md). A fresh install ships default terms, so the screen appears with nothing configured. The admin's own first visit after setup shows it too; setup itself is never blocked by it.
+
+An admin edits the terms under **Settings → Access → Terms of use**:
+
+- **Title** and **Text (Markdown)**, then **Save as a new version**. Saving changed text or title stamps a new version, and everyone is asked to accept again on their next visit; saving what is already in force changes nothing.
+- **Restore the default** puts the shipped default text back.
+- **Ask every person to accept the terms** switches the screen on or off. It is on by default.
+- **Acceptances** lists who accepted which version and when.
+
+Accepting is recorded per person and version, with the time and address, and the edits and acceptances are recorded in the audit log (the edit rows carry the version only, never the text). Declining signs the person out; they accept on their next sign-in. Scripts and the CLI are never asked, and neither are the MCP keys of operators and above or agents' keys: the screen is for people signing in to the app, so an ops key or an agent's key keeps working whether or not anyone has accepted. A Workspace-only (`user`) person's own key is held until that person accepts.
 
 ### Your First Dashboard
 
@@ -181,7 +208,7 @@ curl -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
 
 The following endpoints do not require authentication:
 
-- `GET /api/auth/mode` -- Returns the current authentication mode and whether setup is complete. `email_delivery_available` is `false` when the install cannot send email (the login page then says the code is in the backend log); it is install-level and never varies per address.
+- `GET /api/auth/mode` -- Returns the current authentication mode and whether setup is complete. `email_delivery_available` is `false` when the install cannot send email (the login page then says no email was sent); `email_code_in_log` is `true` only on a development install that prints codes to the backend log. Both are install-level and never vary per address.
 - `GET /api/setup/status` -- Returns whether initial setup is complete, and `claim_required: "instance-id"` when the first-run form must also be given the EC2 instance ID (otherwise `null`).
 - `POST /api/setup/admin-password` -- The first-run form's endpoint; refuses (403) once a usable admin exists, and on a hosted compose whose blank password was not marked for browser claim. On success it also schedules the system-agent deploy and first-run seeding.
 - `POST /api/token` -- The login endpoint itself.
@@ -193,6 +220,22 @@ Both calls take a signed-in browser session; no MCP key can change a sign-in ide
 - `POST /api/users/me/email/code` -- Body `{"email": "user@example.com"}`. Mails a 6-digit code to the new address (at most 3 per 10 minutes).
 - `PUT /api/users/me/email` -- Body `{"email": "user@example.com", "code": "123456"}`. Binds the address. Without a code it answers `400 code_required`; an address held by another account gets `409 email_in_use`; five wrong codes in 10 minutes lock that bind with `429`.
 
+### Changing the password
+
+- `PUT /api/users/me/password` -- Body `{"current_password": "...", "new_password": "...", "revoke_api_keys": false}`. A signed-in browser session only (MCP keys refused). Returns a fresh token for the caller, and says how many keys were revoked and how many you created still work. An account with no password gets `409`. Recorded in the audit log as `password_changed` or `password_change_failed`, with no password in the entry. `GET /api/users/me` reports `has_password`.
+
+### Terms of use
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/terms/current` | GET | The terms in force: title, text, version, and whether the caller has accepted |
+| `/api/terms/accept` | POST | Accept the version shown — body `{"version": "..."}`. A version that changed meanwhile answers `409 version_stale` |
+| `/api/terms` | PUT | Save the title and text as a new version, or switch the requirement off with `required: false` (admin, signed-in session) |
+| `/api/terms/restore-default` | POST | Restore the shipped default (admin, signed-in session) |
+| `/api/terms/acceptances` | GET | Who accepted which version, and when (admin) |
+
+Until a person accepts, every other call from their signed-in session answers `403` with `{"code": "terms_required", "version": "..."}`, and the app opens the terms screen.
+
 ### First-run state
 
 - `GET /api/onboarding/first-run` -- Whether the caller still sees a seed-only install, the seeded agent names, and which agent the **Show me** door opens.
@@ -202,7 +245,7 @@ Both calls take a signed-in browser session; no MCP key can change a sign-in ide
 ## Limitations
 
 - Backend restarts invalidate all active JWT tokens. All users and integrations must re-authenticate.
-- Email login requires a configured email service. Without one, codes are written to the backend log and the login page says so; admin password login always works.
+- Email login requires a configured email service. Without one no code is sent, none is written to the log, and the login page says so; admin password login always works.
 - Trinity requires Docker. It cannot run without it.
 - Seeding Cornelius needs outbound access to GitHub at first boot; a failed pass is retried on the next start.
 - PostgreSQL is the database backend. See [Single-Server Deployment → Database backend](../guides/deploying/single-server.md#database-backend).

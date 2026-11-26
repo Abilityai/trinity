@@ -239,6 +239,13 @@ TABLES = {
             -- on NULL, and an address that can no longer reach the agent is a
             -- refused dispatch rather than a silent drop.
             deliver_to_workspace_email TEXT,
+            -- ent#1391: mail each run's result to the person who turned it on.
+            -- Their id, never an address: the address is read from their account
+            -- at each send. NULL — every existing row — mails nothing. The error
+            -- pair says why the last result mail did not go (NULL after one that did).
+            email_results_user_id INTEGER,
+            email_results_error TEXT,
+            email_results_error_at TEXT,
             deleted_at TEXT,
             FOREIGN KEY (owner_id) REFERENCES users(id)
         )
@@ -311,6 +318,12 @@ TABLES = {
             -- #3380: the /chat thread this turn answers, so a watchdog-claimed
             -- result can still write its reply there. NULL = not a /chat turn.
             chat_session_id TEXT,
+            -- ent#1225: the turn this row continues, written by the platform
+            -- only for a turn RUNNING on that agent when it was recorded. A
+            -- continuation trigger (caller_wake, operator_response,
+            -- operator_ending, skill_gate) is rated as that turn; a delegated
+            -- callee row records the caller's turn. NULL = none.
+            continues_execution_id TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -2125,6 +2138,29 @@ TABLES = {
     """,
 
     # -------------------------------------------------------------------------
+    # Guardrail events (trinity-enterprise#165, GUARD-005)
+    # -------------------------------------------------------------------------
+    # One row per event an agent's guardrail hooks reported (a refusal, a
+    # redaction, a hook error). Agent-reported attribution: `execution_id` has
+    # no FK (execution rows have their own retention).
+    "guardrail_events": """
+        CREATE TABLE IF NOT EXISTS guardrail_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            hook TEXT NOT NULL,
+            tool TEXT,
+            code TEXT,
+            execution_id TEXT,
+            details TEXT,
+            UNIQUE(agent_name, event_id)
+        )
+    """,
+
+    # -------------------------------------------------------------------------
     # Platform Audit Log (SEC-001 / Issue #20) — Phase 1
     # -------------------------------------------------------------------------
     # Cross-cutting append-only audit trail for agent lifecycle, auth, MCP,
@@ -2307,6 +2343,11 @@ TABLES = {
 # =============================================================================
 
 INDEXES = [
+    # trinity-enterprise#165 — the per-agent read, the per-execution counts and
+    # the retention sweep (keyed on the server receive time).
+    "CREATE INDEX IF NOT EXISTS idx_guardrail_events_agent_occurred ON guardrail_events(agent_name, occurred_at)",
+    "CREATE INDEX IF NOT EXISTS idx_guardrail_events_execution ON guardrail_events(execution_id)",
+    "CREATE INDEX IF NOT EXISTS idx_guardrail_events_received ON guardrail_events(received_at)",
     "CREATE INDEX IF NOT EXISTS idx_terms_acceptances_email ON terms_acceptances(email)",
     # trinity-enterprise#1107 ruling A(1): a Workspace portal session has no
     # `users` row — its row is keyed by (email, version); UNIQUE(user_id, version)

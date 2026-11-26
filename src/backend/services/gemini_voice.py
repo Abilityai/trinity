@@ -1470,7 +1470,7 @@ class GeminiVoiceService:
         if not prompt:
             return "No prompt provided."
 
-        logger.info(f"Voice tool call: agent={agent_name} tool={tool_name} prompt={prompt[:80]!r}")
+        logger.info(f"Voice tool call: agent={agent_name} tool={tool_name} prompt_chars={len(prompt)}")
         # trinity-enterprise#751: this path reaches the agent without
         # `execute_task` (no row, no requester identity), so a gated skill is
         # refused here rather than put up for approval. The model voices it.

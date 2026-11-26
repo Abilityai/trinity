@@ -7,10 +7,15 @@ import { useAgentsStore } from './agents'
 import { parseUTC, getTimestampMs } from '@/utils/timestamps'
 import { isOrgTag } from '@/utils/gridOrg'
 import { agentDisplayName } from '@/utils/agentName'
-import { VIEW_MODES, DEFAULT_VIEW_MODE } from '@/utils/viewModes'
+import { VIEW_MODES, DEFAULT_VIEW_MODE, initialViewMode } from '@/utils/viewModes'
 
 // #3109: how long a burst of `agent_created` events is gathered into one refetch.
 export const AGENT_CREATED_COALESCE_MS = 300
+// More new names than this in one refetch is a roster swap (another session's
+// import, a restored backup), not agents being made: nothing is animated.
+export const ARRIVAL_BATCH_MAX = 12
+// How long a new name stays in `arrivals` for a surface to pick up.
+export const ARRIVAL_NEWS_MS = 15000
 
 export const useNetworkStore = defineStore('network', () => {
   // State
@@ -65,16 +70,18 @@ export const useNetworkStore = defineStore('network', () => {
   let socketGeneration = 0
   let socketMinting = null
 
-  // View mode state (timeline | grid | list) — default timeline, persisted.
+  // View mode state (timeline | grid | list), persisted. A person who has never
+  // chosen opens in Grid (trinity-enterprise#1357, `initialViewMode`); opening
+  // writes nothing — only setViewMode records a choice.
   // trinity-enterprise#47 added 'grid'; trinity-enterprise#260 added 'list'
   // (the Agents page consolidated into the dashboard); the legacy 'graph' Vue
   // Flow canvas was decommissioned (#1689). A persisted stale mode (e.g.
   // 'graph', or 'list' on an older bundle) degrades to the default (timeline)
-  // via the VIEW_MODES.includes() guard below. The list lives in
+  // inside `initialViewMode`. The list lives in
   // `utils/viewModes.js` (#2536) — ONE home shared with the Dashboard's mode
   // toggle v-for, the `v` cycle order and the e2e specs; do not re-declare it.
   const savedViewMode = localStorage.getItem('trinity-dashboard-view')
-  const viewMode = ref(VIEW_MODES.includes(savedViewMode) ? savedViewMode : DEFAULT_VIEW_MODE)
+  const viewMode = ref(initialViewMode(savedViewMode))
   const isTimelineMode = computed(() => viewMode.value === 'timeline')
   const isPlaying = ref(false)
   const replaySpeed = ref(10) // 10x default
@@ -155,10 +162,21 @@ export const useNetworkStore = defineStore('network', () => {
   // invariant): node data enriches timeline rows (isSystemAgent → system-first
   // sort + purple treatment), so nodes must stay PRE-query — a query-filtered
   // rebuild followed by Esc would render degraded rows until the next rebuild.
+  // trinity-enterprise#1355: example agents kept off the first screen where the
+  // assistant leads the first session (set by the Dashboard; empty elsewhere).
+  // Applied here, before the owner filter, so every pane and the graph agree.
+  const hiddenExamples = ref([])
+  function setHiddenExamples(names) {
+    hiddenExamples.value = Array.isArray(names) ? names : []
+  }
+  const shownAgents = computed(() => hiddenExamples.value.length
+    ? agents.value.filter(a => !hiddenExamples.value.includes(a.name))
+    : agents.value)
+
   const ownerFilteredAgents = computed(() => {
-    if (!filterOwner.value) return agents.value
+    if (!filterOwner.value) return shownAgents.value
     const owner = filterOwner.value === '__unassigned__' ? null : filterOwner.value
-    return agents.value.filter(a => (a.owner || null) === owner)
+    return shownAgents.value.filter(a => (a.owner || null) === owner)
   })
 
   // ent#261 seam: the canonical "visible agents" set — pre-query fleet ∘ the
@@ -199,6 +217,30 @@ export const useNetworkStore = defineStore('network', () => {
     convertAgentsToNodes(ownerFilteredAgents.value)
   }
 
+  // Agents that joined the fleet while the dashboard was open. A name counts
+  // only when it is missing from the last roster fetched under the SAME tag
+  // filter: a first load, or a filter being lifted, brings rows into view
+  // that were never away. The render surfaces animate these in.
+  const arrivals = ref([])
+  let rosterNames = null
+  let rosterTags = null
+  function noteArrivals(rows, tagsKey) {
+    const names = new Set((rows || []).map((a) => a.name))
+    if (rosterNames && rosterTags === tagsKey) {
+      const fresh = [...names].filter((n) => !rosterNames.has(n) && !arrivals.value.includes(n))
+      if (fresh.length && fresh.length <= ARRIVAL_BATCH_MAX) {
+        arrivals.value = [...arrivals.value, ...fresh]
+        // Whether or not a surface showed them, they stop being news.
+        setTimeout(() => fresh.forEach(settleArrival), ARRIVAL_NEWS_MS)
+      }
+    }
+    rosterNames = names
+    rosterTags = tagsKey
+  }
+  function settleArrival(name) {
+    if (arrivals.value.includes(name)) arrivals.value = arrivals.value.filter((n) => n !== name)
+  }
+
   async function fetchAgents() {
     loading.value = true
     loadError.value = false
@@ -208,6 +250,7 @@ export const useNetworkStore = defineStore('network', () => {
         params.tags = filterTags.value.join(',')
       }
       const response = await axios.get('/api/agents', { params })
+      noteArrivals(response.data, params.tags || '')
       agents.value = response.data
       // Write-through (ent#260 / #1643): keep agentsStore.agents warm from the
       // same response — with the Agents page gone this is the base fetch that
@@ -951,6 +994,8 @@ export const useNetworkStore = defineStore('network', () => {
 
     // Remove from agents list
     agents.value = agents.value.filter(a => a.name !== event.agent_name)
+    rosterNames?.delete(event.agent_name)
+    settleArrival(event.agent_name)
   }
 
   // #47: keep the WS-driven working map current. `chat_start`/`schedule_start`
@@ -2007,6 +2052,8 @@ export const useNetworkStore = defineStore('network', () => {
     filterOwner,
     filterQuery, // ent#261 — type-to-filter query (never persisted)
     ownerFilteredAgents, // ent#261 — pre-query fleet (the "Y" in "X of Y match"; feeds nodes)
+    hiddenExamples,
+    setHiddenExamples,
     visibleAgents, // ent#261 seam — the canonical filtered fleet all three panes consume
     // View mode / Replay state
     viewMode,
@@ -2029,6 +2076,8 @@ export const useNetworkStore = defineStore('network', () => {
 
     // Actions
     fetchAgents,
+    arrivals,
+    settleArrival,
     fetchPermissionEdges,
     setFilterTags,
     setFilterQuery,

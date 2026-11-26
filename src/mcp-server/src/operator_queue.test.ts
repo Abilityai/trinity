@@ -903,6 +903,7 @@ describe("trinity-enterprise#1066 ask_for_credential", () => {
 
   for (const detail of [
     { code: "no_person", message: "A credential ask must reach exactly one person." },
+    { code: "role_cannot_open_agent", message: "Nobody would see this ask.", role: "primary" },
     { code: "invalid_credential_name", message: "bad name", reason: "reserved" },
   ]) {
     it(`a ${detail.code} refusal comes back named, not as a throw`, async () => {
@@ -979,6 +980,12 @@ describe("trinity-enterprise#1066 ask_for_credential", () => {
     assert.match(d, /never ask for (a|the) (secret|value) in a (plain )?message/i);
     assert.match(d, /never repeat/i);
     assert.match(d, /no_person/);
+    assert.match(d, /role_cannot_open_agent/);
+    // #4599: the platform picks the reader (the primary, else the owner); the
+    // text used to say the ask reaches "the person of the current chat".
+    assert.match(d, /your primary person, else your owner/);
+    assert.doesNotMatch(d, /person of the current chat/);
+    assert.match(d, /could not check/);
     assert.match(d, /get_my_ask/);
     assert.doesNotMatch(d, /mcp__trinity__/);
   });

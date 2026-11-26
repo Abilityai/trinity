@@ -14,6 +14,10 @@ Memory. A **Workspace** conversation resumes: every message reattaches to the sa
 
 It preserves the agent's full working memory: tool results (files it read, commands it ran), mid-skill state, and reasoning state — not just the text of the conversation. The stateless Chat tab only re-sends the visible message log as text, so the agent loses tool outputs and internal state between turns. Use the Workspace for long multi-turn reasoning or multi-step work; the Chat tab is fine for one-shot questions. See [Continuous Conversations](../agents/agent-session.md).
 
+## Does the agent remember me from one chat to the next?
+
+Yes, through person memory, which is separate from a chat's working memory. The agent keeps notes about you and Trinity keeps a rolling summary of your conversations, and both are given to it on every turn that serves you, in any chat. On the agent's **Info** tab, **What it remembers about you** shows the notes and every change to them, with **Undo**. Where an admin has turned on retrieval memory, the agent also recalls facts from earlier runs that match what you ask. Your memory is never shown to anyone else the agent talks to. See [Agent Memory](../agents/agent-memory.md).
+
 ## Why doesn't my agent seem to remember anything between turns?
 
 Most likely you're on the **Chat** tab rather than the Workspace — the Chat tab is stateless by design. If you are in the Workspace, the other cause is the runtime: a Codex agent has no resume primitive, so its turns replay the visible history as text instead of carrying working memory forward. The conversation stays coherent either way; what's lost is the agent's tool results and mid-task state. See [Continuous Conversations](../agents/agent-session.md).
@@ -112,7 +116,7 @@ Yes, on both surfaces, though the pickers differ. In the **Workspace**, platform
 
 ## What are the Fable 5 and Sonnet 5 models?
 
-Fable is the most capable tier — reach for it on the longest, hardest, most involved tasks where quality matters more than speed. **Fable 5.1** is the current one; Fable 5 is still offered and still supported, just no longer the latest in its tier. Sonnet 5 is the fast, smart everyday model, and it carries a 1M-token context window, so it holds far more of a long conversation or large codebase before compaction. Both appear by name in the Chat tab's model picker, in the agent's Model Selection setting, and in the per-schedule and per-loop overrides. The Workspace dropdown speaks in tiers instead: **Balanced — fast and smart** is Sonnet 5, **Most capable** is Opus 5.5, and **Fastest** is Haiku. See [Agent Configuration](../agents/agent-configuration.md#model-selection).
+Fable is the most capable tier — reach for it on the longest, hardest, most involved tasks where quality matters more than speed. **Fable 5.2** is the current one; Fable 5.1 and Fable 5 are still offered and still supported, just no longer the latest in their tier. Sonnet is the fast, smart everyday model — **Sonnet 5.5** is the current one, Sonnet 5 is still offered — and it carries a 1M-token context window, so it holds far more of a long conversation or large codebase before compaction. Both appear by name in the Chat tab's model picker, in the agent's Model Selection setting, and in the per-schedule and per-loop overrides. The Workspace dropdown speaks in tiers instead: **Balanced — fast and smart** is Sonnet 5.5, **Most capable** is Opus 5.5, and **Fastest** is Haiku 5.5. See [Agent Configuration](../agents/agent-configuration.md#model-selection).
 
 ## Does chat render markdown, and can I attach files?
 
@@ -128,7 +132,7 @@ Click the **×** on the file's chip in the composer. A file still waiting to upl
 
 ## How do I know a reply has arrived when I'm not looking at the chat?
 
-Three ways. While anything is unread, the browser tab's title carries the count — `(3) Trinity — Workspace` — and the agent's row in the sidebar shows its own unread badge (questions the agent is waiting on you to answer are counted separately). Inside a chat, if you've scrolled up to re-read something, an arriving message doesn't pull you back down: a **N new messages** control appears, and sending, opening a chat or clicking it returns you to the bottom. Opening the chat clears the count; unread badges count 1:1 chats only, not rooms. See [Workspace](../sharing-and-access/workspace.md#reading-replies).
+Three ways. While anything is unread, the browser tab's title carries the count — `(3) Trinity — Workspace` — and the agent's row in the sidebar shows its own unread badge (questions the agent is waiting on you to answer are counted separately). Inside a chat, if you've scrolled up to re-read something, an arriving message doesn't pull you back down: a **N new messages** control appears, and sending, opening a chat or clicking it returns you to the bottom. Opening the chat clears the count. Rooms count too: a room's row shows how many agent messages arrived since you last read it. See [Workspace](../sharing-and-access/workspace.md#reading-replies).
 
 ## How is the Workspace Inbox sorted?
 

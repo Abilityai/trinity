@@ -143,6 +143,24 @@ def _app():
 # The writer validates before it writes, and writes nothing for no change
 # --------------------------------------------------------------------------- #
 
+class TestDefaultTextReflows:
+    """trinity#4584: the terms screen renders with marked `breaks: true`, so a
+    hard-wrapped source line becomes a `<br>`. The default text must keep each
+    paragraph and each list item on one source line."""
+
+    def test_no_paragraph_has_a_newline_inside_a_sentence(self):
+        from services import terms_defaults
+
+        for block in terms_defaults.DEFAULT_TERMS_TEXT.split("\n\n"):
+            lines = block.strip("\n").split("\n")
+            if len(lines) > 1:
+                assert all(line.startswith("- ") for line in lines), (
+                    "only list items may span lines, one item per line: %r" % block
+                )
+            for line in lines:
+                assert not line.startswith(" "), "indented continuation line: %r" % line
+
+
 class TestTheWriterIsAtomic:
     """Merge-train findings on ent#1107: C3 (a 422 on the title must not have
     published the text under the old version), W7 (an identical save stamps

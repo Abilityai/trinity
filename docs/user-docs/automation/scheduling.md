@@ -18,6 +18,8 @@ For a single, agent-initiated, one-shot deferred follow-up rather than a recurri
 
 Schedules take any IANA zone name — including legacy aliases like `US/Eastern`, `Asia/Calcutta`, and `Europe/Kiev`. A timezone the platform cannot actually resolve is rejected when you create the schedule, with a message naming the problem, rather than being accepted and then silently never firing.
 
+At a daylight-saving fall-back, a schedule's next fire time never moves backwards. A minute-stepped schedule such as `*/30 * * * *` in a zone leaving summer time keeps firing on its cadence through the repeated hour.
+
 ### Schedules from a template
 
 A template can ship the recurring work its agent is designed to do in a `schedules:` block, and Trinity creates those schedules when the agent is created — through the UI, the API, and MCP alike. They appear here like any other schedule and are yours to edit, disable, or delete. See [Creating Agents](../agents/creating-agents.md).
@@ -31,7 +33,7 @@ A template can ship the recurring work its agent is designed to do in a `schedul
 1. Open the agent detail page and go to the scheduling section.
 2. Click **Create Schedule**.
 3. Configure: name, cron expression (e.g., `0 9 * * 1-5` for weekdays at 9 AM), message/task, timezone, and description. The presets **Daily 9 AM**, **Weekly Mon**, **Every 6h** and **Every 30m** fill the cron field for the common cadences.
-4. Optionally select a model override from the **Model** picker — Claude Opus 5.5, Fable 5.1, Sonnet 5, Haiku 4.5 and older models are listed, or type any model id. Left empty, the schedule uses the platform default model. Fable 5.1 is the most capable model, for the longest and hardest tasks; Sonnet 5 is fast with a 1M-token context window.
+4. Optionally select a model override from the **Model** picker — Claude Opus 5.5, Fable 5.2, Sonnet 5.5, Haiku 5.5 and older models are listed, or type any model id. Left empty, the schedule uses the agent's own model (the one set under **Settings › General › Model**, or declared by its template), else the platform default model (see [Model Selection](../agents/agent-configuration.md#model-selection)). Fable 5.2 is the most capable model, for the longest and hardest tasks; Sonnet 5.5 is fast with a 1M-token context window.
 5. Enable or disable individual schedules with the toggle.
 6. View execution history with status, duration, and cost.
 7. Click **Run now** to trigger a schedule immediately.
@@ -86,11 +88,40 @@ Beyond the name, cron expression, message, timezone and description, `create_age
 | `/api/agents/{name}/schedules/{id}/enable` | POST | Enable schedule (owner/admin) |
 | `/api/agents/{name}/schedules/{id}/disable` | POST | Disable schedule (owner/admin) |
 | `/api/agents/{name}/schedules/{id}/trigger` | POST | Manual trigger (owner/admin) |
+| `/api/agents/{name}/schedules/{id}/take-over` | POST | Take over someone else's schedule (owner/admin, a person only; see below) |
 | `/api/agents/{name}/schedules/{id}/executions` | GET | Execution history |
 | `/api/agents/{name}/schedules/{id}/analytics` | GET | Per-schedule analytics (see below) |
 | `/api/agents/{name}/schedules/analytics-summary` | GET | Per-schedule performance rollup for the whole agent (`?window=7d\|14d\|30d`) |
 
 Enabling, disabling, and manually triggering a schedule are **owner or admin** actions — someone the agent is merely shared with can read its schedules and their history but cannot start or stop them. The same applies to the `toggle_agent_schedule` and `trigger_agent_schedule` MCP tools.
+
+### Taking over a schedule someone else created
+
+A schedule runs with the access of the person who **created** it. When someone the agent is shared with creates a schedule, its runs have their access, not the owner's: no shell commands and no tools the owner added. Each schedule read says so (`runs_as: shared_person`, with the reason in `runs_as_reason`).
+
+To give such a schedule the owner's access, the agent's owner or an admin **takes it over**: they become its creator, and its runs have their access from then on.
+
+- **Review first.** A take-over gives the owner's access to a prompt someone else wrote, so read the whole schedule first: the message, the allowed tools, the model and the validation prompt. The request repeats what you read: `expected_updated_at` (the schedule's `updated_at`) and `reviewed` (`message`, `allowed_tools`, `model`, `validation_enabled`, `validation_prompt`), copied unchanged from the schedule you read. If anything changed since then, the take-over is refused (`409 schedule_changed_since_review`): read it again and retry.
+- **A person only.** An agent key, the system key or a connector key cannot take a schedule over, and there is no MCP tool for it. Your own `user` API key works, like signing in.
+- **Not while it runs.** While a run of the schedule is queued, running or waiting to retry, the take-over is refused (`409 schedule_run_in_progress`).
+- **Only when there is something to take over.** A schedule whose runs already have the owner's access is refused (`409 schedule_not_restricted`). The schedule read's `can_take_over` says whether you may take it over.
+- **The webhook is revoked.** Its URL stops working, so the person who created the schedule cannot use it to start runs with your access. Generate a new one if you need it.
+- **Delivery to another person's Workspace.** If the schedule delivers to someone else's Workspace, you decide: `"delivery": "clear"` stops that delivery, or `"delivery": "keep"` with `"keep_delivery_to"` repeating the address keeps it. Without either, the take-over is refused (`409 schedule_delivers_to_another_person`). After a take-over those runs would have your access, so they are not kept by accident.
+- **What the creator loses.** The person who created it can no longer edit, delete or manage the webhook of the schedule, and no longer sees its runs that have no user in its history. An edit they started just before the take-over does not land after it.
+- **An admin's take-over** lasts while they keep the admin role. If they lose it, the schedule's runs have a shared person's access again.
+
+Example:
+
+```bash
+curl -X POST http://localhost:8000/api/agents/my-agent/schedules/SCHEDULE_ID/take-over \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"expected_updated_at": "2026-11-08T09:00:00.000000Z",
+       "reviewed": {"message": "Summarise my week", "allowed_tools": null, "model": null,
+                    "validation_enabled": false, "validation_prompt": null},
+       "delivery": "clear"}'
+```
+
+**Run now** on such a schedule stays available to the owner and admins, and that one run has your access. An agent key cannot do it: the REST route answers `409 schedule_runs_as_shared_person`, and `trigger_agent_schedule` returns `status: "refused"` with that code and the backend's message. Only a run already in flight comes back as `status: "already_running"`; a refusal means nothing was started, so there is no run to wait for.
 
 ## Delivering a Run's Output to Someone's Workspace
 
@@ -246,6 +277,10 @@ Retries are off by default: a schedule created in the UI (**Max Retries** → **
 3. Rate-limit errors (429) use 2x delay, capped at 300 seconds
 4. Retry creates a new execution record linked to the original
 5. Process repeats until success or max retries exhausted
+
+A run that stopped at its turn limit (`max_turns`) is never retried: the same task under the same cap stops at the same place, so a retry would only spend another full turn budget.
+
+A retry of a cron-fired run is held to the same gates as the fire itself. If the agent's autonomy was turned off in the meantime, the retry is dropped and no row is written; if a git-sync pause engaged, the retry is recorded as `skipped` with the reason. A retry of a run you started by hand or by webhook is not gated, just as that run was not. A retry also delivers its answer to a person's Workspace when the schedule is set to, so the person sees the retry's answer, not only the first attempt's failure.
 
 ### Execution Grouping
 

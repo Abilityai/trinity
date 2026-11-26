@@ -6,7 +6,7 @@ import logging
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional, Annotated
+from typing import Any, Callable, Optional, Annotated, Tuple
 from fastapi import Depends, HTTPException, status, Request, Path
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -15,6 +15,7 @@ from models import User
 from config import SECRET_KEY, ALGORITHM
 from database import db
 from redis_breaker_util import get_breaker_redis
+from utils import read_narrowing
 
 logger = logging.getLogger(__name__)
 
@@ -2830,7 +2831,8 @@ async def _audit_capability(
     target: Optional[str], **details,
 ) -> None:
     """One AUTHORIZATION row about a capability. Best-effort: an audit failure
-    never changes what the caller gets."""
+    never changes what the caller gets. Safe with `request=None`, for a fence
+    applied off the request path (agent creation from a system deploy, #4387)."""
     try:
         from services.platform_audit_service import (
             platform_audit_service, AuditEventType, principal_actor,
@@ -2844,12 +2846,12 @@ async def _audit_capability(
             event_action=action,
             source="api",
             **actor,
-            actor_ip=request.client.host if request.client else None,
+            actor_ip=getattr(getattr(request, "client", None), "host", None),
             target_type="agent",
             target_id=target,
-            endpoint=request.scope["path"],
-            request_id=getattr(request.state, "request_id", None),
-            details={"capability": capability, "method": request.method, **details},
+            endpoint=(getattr(request, "scope", None) or {}).get("path"),
+            request_id=getattr(getattr(request, "state", None), "request_id", None),
+            details={"capability": capability, "method": getattr(request, "method", None), **details},
         )
     except Exception:  # noqa: BLE001
         logger.warning("capability audit failed for %s (%s)", capability, action)
@@ -3291,7 +3293,8 @@ def assert_agent_owner(current_user: User, agent_name: str, *, detail: str = "No
     # ent#926: an agent's key resolves to its owner, so an owner check inside a
     # handler (a force-reset pull) would pass it in a shared person's turn.
     if restricted_agent_turn(current_user):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=OWNER_TIER_TURN_REFUSED)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail=_turn_refusal_detail(current_user, "owner_tier"))
 
 
 # ---------------------------------------------------------------------------
@@ -3387,10 +3390,41 @@ def acting_turn_user_id(current_user: User) -> Optional[int]:
         -> `NO_ROWS_USER_ID`.
 
     Fails closed: a ledger that cannot be read returns `NO_ROWS_USER_ID`. The
-    turn is the KEY's agent's, whatever agent the route names."""
+    turn is the KEY's agent's, whatever agent the route names.
+
+    A narrowed answer is noted for the response (`X-Trinity-Read-Narrowed`,
+    trinity-enterprise#978): here, where the view is decided and before any row
+    is read, so every reader that narrows through this function is marked and
+    the marker never depends on a row."""
+    person, code = _acting_turn_narrowing(current_user)
+    if person is not None:
+        read_narrowing.note(code)
+    return person
+
+
+def _acting_turn_narrowing(current_user: User) -> Tuple[Optional[int], Optional[str]]:
+    """`acting_turn_user_id`'s answer and why it is narrowed: one of
+    `turn_tier_service.READ_NARROWED_CODES`, None for the full view.
+
+    What the code can tell a caller about a turn id it chooses to send:
+
+      * while a share turn runs, every id that is not itself a RUNNING share
+        turn of the agent (unknown, an owner turn's, a finished share turn's,
+        none at all) reads `running_turn`, so the code does not say whether
+        such an id exists or whose it was;
+      * `turn_person` is said only of a share turn that is itself running (a
+        turn whose process can make a request always is). That confirms one
+        thing to a caller that already holds the id: it is a share turn running
+        on the caller's own agent;
+      * with no share turn running, an owner turn's id (or none) reads the full
+        view and an unknown or finished-share id reads narrowed (`unverified`).
+        That difference is the view's, and predates the marker."""
     agent = getattr(current_user, "agent_name", None)
     if getattr(current_user, "mcp_scope", None) != "agent" or not (isinstance(agent, str) and agent):
-        return None
+        return None, None
+    # Imported here, like `turn_tier_service`: this module's import surface
+    # stays `models.User`, which is all a test that stubs `models` provides.
+    from models import TaskExecutionStatus
     from services import turn_tier_service
     try:
         people = turn_tier_service.running_share_people(db, agent)
@@ -3398,24 +3432,29 @@ def acting_turn_user_id(current_user: User) -> Optional[int]:
         if run and run != _MANUAL_EXECUTION_ID:
             execution = db.get_execution(run)
             tier = turn_tier_service.turn_tier(db, agent, execution=execution)
+            not_this_turn = (turn_tier_service.READ_NARROWED_RUNNING_TURN if people
+                             else turn_tier_service.READ_NARROWED_UNVERIFIED)
             if tier == turn_tier_service.UNKNOWN:
-                return NO_ROWS_USER_ID
+                return NO_ROWS_USER_ID, not_this_turn
             if tier == turn_tier_service.SHARE:
                 person = turn_tier_service.turn_person(db, agent, execution)
+                code = (turn_tier_service.READ_NARROWED_TURN_PERSON
+                        if getattr(execution, "status", None) == TaskExecutionStatus.RUNNING
+                        else not_this_turn)
                 if person is None or people - {person}:
-                    return NO_ROWS_USER_ID
-                return person
+                    return NO_ROWS_USER_ID, code
+                return person, code
             # An owner-tier header widens nothing: fall through to the ledger.
     except Exception:  # noqa: BLE001 — fail closed: an unreadable ledger narrows to nothing
         logger.warning("[ent#926] acting-turn read failed", exc_info=True)
-        return NO_ROWS_USER_ID
+        return NO_ROWS_USER_ID, turn_tier_service.READ_NARROWED_UNVERIFIED
     if not people:
-        return None
+        return None, None
     if len(people) == 1:
         (person,) = people
         if isinstance(person, int) and person > 0:
-            return person
-    return NO_ROWS_USER_ID
+            return person, turn_tier_service.READ_NARROWED_RUNNING_TURN
+    return NO_ROWS_USER_ID, turn_tier_service.READ_NARROWED_RUNNING_TURN
 
 
 # An agent key acting in a turn the platform restricts (a shared person's, or a
@@ -3437,6 +3476,25 @@ OWNER_TIER_TURN_REFUSED = (
     "This turn is for a person the agent is shared with (or a visitor the owner has "
     "limited), and this is something only the agent's owner may do. Ask the agent's "
     "owner to do it."
+)
+# trinity-enterprise#978: the same two refusals when the caller's own turn is
+# not known to be the restricted one. While a shared person's or a limited
+# visitor's turn runs, every run on the agent is fenced (the ledger cannot tell
+# which process sent a request), and "this turn is for a person" would misname
+# the cause to the owner's own concurrent run. The text says "a turn", never
+# "another turn": a request that sends no turn id may come from the restricted
+# turn itself, and the sentence has to be true for it too.
+_SHARE_TURN_RUNNING = (
+    "A turn is running on this agent for a person it is shared with (or a visitor "
+    "the owner has limited). Until that turn ends, no run on the agent can "
+)
+STANDING_WORK_REFUSED_RUNNING_TURN = (
+    _SHARE_TURN_RUNNING + "set up work that runs later as the agent's owner: schedules, "
+    "loops, reminders and events. Try again after that turn ends."
+)
+OWNER_TIER_TURN_REFUSED_RUNNING_TURN = (
+    _SHARE_TURN_RUNNING + "do what only the agent's owner may do. Try again after that "
+    "turn ends."
 )
 
 
@@ -3460,14 +3518,44 @@ def restricted_agent_turn(principal) -> bool:
     return turn_tier_service.running_turn_restricts(db, agent)
 
 
+def _refused_by_another_turn(principal) -> bool:
+    """For a principal `restricted_agent_turn` already refused: is the cause a
+    share-tier turn RUNNING on the agent, rather than a turn the request itself
+    names as restricted (trinity-enterprise#978)?
+
+    Chooses the refusal's words, never whether to refuse. True only when the
+    turn the request names does not restrict (or it names none) and the ledger
+    was read and shows a share-tier turn running; anything that cannot be
+    confirmed (an unreadable ledger) keeps the original text. A request with no
+    turn id from the restricted turn itself lands here too, which is why the
+    text it selects does not say "another"."""
+    agent = getattr(principal, "agent_name", None)
+    from services import turn_tier_service
+    try:
+        acting = turn_tier_service.acting_turn(db, principal)
+        if acting is not None and turn_tier_service.restricts_standing_work(db, agent, acting[0], acting[1]):
+            return False
+        return bool(turn_tier_service.running_share_people(db, agent))
+    except Exception:  # noqa: BLE001 — only the wording depends on it
+        return False
+
+
+def _turn_refusal_detail(principal, refused: str) -> str:
+    """The 403 text of a route refused in a restricted turn."""
+    another = _refused_by_another_turn(principal)
+    if refused == "standing_work":
+        return STANDING_WORK_REFUSED_RUNNING_TURN if another else STANDING_WORK_REFUSED
+    return OWNER_TIER_TURN_REFUSED_RUNNING_TURN if another else OWNER_TIER_TURN_REFUSED
+
+
 def _enforce_standing_work_fence(request, principal: User) -> None:
     from services import route_tier_service
     method = (getattr(request, "method", "") or "").upper()
     refused = route_tier_service.refused_in_restricted_turn(method, request)
     if refused is None or not restricted_agent_turn(principal):
         return
-    detail = STANDING_WORK_REFUSED if refused == "standing_work" else OWNER_TIER_TURN_REFUSED
-    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                        detail=_turn_refusal_detail(principal, refused))
 
 
 def agent_viewer_tier(current_user: User, agent_name: str) -> str:
@@ -3669,3 +3757,20 @@ SkillManagedAgentByName = Annotated[str, Depends(get_skill_managed_agent_by_name
 
 # Current user type alias
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+def check_requested_project(request: Any, current_user: Any, agent_name: str) -> None:
+    """Refuse a dispatch whose body names a ``project_id`` the platform will not
+    attribute (ent#1105). Call it BEFORE any admission, claim, slot or row.
+
+    The decision is the execution-attribution seam's; this only maps its
+    refusal onto the HTTP response — 422 ``project_attribution_unavailable``
+    when no edition attributes executions to projects.
+    """
+    from services import execution_attribution
+    try:
+        execution_attribution.check(
+            getattr(request, "project_id", None),
+            principal=current_user, agent_name=agent_name)
+    except execution_attribution.AttributionRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail())

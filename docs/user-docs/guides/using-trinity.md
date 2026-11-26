@@ -29,7 +29,7 @@ There is no separate Agents page — it is now the Dashboard's List mode, and `/
 
 The Dashboard gives you a bird's-eye view of your agent fleet in three interchangeable views:
 
-- **Timeline** (default) — Recent and live executions per agent, chronologically.
+- **Timeline** — Recent and live executions per agent, chronologically.
 - **Grid** — A draggable tile canvas, optionally overlaid with department zones and reporting lines.
 - **List** — A sortable, filterable row list with inline toggles and bulk tag actions.
 
@@ -71,7 +71,7 @@ Click any agent to open its detail page. Tabs appear based on what the agent has
 | **A2A** | Inbound A2A exposure (owner-only, entitled installations) |
 | **Git** | Sync status, pending changes, commits, **Pull**, **Push** and **Refresh** (only when the agent has a repository binding) |
 | **Files** | Browse the agent workspace, download files |
-| **Settings** | The one configuration home, pinned last on the strip (owners and admins): a rail of panes — **General** (identity, model and funding, timeout, capacity, read-only, memory and CPU, template details, danger zone), **Guardrails**, **People** (who the agent is shared with), **Channels**, **Integrations** (MCP exposure and access key), **Storage** (repository, GitHub token, credentials, shared folders, file sharing) — with one bar listing every change that waits for a restart |
+| **Settings** | The one configuration home, pinned last on the strip (owners and admins): a rail of panes — **General** (identity, model and funding, timeout, capacity, read-only, memory and CPU, template details, danger zone), **Credentials**, **Guardrails**, **People** (who the agent is shared with), **Channels**, **Integrations** (MCP exposure and access key), **Storage** (repository, GitHub token, shared folders, file sharing) — with one bar listing every change that waits for a restart |
 
 Header actions:
 
@@ -99,10 +99,10 @@ What happens after creation:
 
 - A Docker container is built from the `trinity-agent-base` image.
 - Template files are copied into the agent's workspace at `/home/developer/`.
-- Credentials the template declares show as missing under **Settings › Storage › Credentials** until you add them.
+- Credentials the template declares show as missing under **Settings › Credentials** until you add them.
 - The agent starts automatically and appears on the Dashboard.
 
-Next, add credentials under **Settings › Storage › Credentials**, send a task or chat, set up schedules (the **Schedules** tab's empty state has a **Create a schedule** button), and configure permissions if you are building a multi-agent system. Importing an existing GitHub repository runs a compatibility check inline. See [Creating Agents](../agents/creating-agents.md).
+Next, add credentials under **Settings › Credentials**, send a task or chat, set up schedules (the **Schedules** tab's empty state has a **Create a schedule** button), and configure permissions if you are building a multi-agent system. Importing an existing GitHub repository runs a compatibility check inline. See [Creating Agents](../agents/creating-agents.md).
 
 ## Operations
 

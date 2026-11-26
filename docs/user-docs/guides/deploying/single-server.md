@@ -227,7 +227,7 @@ The `cloudflared` tunnel service is **not started** by default — it requires a
 
 Open your domain (or `http://your-server-ip`, or `http://your-server-ip:$FRONTEND_PORT`) in a browser. Log in with:
 - **Username:** `admin` (or `ADMIN_USERNAME` if you changed it)
-- **Password:** the `ADMIN_PASSWORD` you set in `.env` (re-applied on every backend boot — change it there, not in the UI, then recreate the backend container with `docker compose -f <file> up -d backend`; a plain `restart` does not re-read `.env`)
+- **Password:** the `ADMIN_PASSWORD` you set in `.env` (change it later under **Settings → General → Password**, then update `.env` to match. The backend re-applies `ADMIN_PASSWORD` only when the value in `.env` changes, so setting a new value there and recreating the backend with `docker compose -f <file> up -d backend` resets it; a plain `restart` does not re-read `.env`)
 
 There is no setup wizard on a server install: setting `ADMIN_PASSWORD` provisions the admin account during startup, and the unauthenticated first-run form refuses to run once a usable admin exists. The exceptions are installs that deliberately boot with no admin: a Marketplace 1-Click Droplet created without a password, claimed in the browser — see [DigitalOcean 1-Click](#digitalocean-marketplace-1-click) — and an AWS install without one, claimed with the EC2 instance ID — see [Deploy on AWS](aws.md). What you see instead is the Dashboard with a fresh install's starter fleet and the first-run setup sequence — a **Sign-in email** step (so you can log in with email + password), the required **Connect Claude** step, and optional keys — see [First-Time Setup](../../getting-started/setup.md).
 
@@ -294,7 +294,7 @@ docker exec trinity-redis redis-cli ping
 curl -s http://localhost:8080/health
 
 # Vector
-docker exec trinity-vector wget -q -O - http://localhost:8686/health
+docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health
 ```
 
 The scheduler's port 8001 is not published to the host by either server compose file — probe it from inside the container instead: `docker exec trinity-scheduler curl -sf http://localhost:8001/health`. See [monitoring.md](monitoring.md) for the full monitoring guide.
@@ -367,7 +367,7 @@ The login banner (Droplet → Console) prints the URL to open, whether HTTPS cam
 
 The certificate is a real Let's Encrypt certificate for the IP address, so there is no browser warning.
 
-**Passwords.** On a Droplet claimed in the browser, `.env` keeps `ADMIN_PASSWORD` blank on purpose — the password lives only in the database, and reboots and `start.sh --hosted` upgrades leave it alone. There is no change-password form in the UI. To change or reset the password on any Droplet, set `ADMIN_PASSWORD` in `/opt/trinity/.env` and re-run `./scripts/deploy/start.sh --hosted` (or `docker compose -f docker-compose.hosted.yml up -d backend`); the backend adopts the value on the next boot. A plain `restart` does not re-read `.env`.
+**Passwords.** On a Droplet claimed in the browser, `.env` keeps `ADMIN_PASSWORD` blank on purpose — the password lives only in the database, and reboots and `start.sh --hosted` upgrades leave it alone. Change it in the app under **Settings → General → Password**. To reset a forgotten password on any Droplet, set `ADMIN_PASSWORD` in `/opt/trinity/.env` and re-run `./scripts/deploy/start.sh --hosted` (or `docker compose -f docker-compose.hosted.yml up -d backend`); the backend adopts the value on the next boot. A plain `restart` does not re-read `.env`.
 
 Because the install recorded `do-marketplace` as its provenance, the first-run setup that opens on the Dashboard begins with a **Secure this instance** step for admins. It is a two-stage upgrade prompt, not a breakage warning:
 
@@ -440,7 +440,7 @@ cd /opt/trinity
 
 It reads the public IP from Vultr's metadata service, installs Docker, Caddy with the IP certificate and the host firewall, then installs Trinity. Use a release that includes Vultr support: v0.9.5 and earlier stop with `unsupported --cloud 'vultr'`. With no `ADMIN_PASSWORD` in the environment or `.env`, `--unattended` generates one and prints it in the final summary. The install records `script` as its provenance, which does not show the first-run **Secure this instance** step, so add a domain and a tunnel by following [Hardening a Marketplace Install](hardening.md) directly. Day-two commands are the ones in [Managing the Droplet](#managing-the-droplet), run from `/opt/trinity`.
 
-A Vultr Marketplace app is prepared as an imageless listing: Vultr runs a first-boot script on a stock Ubuntu 24.04, which installs the latest stable release (about four minutes) and leaves the admin to be claimed in the browser, like the DigitalOcean 1-Click. Its install log is `/var/log/trinity-install.log`, and `/etc/trinity/ready` or `/etc/trinity/firstboot-failed` records the outcome.
+A Vultr Marketplace app is prepared as an imageless listing: Vultr runs a first-boot script on a stock Ubuntu 24.04, which installs the latest stable release (about four minutes) and leaves the admin to be claimed in the browser, like the DigitalOcean 1-Click. The listing sets a minimum of 4 vCPUs and 8 GB RAM, so the deploy page does not offer smaller plans. The same script run as plain User Data on a smaller instance warns that it is below the 8 GB floor and installs anyway. Its install log is `/var/log/trinity-install.log`, and `/etc/trinity/ready` or `/etc/trinity/firstboot-failed` records the outcome.
 
 ## `.env` reference
 
@@ -468,14 +468,16 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 |---|---|---|
 | `OPERATOR_INTAKE_ENABLED` | dev · prod · hosted | `false` disables the once-per-install, opt-in operator contact submission. |
 | `OPERATOR_INTAKE_URL` | dev · prod · hosted | Endpoint for that submission (override to self-host). |
-| `DO_NOT_TRACK` | dev · prod · hosted | Any value other than `0`/empty/`false` disables the operator intake and telemetry sharing. |
+| `DO_NOT_TRACK` | dev · prod · hosted | Any value other than `0`/empty/`false` is the one setting after which the instance makes no request to a vendor-operated host: it disables the operator intake, telemetry sharing, the help widget's reports and the docs Q&A service (the widget's Ask tab and the `ask_trinity` tool), and removes both vendor hosts from the Content-Security-Policy. Read at run time by the backend and MCP server, and on prod and hosted by the frontend's nginx, which serves the Content-Security-Policy; recreate those containers after changing it. Your own model provider, GitHub, email and channel settings are not affected. |
+| `BUG_REPORTING_ENABLED` | dev · prod · hosted | `false` removes the help widget's Bug / Feature / Feedback tabs at run time, on the published images too. |
+| `ASK_TRINITY_ENABLED` | dev · prod · hosted | `false` removes the help widget's Ask tab and stops the `ask_trinity` MCP tool from being registered. With this and `BUG_REPORTING_ENABLED` both off, the help widget is not shown. |
 | `TELEMETRY_SHARING_ENABLED` | dev · prod · hosted | Hard kill switch for opt-in usage sharing (`false` → the Settings consent toggle refuses). |
 | `TELEMETRY_SHARING_URL` | dev · prod · hosted | Receiver endpoint (override to self-host). |
 | `TELEMETRY_SHARING_INTERVAL_HOURS` | dev · prod · hosted | Sharing heartbeat cadence (default 24). |
 | `TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS` | dev · prod · hosted | Default backfill window at consent (default 30). |
 | `TEMPLATE_REGISTRY_ENABLED` | dev · prod · hosted | `false` stops fetching the vendor template registry (air-gap). |
 | `TEMPLATE_REGISTRY_URL` | dev · prod · hosted | Registry document URL (HTTPS only, no redirects). |
-| `VITE_BUG_REPORTING_ENABLED` | prod build only | Baked into the production frontend image at build time; `false` removes the in-app bug/feedback widget. Published hosted images carry the default; the dev Vite server reads `src/frontend/.env` instead. |
+| `VITE_BUG_REPORTING_ENABLED` | prod build only | Baked into the production frontend image at build time; `false` removes the in-app report tabs from a frontend built on this machine. It cannot change a published image: use the run-time `BUG_REPORTING_ENABLED` for that. |
 | `VITE_BUG_INTAKE_URL` | prod build only | Bug-report endpoint baked into the production frontend (repointing also needs a CSP change in the frontend sources). |
 
 ### Email login
@@ -512,7 +514,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `ELEVENLABS_API_KEY` | dev · prod · hosted | Outbound voice replies on channels; empty = off. |
 | `ELEVENLABS_MODEL_ID` | dev · prod · hosted | ElevenLabs model (default `eleven_multilingual_v2`). |
 | `TTS_MAX_CHARS` | dev · prod · hosted | Replies longer than this are delivered as text instead of synthesized. |
-| `GEMINI_TEXT_MODEL` / `GEMINI_TRANSCRIPTION_MODEL` (commented) | dev · prod · hosted | Override the built-in Gemini model ids. Keep commented unless overriding — an empty value shadows the default. |
+| `GEMINI_TEXT_MODEL` / `GEMINI_TRANSCRIPTION_MODEL` / `GEMINI_IMAGE_MODEL` (commented) | dev · prod · hosted | Override the built-in Gemini model ids. Keep commented unless overriding — an empty value shadows the default. |
 | `VOICE_ENABLED` | dev · prod · hosted | Voice chat platform-wide (default on). |
 | `VOICE_MODEL` (commented) | dev · prod · hosted | Gemini Live model override. Keep commented unless overriding. |
 | `WORKSPACE_VOICE_MAX_DURATION` | dev · prod · hosted | Max length of one Workspace voice call, seconds (default 1800). |
@@ -559,6 +561,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `TUNNEL_TOKEN` | prod · hosted | Cloudflare Tunnel token; the `cloudflared` service is profile-gated. |
 | `PRIVATE_NETWORK_CIDRS` | none — read by `start.sh --provision` | Source ranges served over plain HTTP by the Caddy that provisioning installs (a VPN-only instance). Empty = every HTTP request redirects to HTTPS. Apply a change with `--caddy-only` — see [Hardening](hardening.md#reaching-the-ui-over-the-tailnet). |
 | `SSH_HOST` | dev · prod · hosted | Host advertised for agent SSH access (auto-detected from `FRONTEND_URL` when empty). |
+| `AGENT_SSH_BIND_ADDRESS` | dev · prod · hosted | Host interface each agent's SSH port (2222–2262) is published on. Unset or blank means `127.0.0.1`: reachable from the host only, or through it with `ssh -J`. A VPN interface IP (set `SSH_HOST` to the same address) or `0.0.0.0` (pair it with `scripts/deploy/docker-firewall.sh`) widens it. Must be an IP literal; anything else falls back to loopback and logs an error. Read when an agent is created or recreated, so an existing agent keeps its binding until it is recreated. See [Hardening](hardening.md). |
 | `TRINITY_DATA_PATH` | prod · hosted | Bind-mount directory for `/data` (default `./trinity-data`). Dev uses a named volume. |
 | `HOST_TEMPLATES_PATH` | prod · hosted | Host path of the agent-template directory when compose runs outside the repo root. |
 | `TRINITY_INSTANCE_NAME` | dev · prod · hosted | Label naming this instance in outbound alerts. |
@@ -627,7 +630,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `OTEL_COLLECTOR_ENDPOINT` | dev · prod · hosted | Collector endpoint (default the bundled `trinity-otel-collector`). |
 | `OTEL_METRICS_EXPORTER` / `OTEL_LOGS_EXPORTER` / `OTEL_EXPORTER_OTLP_PROTOCOL` / `OTEL_METRIC_EXPORT_INTERVAL` | dev · prod · hosted | Exporter settings. |
 | `TELEMETRY_CONTAINER_STATS_TTL` / `TELEMETRY_DOCKER_POOL_SIZE` | dev · prod · hosted | Container-stats cache freshness and Docker fetch parallelism. |
-| `CANARY_ENABLED` / `CANARY_SLACK_WEBHOOK_URL` | dev · prod · hosted | Continuous invariant watcher (staging/dev) and its Slack webhook. |
+| `CANARY_ENABLED` / `CANARY_SLACK_WEBHOOK_URL` | dev · prod · hosted | Continuous invariant watcher (staging/dev) and its Slack webhook. `1`, `true`, `yes` or `on` (any case) turns the watcher on; unset, `0`, `false`, `no` or `off` leaves it off. Any other value also leaves it off and logs a warning at startup naming the value. |
 | `SYNC_HEALTH_POLL_INTERVAL_SECONDS` | dev · prod · hosted | Seconds between git sync-health polls of each git-enabled agent (default 60). Each poll runs a `git fetch` inside the agent, so raise it to cut that load on a large fleet. An invalid or non-positive value falls back to 60. |
 
 ## See Also

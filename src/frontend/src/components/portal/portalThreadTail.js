@@ -12,6 +12,8 @@
 // read, and what to append — kept out of the component so the traps are pinned
 // without a mount (`portalThreadTail.spec.js`).
 
+import { heldThrough, READ_UP_TO_NOW } from '../../utils/readThrough'
+
 // The server bounds `GET …/history?limit=` at 50 (`router.py`, `le=50`); a
 // larger value is a 422, not a longer read.
 export const TAIL_LIMIT_CAP = 50
@@ -33,6 +35,33 @@ export const TAIL_LIMIT_CAP = 50
 export function tailSignature(row) {
   if (!row) return null
   return `${Number(row.message_count ?? 0)}|${row.last_message_at || ''}`
+}
+
+/**
+ * #4671: does the transcript already hold everything the thread's row describes?
+ *
+ * Every message write stamps the session's `last_message_at` with that
+ * message's own `created_at` (`add_portal_message` / `touch_portal_session`
+ * take one `now`), so when the row's newest instant IS the newest row on
+ * screen, there is nothing behind it to fetch. That is the case after the
+ * person's own turn: the reply came in on the turn's path, then the shell's
+ * list refresh moved the row, and the tail watcher used to read history a
+ * second time to learn what it had just been handed.
+ *
+ * Compared as the raw strings first: two rows can share a millisecond, and
+ * `Date.parse` would call a later one "the same". Any doubt — no instant on
+ * the row, none on the newest message (the synchronous fallback's reply has
+ * none), an unparseable value — answers false, and the read happens as before.
+ */
+export function tailHeld(row, messages) {
+  const last = row?.last_message_at
+  if (!last) return false
+  const held = heldThrough(messages, 'at')
+  if (!held || held === READ_UP_TO_NOW) return false
+  if (last === held) return true
+  const a = Date.parse(last)
+  const b = Date.parse(held)
+  return !Number.isNaN(a) && !Number.isNaN(b) && a < b
 }
 
 /** How many newest rows to read: the arrivals the badge counts, plus the reply poll's depth, capped. */

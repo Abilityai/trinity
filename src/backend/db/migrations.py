@@ -4595,6 +4595,26 @@ def _migrate_schedule_workspace_delivery(cursor, conn):
     conn.commit()
 
 
+def _migrate_schedule_email_results(cursor, conn):
+    """ent#1391 — mail each run's result to the person who asked. Three nullable
+    columns, no backfill, no index (read only through the schedule row already
+    loaded by id): `email_results_user_id` (who turned it on; the address is read
+    from their account at each send), `email_results_error` and
+    `email_results_error_at` (why the last mail did not go). NULL mails nothing.
+
+    Postgres counterpart: `0126_schedule_email_results`.
+    """
+    for name, kind in (("email_results_user_id", "INTEGER"),
+                       ("email_results_error", "TEXT"),
+                       ("email_results_error_at", "TEXT")):
+        _safe_add_column(
+            cursor, "agent_schedules", name,
+            f"ALTER TABLE agent_schedules ADD COLUMN {name} {kind}",
+            log_msg=f"Adding {name} to agent_schedules (ent#1391)...",
+        )
+    conn.commit()
+
+
 def _migrate_agent_skills_delivery_status(cursor, conn):
     """#2914 — the durable per-assignment injection verdict.
 
@@ -5035,6 +5055,25 @@ def _migrate_execution_chat_session_id(cursor, conn):
         "schedule_executions",
         "chat_session_id",
         "ALTER TABLE schedule_executions ADD COLUMN chat_session_id TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_execution_continues_execution_id(cursor, conn):
+    """trinity-enterprise#1225 — a continuation turn names the turn it continues.
+
+    One nullable column on `schedule_executions`. A wake, an ask resume or
+    ending and a gate notice carry nobody on the row; the platform records the
+    turn they continue so they are rated as that turn, and a delegated callee
+    row records the caller's turn the wake later continues. Nullable, no
+    backfill: old rows stay NULL and are rated as before.
+    PostgreSQL half: Alembic `0124_execution_continues_execution_id`.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "continues_execution_id",
+        "ALTER TABLE schedule_executions ADD COLUMN continues_execution_id TEXT",
     )
     conn.commit()
 
@@ -6267,6 +6306,39 @@ def _migrate_channel_client_blocks(cursor, conn):
     """)
 
 
+def _migrate_guardrail_events_table(cursor, conn):
+    """trinity-enterprise#165 (GUARD-005) — the guardrail event store: one row
+    per refusal / redaction / hook error an agent's own key reported. Schema is
+    also in db/schema.py for fresh installs; mirrored by Alembic revision
+    0125_guardrail_events. Additive: a new table, no existing row touched.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS guardrail_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            hook TEXT NOT NULL,
+            tool TEXT,
+            code TEXT,
+            execution_id TEXT,
+            details TEXT,
+            UNIQUE(agent_name, event_id)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_guardrail_events_agent_occurred ON guardrail_events(agent_name, occurred_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_guardrail_events_execution ON guardrail_events(execution_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_guardrail_events_received ON guardrail_events(received_at)"
+    )
+
+
 def run_mcp_external_access_backfill(run, *, now_iso: str) -> bool:
     """abilityai/trinity-enterprise#1101 — an install that already has users
     was serving `/mcp` to off-box clients before the switch existed, so it
@@ -6517,4 +6589,7 @@ MIGRATIONS = [
     ("agent_ownership_wake_on_ending", _migrate_agent_ownership_wake_on_ending),
     ("channel_client_blocks", _migrate_channel_client_blocks),
     ("agent_ownership_default_model", _migrate_agent_ownership_default_model),
+    ("execution_continues_execution_id", _migrate_execution_continues_execution_id),
+    ("guardrail_events_table", _migrate_guardrail_events_table),
+    ("schedule_email_results", _migrate_schedule_email_results),
 ]

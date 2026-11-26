@@ -74,6 +74,8 @@ EXPECTED_SITES = frozenset({
     # trinity-enterprise#1169: the set-assign route delegates its write to
     # assign_set_and_deliver (shared with the Workspace steward pick).
     "routers/skills.py::unassign_skill_set",
+    # #4387: a template's declared `library_skills:` are assigned at creation.
+    "services/agent_service/crud.py::_assign_declared_library_skills",
     "services/agent_service/lifecycle.py::inject_assigned_skills",
     "services/skills_sync_service.py::SkillsLibrarySyncService._reinject_agent",
     # ent#1030: the single-skill assign route delegates its write here.

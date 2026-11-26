@@ -6,6 +6,10 @@
 
 Connection happens in two stages. First, a platform admin sets up the Slack app under **Settings → Integrations → Slack Integration**, following the checklist shown inline: under **OAuth Credentials**, enter the app's Client ID, Client Secret and Signing Secret and click **Save Credentials**; under **Transport Connection**, paste the app-level token (`xapp-...`) and click **Connect** to start Socket Mode (the badge reads **Socket Mode**, **Webhook** or **Disconnected**); then click **Install to Workspace** (**Reinstall to Workspace** once a workspace is connected) to complete OAuth and obtain the bot token. The client secret, signing secret and app token are stored encrypted at rest. Second, each agent is bound to Slack from its own detail page: open **Settings › Channels**, click **Configure** on the Slack row, and click **Create Channel** to create a dedicated channel bound to that agent — a public link's **Connect Slack** button is a shortcut into the same binding (see [Sharing, Access & Monetization](sharing-access-and-monetization.md#can-i-connect-a-public-link-to-slack)). Only one Slack workspace can be connected per Trinity instance. See [Slack Integration](../integrations/slack-integration.md).
 
+## After I click Install to Workspace, Slack sends me to a page that doesn't load. Did the install fail?
+
+Probably not. After Slack's consent screen Trinity redirects you to `FRONTEND_URL` if it is set, otherwise to the **Public URL** under **Settings → General**. Only when neither is set does it fall back to `http://localhost`, which does not load on a server install even though the install succeeded. Set the Public URL (or `FRONTEND_URL`) and go back to **Settings → Integrations → Slack Integration** to confirm the workspace is connected. See [Slack Integration](../integrations/slack-integration.md).
+
 ## What is the difference between Socket Mode and webhook mode for Slack?
 
 Socket Mode is the default transport: Trinity opens an outbound WebSocket connection to Slack, so your instance needs no public URL — it works even on a laptop behind NAT. Webhook mode is the HTTP fallback for production environments where Slack posts events to your server, which requires a publicly accessible URL. If you can use Socket Mode, it is the simpler option. See [Slack Integration](../integrations/slack-integration.md).
@@ -36,7 +40,7 @@ Trinity posts each reply with the agent's name and its Trinity avatar as the per
 
 ## How do I connect an agent to Telegram?
 
-Create a bot first: message @BotFather on Telegram, send `/newbot`, choose a name and a username ending in `bot`, and copy the bot token. Then open the agent's **Settings › Channels**, click **Configure** on the Telegram row, paste the token, and click **Connect Bot** — Trinity validates the token and registers the webhook. Each agent needs its own dedicated bot; bots cannot be shared across agents. If the status shows the yellow "Bot connected but webhook not registered", set **Public URL** under **Settings → General** to your instance's public address — the webhook registers automatically once saved. See [Telegram Integration](../integrations/telegram-integration.md).
+Create a bot first: message @BotFather on Telegram, send `/newbot`, choose a name and a username ending in `bot`, and copy the bot token. Then open the agent's **Settings › Channels**, click **Configure** on the Telegram row, paste the token, and click **Connect Bot** — Trinity validates the token and registers the webhook. Each agent needs its own dedicated bot; bots cannot be shared across agents. If the dialog shows the yellow "Bot connected, but Telegram can't deliver messages to it yet", either no **Public URL** is set under **Settings → General** (set it to your instance's public HTTPS address; the webhook registers automatically once saved), or Telegram has not accepted the webhook — check the address is reachable from the internet and press **Verify**, which re-registers the webhook, answers **Operational** only when Telegram can deliver, and otherwise shows Telegram's own reason. See [Telegram Integration](../integrations/telegram-integration.md).
 
 ## Why doesn't my Telegram bot see every message in a group?
 
@@ -81,6 +85,10 @@ Not as a built-in channel. The channels Trinity connects out of the box are Slac
 ## How do users verify their email from Telegram or WhatsApp?
 
 Users send `/login user@example.com` to the bot, receive a 6-digit code at that address, and reply `/login 123456` to complete verification. `/whoami` shows the currently verified email and `/logout` clears it. On Slack no command is needed — the workspace OAuth already provides each user's email. Verification matters for agents with a restricted access policy: unverified users are prompted to log in before the agent responds. See [Access Control](../sharing-and-access/access-control.md).
+
+## Why does my Telegram or WhatsApp bot say "Too many sign-in code requests"?
+
+Sign-in code emails are rate-limited so a chat cannot be used to flood a mailbox. Over 10 minutes, each chat sender may request 5 codes, each email address 3, and each Telegram bot, WhatsApp number or Slack workspace 20. Over a cap the bot replies *Too many sign-in code requests. Try again in 10 minutes.* and sends no email; the user waits out the window and sends `/login` again. The per-address cap is shared with the web and MCP email sign-in, so requests for one address count together wherever they came from. See [Access Control](../sharing-and-access/access-control.md#limitations).
 
 ## How do I let people chat with my agent without a Trinity account?
 

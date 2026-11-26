@@ -253,16 +253,29 @@ class SlotService:
                         "[Slots] release callback skipped: no running event loop"
                     )
 
-    def active_slot_count(self, agent_name: str) -> int:
-        """How many slots the agent is holding right now — the same ZSET
-        ``acquire_slot`` admits against, counted with ZCARD.
+    def active_slot_counts(self, agent_names) -> Dict[str, Optional[int]]:
+        """How many slots each agent is holding right now — the same ZSET
+        ``acquire_slot`` admits against, one pipelined ZCARD per agent in one
+        round trip (#4257, batched by #4635).
 
-        Synchronous on purpose: a caller that only needs the meter reading
-        (the #4257 queue-stall monitor runs inside the sync maintenance tick)
-        should not have to await `get_slot_state`, which additionally reads one
-        metadata hash per slot to build the per-slot detail it does not want.
+        Synchronous on purpose: the queue-stall monitor runs inside the sync
+        maintenance tick and needs only the counts, not `get_slot_state`'s
+        per-slot detail (one metadata hash per slot). Not a transaction: the
+        counts are a reading, not a snapshot. A key Redis refuses to count
+        (WRONGTYPE) answers None for that agent only; a failure of the round
+        trip itself raises to the caller.
         """
-        return int(self.redis.zcard(self._slots_key(agent_name)))
+        names = list(agent_names)
+        if not names:
+            return {}
+        pipe = self.redis.pipeline(transaction=False)
+        for name in names:
+            pipe.zcard(self._slots_key(name))
+        replies = pipe.execute(raise_on_error=False)
+        return {
+            name: None if isinstance(reply, Exception) else int(reply)
+            for name, reply in zip(names, replies)
+        }
 
     def renew_slot(self, agent_name: str, execution_id: str) -> bool:
         """#2433: re-anchor a HELD slot's lease at 'now'.

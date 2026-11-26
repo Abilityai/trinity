@@ -34,6 +34,7 @@ from dependencies import (
     require_admin,
 )
 from models import EvaluationCreate, EvaluationResponse, User
+from utils import request_memo
 
 # Mirrors `client_portal.service.WORKSPACE_EVALUATOR_PREFIX`. Imported would be
 # a router→portal-module dependency for one constant; the two are pinned
@@ -166,12 +167,20 @@ def _operator_for(rows, current_user: User) -> set:
     """
     names = {r.get("agent_name") for r in rows if r.get("agent_name")}
     operator = set()
-    for name in names:
+    # #4672: the same predicate per agent, with the owner rows read once — a
+    # page of 500 rows can span many agents. A failed warm-up changes nothing:
+    # the per-agent check below still runs, and still fails closed.
+    with request_memo.scope():
         try:
-            if (db.can_user_share_agent(current_user.username, name) and agent_may_reach(current_user, name, manage=True)):
-                operator.add(name)
+            db.get_agent_owners(sorted(names))
         except Exception:  # noqa: BLE001
-            logger.warning("evaluations: operator check failed for %s", name)
+            logger.warning("evaluations: owner prefetch failed")
+        for name in names:
+            try:
+                if (db.can_user_share_agent(current_user.username, name) and agent_may_reach(current_user, name, manage=True)):
+                    operator.add(name)
+            except Exception:  # noqa: BLE001
+                logger.warning("evaluations: operator check failed for %s", name)
     return operator
 
 

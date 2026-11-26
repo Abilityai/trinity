@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 vi.mock('axios', () => ({ default: { post: vi.fn(), get: vi.fn() } }))
-vi.mock('vue-router', () => ({ useRouter: () => ({ push: vi.fn() }) }))
+vi.mock('vue-router', () => ({ useRoute: () => ({ query: {}, hash: '' }), useRouter: () => ({ push: vi.fn(), replace: vi.fn() }) }))
 vi.mock('../../src/router', () => ({ clearSetupCache: vi.fn(), getSetupClaimRequired: () => null }))
 vi.mock('../../src/stores/auth', () => ({ useAuthStore: () => ({ loginWithCredentials: vi.fn() }) }))
 vi.mock('../../src/components/TrinityMark.vue', () => ({ default: { template: '<span />' } }))

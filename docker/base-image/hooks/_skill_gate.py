@@ -54,9 +54,11 @@ import threading
 from collections import namedtuple
 from typing import Dict, List, Optional, Tuple
 
-# The Claude Code release the facts below were read from. A unit test fails
-# when the image's pin moves; re-check every item, then move this.
-SKILL_GATE_CLI_VERIFIED = "2.1.281"
+# The Claude Code release the facts below were last checked on. A unit test
+# fails when the image's pin moves; re-check every item, then move this.
+# Read from the 2.1.281 binary; re-checked on 2.1.322 (#4528) by running each
+# one in the image against a stub API, with 2.1.281 beside it as the control.
+SKILL_GATE_CLI_VERIFIED = "2.1.322"
 CLI_FACTS_TO_REAUDIT = (
     "Hook entries with `args` run in exec form: spawned directly, never through a "
     "shell, never wrapped by CLAUDE_CODE_SHELL_PREFIX.",
@@ -89,6 +91,16 @@ CLI_FACTS_TO_REAUDIT = (
     "~/.claude/.credentials.json is read from disk, so either one signs a nested claude in.",
     "A -p or --print before any `--` skips subcommand parsing, so `claude mcp -p x` is a model "
     "session; --version and --help still exit first. gated_bash_deny relies on this.",
+    "The Monitor tool (offered since 2.1.310 with telemetry off) runs a shell command of its "
+    "own; hooks registered for Bash see that command as a Bash call (since 2.1.314) and can "
+    "block it. Headless and chat turns do not offer the tool at all (PLATFORM_DENIED_TOOLS).",
+    "A server-managed settings payload the CLI holds (cached as <config dir>/remote-settings.json, "
+    "the settings object itself) that sets any key but managedSourcesBehavior and "
+    "wslInheritsWindowsSettings is the managed tier alone: managed-settings.json and every "
+    "managed-settings.d file are skipped, so none of their hooks run (only env still merges per "
+    "key). With managedSourcesBehavior \"merge\" they run, unless the payload sets "
+    "disableAllHooks. agent_server/services/managed_hooks.py reads that cache "
+    "(trinity-enterprise#1176).",
 )
 
 MARKER = "/opt/trinity/skill-gates-active"
@@ -790,14 +802,14 @@ def _verdict(status: int, payload: bytes, call: Call) -> Outcome:
     message = data.get("message")
     if not isinstance(message, str) or not message.strip():
         message = REFUSED_WITHOUT_WORDS
-    return Outcome(2, message[:MESSAGE_MAX_CHARS], "skill_gate_deny", _fields(call))
+    return Outcome(2, message[:MESSAGE_MAX_CHARS], "skill_gate_deny", dict(_fields(call), code="skill_refused"))
 
 
 def _no_verdict(reason: str, call) -> Outcome:
     """No answer from the platform: the marker decides. Present — this agent
     has gates — refuses; absent lets the call through."""
     marker = _marker_present()
-    fields = dict(_fields(call), reason=reason, marker=marker)
+    fields = dict(_fields(call), reason=reason, marker=marker, code="skill_check_unreachable")
     if marker:
         return Outcome(2, COULD_NOT_CHECK, "skill_gate_unknown", fields)
     return Outcome(0, None, "skill_gate_unknown", fields)
@@ -817,9 +829,10 @@ def _fields(call) -> dict:
 # ---------------------------------------------------------------------------
 
 def _log(outcome: Outcome) -> None:
-    """To /logs/guardrails.jsonl (Vector) through the guardrails' own helper,
-    in a thread with a short join: a failing or blocking write never changes
-    the exit code and never holds the tool."""
+    """To the /logs/guardrails.jsonl spool through the guardrails' own helper
+    (the agent server forwards it to the platform, trinity-enterprise#165), in
+    a thread with a short join: a failing or blocking write never changes the
+    exit code and never holds the tool."""
     if not outcome.event:
         return
 

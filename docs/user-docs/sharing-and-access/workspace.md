@@ -10,7 +10,7 @@ Workspace lives at `/workspace` and ships in **every** build. The older `/portal
 - **Inbox** — The Workspace's landing page at `/workspace/inbox`: what your agents need from you and what came back, across every agent on your roster.
 - **Client** — An external person who signs in with a verified email. They have no Trinity account and never see the admin UI.
 - **Chat** — One ongoing conversation. A **1:1** chat is with a single agent; a **room** is a chat with two or more.
-- **Main** — The pinned chat every (you, agent) pair has. It is the first tab for every agent and the place the agent reaches you when nothing else names a chat: an agent-initiated message, a question it raises outside a conversation, or a scheduled brief.
+- **Main** — The pinned chat every (you, agent) pair has. It is the first tab for every agent and the place the agent reaches you when nothing else names a chat: an agent-initiated message (including one the agent sends with `send_message` on the `web` channel, which is how it reaches someone who works only in the Workspace — nothing else notifies them), a question it raises outside a conversation, or a scheduled brief. A message the agent sends between turns is never shown as the answer to a turn you are waiting on.
 - **Rail** — The right-hand column beside the conversation. Its tabs, in order, are **Info**, **Canvas**, **Files**, **Projects** (on instances licensed for them), **Asks**, **Work** and **Loops**.
 - **Project** — The record of a piece of sustained work — goal, members, agents, tasks and a shared log — linked to the chats where it happens. Licensed instances only; see [Workspace Projects](workspace-projects.md).
 - **Briefing** — The panel on an empty chat headed **Things you can ask**, drawn from the agent's exposed skills or its template.
@@ -32,6 +32,14 @@ An external client signs in with email instead:
 3. Enter the code. No password, and no platform account is created.
 
 Codes expire after a few minutes. **Resend code** becomes available after a short cooldown, and **← different email** lets you switch before verifying. Signing in with an email that has no agents shared with it still works — you land on an empty roster.
+
+An email that belongs to a Trinity account (one with a password, or one the platform's own email sign-in admits) is not signed in as a client: after the code verifies, the Workspace sends you to the Trinity sign-in page with the address filled in and the line *This email has a Trinity account. Sign in here to open your Workspace.* — so you get your own agents and the platform-user features rather than a client's view.
+
+**An account with no email.** The Workspace finds your agents by email. A Trinity account without one — the built-in admin on a default install — sees *Add an email to use the Workspace* instead of the sidebar, with **Open Settings** (it lands on **Settings → General → Admin sign-in email**) and **Reload**. Once an email is bound, the account's own agents are in its roster.
+
+### Accepting the terms of use
+
+When the instance shows terms of use, every person sees the current version once — a client inside the Workspace, a platform user on the Trinity terms page — before anything else loads. Tick *I have read these terms and accept them.* and press **Accept and continue**; the Workspace then loads your roster, chats and asks. **Decline and sign out** signs you out and changes nothing else; sign in again whenever you are ready to accept. If the terms change while you are reading, the screen says so and shows the new version. A new version is shown again on your next visit. If the terms are outstanding when the Workspace loads, the page says so with **Review the terms** instead of an error and a retry that would only be refused again.
 
 A client session slides: it renews while you use the Workspace, ends after the idle window, and never outlives the cap (defaults: 7 idle days, 30 days total). When it times out, the sign-in form says so — *Your session timed out* — and signing in again returns you to where you were. An administrator sees the policy under **Settings → Retention → Workspace sessions**; changing it needs an entitlement.
 
@@ -71,12 +79,14 @@ Signing in, or opening bare `/workspace`, lands you on the **Inbox** — *What n
 | Tab | Shows |
 |-----|-------|
 | **Action** | Asks addressed to you that are still waiting, **Newest** first. A **Sort asks** switch in the list's head line offers **Urgency** instead: asks that expire within 24 hours (soonest first), then by priority, then oldest first. The choice is remembered for you in this browser, and a link can carry it (`?sort=urgency`). While asks are waiting, a second strip narrows the list to one agent (**All agents** or an agent's name, with its count) |
-| **Unread** | Chats where something came back since you last read them — replies, completed runs delivered to you, deliverables addressed to you — and times someone [tagged you](#tagging-a-person) |
-| **All** | Every chat, read or not, plus waiting asks and asks that ended in the last 7 days |
+| **Unread** | Chats where something came back since you last read them — replies, completed runs delivered to you, deliverables addressed to you — rooms you are in where an agent posted since you last read them (one row per room), and times someone [tagged you](#tagging-a-person) |
+| **All** | Every chat and every room you are in, read or not, plus waiting asks and asks that ended in the last 7 days |
 
 Click a row to open it in the reading pane beside the list (on a narrow screen the pane replaces the list, with **Back**). An ask is answered right there, with the same controls as in a chat, and below it the ask's context: **Where it came from** (the chat and the few messages before the ask, with a link to open it there), **Delivered in that chat**, and **Your recent answers** to this agent. A chat shows what arrived since you last read it and its deliverables, and is marked read once it has loaded; **Mark read**, **Reply in chat** and **Open in chat** sit in the pane's header, plus **Open canvas** when the agent has one. An ask's header offers **Open in chat** only when a chat turn raised it, and it opens that chat; an ask raised by a schedule, a loop or a gate has no header actions. On **Unread** and **All**, **Mark N chats read** clears them in one go, after a confirmation when it covers more than one chat.
 
-Rows keep their place while you stay on a tab: a chat you read stays listed, drawn as read, and a poll never re-sorts the list under you — changing the sort re-sorts the rows once, then they hold again. A tab shows 50 rows, then **Show more**. The Inbox reads at most 200 asks, the longest-waiting pending ones first; a note under the list says so when the cap is reached. Rooms are not in the Inbox yet.
+A room row opens the room's new messages in the reading pane, then marks the room read; **Open in chat** opens the room itself. Only agents' messages count toward a room's unread, and a room you have open is read as messages arrive, so it never badges itself.
+
+Rows keep their place while you stay on a tab: a chat you read stays listed, drawn as read, and a poll never re-sorts the list under you — changing the sort re-sorts the rows once, then they hold again. A tab shows 50 rows, then **Show more**. The Inbox reads at most 200 asks, the longest-waiting pending ones first; a note under the list says so when the cap is reached. Marking something read covers exactly what you were shown, so a message that arrives a moment later stays unread.
 
 **Discuss and Dismiss.** A question or approval card also offers **Discuss** — a chat with the asking agent about that ask, where for a question **Send as answer** answers it from the message field — and **Dismiss**, which ends the ask without answering after a 5-second **Undo**. Alerts offer neither, and neither does an ask that went to several people because they fill the same role: the first answer ends it for everyone, and the others see **Answered · *name***. Who asks reach, the controls, and how long ended asks stay are all in [Approvals](../automation/approvals.md).
 
@@ -106,8 +116,9 @@ One box: the message field on top, the controls in a row inside it. Enter sends;
 - **`/` and `@`** — type `/` at the start of a word for the agent's skills, or `@` for another agent or, once you type a name, a person (see [Tagging a person](#tagging-a-person)). ↓ then Enter (or Tab for the top row) inserts the pick; Esc dismisses the list. Enter alone always sends. A `/` pick splices the skill's starter prompt into the field without sending.
 - **Model** — platform users on a Claude-runtime agent get a dropdown beside Send. The default option reads **Agent's default (…)** and names what the agent would use; the other three are plain-language tiers — **Most capable**, **Balanced — fast and smart**, **Fastest**. The choice is remembered per agent on your account. Resolution is your explicit choice → the model the owner set for the agent's public channels → the platform default. If the agent can't complete a turn on a model you chose, the reply says so and the choice reverts to the agent's default.
 - **Attach** — the paperclip picks files, dropping files anywhere on the conversation sends them (*Drop files to send to …*), and pasting a copied image or file into the message field attaches it the same way. A paste that also carries text still types the text. Up to 20 files per drop, 25 MB each, uploaded one after another; each shows as a chip with its own progress, and a refused file names itself and the limit. The **×** on a chip takes the file back before you send: a file still queued never uploads, and one already uploaded is removed from the agent's inbox (in a room, from every participant's). The × is inert while a send is settling or an @mention is carrying your files to a room. Sent files land in the agent's inbox and appear under **Files you sent** in the rail.
+  Files you send are never committed to the agent's git repository — the agent's `inbox/<person>/` folder is gitignored — so they stay on the agent's volume, not in its repo. Ones committed before this rule are untracked on the agent's next start or Push; copies already pushed stay in the repo's history until the owner rewrites it.
 - **Speak your message** — the microphone dictates into the field. It is separate from the voice call, and it appears only where dictation can work; see [Dictation](#dictation).
-- **Voice call** — the leftmost button starts the real-time call in this chat; see [Voice Chat](../advanced/voice-chat.md).
+- **Voice call** and **Direct call** — the leftmost buttons start a call in this chat. **Start a voice call** is the real-time call, where a voice model talks with you and hands work to the agent; **Start a Direct call** sends every spoken turn to the agent itself and reads its own reply aloud. One call at a time per chat; see [Voice Chat](../advanced/voice-chat.md).
 - **Speak replies aloud** — a speaker button above the composer, shown only when the agent has a voice configured, reads each reply in the agent's ElevenLabs voice on your side. Click again to mute. It is hidden during a call, when the orb owns playback. See [Voice Replies](../advanced/voice-replies.md).
 - **Send** becomes **Stop** while a turn runs.
 
@@ -129,6 +140,10 @@ Turns on one chat are serialized to protect the agent's memory. A second message
 
 Closing the tab doesn't stop anything: the turn keeps running on the server and the reply is waiting when you come back.
 
+When a run the platform started for you fails — a background task, a hand-off, a room turn — the chat, the Work card and any Slack or Telegram report say so in one plain sentence: it was cancelled, it hit a usage limit, it timed out, or it could not be completed. The raw error, with its subscription and configuration details, stays on the execution for the agent's operators.
+
+An open Workspace page hears when an agent is shared with you or becomes available, without a reload.
+
 ### Reading replies
 
 - Headings, lists and tables in a reply render as such. A code block is its own object with a language label and an always-visible **Copy**; it wraps at the edge rather than scrolling sideways.
@@ -136,7 +151,7 @@ Closing the tab doesn't stop anything: the turn keeps running on the server and 
 - **Reply to this message** puts a *Replying to …* chip above the message field, and your next message tells the agent which of its messages you are answering. The **×** on the chip, or **Esc** in the message field, drops it. Reply is offered in 1:1 chats, and is disabled during a voice call.
 - If you have scrolled up to re-read something, an arriving message does not pull you back down. A **N new messages** control appears instead; sending, opening a chat or clicking it returns you to the bottom.
 - Reports the agent produced for this chat appear at the end of the thread under **Delivered here** — see [Agent Reports](../operations/agent-reports.md).
-- While anything is unread, the browser tab's title carries the count — `(3) Trinity — Workspace` — so a reply lands even when the Workspace is behind another tab. Opening the chat clears it. Unread counts replies you haven't read; an agent's questions are counted separately.
+- While anything is unread, the browser tab's title carries the count — `(3) Trinity — Workspace` — so a reply lands even when the Workspace is behind another tab. Opening the chat clears it. Unread counts replies you haven't read, in chats and in rooms; an agent's questions are counted separately.
 
 ### Conversations keep their memory
 
@@ -164,7 +179,7 @@ The rail opens on **Work** (on **Info** for a client, who has no Work tab), or o
 
 ### The agent's page is the conversation
 
-Clicking an agent no longer opens a report about it. Its numbers sit in a band under the header of every chat with it — tasks in the last 7 days, the percentage completed, the percentage that succeeded first try (a rate with nothing to measure reads —), a **Helpful / Not helpful** tally where people have rated it, and a small activity chart. Everything else is the rail's **Info** tab:
+Clicking an agent no longer opens a report about it. Its numbers sit in a band under the header of every chat with it — tasks in the last 7 days, the percentage completed, the percentage that succeeded first try (a rate with nothing to measure reads —), a **Helpful / Not helpful** tally where people have rated it, and an activity waveform — one pulse per day, its height following that day's runs and its colours where they came from; hover a day for its breakdown. Everything else is the rail's **Info** tab:
 
 | Section | Shows |
 |---------|-------|
@@ -174,8 +189,9 @@ Clicking an agent no longer opens a report about it. Its numbers sit in a band u
 | **Your chats** | The full list, unread counts included — Main shows as **Current conversation**, archived chats in grey |
 | **What it can do** | Capability cards, each with its skill's description (or **No description yet**); clicking one pre-fills the composer. An agent exposing no skills shows its template's use cases here as **What you can ask** instead, and an agent that could not be reached says so rather than showing an empty list |
 | **Reports** | Structured reports the agent has published; expand one to read it — see [Agent Reports](../operations/agent-reports.md) |
-| **What it remembers about you** | The agent's notes about you, and a **Changes** list of the runs that rewrote them, with **Undo** |
+| **What it remembers about you** | The agent's notes about you, and a **Changes** list of the runs that rewrote them — each with the lines it added and removed — with **Undo**. A change the agent's owner undid reads *Undone by an operator of this agent*. See [Agent Memory](../agents/agent-memory.md) |
 | **Decisions** | The seat's decision record — see [Decisions](#decisions) |
+| **What it may do unprompted** | Per kind of ask, whether the agent may act without asking you first, and why not — see [What it may do unprompted](#what-it-may-do-unprompted) |
 
 An external client's band and Info tab count only the runs they can see: their own turns, the runs those turns started, and the agent's scheduled runs — except a scheduled brief delivered to someone else. Other people's runs of the same agent, and their timings, are never shown to a client. A platform user sees the agent's full activity.
 
@@ -216,6 +232,23 @@ On a decision that is still active:
 
 Nothing is deleted. A decision past its review date shows as expired until someone reconfirms it. The seat's active decisions are read into every turn with that agent, so the agent reuses the criterion next time. You see and edit your own seat's decisions; the agent's owner sees and edits every seat's. The agent records decisions too, with the `record_decision` MCP tool.
 
+The form's optional **Ask class** names the kind of ask a decision settles (for example `vendor-renewal`). Decisions that share an ask class are the evidence for [what the agent may do unprompted](#what-it-may-do-unprompted).
+
+### What it may do unprompted
+
+The last section of the **Info** tab, **What it may do unprompted**, lists each ask class from your decisions with one of two states: **on-request** (the agent asks you first) or **unprompted** (it acts and reports). Every class starts on-request. There is no promote button — a class graduates only when its record earns it:
+
+- at least three decisions for that ask class, from at least three separate conversations (decisions the agent recorded on its own must also span at least three days);
+- one consistent criterion across them, and no reversal among the ones still in force;
+- no thumbs-down from you on this agent in the last 30 days;
+- not marked **guard-capped** — a class that moves a metric another role holds never graduates on this evidence alone.
+
+Two switches above the seat can still keep a graduated class on-request: the instance **autonomy level** (below **L2**, nothing runs unprompted anywhere; the line at the top of the section names the level) and the agent's own autonomy switch, which is the hard off. A class that earned it but is held back by either reads *earned — blocked by the dial*. Every class that is not unprompted lists every reason, in plain words, and the agent reads the same reasons, so it can tell you why it is asking. Evidence lapses when its decisions pass their review dates.
+
+**Hold on-request** keeps a class asking first however much evidence it has; anyone may hold a class on their own seat. **Release** lets it graduate again, and only the agent's owner can release a hold. The owner also sees **Other seats · N** for everyone else's classes. With no ask classes yet the section says *Nothing yet* and what it would take.
+
+**For admins.** **Settings → Retention → Autonomy level** sets the instance ceiling: **L0** Continuity, **L1** Companion (the default), **L2** Delegated classes, **L3** Load-bearing judgment. Nothing runs unprompted below L2. Raising the level promotes nothing — each seat's classes are still earned from its decision record — and lowering it takes nothing away: what each seat earned comes back as it was when you raise the level again. Only a person signed in as an admin can change it; an agent's key can read it, never set it.
+
 ### Dictation
 
 The microphone in the composer (**Speak your message**) turns speech into text in the message field. Nothing sends until you press Enter. Clients and platform users both get it, and it uses one of two engines:
@@ -240,6 +273,8 @@ Trinity checks each key once and repeats the check every few hours, and at once 
 ### Voice mode
 
 The call button in the composer starts a real-time voice call inside the chat you are in. The orb takes the conversation column, the agent's canvas takes the right column, and the header, tabs and composer stay visible but inert until you end the call (the theme switch keeps working) (**End call**, the orb's End button, or **Esc**). Switching chats and **⌘J** wait until the call ends. The spoken turns land in the chat as one collapsed **Voice call · N min** block. Everything about the call — who can start one, what the agent can do during it, the time limit — is in [Voice Chat](../advanced/voice-chat.md).
+
+The **Direct call** button beside it keeps the conversation in front of you: each thing you say becomes an ordinary turn in this chat, and the agent's own reply is read aloud. A strip above the composer shows the call's state — **Listening**, **Got it**, **Thinking**, **Speaking**, **Yes or no?** — with **Stop**, **Mute** and **End call**. Say *stop* (or *wait*, *never mind*…) or press **Stop** to cut the agent off; **Esc** silences it while it speaks and ends the call when it is quiet. The call folds into one **Direct call · N min** block. See [Voice Chat → Direct calls](../advanced/voice-chat.md#direct-calls).
 
 ### Bringing in another agent
 
@@ -291,7 +326,7 @@ Capability cards come from the agent's exposed skills where an operator has conf
 
 ## For Agents
 
-Workspace is a client-facing shell over the platform's existing agent behavior, not a new agent capability — an agent reaches the people in it through its replies, its [reports](../operations/agent-reports.md), its [questions](../automation/approvals.md) and its [canvas](../agents/agent-canvas.md). The one Workspace record an agent writes directly is the seat's decision record: `record_decision` records a decision for the person the current turn is for (the seat comes from the turn's `execution_id`, never from a parameter), and `list_seat_decisions` reads that seat's record back. Neither returns an email address. It is served by `/api/enterprise/client-portal/*` (the prefix is historical), authenticated by either a Workspace session token or a platform JWT, with every per-agent route scoped to the caller's roster. Agent-scoped MCP keys are refused.
+Workspace is a client-facing shell over the platform's existing agent behavior, not a new agent capability — an agent reaches the people in it through its replies, its [reports](../operations/agent-reports.md), its [questions](../automation/approvals.md) and its [canvas](../agents/agent-canvas.md). The one Workspace record an agent writes directly is the seat's decision record: `record_decision` records a decision for the person the current turn is for (the seat comes from the turn's `execution_id`, never from a parameter), and `list_seat_decisions` reads that seat's record back. `get_autonomy` reads what the agent may do unprompted for that seat, with every blocking reason spelled out, so the agent can say why it is asking. None of them returns an email address. It is served by `/api/enterprise/client-portal/*` (the prefix is historical), authenticated by either a Workspace session token or a platform JWT, with every per-agent route scoped to the caller's roster. Agent-scoped MCP keys are refused.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -324,8 +359,11 @@ Workspace is a client-facing shell over the platform's existing agent behavior, 
 | `/agents/{name}/memory` | GET | What the agent remembers about the caller, and the writes that changed it |
 | `/agents/{name}/memory/writes/{id}/undo` | POST | Revert the notes to before one write, latest first |
 | `/agents/{name}/decisions` | GET / POST | The seat decision record / record a decision |
+| `/agents/{name}/autonomy` | GET | What the agent may do unprompted for the caller, per ask class, with every blocking reason; the owner also gets the other seats |
+| `/agents/{name}/autonomy/classes/{ask_class}` | POST | `{action: hold \| release, seat?}` — hold a class on-request (anyone, own seat) or release a hold (the agent's owner only). A person only |
+| `/agents/{name}/autonomy/classes/{ask_class}/guard` | POST | `{guard_metric: not_assessed \| capped \| clear, seat?}` — record whether a class moves a metric another role holds; `capped` keeps it on-request. The agent's owner only |
 | `/agents/{name}/decisions/{id}/actions` | POST | `close`, `reverse` (with a reason), `reconfirm` (with a new date) or `supersede` an active decision; a decision that is no longer active returns `409` |
-| `/agents/{name}/voice/start` | POST | Start a voice call bound to a chat (platform users) |
+| `/agents/{name}/voice/start` | POST | Start a voice call bound to a chat (platform users); `mode: "direct"` starts a Direct call |
 | `/agents/{name}/stt` | POST | Transcribe a recorded clip for dictation — returns `{text}`. `404` when dictation is unavailable; a provider error returns a sentence naming the cause (`503` key, permission or credits; `429` rate limit; `422` unreadable recording; `502` provider failure) |
 | `/chat-state` | GET | Star and unread state for every chat; `?previews=true` adds each unread chat's newest arrivals (the Inbox) |
 | `/chat-state/{kind}/{id}/star` | PUT / DELETE | Star or unstar a chat |
@@ -344,19 +382,19 @@ Asks (`/asks`, with `/asks/{id}/answer`, `/discuss`, `/dismiss` and `/context`) 
 
 - **Shared agents only.** A client sees an agent only if it is shared with their verified email.
 - **No admin access.** Clients can chat, send files, star and rename chats, rate replies and read reports — never configure, create, or manage agents.
-- **Platform users only** for the model dropdown, voice calls, the Work and Loops tabs, and a room's live cards. A client sees none of them; in a room, a client sees *… is thinking…* instead and cannot stop a turn.
+- **Platform users only** for the model dropdown, voice and Direct calls, the Work and Loops tabs, and a room's live cards. A client sees none of them; in a room, a client sees *… is thinking…* instead and cannot stop a turn.
 - **Stop covers only work your own messages started** — your turns, the jobs they hand on, and room turns. Nobody else can stop them from the Workspace. A loop is stopped from the **Loops** tab; a scheduled or background run from the agent's **Tasks** tab.
 - **Dictation depends on the ElevenLabs key.** Without a key that may call speech-to-text, dictation falls back to the browser's own engine, and the microphone is hidden in a browser that has none.
 - **Multi-agent chat is available in every build.** Against an older backend that does not serve rooms, `@mention` escalation is unavailable and Workspace says so rather than failing obscurely.
-- **Rooms show no unread count.** Stars work for rooms; unread badges count 1:1 chats only. A chat that existed before you first read anything, and was never opened, reports nothing.
-- **Room settings are not editable here** beyond the name. Topic, budget and scribe are set through the API.
+- **A chat that existed before you first read anything**, and was never opened, reports no unread count.
+- **Room settings are not editable here** beyond the name and, where people can be seated, who is in it. Topic, budget and scribe are set through the API.
 - **`/` skills are not offered in a room.** `@` is.
 - **Codex agents replay history** instead of resuming, so their continuity is text-only.
 - **A very long chat is windowed.** The thread shows the newest turns and says *Earlier messages in this chat aren't shown* when older ones were cut.
 - **No cost or model information** is shown on the agent's band or Info tab, and the chat history and chat reply routes return no turn cost to any caller.
 - **Suggestions are for platform users.** An external client sees no **Suggested for you** list. Suggestions are not offered in a room.
 - **Drafts stay in one browser.** Unsent text does not follow you to another device.
-- **Rooms are not in the Inbox yet**, and **Reply to this message** is offered in 1:1 chats only. A tag from a room does reach the tagged person's Inbox.
+- **Reply to this message** is offered in 1:1 chats only.
 - **Tags are in-app only.** A tagged person is not emailed; they see the tag the next time they open the Workspace.
 - **An ask several people received** cannot be dismissed or discussed yet — only answered.
 - **Agent memory for the switch keys is per tab.** Which chat you last had open with each agent is forgotten on reload.
@@ -369,6 +407,7 @@ Asks (`/asks`, with `/asks/{id}/answer`, `/discuss`, `/dismiss` and `/context`) 
 - [Agent Sharing & Access](agent-sharing.md) — sharing agents with operators and external clients (grants the Workspace roster)
 - [Cross-Channel Access Control](access-control.md) — verified-email identity and access requests across channels
 - [Continuous Conversations](../agents/agent-session.md) — what resuming preserves, and its limits
+- [Agent Memory](../agents/agent-memory.md) — what an agent remembers about each person across chats, and how its owner reviews it
 - [Voice Chat](../advanced/voice-chat.md) — the real-time call inside a Workspace chat
 - [Agent Canvas](../agents/agent-canvas.md) — the surface the rail's Canvas tab and the call's right column show
 - [Shared Sessions (Rooms)](../collaboration/rooms.md) — how multi-agent conversations work underneath

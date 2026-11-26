@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 
+from utils import request_memo
 from utils.helpers import parse_iso_timestamp, utc_now_iso
 from services.chat_title import (
     chat_title_problem,
@@ -47,9 +48,11 @@ import config
 # `config.PORTAL_SOURCE_CHANNEL` for why it exists and why it is not a channel.
 from config import PORTAL_SOURCE_CHANNEL
 from services import login_policy_gate, skill_gate_map_service, turn_context
+from services import execution_attribution  # ent#1105
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.channel_completion_report import (
     COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED, COMPLETION_SOURCE_NOTICE,
+    PROACTIVE_SOURCE,
 )
 
 from . import db
@@ -293,10 +296,45 @@ def email_has_access(email: str | None) -> bool:
     if len(db.get_shared_roster(email)) == 0:
         return False
     try:
-        return not db.is_client_blocked(email)
+        if db.is_client_blocked(email):
+            return False
     except Exception as exc:  # noqa: BLE001 — a block must not evaporate on error
         logger.error("[#281] block lookup failed during portal sign-in; denying: %s", exc)
         return False
+    # trinity-enterprise#1258: a share does not re-open a deactivated account.
+    return not email_account_suspended(email)
+
+
+def email_account_suspended(email: str | None) -> bool:
+    """trinity-enterprise#1258 — True when this address belongs to a platform
+    account that is deactivated (`users.suspended_at`, the #995 primitive).
+
+    The Workspace door decided on two questions only — is an agent shared with
+    the address, and would `/login` admit it — and neither reads the column. So
+    a suspended account with a share fell through to the outside-client path:
+    a code, a session, and turns on the shared agent, while `/login` refused
+    the same person. Suspension wins on every door (ruling on the issue): a
+    share made before or after it does not re-open the account, and the remedy
+    is an admin reactivating it.
+
+    An address with no account is not suspended: an outside client has no
+    `users` row and is governed by the share and the block (ent#281) alone.
+
+    Fail-closed, like the block: a lookup that cannot answer denies. Every
+    caller reads the same database for the share or the session one line away,
+    so a database that cannot answer this could not have served the request.
+    """
+    addr = (email or "").strip().lower()
+    if not addr:
+        return False
+    from database import db as core_db
+    try:
+        user = core_db.get_user_by_email(addr)
+    except Exception as exc:  # noqa: BLE001 — a deactivation must not evaporate on error
+        logger.error("[ent#1258] account lookup failed at the Workspace door; denying: %s",
+                     type(exc).__name__)
+        return True
+    return bool(user and user.get("suspended_at"))
 
 
 # #3922 — what `portal_signin_verify` returns instead of a token for a platform
@@ -385,6 +423,11 @@ def portal_signin_request(email: str | None) -> str | None:
     email = (email or "").strip().lower()
     if not email or not (email_has_access(email) or platform_login_admits(email)):
         return None
+    # trinity-enterprise#1258: no code for a deactivated account, whichever of
+    # the two reasons above would have issued one. The router's body is the
+    # same either way, so this tells a caller nothing (#186).
+    if email_account_suspended(email):
+        return None
     # ent#849: members of an SSO-only org sign in with SSO; outsiders keep codes.
     if not login_policy_gate.email_code_allowed_for(email):
         return None
@@ -402,6 +445,12 @@ def portal_signin_verify(email: str | None, code: str | None, *, interactive: bo
     email = (email or "").strip().lower()
     # ent#849: before redeeming, so a refused member's code is not consumed.
     if not login_policy_gate.email_code_allowed_for(email):
+        return None
+    # trinity-enterprise#1258: a deactivated account gets no session and no
+    # hand-off to `/login`. Before redeeming, like the policy check above, so
+    # the answer is the same 401 as a wrong code (#186). No code is issued to
+    # such an account, but one issued just before the suspension is still live.
+    if email_account_suspended(email):
         return None
     from database import db as core_db
     if not core_db.verify_login_code(email, code or ""):
@@ -1161,6 +1210,7 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     model_context = _model_context()
     # ent#1172: once per roster load, like `tts_ready` and `model_context`.
     member_names = _member_agent_names()
+    managers = canvas_managers(names, email, is_platform=include_owned)
     cards = [
         _row_to_card(r, tts_ready, default_voice,
                      availability=availability.get(r["agent_name"], "unknown"),
@@ -1178,8 +1228,9 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
                      # couple of indexed lookups per agent on a load that already
                      # makes a Docker call; if it ever matters, memoize INSIDE
                      # the predicate so both callers benefit.
-                     can_manage_canvases=may_manage_canvases(
-                         r["agent_name"], email, is_platform=include_owned))
+                     # #4672: still that predicate, asked once per agent inside
+                     # one memo scope (`canvas_managers`) rather than inline.
+                     can_manage_canvases=r["agent_name"] in managers)
         for r in rows
     ]
     # #2163: the briefing is DEFERRED, not dropped. Saying so on the card is
@@ -1966,8 +2017,35 @@ def may_manage_canvases(agent_name: str, email: str | None, *,
     return bool(core_db.can_user_share_agent(user["username"], agent_name))
 
 
+def canvas_managers(agent_names, email: str | None, *, is_platform: bool) -> set[str]:
+    """Which of ``agent_names`` this caller may manage canvases on (#4672).
+
+    `may_manage_canvases` asked per agent, exactly as before — it is still the
+    one predicate — but inside one `request_memo.scope()` with the owners read
+    in one query first, so a roster of N agents costs the same three reads as
+    a roster of one instead of re-reading the caller's own user row and one
+    owner row per agent on every Workspace load.
+    """
+    from database import db as core_db
+
+    names = list(agent_names or [])
+    if not is_platform or not email or not names:
+        return set()
+    with request_memo.scope():
+        try:
+            core_db.get_agent_owners(names)
+        except Exception:  # noqa: BLE001 — a failed warm-up falls back to per-agent reads
+            logger.warning("canvas_managers: owner prefetch failed", exc_info=True)
+        return {name for name in names if may_manage_canvases(name, email, is_platform=is_platform)}
+
+
+@request_memo.memoized
 def roster_agent_names(email: str | None, include_owned: bool) -> set[str]:
     """The set of agent names on the caller's roster — THE access boundary.
+
+    Memoized inside a `request_memo.scope()` (#4671): a read that re-checks
+    the roster once per agent asks the same two queries each time, so the
+    scope answers them once. Treat the returned set as read-only.
 
     #2198: extracted so the per-agent gate above and the cross-agent batch read
     (`list_all_sessions`) resolve membership through one implementation rather
@@ -2697,6 +2775,8 @@ def _context_lines(rows: list[dict], spoken_budget: int) -> list[str]:
       hiding from the agent that a call ended or that Main was reset;
     * a background task's completion report (ent#610 marker) →
       ``[Background task report: …]``, for the same reason;
+    * a message the agent sent between turns (ent#1221 marker) →
+      ``[You messaged them between turns: …]``, so it is not read as a reply;
     * spoken rows beyond the budget are dropped oldest-first, and every cut is
       named where the call's kept rows begin — a count only, no pointer to a
       place the agent cannot read.
@@ -2714,6 +2794,9 @@ def _context_lines(rows: list[dict], spoken_budget: int) -> list[str]:
             continue
         if m.get("source") in _COMPLETION_SOURCES:
             lines.append(f"[Background task report: {content}]")
+            continue
+        if m.get("source") == PROACTIVE_SOURCE:  # ent#1221
+            lines.append(f"[You messaged them between turns: {content}]")
             continue
         spoken = m.get("source") == "voice"
         if spoken:
@@ -3028,6 +3111,8 @@ def _precreate_sync_execution(
                 open_canvas_id=open_canvas_id,
             ),
         )
+        # ent#1105: an edition may attribute this turn to its chat's project.
+        execution_attribution.record_row(execution)
         return execution.id if execution else None
     except Exception:  # noqa: BLE001
         logger.warning("portal: could not pre-create the sync turn's execution row")
@@ -3590,9 +3675,9 @@ async def portal_chat(agent_name: str, message: str, email: str,
                 isinstance(switch, dict) and switch.get("switched")
                 and not switch.get("retried") and not switch.get("exhausted")
             ):
-                where = switch.get("new_subscription")
+                # #4482: a subscription's name is operator data — never shown.
                 moved = (
-                    f"moved onto '{where}'" if where
+                    "moved onto another subscription" if switch.get("new_subscription")
                     else "moved onto the platform API key"
                 )
                 raise ClientPortalError(
@@ -4500,6 +4585,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
             open_canvas_id=open_canvas_id,
         ),
     )
+    # ent#1105: an edition may attribute this turn to its chat's project.
+    execution_attribution.record_row(execution)
     execution_id = execution.id if execution else None
     if not execution_id:
         # No id means no stream to subscribe to. Fail loudly rather than hand
@@ -4998,9 +5085,24 @@ def _attach_own_ratings(messages: list, email: str, *, is_platform: bool = False
             m["my_rating"] = "up" if quality >= 0.5 else "down"
 
 
+class InvalidHistoryCursor(ValueError):
+    """trinity-enterprise#594: a thread cursor that is not ``<created_at>|<id>``
+    (or one paired with the poll's ``limit``). The route names it as a 422."""
+
+
+def parse_history_cursor(cursor: str) -> tuple[str, str]:
+    """``"<created_at>|<id>"`` → its two halves, kept as the stored strings (the
+    read compares them in SQL against the same ORDER BY). Split on the LAST
+    ``|``: a row id never carries one, a stamp could in principle."""
+    at, sep, mid = str(cursor or "").rpartition("|")
+    if not sep or not at or not mid or len(cursor) > 200:
+        raise InvalidHistoryCursor(cursor)
+    return at, mid
+
+
 def get_history(agent_name: str, email: str, session_id: str | None = None,
                 include_owned: bool = False, limit: int | None = None,
-                viewer_is_person: bool = True) -> dict:
+                viewer_is_person: bool = True, before: str | None = None) -> dict:
     """A client's conversation with a rostered agent (oldest-first). Roster-scoped
     (miss → 404). With ``session_id`` it returns that thread (validated to belong
     to the caller — miss → 404); with none it returns the client's most-recent
@@ -5012,7 +5114,17 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
     them, under the row ceiling (``truncated`` says when it cut). A ``limit`` →
     the newest N ROWS whatever their source: the reply poll's narrow read, made
     every few hundred milliseconds while a turn runs, which only needs the
-    newest reply and must not pay for — or be confused by — the window."""
+    newest reply and must not pay for — or be confused by — the window.
+
+    trinity-enterprise#594: ``before`` (the previous page's ``next_before``)
+    reads the same window shape strictly older than that row. An older page is
+    not the thread's live tail, so it carries no in-flight or last-outcome
+    state. ``before`` never combines with ``limit``."""
+    cursor = None
+    if before is not None:
+        if limit is not None:
+            raise InvalidHistoryCursor(before)
+        cursor = parse_history_cursor(before)
     if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     if session_id:
@@ -5022,6 +5134,8 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
         session_id = db.get_latest_portal_session_id(agent_name, email)
     messages: list = []
     truncated = False
+    has_earlier = False
+    next_before = None
     # trinity#3402: the client's own thread shows a held turn and its notice —
     # and the reply poll must find that notice as the turn's answer.
     if session_id and limit is not None:
@@ -5029,8 +5143,10 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
                                           include_held=True)
     elif session_id:
         window = db.get_portal_thread_window(agent_name, email, session_id,
-                                             typed_limit=_HISTORY_TYPED_TURNS, include_held=True)
+                                             typed_limit=_HISTORY_TYPED_TURNS, include_held=True,
+                                             before=cursor)
         messages, truncated = window.rows, window.truncated
+        has_earlier, next_before = window.has_earlier, window.next_before
     # ent#366: attach the caller's OWN rating to each message, so a reload shows
     # the thumb they already gave. One query for the thread rather than one per
     # message, and scoped to this evaluator — nobody sees anyone else's rating.
@@ -5051,7 +5167,8 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
     # ent#286: a client that reloaded mid-turn has lost the execution id it was
     # streaming. It arrives here, on the fetch the client already makes on
     # mount, so reattaching costs no extra round trip.
-    inflight = get_turn_inflight(session_id) if session_id else None
+    # ent#594: an older page is history, not the live tail — no reattach.
+    inflight = get_turn_inflight(session_id) if session_id and cursor is None else None
 
     # #2214: ...and how long it may honestly wait for that turn — the marker's
     # REMAINING Redis TTL, read in the same client call. The budget was fixed at
@@ -5094,6 +5211,10 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
         # #2694: the ceiling cut rows off the old end — declared on the model
         # for the same reason the fields below are.
         "truncated": truncated,
+        # trinity-enterprise#594: something older exists, and the cursor that
+        # reads it. `truncated` stays one release for tabs on the old client.
+        "has_earlier": has_earlier,
+        "next_before": next_before,
         "in_flight_execution_id": inflight,
         "in_flight_wait_budget_seconds": wait_budget,
         # #2320: WHY the last turn ended, when it ended badly. Rides the poll
@@ -5104,7 +5225,8 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
         # it. The route's `response_model` strips undeclared keys silently
         # (models.py), so adding a field here alone is a no-op that tests
         # against the service layer would still pass.
-        "last_turn_outcome": get_turn_outcome(session_id) if session_id else None,
+        "last_turn_outcome": (get_turn_outcome(session_id)
+                              if session_id and cursor is None else None),
     }
 
 

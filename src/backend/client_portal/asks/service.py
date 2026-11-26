@@ -25,6 +25,7 @@ from services.operator_queue_choices import (
     ReservedAnswerError,
     ResponseNotOfferedError,
 )
+from utils import request_memo
 from utils.helpers import iso_cutoff, utc_now_iso
 
 from .models import WorkspaceAsk, WorkspaceAskNotice
@@ -434,6 +435,38 @@ def _decode_cursor(cursor: Optional[str]) -> int:
     return int(m.group(1))
 
 
+def _prefetch(items: List[dict], email: str, is_platform: bool) -> None:
+    """Read once what `_project` would otherwise read per row (#4671).
+
+    One query each for: the asks these rows link to (`replaces` /
+    `replaced_by`), the gate records behind the approvals, the people who
+    answered a shared ask, and — for a platform viewer, whose gate cards carry
+    run links — the owners of, and the viewer's shares on, the agents those
+    runs are on. Each batch read answers the matching per-item read for the
+    rest of the `request_memo.scope()`, so `_project` and `card_view` are
+    unchanged and still decide everything; they just find the answer already
+    read.
+
+    Best-effort by design: an optimisation that fails must not become an
+    outage, so a failure here is logged and the per-row reads run as they
+    always did — with their own error handling, which is the behaviour the
+    503 contract was written against.
+    """
+    try:
+        linked = [item.get(key) for item in items for key in ("replaces", "replaced_by")]
+        if any(linked):
+            db.get_operator_queue_items_by_ids(linked)
+        answerers = [item.get("disposed_by_email") or item.get("responded_by_email")
+                     for item in items if _is_shared(item)]
+        db.get_users_by_emails([email] + answerers)
+        # The gate cards' own reads — shared with the operator's queue (#4672).
+        skill_gate_service.prefetch_cards(
+            items, run_viewer=_platform_username(email) if is_platform else None)
+    except Exception:  # noqa: BLE001 — see the docstring: fall back to per-row reads
+        logger.warning("[WorkspaceAsks] prefetch failed; reading per row", exc_info=True)
+
+
+@request_memo.scoped
 def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = None,
                    include_ended: bool = False, limit: int = PAGE_MAX,
                    cursor: Optional[str] = None, chat_id: Optional[str] = None) -> AsksPage:
@@ -445,6 +478,13 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
     queue or the roster cannot be read (trinity-enterprise#610, PR A0) — an
     outage is never answered with an empty page, which the client would render
     as "nothing is waiting".
+
+    The whole read runs inside one `request_memo.scope()` (#4671), so its
+    query count does not grow with the rows or agents it lists: the roster is
+    read once however many agents are re-checked against it, and `_prefetch`
+    reads what the projection needs per row in one query per kind. Nothing
+    about WHO sees WHAT moved — `_on_roster` is still asked per agent and
+    still fails closed per agent, and `_project` is the same projection.
 
     `chat_id` (trinity-enterprise#610, the 09-30 ruling amended) is ONE chat's
     own read: the asks the platform stamped as raised in a turn of that chat
@@ -526,6 +566,7 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
         logger.warning("[WorkspaceAsks] list failed", exc_info=True)
         raise AsksUnavailable("queue unreadable") from e
 
+    _prefetch(items or [], email, is_platform)
     out = [_project(item, viewer_email=email, is_platform=is_platform) for item in items or []]
     if chat_id is not None:
         out = [a for a in out if _in_chat(a, chat_id)]
@@ -766,12 +807,20 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
     except ask_service.AskNotAddressee as e:
         # trinity-enterprise#751: a gated-skill approval addressed to someone else;
         # #1042: an ask to a canon role the person is not seated in.
-        raise AskError(403, "not_addressee",
-                       e.role_message() or "This approval was addressed to someone else.")
+        # trinity-enterprise#1096: who it waits for, structured; never the
+        # admin verbs (R11 — this door has none).
+        detail = e.detail()
+        raise AskError(403, "not_addressee", detail.pop("message"),
+                       {k: v for k, v in detail.items() if k != "code"})
     except ask_service.AskConflict as conflict:
         # A lost race writes nothing and dispatches nothing — the sink only
         # reaches its observers on a compare-and-set it WON. Still pending means
         # the deadline refused it before the poller swept the row.
+        if conflict.code == "readdressed":
+            # trinity-enterprise#1096 (R5): moved off this person meanwhile.
+            # The person it moved to is not named on this door.
+            moved = ask_service.readdressed_detail(conflict.item or {}, name_people=False)
+            raise AskError(409, "readdressed", moved["message"])
         if conflict.code == "expired":
             raise AskError(409, "expired", "This ask expired before it was answered.")
         kind = ask_service.agent_ending_kind(conflict.item or {})
@@ -881,8 +930,9 @@ async def provide_credential(item_id: str, email: str, is_platform: bool, value:
                        "marked answered; the agent will ask again if it still needs it.",
                        {"credential_written": True})
     except ask_service.AskNotAddressee as e:
-        raise AskError(403, "not_addressee",
-                       e.role_message() or "This ask was addressed to someone else.")
+        detail = e.detail()
+        raise AskError(403, "not_addressee", detail.pop("message"),
+                       {k: v for k, v in detail.items() if k != "code"})
     updated = ending.rows[0]
     logger.info("[WorkspaceAsks] %s answered by %s through the secret field (client=%s)",
                 item_id, email, not is_platform)

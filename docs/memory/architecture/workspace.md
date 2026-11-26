@@ -62,7 +62,7 @@ either a password or the email login would admit it — email login on, the poli
 allow-listed; an allow-list row alone is not an account) gets no portal session: after its code verifies, `/auth/verify` answers
 409 `platform_login_required`, and the Workspace sends it to `/login` with a return path. Every
 platform login (`auth._finalizeLogin`) ends a leftover Workspace client sign-in, since `authHeader`
-prefers a held portal token. Detail: [workspace-only-role.md](../feature-flows/workspace-only-role.md). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
+prefers a held portal token. **Nor is it a door for a deactivated account (trinity-enterprise#1258).** A portal session carries an email and no account, so `users.suspended_at` (#995) is read explicitly: `service.email_account_suspended` refuses the three mint paths (inside `email_has_access`, and first in `/auth/request` and `/auth/verify`), and `portal_auth._reject_if_blocked` — the check every `decode_portal_session` consumer makes — refuses a live session on its next request. Suspension wins over a share; fail-closed. Detail: [workspace-only-role.md](../feature-flows/workspace-only-role.md). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
 reads (`WORKSPACE_WS_EVENT_TYPES` / `_FIELDS`, `architecture/integrations.md`). An agent whose owner
 is Workspace-only is refused at the rooms door.
 
@@ -136,7 +136,13 @@ flight it reads the newest rows (`unread + 8`, capped at the server's 50), adopt
 id onto its own id-less local question (or that question renders twice), appends the unseen
 ids through `historyRow` as an arrival (#2624), and emits `thread-caught-up` — a distinct
 event, because `sessions-changed` also drives the #2579 title-settle cycle — which the shell
-answers with mark-read only if the thread is the one on screen. The ent#747 ask-result poll
+answers with mark-read only if the thread is the one on screen. **One move is not read
+(#4671): the person's own turn.** Its reply poll already returned the thread's newest rows,
+so `settleOwnTail` folds them in the way `reconcileTail` would and marks the thread settled;
+while that mark stands and the row's newest instant is one the transcript already holds
+(`portalThreadTail.tailHeld`) the watcher skips the read, and it reads again the moment the
+row is ahead. Missing rows, a thread switch mid-turn or a gap deeper than the poll's window
+settle nothing, and the watcher fetches as before. The ent#747 ask-result poll
 rides the same `reconcileTail`. `startAsksPoll` also runs the tick body on
 `visibilitychange` → visible. See
 [workspace-open-thread-catch-up.md](../feature-flows/workspace-open-thread-catch-up.md).
@@ -181,8 +187,9 @@ resolves to its owner carrying the owner's role — can no longer traverse the W
 as `is_platform=True` (it could previously read the owner's threads with agents the
 calling agent holds no `agent_permissions` edge to, and this route would have made that
 one call). User-scoped keys, `scope='system'` and portal session tokens are unaffected;
-there is no legitimate agent caller of this surface (no MCP tool targets it, no agent
-image calls it). Since trinity-enterprise#611 `scope='system'` keeps that read breadth but is
+there is no legitimate agent caller of this surface. No agent image calls it, and its
+one MCP caller, the project tools (`tools/projects.ts`), reaches it only with a person's
+own user-scoped key, which resolves here to that person. An agent key is refused. Since trinity-enterprise#611 `scope='system'` keeps that read breadth but is
 not a person: `PortalPrincipal.is_person` is False and the ask answer refuses it (403
 `person_required`), as the operator respond route does.
 
@@ -419,7 +426,10 @@ since trinity#2694 the history window is counted in **typed turns** (the newest 
 spoken rows of the calls among them riding along, under a row ceiling that reports
 `truncated`), so a call can no longer push the typed turns before it off the screen; the
 reply poll reads `?limit=N` (row semantics) and finds the reply by identity, never by
-count. The agent's next typed turn is told what was said: a resumed turn is prefixed with
+count. Since trinity-enterprise#594 the window pages: `?before=<created_at>|<id>` (a read's
+`next_before`) returns the next OLDER window, compared as stored strings against the read's own
+ORDER BY, and `has_earlier` (a probe below the oldest row, not the ceiling flag) drives "Show
+earlier", prepended under `useStickToBottom.holdPosition`; `before` never combines with `limit`. The agent's next typed turn is told what was said: a resumed turn is prefixed with
 the platform-written rows since its last typed reply (`get_platform_rows_since_last_reply`
 → `_format_voice_delta`), the cold replay carries the same rows in the same form under one
 24k spoken-char budget, and the two are mutually exclusive — a call is refused (409) while a
@@ -1032,6 +1042,17 @@ Requirement §5.39 of `core-agent.md`; flow in `workspace-suggestions.md`.
 ask table (Action), the portal messages and addressed deliverables (Unread, All),
 and the #557 read cursor. It adds **no table, no store and no router**. Requirement
 §5.40 of `core-agent.md`; flow in `feature-flows/workspace-inbox.md`.
+
+**One seam from the ask card back to the Inbox: `notifyAnswered`.** A row leaves a tab
+visit only as a ghost (principle 5), with one exception: the reader's own confirmed answer
+crosses its row off Action and opens the next ask. The card tells the Inbox through a
+**function prop** handed down the pane (`PortalInbox.onAnswered` → `PortalInboxPane` →
+`PortalAsks` → `PortalCredentialField`), called on the answer's success path only. It is not
+an emit, because the pane is keyed by the item and an emit from a card unmounted
+mid-request is dropped; and it is not read off the data, because an ask a poll brings back
+ended must keep its ghost. The timing and the selection live in the container, the rules
+(`nextPendingAsk`, `dropFromVisit`, `answeredAnnouncement`) in `portalInbox.js`; still no
+store. A surface that passes the prop also takes over the "Sent" confirmation.
 
 **Unread is the #557 cursor, generalised to deliverables.** `client_portal/db.py`
 holds ONE fragment, `_UNREAD_ARRIVALS`, a `UNION ALL` of two arms that share the
@@ -1744,6 +1765,21 @@ is the edition-agnostic surface it plugs into:
   `tabPassesDoor` checks a declared capability fail-closed against
   `session.capabilities`, so a session without it — including a platform
   session on a build without the module — sees exactly the tabs it saw before.
+- **Tasks board (trinity-enterprise#957)** — the Tasks tab is one task surface
+  with two views, List | Board (`BaseSegmented`, remembered per person in
+  `localStorage`). `ProjectTaskBoard.vue` only draws and emits; the columns and
+  every rule are pure data in `projectsUtils.js` (`BOARD_COLUMNS`, `columnOf`,
+  `boardColumns`, `boardMove`), so a new step of the path is one array entry and
+  a status no column names lands in the first column instead of vanishing.
+  `ProjectTasks.vue` owns the writes: a move is the existing status-only task
+  update (`store.moveTask` — the answer is merged into the rows at once and the
+  re-reads reconcile in the background), tracked in ONE in-flight map
+  (`useTaskBoardMoves`) shared with Confirm. The dragged task is component
+  state; the drag payload is never read back, because task ids repeat across
+  projects. Tasks are re-read while the tab is visible (`useVisiblePolling`),
+  `fetchTasks` lets only the newest read of a project write (success and error
+  alike), and fresh rows are held while a drag or a keyboard pick is in
+  progress. Under `boardMinWidth()` of container width the list renders.
 - **Project page (v2)** — `OverflowTabs` over Overview / Tasks
   (`ProjectTasks.vue`) / Log (`ProjectLog.vue`) / Files & reports
   (`ProjectMaterial.vue`, reusing `ReportRenderer`). An invited guest gets one

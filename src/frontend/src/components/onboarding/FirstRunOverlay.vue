@@ -144,6 +144,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../../stores/auth'
 import { useSessionsStore } from '../../stores/sessions'
 import { useFirstRunStore } from '../../stores/firstRun'
+import { useAssistantStore } from '../../stores/assistant'
 import { useProductTelemetryStore } from '../../stores/productTelemetry'
 import BaseButton from '../base/BaseButton.vue'
 import ConfirmDialog from '../ConfirmDialog.vue'
@@ -184,19 +185,27 @@ const open = defineModel('open', { type: Boolean, default: false })
 
 const route = useRoute()
 const router = useRouter()
+const assistant = useAssistantStore()
 const auth = useAuthStore()
 const sessions = useSessionsStore()
 const firstRun = useFirstRunStore()
 const telemetry = useProductTelemetryStore()
 
-// Per-browser, read once so a change in another tab cannot pop it mid-render.
-const closed = ref(readFirstRunClosed())
+// Per-browser and per-install: read once the install is known, and not again,
+// so a change in another tab cannot pop it mid-render.
+const closedHere = ref(false)
+const closedBefore = computed(() => firstRun.loaded && readFirstRunClosed(firstRun.install))
+const closed = computed(() => closedHere.value || closedBefore.value)
 const skipped = ref(readFirstRunSkipped())
 // Session-only: steps that emitted `complete` since the overlay opened. Never
 // persisted — completion is otherwise derived from state.
 const completed = ref([])
 
 const forced = computed(() => route.query.onboarding === '1')
+
+// Others on the page (the assistant) keep quiet while setup has the screen.
+watch(open, (now) => { firstRun.overlayOpen = now }, { immediate: true })
+onBeforeUnmount(() => { firstRun.overlayOpen = false })
 
 /**
  * The registry context. Step components receive it read-only; C's credential
@@ -224,6 +233,10 @@ const ctx = computed(() => ({
   telemetryFirstValue: sessions.telemetrySharingFirstValue,
   firstRun: firstRun.firstRun,
   demoAgent: firstRun.demoAgent,
+  // trinity-enterprise#1355: the instance says the assistant leads its first
+  // session; the corner must be decided before this dialog may open by itself.
+  assistantDecided: assistant.corner !== 'undecided',
+  assistantLeads: assistant.corner === 'assistant' && !!assistant.status?.leads_setup,
   forced: forced.value,
   closed: closed.value,
   skipped: skipped.value,
@@ -301,8 +314,13 @@ watch(
 )
 
 function close() {
-  persistFirstRunClosed()
-  closed.value = true
+  persistFirstRunClosed(firstRun.install)
+  closedHere.value = true
+  // An install gets its mark the first time something records an event, which
+  // may be this very session: read it again and keep the close against it.
+  if (!firstRun.install) {
+    firstRun.fetchState(true).then(() => { if (firstRun.install) persistFirstRunClosed(firstRun.install) }).catch(() => {})
+  }
   open.value = false
   if (nextRoute.value) {
     router.push(nextRoute.value).catch(() => {})

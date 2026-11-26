@@ -38,6 +38,7 @@ from .agent_settings import (
     TtsMixin,
     EphemeralMixin,
 )
+from utils import request_memo
 from utils.helpers import utc_now_iso
 
 # System agent name constant
@@ -325,14 +326,12 @@ class AgentOperations(
             ).first()
             return row is not None
 
-    def get_agent_owner(self, agent_name: str) -> Optional[Dict]:
-        """Get the owner of an agent, including is_system flag.
-
-        Excludes soft-deleted agents (#834): callers consume this to
-        gate user-facing access; soft-deleted agents should look like
-        they don't exist.
-        """
-        stmt = (
+    @staticmethod
+    def _owner_select():
+        """The owner row, live agents only — ONE statement for the per-agent
+        read and its batch form, so the two cannot disagree about who owns an
+        agent or whether a soft-deleted one exists."""
+        return (
             select(
                 agent_ownership.c.id,
                 agent_ownership.c.agent_name,
@@ -344,18 +343,44 @@ class AgentOperations(
             .select_from(
                 agent_ownership.join(users, agent_ownership.c.owner_id == users.c.id)
             )
-            .where(
-                agent_ownership.c.agent_name == agent_name,
-                agent_ownership.c.deleted_at.is_(None),
-            )
+            .where(agent_ownership.c.deleted_at.is_(None))
         )
+
+    @staticmethod
+    def _owner_row(row) -> Dict:
+        result = dict(row)
+        result["is_system"] = bool(result.get("is_system", 0))
+        return result
+
+    @request_memo.memoized_method
+    def get_agent_owner(self, agent_name: str) -> Optional[Dict]:
+        """Get the owner of an agent, including is_system flag.
+
+        Excludes soft-deleted agents (#834): callers consume this to
+        gate user-facing access; soft-deleted agents should look like
+        they don't exist.
+        """
+        stmt = self._owner_select().where(agent_ownership.c.agent_name == agent_name)
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
-            if row:
-                result = dict(row)
-                result["is_system"] = bool(result.get("is_system", 0))
-                return result
-            return None
+            return self._owner_row(row) if row else None
+
+    def get_agent_owners(self, agent_names) -> Dict[str, Optional[Dict]]:
+        """`{agent name: owner row or None}` in ONE query (#4671) — the batch
+        form of `get_agent_owner`. Inside a `request_memo.scope()` it also
+        answers the per-agent read for the rest of the scope, which is what
+        makes `can_user_access_agent` over many agents cost no query each."""
+        names = [n for n in dict.fromkeys(agent_names or []) if isinstance(n, str) and n]
+        found: Dict[str, Dict] = {}
+        if names:
+            stmt = self._owner_select().where(agent_ownership.c.agent_name.in_(names))
+            with get_engine().connect() as conn:
+                for row in conn.execute(stmt).mappings():
+                    found.setdefault(row["agent_name"], self._owner_row(row))
+        out = {name: found.get(name) for name in names}
+        for name, owner in out.items():
+            self.get_agent_owner.prime(name, value=owner)
+        return out
 
     def get_agents_by_owner(self, owner_username: str) -> List[str]:
         """Get all agent names owned by a user."""

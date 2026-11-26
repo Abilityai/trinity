@@ -246,6 +246,10 @@ agent_schedules = Table(
     Column("webhook_auth_enabled", Integer),    # ent#77: gate signature verify
     # ent#498 — nullable, no backfill; see db/schema.py for the contract.
     Column("deliver_to_workspace_email", Text),
+    # ent#1391 — nullable, no backfill; see db/schema.py for the contract.
+    Column("email_results_user_id", Integer),
+    Column("email_results_error", Text),
+    Column("email_results_error_at", Text),
     Column("deleted_at", Text),
 )
 
@@ -331,6 +335,8 @@ schedule_executions = Table(
     ),
     # #3380 — the /chat thread this turn answers; NULL = not a /chat turn.
     Column("chat_session_id", Text),
+    # ent#1225 — the platform-recorded turn this row continues; NULL = none.
+    Column("continues_execution_id", Text),
 )
 
 agent_loops = Table(
@@ -1842,6 +1848,32 @@ channel_client_blocks = Table(
     Column("blocked_by_email", Text),
     Column("reason", Text),
     UniqueConstraint("agent_name", "channel", "client_id"),
+)
+
+# trinity-enterprise#165 (GUARD-005) — guardrail events an agent's hooks
+# reported, pushed by the agent's own key. `execution_id` is attribution, not a
+# FK. `details` is a JSON object of the allowlisted fields (patterns, verb,
+# tier, turn_kind, rule, path, session_id, tool_use_id, kind_raw, hook_raw,
+# occurred_at_reported — the agent's own `ts` when it was later than the
+# receive time and `occurred_at` was clamped to it).
+guardrail_events = Table(
+    "guardrail_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("agent_name", Text, nullable=False),
+    Column("event_id", Text, nullable=False),
+    Column("occurred_at", Text, nullable=False),
+    Column("received_at", Text, nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("hook", Text, nullable=False),
+    Column("tool", Text),
+    Column("code", Text),
+    Column("execution_id", Text),
+    Column("details", Text),
+    UniqueConstraint("agent_name", "event_id"),
+    Index("idx_guardrail_events_agent_occurred", "agent_name", "occurred_at"),
+    Index("idx_guardrail_events_execution", "execution_id"),
+    Index("idx_guardrail_events_received", "received_at"),
 )
 
 audit_log = Table(

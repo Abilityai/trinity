@@ -1370,6 +1370,7 @@ const response = await axios.get(`/api/agents/${name}/tags`, {
 
 | Date | Change |
 |------|--------|
+| 2026-11-19 | **Sidebar replaced by a toolbar dropdown**: `SystemViewsSidebar.vue` is deleted; `SystemViewsMenu.vue` in the dashboard toolbar lists the views (All agents, each view with its count and an edit control, New system view) and emits the same `create` / `edit` events. The activation checklist that lived in the sidebar is an absolutely positioned card in the dashboard's bottom-left corner. Sidebar references below are historical. |
 | 2026-02-22 | **Sidebar Default Collapsed**: SystemViewsSidebar.vue now defaults to collapsed when no localStorage value exists (line 124). Fixed toggle button to properly call `toggleCollapse()` for localStorage persistence (line 14). |
 | 2026-02-17 | Initial implementation of ORG-001 Phase 1 (Tags) |
 | 2026-02-17 | Added ORG-001 Phase 2 (System Views) - sidebar, editor, store, API |

@@ -70,7 +70,7 @@ mcp__trinity__get_fan_out_result({ agent_name: "my-agent", fan_out_id: "fo_abc12
 Receipt semantics:
 
 - A receipt is issued only when the running batch can be attributed to *your* call unambiguously. If more than one recent batch could be yours, the tool returns an error that says so rather than guessing — check `list_recent_executions` before retrying.
-- Do not re-send to "try again". An **identical** re-send is deduplicated server-side and answers with the same batch. A **reworded** re-send is a different call and dispatches all N tasks a second time, against an agent that is already working.
+- Do not re-send to "try again". An **identical** re-send from the same turn is deduplicated server-side and answers with the same batch. A **reworded** re-send is a different call and dispatches all N tasks a second time, against an agent that is already working.
 - If you know the batch will run long, pass `async_mode: true` from the start (see below).
 
 #### Fire and forget: `async_mode`
@@ -206,7 +206,7 @@ Each subtask is still bounded by the agent's own execution timeout. After a dead
 
 ## Idempotency
 
-`POST /api/agents/{name}/fan-out` accepts an `Idempotency-Key` header, and the MCP tool derives one from its arguments. A duplicate sent while the batch is still running returns `409` whose `execution_id` field carries the batch's `fan_out_id` to poll; a duplicate after it finished replays the original response with `X-Idempotent-Replay: true`. For an `async_mode` call, the replayed response is the original `accepted` receipt, so poll the batch for its outcome. See [Chat API → Idempotency](../api-reference/chat-api.md#idempotency).
+`POST /api/agents/{name}/fan-out` accepts an `Idempotency-Key` header, and the MCP tool derives one from its arguments and the calling turn. So an identical batch sent again from the same turn is deduplicated, while the same batch sent from a later turn of the caller is a new fan-out and runs. A scheduled retry of a run counts as that run's turn, so it replays the first attempt's batch instead of running it twice. A duplicate sent while the batch is still running returns `409` whose `execution_id` field carries the batch's `fan_out_id` to poll; a duplicate after it finished replays the original response with `X-Idempotent-Replay: true`. For an `async_mode` call, the replayed response is the original `accepted` receipt, so poll the batch for its outcome. See [Chat API → Idempotency](../api-reference/chat-api.md#idempotency).
 
 ## Observability
 

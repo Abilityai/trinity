@@ -24,7 +24,7 @@ from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from types import SimpleNamespace
 
 import httpx
@@ -49,8 +49,10 @@ from services.capacity_manager import (
     get_capacity_manager,
 )
 from services.dispatch_breaker import DispatchBreaker
-from services.execution_integrity import derive_turn_integrity
+from services.execution_integrity import derive_turn_integrity, with_restricted_turn
+from services import schedule_tier_alerts
 from services import event_dispatch_service
+from services import execution_attribution  # ent#1105
 from services import channel_completion_report
 from services import peer_skill_policy, skill_gate_service
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
@@ -196,6 +198,11 @@ def _default_model_for(agent_name: str) -> Optional[str]:
 
     ent#1202: a Claude Code agent's own ``default_model`` comes first when this
     instance can run it — one resolver, ``agent_model_service``, for every rung.
+
+    OpenCode (#2981) has its OWN platform default
+    (``platform_default_model_opencode``, a ``provider/model`` id) because the
+    fleet default is a bare Claude id it refuses with "missing a provider
+    prefix"; that rung lives in the same resolver.
     """
     from services.agent_model_service import resolve_default_model
 
@@ -237,6 +244,7 @@ from .execution_classification import (  # noqa: F401
     _salvage_attempt_cost,
     classify_switch_failure,
     detect_unresolved_slash_command,
+    is_turn_refusal,
 )
 
 
@@ -334,9 +342,13 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # trinity-enterprise#1102: `caller_wake` is the `operator_ending` shape for
     # a delegation — the platform wakes the agent that delegated a run when
     # that run ends, from the terminal fan-out, with nobody reading its reply.
+    #
+    # trinity-enterprise#1236: `project_steward` is the platform waking a
+    # project's steward agent, the turn a schedule used to start, with nobody
+    # reading its reply.
     {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
      "a2a", "operator_response", "operator_ending", "retry", "self_task",
-     "skill_gate", "caller_wake"}
+     "skill_gate", "caller_wake", "project_steward"}
 )
 
 
@@ -347,6 +359,16 @@ _AUTONOMOUS_TRIGGERS = frozenset(
 _COMMAND_DISPLAY_MAX = 200
 
 
+
+
+def _restricted_turn_json(eid: Optional[str], record: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The `turn_integrity` value of a write that carries only the #4281
+    restriction record (a non-success terminal). None keeps the column."""
+    try:
+        return with_restricted_turn(None, record)
+    except Exception as e:  # noqa: BLE001 - a record must never fail the terminal write
+        logger.error(f"[TaskExecService] restricted-turn record dropped for {eid}: {e}")
+        return None
 
 
 async def _alert_skill_not_found(
@@ -1647,7 +1669,8 @@ def _log_retry_budget(
 # wrote on the row it pre-created. `/api/internal/execute-task` sends neither the
 # schedule id nor the person who pressed Run now — both live on the row.
 _ROW_ATTRIBUTION = ("source_user_id", "source_user_email", "source_agent_name",
-                    "source_mcp_key_id", "source_mcp_key_name", "schedule_id")
+                    "source_mcp_key_id", "source_mcp_key_name", "schedule_id",
+                    "continues_execution_id")
 
 
 def _with_row_attribution(fields: dict, execution_id: Optional[str]) -> dict:
@@ -1752,6 +1775,11 @@ class TaskExecutionService:
         # whether or not the agent is a pull pilot. Off, the #2391 pilot gate
         # alone decides. See `build_pull_queue_payload`.
         queue_on_capacity: bool = False,
+        # trinity-enterprise#1225: the turn this run continues, recorded by a
+        # platform producer through `turn_tier_service.continuation_origin`.
+        # A continuation trigger is rated as that turn. Ignored when
+        # `execution_id` is given (the producer wrote the row).
+        continues_execution_id: Optional[str] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1852,9 +1880,13 @@ class TaskExecutionService:
                     source_channel_client=source_channel_client,
                     source_channel_agent=source_channel_agent,
                     chain_depth=chain_depth,
+                    continues_execution_id=continues_execution_id,
                 ),
             )
             execution_id = execution.id if execution else None
+            # ent#1105: an edition may attribute this execution to a project
+            # from the row alone (e.g. a room turn). Inert in OSS; never raises.
+            execution_attribution.record_row(execution)
 
         # #678/#792 call-attempt bookkeeping, shared with the exception
         # handlers below (they read what the retries wrote). Created BEFORE the
@@ -1931,6 +1963,7 @@ class TaskExecutionService:
                         source_channel_thread=source_channel_thread,
                         source_channel_client=source_channel_client,
                         max_turns=max_turns,
+                        continues_execution_id=continues_execution_id,
                     ),
                 )
 
@@ -2240,6 +2273,8 @@ class TaskExecutionService:
                 schedule_name=(schedule_context or {}).get("name"),
                 loop_id=loop_id,
             )
+            replay = dict(gate_replay or {})
+            request_parts = replay.pop(skill_gate_service.REQUEST_PARTS, None)
             frozen = skill_gate_service.frozen_dispatch(
                 triggered_by=triggered_by,
                 **{k: v for k, v in fields.items() if k != "schedule_id"})
@@ -2256,8 +2291,9 @@ class TaskExecutionService:
                 triggered_by=triggered_by,
                 occurrence_key=execution_id,
                 origin_execution_id=execution_id,
-                dispatch={**frozen, **(gate_replay or {})},
+                dispatch={**frozen, **replay},
                 gates=gates,
+                request_parts=request_parts,
             )
             # Only reachable with a producer-supplied, proven `gate_requester`.
             # trinity-enterprise#752: the row this call created or was given is
@@ -3293,10 +3329,15 @@ class TaskExecutionService:
         # rejection answers 503 (zero tokens), so the status test below would
         # otherwise switch on it and code it AUTH for the dispatch breaker.
         credential_independent = is_turn_limit(error_msg) or is_prompt_too_long(error_msg)
+        # trinity-enterprise#1176: a typed turn refusal carries free text (a
+        # schedule's name, a creator's label) that `is_auth_failure` below
+        # would read as an auth word. No credential changes a refusal.
+        turn_refused = is_turn_refusal(getattr(e, "response", None))
         if (
             not state.subscription_switch_attempted
             and not model_rejected
             and not credential_independent
+            and not turn_refused
         ):
             try:
                 from services.subscription_auto_switch import (
@@ -3440,6 +3481,14 @@ class TaskExecutionService:
         # branches reuse it -- apply_result runs exactly one of them.
         _staged = get_staged_values()
 
+        # #4281: a schedule-backed run whose tier is not owner ran without the
+        # shell. Rated once, before either branch: the record rides this
+        # terminal write's `turn_integrity`, and the rating decides the
+        # operator's alert once the write wins. Total: a rating that cannot be
+        # computed gives no record and never changes the outcome.
+        restricted_rating, restricted_turn = schedule_tier_alerts.run_restriction_by_id(
+            db, agent_name, eid)
+
         if envelope.status == TaskExecutionStatus.SUCCESS:
             # ---- Success-style derivation (moved from execute_task step 5/6) ----
             # ent#279: identity-scrub the RAW agent fields BEFORE the sanitize/
@@ -3494,6 +3543,15 @@ class TaskExecutionService:
                 turn_integrity_json, killed_notice = derive_turn_integrity(
                     exec_log, metadata
                 )
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    f"[TaskExecService] turn-integrity derivation failed for {eid}: {e}"
+                )
+                turn_integrity_json, killed_notice = None, None
+            try:
+                # #4281: the restriction record sits beside the #2467 keys in
+                # one object, and survives a #2467 derivation that failed.
+                turn_integrity_json = with_restricted_turn(turn_integrity_json, restricted_turn)
                 # Transcript-derived JSON passes the same sanitizer as its
                 # siblings execution_log_json / tool_calls_json above — the
                 # leaf's charset whitelist is the primary control, this is the
@@ -3502,9 +3560,9 @@ class TaskExecutionService:
                     turn_integrity_json = sanitize_execution_log(turn_integrity_json)
             except Exception as e:  # noqa: BLE001
                 logger.error(
-                    f"[TaskExecService] turn-integrity derivation failed for {eid}: {e}"
+                    f"[TaskExecService] turn-integrity serialization failed for {eid}: {e}"
                 )
-                turn_integrity_json, killed_notice = None, None
+                turn_integrity_json = None
             if killed_notice:
                 sanitized_resp = (
                     f"{killed_notice}\n\n{sanitized_resp}"
@@ -3618,6 +3676,9 @@ class TaskExecutionService:
                 status="success",
                 summary_or_error=sanitized_resp,
             )
+            # #4281: decide the creator's alert again, from their LIVE schedules,
+            # so a run that ends after its schedule was disabled files nothing.
+            schedule_tier_alerts.after_run(agent_name, restricted_rating)
 
             return TaskExecutionResult(
                 execution_id=eid or "",
@@ -3709,6 +3770,8 @@ class TaskExecutionService:
                     tool_calls=salvage_tool_calls_json,
                     claude_session_id=salvage_session_id,
                     retry_count=envelope.retry_count or None,
+                    # #4281: None (an owner-tier or non-schedule run) keeps the column.
+                    turn_integrity=_restricted_turn_json(eid, restricted_turn),
                     completed_at=envelope.completed_at,  # #3589
                 ),
             )
@@ -3786,6 +3849,8 @@ class TaskExecutionService:
                 status=str(getattr(envelope.status, "value", envelope.status)),
                 summary_or_error=envelope.error,
             )
+            # #4281: as on the success branch.
+            schedule_tier_alerts.after_run(agent_name, restricted_rating)
 
         return TaskExecutionResult(
             execution_id=eid or "",

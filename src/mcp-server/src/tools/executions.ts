@@ -10,6 +10,8 @@ import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import { accessDenied } from "../access.js";
 import { ApiError } from "../client.js";
+import { toolFailed } from "../audit.js";
+import { NARROWED_DESCRIPTION, narrowedField, readNarrowing } from "../read-narrowing.js";
 
 /**
  * #2958: `compact_metadata` is stored as a JSON string. Parse it for the
@@ -22,6 +24,27 @@ function parseCompactMetadata(raw: string | null | undefined): unknown {
   } catch {
     return null;
   }
+}
+
+/**
+ * #4281: a run restricted by its own schedule's creator is stamped
+ * `turn_integrity.restricted_turn`. `turn_integrity` is a JSON string; only
+ * that key is shown, and only when the run carries it (absent, never null).
+ */
+function restrictedTurnField(raw: string | null | undefined): { restricted_turn?: unknown } {
+  const parsed = parseCompactMetadata(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const stamp = (parsed as Record<string, unknown>).restricted_turn;
+  return stamp && typeof stamp === "object" ? { restricted_turn: stamp } : {};
+}
+
+/**
+ * trinity-enterprise#978: under a narrowed view, "not found" covers a run that
+ * exists but is outside the view. The backend answers both the same on purpose;
+ * the tool returns that answer with the reason instead of a bare API error.
+ */
+function isNarrowedNotFound(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 404 && readNarrowing() !== undefined;
 }
 
 /**
@@ -96,6 +119,7 @@ export function createExecutionTools(
         "List recent executions for an agent across all trigger types (schedule, manual, MCP, chat). " +
         "Returns execution summaries with status, timing, cost, and context usage. " +
         "Use this to check what tasks ran recently or to find an execution_id for get_execution_result. " +
+        NARROWED_DESCRIPTION + " " +
         "Access control: agents can only list executions on self or permitted agents.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent to list executions for"),
@@ -139,6 +163,7 @@ export function createExecutionTools(
           agent_name,
           execution_count: filtered.length,
           executions: filtered,
+          ...narrowedField(),
         }, null, 2);
       },
     },
@@ -154,6 +179,9 @@ export function createExecutionTools(
         "Optionally include the full execution transcript (tool calls, thinking, responses). " +
         "A long `duration_ms` with a non-null `compact_metadata` is a one-off context auto-compaction " +
         "(its trigger, pre/post tokens and duration), not a degraded agent. " +
+        "`restricted_turn` is present when the run was held to a shared person's access by the schedule " +
+        "that started it (no shell commands, no tools the owner added). " +
+        NARROWED_DESCRIPTION + " A run outside that view answers `error: \"Execution not found\"` with `narrowed`. " +
         "Access control: agents can only view executions on self or permitted agents.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent that ran the execution"),
@@ -180,7 +208,17 @@ export function createExecutionTools(
           });
         }
 
-        const execution = await apiClient.getExecution(agent_name, execution_id);
+        let execution: Awaited<ReturnType<TrinityClient["getExecution"]>>;
+        try {
+          execution = await apiClient.getExecution(agent_name, execution_id);
+        } catch (e) {
+          if (!isNarrowedNotFound(e)) throw e;
+          return toolFailed(
+            context,
+            { error: "Execution not found", agent_name, execution_id, ...narrowedField() },
+            "HTTP 404: not found in a narrowed view"
+          );
+        }
 
         console.log(`[get_execution_result] Retrieved execution ${execution_id} for agent '${agent_name}' (status=${execution.status})`);
 
@@ -200,6 +238,11 @@ export function createExecutionTools(
           context_max: execution.context_max || null,
           model_used: execution.model_used || null,
           compact_metadata: parseCompactMetadata(execution.compact_metadata),
+          ...restrictedTurnField(execution.turn_integrity),
+          // ent#1105: only when the platform attributed the run to a project
+          // this reader may see; absent otherwise (never a null placeholder).
+          ...(execution.project_id ? { project_id: execution.project_id } : {}),
+          ...narrowedField(),
         };
 
         if (include_log) {
@@ -232,7 +275,8 @@ export function createExecutionTools(
         "`failed`, …), so a subtask waiting for a slot is distinguishable from one that ran. " +
         "\n\nAccess control: agents can only read batches on self or permitted agents. " +
         "An unknown fan_out_id, one belonging to another agent, and a malformed one are " +
-        "the same 'not found'.",
+        "the same 'not found'. " + NARROWED_DESCRIPTION +
+        " A batch outside that view answers `error: \"Fan-out not found\"` with `narrowed`.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent that ran the fan-out"),
         fan_out_id: z
@@ -259,12 +303,22 @@ export function createExecutionTools(
           });
         }
 
-        const batch = await apiClient.getFanOutResult(agent_name, fan_out_id);
+        let batch: Awaited<ReturnType<TrinityClient["getFanOutResult"]>>;
+        try {
+          batch = await apiClient.getFanOutResult(agent_name, fan_out_id);
+        } catch (e) {
+          if (!isNarrowedNotFound(e)) throw e;
+          return toolFailed(
+            context,
+            { error: "Fan-out not found", agent_name, fan_out_id, ...narrowedField() },
+            "HTTP 404: not found in a narrowed view"
+          );
+        }
         console.log(
           `[get_fan_out_result] ${agent_name}/${fan_out_id}: ${batch.status} ` +
           `(${batch.completed}/${batch.total} done, ${batch.running} running)`
         );
-        return JSON.stringify(batch, null, 2);
+        return JSON.stringify({ ...batch, ...narrowedField() }, null, 2);
       },
     },
 
@@ -277,6 +331,7 @@ export function createExecutionTools(
         "Get a high-level activity summary for an agent over a time window. " +
         "Returns counts of activities by type and state (e.g., 5 chat_start completed, 2 schedule_start failed). " +
         "Useful for monitoring agents, checking if scheduled tasks ran, and building dashboards. " +
+        NARROWED_DESCRIPTION + " " +
         "Access control: agents can only view activity for self or permitted agents.",
       parameters: z.object({
         agent_name: z
@@ -343,6 +398,7 @@ export function createExecutionTools(
           total_activities: activities.length,
           by_type: byType,
           by_agent: agent_name ? undefined : byAgent,
+          ...narrowedField(),
         }, null, 2);
       },
     },

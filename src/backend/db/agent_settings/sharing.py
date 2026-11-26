@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from ..engine import get_engine
 from ..tables import agent_sharing, access_requests, users
 from db_models import AgentShare
+from utils import request_memo
 from utils.helpers import utc_now_iso
 
 
@@ -276,6 +277,7 @@ class SharingMixin:
                 return True
         return self.is_agent_shared_with_email(agent_name, normalized)
 
+    @request_memo.memoized_method
     def is_agent_shared_with_user(self, agent_name: str, username: str) -> bool:
         """Check if an agent is shared with a specific user (by their email)."""
         user = self._user_ops.get_user_by_username(username)
@@ -294,6 +296,28 @@ class SharingMixin:
         )
         with get_engine().connect() as conn:
             return conn.execute(stmt).first() is not None
+
+    def agents_shared_with_user(self, agent_names, username: str) -> set:
+        """Which of `agent_names` are shared with `username`, in ONE query
+        (#4671) — the batch form of `is_agent_shared_with_user`, matched the
+        same way. Inside a `request_memo.scope()` it also answers the
+        per-agent read for the rest of the scope."""
+        names = [n for n in dict.fromkeys(agent_names or []) if isinstance(n, str) and n]
+        user = self._user_ops.get_user_by_username(username)
+        user_email = (user or {}).get("email")
+        shared: set = set()
+        if names and user_email:
+            stmt = select(agent_sharing.c.agent_name).where(
+                and_(
+                    agent_sharing.c.agent_name.in_(names),
+                    agent_sharing.c.shared_with_email == user_email.lower(),
+                )
+            )
+            with get_engine().connect() as conn:
+                shared = {row[0] for row in conn.execute(stmt)}
+        for name in names:
+            self.is_agent_shared_with_user.prime(name, username, value=name in shared)
+        return shared
 
     def can_user_share_agent(self, username: str, agent_name: str) -> bool:
         """Check if a user can share an agent (only owner or admin)."""

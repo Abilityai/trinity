@@ -78,6 +78,7 @@ def wait_for_agent_ready(monkeypatch):
             get_anthropic_api_key=None, get_github_pat=None,
             get_agent_full_capabilities=None,
             get_agent_default_resources=None,  # added to lifecycle.py import (#725)
+            apply_opencode_provider_env=None,  # added to lifecycle.py import (#2981 OpenCode runtime)
         ),
         "services.skill_service": types.SimpleNamespace(skill_service=None),
     }

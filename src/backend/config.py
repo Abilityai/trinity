@@ -68,6 +68,23 @@ TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS = int(
     os.getenv("TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS", "30")
 )
 
+# --- Vendor-hosted help channels (#4499) ---------------------------------
+# The two remaining requests an instance makes to a vendor-operated host: the
+# help widget's bug / feature / feedback report (#1116) and the docs Q&A service
+# behind the widget's Ask tab and the `ask_trinity` MCP tool (ent#328). Both
+# are read here at RUN time, so the published images honour them without a
+# rebuild; the SPA reads them from `GET /api/version` (`help`), and the MCP
+# server reads the same two variables from its own environment.
+# `DO_NOT_TRACK=1` turns both off, with the two channels above: it is the one
+# setting after which no request leaves for a vendor-operated host.
+_DO_NOT_TRACK = os.getenv("DO_NOT_TRACK", "0").strip().lower() not in ("0", "", "false")
+BUG_REPORTING_ENABLED = (
+    os.getenv("BUG_REPORTING_ENABLED", "true").strip().lower() != "false" and not _DO_NOT_TRACK
+)
+ASK_TRINITY_ENABLED = (
+    os.getenv("ASK_TRINITY_ENABLED", "true").strip().lower() != "false" and not _DO_NOT_TRACK
+)
+
 # JWT Settings
 # SECURITY: SECRET_KEY must be set via environment variable in production
 # Generate with: openssl rand -hex 32
@@ -385,6 +402,8 @@ TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "1500"))
 # (Telegram voice messages). Both default to the same model today.
 GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL") or "gemini-3.5-flash"
 GEMINI_TRANSCRIPTION_MODEL = os.getenv("GEMINI_TRANSCRIPTION_MODEL") or "gemini-3.5-flash"
+# Image generation model (the previous hard-coded gemini-3.1-flash-image-preview was shut down).
+GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL") or "gemini-nano-banana-2.1"
 # Workspace Direct calls (trinity-enterprise#1046). The speech model transcribes only:
 # on a silent clip it returns nothing, where a general model has been seen to invent
 # text. TTS tries the models in order.
@@ -734,6 +753,10 @@ RETENTION_OPS_KEYS = (
     # remembered). Deliberately NOT a community-floor key: the 5-day floor
     # would gut a feature whose whole point is a year of history.
     "metrics_retention_days",
+    # trinity-enterprise#165 (ruling D10): guardrail events. A row sweep with
+    # its own `_guard_allows` site. Not a community-floor key: trinity#4281
+    # joins an event to its execution row, and both default to 90 days.
+    "guardrail_event_retention_days",
 )
 
 # The RETENTION_OPS_KEYS members whose prune is NOT a #1644 row sweep (#2216).
@@ -836,6 +859,12 @@ OPS_SETTINGS_DEFAULTS = {
     # the question a business metric exists to answer. "0" disables the sweep
     # (keep forever), as on every row window above. Wide/safe per #1638.
     "metrics_retention_days": "365",
+    # trinity-enterprise#165 (ruling D10): how long a guardrail event is kept,
+    # counted from when the backend received it. 90 matches agent_reports and
+    # execution_row_retention_days, so trinity#4281's join to the execution row
+    # lasts as long as the event. "0" disables the sweep. Wide/safe per #1638:
+    # never lower it, it is read at prune time for every install with no row.
+    "guardrail_event_retention_days": "90",
     # trinity-enterprise#478: per-agent per-UTC-day WRITE budget for recorded
     # points. "0" is unlimited, following `ops_cost_limit_daily_usd` and the
     # `max_agents_*` convention — an operator must be able to lift a cap
@@ -903,6 +932,7 @@ OPS_SETTINGS_VALIDATION = {
     # trinity-enterprise#478. The window follows the row convention (`0`
     # disables). The cap's `0` means UNLIMITED, so its bounds are its own.
     "metrics_retention_days": ("int", 0, _DAYS_MAX),
+    "guardrail_event_retention_days": ("int", 0, _DAYS_MAX),  # trinity-enterprise#165
     "metrics_daily_point_cap": ("int", 0, 10_000_000),
     # #2806: the floor is 1, not 0 — no value may refuse every agent call.
     "inter_agent_max_chain_depth": ("int", 1, 32),

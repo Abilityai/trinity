@@ -963,6 +963,17 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
         "POST /api/agents/{agent_name}/executions/{execution_id}/result",
         "terminal result delivery; authenticates the agent's own key and path self-match (#1083)",
         _SIB_OWN_KEY),
+    "routers/guardrail_events.py::post_guardrail_events": (
+        "POST /api/agents/{agent_name}/guardrail-events",
+        "the in-container forwarder pushes the agent's own guardrail events; authenticates the agent's own "
+        "key outside get_current_user, path self-match (authorize_heartbeat, trinity-enterprise#165)",
+        _SIB_OWN_KEY),
+    "routers/guardrail_events.py::get_guardrail_events": (
+        "GET /api/agents/{agent_name}/guardrail-events",
+        "trinity-enterprise#165: a READ of the agent's own guardrail events and reporting state (owner tier, "
+        "ruling D8: rows name owner-only paths a shared person tried); the agent itself already holds the spool",
+        "owner tier (OwnedAgentByName): a sibling reads it only for an agent it spawned, never through an edge "
+        "(the ent#629 manage reach)"),
     "routers/agents.py::agent_execution_turn_tier": (
         "GET /api/agents/{agent_name}/executions/{execution_id}/turn-tier",
         "the in-container guard asks which tier its own turn acts for; authenticates the agent's own key and path self-match (ent#926)",
@@ -995,7 +1006,9 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
     "routers/schedules.py::disable_schedule": (
         "POST /api/agents/{name}/schedules/{schedule_id}/disable", "MCP disable_schedule", _SIB_SCHEDULES),
     "routers/schedules.py::trigger_schedule": (
-        "POST /api/agents/{name}/schedules/{schedule_id}/trigger", "MCP trigger_schedule (a manual run)",
+        "POST /api/agents/{name}/schedules/{schedule_id}/trigger",
+        "MCP trigger_schedule (a manual run); a schedule whose runs are a shared person's is refused to "
+        "every key (409 schedule_runs_as_shared_person, #4281): a manual run has the caller's tier",
         "no capability fence ('trigger now' is exempt from schedules.manage, trinity-enterprise#164): a sibling "
         "triggers another agent's schedule only as an agent it spawned (OwnedAgent, the ent#629 manage reach)"),
     # trinity-enterprise#719: uses of what a person granted — a channel binding and its
@@ -1185,8 +1198,10 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
     "routers/internal.py::mcp_external_access": ("GET /api/internal/mcp-external-access", _SECRET),
     "routers/internal.py::mcp_exposed_agents": ("GET /api/internal/mcp-exposed-agents", _SECRET),
     "routers/internal.py::validate_execution": ("POST /api/internal/validate-execution", _SECRET),
+    "routers/internal.py::schedule_retry_dropped": ("POST /api/internal/schedule-retry-dropped", _SECRET),
     "routers/setup.py::get_setup_status": ("GET /api/setup/status", "unauthenticated by design (first-run status)"),
     "routers/setup.py::set_admin_password": ("POST /api/setup/admin-password", "unauthenticated by design until setup completes, then refused"),
+    "routers/setup.py::get_registration_terms": ("GET /api/setup/registration-terms", "unauthenticated by design: open only until setup completes and only with a registration-terms provider registered; reads nothing from the caller (trinity-enterprise#1329)"),
     "routers/webhooks.py::trigger_webhook": ("POST /api/webhooks/{webhook_token}", "the webhook token in the path is the credential"),
     "routers/paid.py::get_paid_agent_info": ("GET /api/paid/{agent_name}/info", "public paid-agent listing (x402)"),
     "routers/paid.py::paid_chat": ("POST /api/paid/{agent_name}/chat", "x402 payment is the credential"),

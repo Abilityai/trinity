@@ -24,6 +24,7 @@ import httpx
 
 from database import db
 from redis_breaker_util import get_breaker_redis
+from services import loop_health
 from services.agent_auth import agent_httpx_client
 from services.model_context import DEFAULT_CONTEXT_WINDOW
 from db_models import (
@@ -122,6 +123,53 @@ except Exception as e:
 # Health Check Functions
 # =========================================================================
 
+def _cpu_limit_cores(host_config, online_cpus) -> float:
+    """Cores this container may use (#4529).
+
+    ``HostConfig.NanoCpus / 1e9`` (``docker run --cpus``) when it is set,
+    else CFS ``CpuQuota / CpuPeriod`` when both are positive, else every
+    online host core. ``CpuQuota`` of 0 or -1 is Docker's "not throttled",
+    not a limit. A missing or non-positive host count falls back to 1 so
+    the percent stays defined.
+    """
+    hc = host_config or {}
+    nano = hc.get("NanoCpus") or 0
+    if nano > 0:
+        return nano / 1_000_000_000
+    quota = hc.get("CpuQuota") or 0
+    period = hc.get("CpuPeriod") or 0
+    if quota > 0 and period > 0:
+        return quota / period
+    if isinstance(online_cpus, (int, float)) and online_cpus > 0:
+        return float(online_cpus)
+    return 1.0
+
+
+def _cpu_percent_of_limit(stats, host_config):
+    """CPU use as a percent of the container's own limit, or None (#4529).
+
+    Docker's ``(cpu_delta / system_delta) * online_cpus * 100`` is a
+    host-core scale: 100 means one busy core and the ceiling is
+    ``online_cpus * 100``. Alerts compare the recorded number with the
+    0–100 ``cpu_warning_percent`` / ``cpu_critical_percent`` defaults, so
+    divide by the container's limit. ``None`` when the sample has no
+    positive delta (the first stats read, or an idle container).
+    """
+    cpu_delta = (
+        stats["cpu_stats"]["cpu_usage"]["total_usage"]
+        - stats["precpu_stats"]["cpu_usage"]["total_usage"]
+    )
+    system_delta = (
+        stats["cpu_stats"]["system_cpu_usage"]
+        - stats["precpu_stats"]["system_cpu_usage"]
+    )
+    if system_delta <= 0 or cpu_delta <= 0:
+        return None
+    num_cpus = stats["cpu_stats"].get("online_cpus", 1)
+    host_percent = (cpu_delta / system_delta) * num_cpus * 100
+    return host_percent / _cpu_limit_cores(host_config, num_cpus)
+
+
 def check_docker_health(agent_name: str) -> DockerHealthCheck:
     """
     Perform Docker layer health check.
@@ -169,15 +217,12 @@ def check_docker_health(agent_name: str) -> DockerHealthCheck:
         # Use stream=False for one-shot stats
         stats = container.stats(stream=False)
 
-        # Calculate CPU percentage
-        cpu_delta = stats["cpu_stats"]["cpu_usage"]["total_usage"] - \
-                    stats["precpu_stats"]["cpu_usage"]["total_usage"]
-        system_delta = stats["cpu_stats"]["system_cpu_usage"] - \
-                       stats["precpu_stats"]["system_cpu_usage"]
-        num_cpus = stats["cpu_stats"].get("online_cpus", 1)
-
-        if system_delta > 0 and cpu_delta > 0:
-            cpu_percent = (cpu_delta / system_delta) * num_cpus * 100
+        # #4529: percent of this container's CPU limit (100 = at the cap),
+        # not Docker's host-core scale (100 = one busy core). Memory below
+        # is already a share of the container's memory limit.
+        cpu_percent = _cpu_percent_of_limit(
+            stats, container.attrs.get("HostConfig")
+        )
 
         # Calculate memory percentage
         mem_usage = stats["memory_stats"].get("usage", 0)
@@ -811,8 +856,8 @@ async def perform_health_check(
         business=business_check,
         issues=issues,
         recent_alerts=[],  # TODO: Fetch from notifications
-        uptime_percent_24h=round(uptime, 2) if uptime else None,
-        avg_latency_24h_ms=round(avg_latency, 2) if avg_latency else None
+        uptime_percent_24h=round(uptime, 2) if uptime is not None else None,
+        avg_latency_24h_ms=round(avg_latency, 2) if avg_latency is not None else None
     )
 
 
@@ -1023,7 +1068,8 @@ class MonitoringService:
                 self._is_leader = leader
 
                 if leader:
-                    await self._run_check_cycle()
+                    with loop_health.tick("monitoring"):
+                        await self._run_check_cycle()
             except Exception as e:
                 print(f"Monitoring check cycle failed: {e}")
 

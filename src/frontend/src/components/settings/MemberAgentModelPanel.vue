@@ -15,7 +15,7 @@
     <div class="px-6 py-5">
       <h3 class="text-lg font-medium text-gray-900 dark:text-gray-100">Models member agents run on</h3>
       <p class="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        A member's messages run on the member model. The agent's own turns — wakes and reminders — run on its template's model.
+        A member's messages run on the member model. The agent's own turns — wakes and reminders — run on its stored model (from its template or a Settings pick).
       </p>
 
       <!-- #1927: gated on "no data yet", never on the in-flight flag. -->
@@ -73,7 +73,7 @@
                 <td class="px-3 py-2 text-gray-900 dark:text-gray-100 break-all">{{ a.agent_name }}</td>
                 <td class="px-3 py-2 font-mono text-gray-900 dark:text-gray-100 break-all">{{ a.resolved || '—' }}</td>
                 <td class="px-3 py-2">
-                  <BaseBadge :variant="a.refused_reason ? 'warning' : 'neutral'">{{ a.source === 'template' ? 'template' : 'default' }}</BaseBadge>
+                  <BaseBadge :variant="a.refused_reason ? 'warning' : 'neutral'">{{ a.source === 'stored' || a.source === 'template' ? a.source : 'default' }}</BaseBadge>
                 </td>
               </tr>
             </tbody>

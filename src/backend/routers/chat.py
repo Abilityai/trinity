@@ -14,6 +14,8 @@ from datetime import datetime
 from typing import NoReturn, Optional
 
 from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ReportBackRequest, TaskExecutionStatus
+from dependencies import check_requested_project  # ent#1105
+from services import execution_attribution  # ent#1105
 from dependencies import (
     assert_not_share_viewer,
     capability_fence,
@@ -28,7 +30,7 @@ from dependencies import (
     viewer_row_scope,
 )
 from services.agent_auth import agent_httpx_client
-from services.docker_service import get_agent_container
+from services.docker_service import get_agent_container, get_agent_runtime
 from services.agent_model_service import resolve_default_model
 from services import sync_waiter
 from services.pull_pilot import is_pull_pilot_agent, pull_queue_allowance
@@ -220,6 +222,9 @@ async def chat_with_agent(
     x_source_agent = resolve_source_agent(
         current_user, x_source_agent, endpoint=f"/api/agents/{name}/chat"
     )
+    # ent#1105: a named project_id is checked before admission, any claim,
+    # slot or row (422 project_attribution_unavailable when none attributes).
+    check_requested_project(request, current_user, name)
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -232,8 +237,11 @@ async def chat_with_agent(
     # after that point would burn the key (the RD11 upload-path quirk this
     # deliberately does not repeat). Normalised in place so the execution row
     # and the dispatch payload cannot disagree about the value.
+    # Abilityai/lilu#652: runtime-aware — an OpenCode agent takes `provider/model`.
     try:
-        request.model = validate_dispatch_model(request.model)
+        request.model = validate_dispatch_model(
+            request.model, runtime=get_agent_runtime(name)
+        )
     except InvalidModelError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
@@ -341,7 +349,7 @@ async def chat_with_agent(
     # ChatDispatchError, which this thin handler maps 1:1 to an HTTPException.
     # The finally in run_chat_turn releases the slot + idem claim.
     try:
-        return await chat_execution_service.run_chat_turn(
+        result = await chat_execution_service.run_chat_turn(
             name=name,
             request=request,
             current_user=current_user,
@@ -363,6 +371,9 @@ async def chat_with_agent(
         )
     except ChatDispatchError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
+    # ent#1105: a named project that passed the check but was not recorded is
+    # answered `project_attribution: "failed"`, never a silent success.
+    return execution_attribution.report(result, execution_attribution.explicit_status())
 
 
 def _resolve_deprecated_task_timeout(requested: Optional[int], agent_cap: int) -> tuple:
@@ -410,6 +421,9 @@ async def execute_parallel_task(
     x_source_agent = resolve_source_agent(
         current_user, x_source_agent, endpoint=f"/api/agents/{name}/task"
     )
+    # ent#1105: a named project_id is checked before admission, any claim,
+    # slot or row (422 project_attribution_unavailable when none attributes).
+    check_requested_project(request, current_user, name)
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -466,8 +480,11 @@ async def execute_parallel_task(
     # the Chat tab actually posts to, and its `model` reaches the runtime as a
     # `--model` argv element by the same path. Normalised in place, exactly like
     # the timeout below.
+    # Abilityai/lilu#652: runtime-aware — an OpenCode agent takes `provider/model`.
     try:
-        request.model = validate_dispatch_model(request.model)
+        request.model = validate_dispatch_model(
+            request.model, runtime=get_agent_runtime(name)
+        )
     except InvalidModelError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
@@ -536,7 +553,9 @@ async def execute_parallel_task(
             or {"task_execution_id": result.execution_id, "async_mode": bool(request.async_mode)},
             headers={"X-Idempotent-Replay": "true"},
         )
-    return result
+    # ent#1105: a named project that passed the check but was not recorded is
+    # answered `project_attribution: "failed"`, never a silent success.
+    return execution_attribution.report(result, execution_attribution.explicit_status())
 
 
 @router.get("/{name}/chat/history")
@@ -840,9 +859,17 @@ async def set_agent_model(
     # ent#875: the model is the agent's for every user — owner tier. An agent key
     # keeps its `agents.manage` capability fence on the route decorator.
     name: str = Depends(get_owned_agent),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    http_request: Request = None,
 ):
-    """Set agent's model for subsequent messages."""
+    """Set agent's model for subsequent messages.
+
+    #4442: on a Claude Code agent the value the agent accepted is also stored
+    as its own model (``default_model``), so the turns the platform starts
+    (wakes, ask endings, events, unpinned reminders and schedules) run on it
+    too, and it survives a restart. The agent stays the judge of the value
+    (#3677); the resolver re-checks it on every read.
+    """
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -854,6 +881,14 @@ async def set_agent_model(
         )
 
     try:
+        runtime = (container.labels or {}).get("trinity.agent-runtime") or "claude-code"
+    except Exception:  # noqa: BLE001
+        runtime = "claude-code"
+    # #4442: the model the agent runs now, read before the change, so a failed
+    # save can put it back and leave the agent and the stored value agreeing.
+    previous = await _read_agent_model(name) if runtime == "claude-code" else None
+
+    try:
         async with agent_httpx_client(name) as client:
             response = await client.put(
                 f"http://agent-{name}:8000/api/model",
@@ -861,10 +896,76 @@ async def set_agent_model(
                 timeout=10.0
             )
             response.raise_for_status()
-
-            return response.json()
+            body = response.json()
     except httpx.HTTPError as e:
         _raise_model_route_error(name, e, "Failed to set model", "set model")
+
+    if runtime != "claude-code":
+        return body  # a non-Claude agent runs on its own model (ent#1202)
+    model = (request.model or "").strip() or None
+    try:
+        saved = await asyncio.to_thread(db.set_default_model, name, model)
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger("trinity.errors").error(
+            f"Model of {name} set on the agent but not saved: {type(e).__name__}")
+        saved = False
+    if not saved:
+        restored = previous is not None and await _put_agent_model(name, previous)
+        if restored:
+            message = (f"The model was not saved, so the agent keeps running {previous}. "
+                       "Set it again.")
+        else:
+            message = ("The model was not saved, and the agent's previous model could not "
+                       f"be put back: chat started from Settings may run {model} until the "
+                       "agent restarts, while the turns the platform starts keep the stored "
+                       "model. Set it again.")
+        raise HTTPException(status_code=500, detail={
+            "error": "model_not_saved",
+            "restored": bool(restored),
+            "message": message,
+        })
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="update_agent_model",
+        source="api",
+        actor_user=current_user,
+        actor_ip=(http_request.client.host
+                  if http_request is not None and http_request.client else None),
+        target_type="agent",
+        target_id=name,
+        endpoint=http_request.scope["path"] if http_request is not None else None,
+        request_id=getattr(getattr(http_request, "state", None), "request_id", None),
+        details={"default_model": model},
+    )
+    return body
+
+
+async def _read_agent_model(name: str) -> Optional[str]:
+    """The model the agent runs now (its ``GET /api/model``); None on any failure.
+    Best effort and quiet: the PUT that follows reports an unreachable agent."""
+    try:
+        async with agent_httpx_client(name) as client:
+            response = await client.get(f"http://agent-{name}:8000/api/model", timeout=5.0)
+            response.raise_for_status()
+            value = response.json().get("model")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[#4442] model of {name} not read before the change: {type(e).__name__}")
+        return None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+async def _put_agent_model(name: str, model: str) -> bool:
+    """Put ``model`` back on the agent. True when the agent accepted it."""
+    try:
+        async with agent_httpx_client(name) as client:
+            response = await client.put(f"http://agent-{name}:8000/api/model",
+                                        json={"model": model}, timeout=10.0)
+            response.raise_for_status()
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger("trinity.errors").error(
+            f"Model of {name} not put back after a failed save: {type(e).__name__}")
+        return False
+    return True
 
 
 def _raise_model_route_error(name: str, e: httpx.HTTPError, unavailable: str, action: str):
@@ -1098,13 +1199,13 @@ async def terminate_agent_execution(
     # capacity force-release, #679 CANCELLED CAS, #1332 dispatch-activity close)
     # lives in chat_execution_service (Invariant #1). HTTP-free — it raises
     # ChatDispatchError (404/503/502/504/non-200), mapped 1:1 here.
-    # #3180: a terminate had no audit row. The service calls this once, and
-    # only when THIS request ended work (a queued, parked or container cancel
-    # that won its CANCELLED CAS); a repeat, `already_finished` and every error
-    # arm write nothing. `log` derives the key fields from the
+    # #3180: a terminate had no audit row. The service calls this once per
+    # ended turn (a queued cancel that won its CAS, a parked cancel, or an agent
+    # that answered `terminated`; #4475); a repeat, `already_finished` and every
+    # error arm write nothing. `log` derives the key fields from the
     # principal (#2389), so a key's terminate names the key.
-    async def _audit_terminate(outcome: str) -> None:
-        await platform_audit_service.log(
+    async def _audit_terminate(outcome: str):
+        return await platform_audit_service.log(
             event_type=AuditEventType.EXECUTION,
             event_action="execution_terminate",
             source="api",
@@ -1171,6 +1272,10 @@ async def get_agent_running_executions(
 
     Returns execution IDs, start times, and metadata for running processes.
     """
+    # trinity-enterprise#978: the view is decided before the container is looked
+    # at, so an answer that never reaches the agent (no container, stopped,
+    # unreachable) carries the narrowed-read marker like any other.
+    scope = viewer_row_scope(current_user, name)
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -1190,7 +1295,6 @@ async def get_agent_running_executions(
 
     # ent#875: a share holder sees only the turns they started. An entry with no
     # row of this agent's (or no id) is dropped, never passed through.
-    scope = viewer_row_scope(current_user, name)
     if scope is not None and isinstance(data, dict):
         kept = []
         for entry in data.get("executions") or []:

@@ -420,3 +420,43 @@ def test_no_provider_leaves_the_block_byte_identical(quiet_db):
     baseline = compose_system_prompt(ctx)
     assert "Primary human" not in baseline
     assert "Stakeholders" not in baseline
+
+
+# ---------------------------------------------------------------------------
+# trinity-enterprise#1221: consent is not reachability
+# ---------------------------------------------------------------------------
+
+
+def test_consent_with_no_channel_says_so_instead_of_permitted():
+    block = build_execution_context(
+        ExecutionContext(agent_name="ops", primary_user_display="A. Smith",
+                         proactive_consent=True, proactive_reachable=False))
+    line = [ln for ln in _lines(block) if ln.startswith("- **Primary human**")][0]
+    assert "permitted" not in line
+    assert line == (
+        "- **Primary human**: A. Smith — consented to proactive contact, but no "
+        "channel reaches them; do not message them — it waits for their next turn")
+
+
+@pytest.mark.parametrize("reachable", [True, None])
+def test_reachable_or_unknown_keeps_todays_line(reachable):
+    block = build_execution_context(
+        ExecutionContext(agent_name="ops", primary_user_display="A. Smith",
+                         proactive_consent=True, proactive_reachable=reachable))
+    assert "- **Primary human**: A. Smith — proactive contact permitted" in block
+
+
+def test_no_consent_stays_closed_whatever_reachability_says():
+    block = build_execution_context(
+        ExecutionContext(agent_name="ops", primary_user_display="A. Smith",
+                         proactive_consent=False, proactive_reachable=True))
+    assert "- **Primary human**: A. Smith" + _NOT_PERMITTED in block
+
+
+def test_compose_carries_reachability_from_the_provider(quiet_db):
+    ap.register_provider(_Provider(answer={
+        "primary_user_display": "A. Smith", "proactive_consent": True,
+        "proactive_reachable": False}))
+    out = compose_system_prompt(ExecutionContext(agent_name="ops", triggered_by="reminder"))
+    assert "no channel reaches them" in out
+    assert "proactive contact permitted" not in out

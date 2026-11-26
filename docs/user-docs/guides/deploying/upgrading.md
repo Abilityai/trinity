@@ -111,7 +111,7 @@ git log --oneline -10
 git diff HEAD~1 HEAD --stat
 ```
 
-If `docker/base-image/Dockerfile` appears in the diff, see [Base Image Upgrade](#base-image-upgrade-if-needed) below.
+If anything under `docker/base-image/` appears in the diff, see [Base Image Upgrade](#base-image-upgrade-if-needed) below.
 
 **Hosted install:** pin the new release in `.env` (the last `TRINITY_IMAGE_TAG` line wins) and check out the matching tag, so the compose file and the mounted `config/` move with the images:
 
@@ -130,7 +130,7 @@ When updating Trinity code, rebuild the platform images only:
 docker compose build --no-cache backend frontend mcp-server scheduler
 ```
 
-The `trinity-agent-base` image is **not** rebuilt by this command. It changes much less often, and rebuilding it forces every agent to be re-deployed. Rebuild it only when `docker/base-image/Dockerfile` itself changes, via `./scripts/deploy/build-base-image.sh`.
+The `trinity-agent-base` image is **not** rebuilt by this command. Rebuilding it means every agent has to be restarted to adopt it, so it is a separate step: rebuild it when anything under `docker/base-image/` changed in the release, via `./scripts/deploy/build-base-image.sh`. See [Base Image Upgrade](#base-image-upgrade-if-needed).
 
 For production:
 
@@ -152,14 +152,14 @@ Do not substitute a bare `docker compose -f docker-compose.hosted.yml pull`: the
 
 - Before touching `.env` or the stack it takes the provisioning lock the IP-refresh timer uses, so a refresh cannot rewrite the Caddy configuration or recreate a service mid-upgrade. If the web UI's `FRONTEND_BIND_ADDRESS` is empty, it is set to `127.0.0.1` (only Caddy needs that port).
 - Before pulling, it checks that the ingress network's range (`TRINITY_PROXY_PREFIX`, default `172.30.0.0/24`) is free and stops — changing nothing — if another Docker network already uses it, naming that network. Set a free `/24` prefix in `.env` and re-run.
-- After the backend is healthy and the web UI answers on its local port, it re-renders the Caddyfile. Caddy is pointed at the web container's PROXY-protocol listener (`127.0.0.1:${CADDY_PROXY_PORT:-18082}`) only after a live check that the listener answers; that listener is what carries each visitor's address to Trinity, so per-client sign-in limits and audit addresses see real clients. If the running web image is older than the checkout, Caddy keeps the ordinary listener and the run prints a warning that visitors' addresses are not yet passed through — pin the matching `TRINITY_IMAGE_TAG` and re-run.
+- After the backend is healthy and the web UI answers on its local port, it re-renders the Caddyfile. Caddy is pointed at the web container's PROXY-protocol listener (`127.0.0.1:${CADDY_PROXY_PORT:-18082}`) only after a live check that the listener answers. A recreated web container answers on its ordinary port before this listener is ready, so the run waits up to 90 seconds for it. That listener is what carries each visitor's address to Trinity, so per-client sign-in limits and audit addresses see real clients. If the running web image is older than the checkout, Caddy keeps the ordinary listener and the run prints a warning that visitors' addresses are not yet passed through — pin the matching `TRINITY_IMAGE_TAG` and re-run.
 - The first switch restarts Caddy once, so open live views (execution logs, chat streams) reconnect. Later re-runs with an unchanged configuration leave Caddy running. A configuration Caddy rejects is never installed; the previous one keeps serving.
 - `/etc/caddy/Caddyfile` belongs to Trinity and is rewritten on every upgrade. **Put your own sites in `/etc/caddy/Caddyfile.d/<name>.caddy`**: the Caddyfile imports every `*.caddy` file there, and Trinity never writes to that directory. If the Caddyfile was edited by hand since Trinity last wrote it (or, on an install from before this check, holds a site Trinity never renders, such as your own hostname), the upgrade **does not replace it**. It prints why, leaves the running configuration serving, and finishes the rest of the upgrade. To apply the new configuration, move your blocks into `Caddyfile.d/`, then re-run with `--caddy-overwrite`; the old file is kept beside it as `Caddyfile.bak-<timestamp>`. To see the file before anything is written, run `sudo ./scripts/deploy/start.sh --provision --cloud <digitalocean|vultr|aws> --caddy-only --dry-run` (`--dry-run` works only with `--caddy-only`; anywhere else it is refused rather than ignored).
 - After adding or editing a file in `Caddyfile.d/`, apply it with `sudo ./scripts/deploy/start.sh --provision --cloud <digitalocean|vultr|aws> --caddy-only`, which reloads Caddy when that directory changed (or `sudo systemctl reload caddy`). Keep the directory `0755` and its files `0644`: Caddy runs as the `caddy` user, and a file only root can read is refused before Caddy is touched.
 
 `--caddy-only` remains available for deliberate reconfiguration (for example after changing `PRIVATE_NETWORK_CIDRS`); it applies the same listener check.
 
-**Upgrading an install that runs on SQLite.** Trinity refuses to start until the data moves, and never comes up on an empty database. `start.sh` stops before pulling and prints the copy command; a directly-run compose stack shows the same guidance in `docker compose logs backend`, with the backend unhealthy. Follow `docs/migrations/SQLITE_TO_POSTGRES.md`. The copy never writes to your SQLite file.
+**Upgrading an install that runs on SQLite.** Trinity refuses to start until the data moves, and never comes up on an empty database. `start.sh` stops before pulling and prints the copy command; a directly-run compose stack shows the same guidance in `docker compose logs backend`, with the backend unhealthy. Follow `docs/migrations/SQLITE_TO_POSTGRES.md`. The copy never writes to your SQLite file. On a source-built install, build all four platform images (`backend frontend mcp-server scheduler`) before the copy: `start.sh` builds nothing, and a backend-only build leaves the scheduler, MCP server and frontend on the previous release while the stack still reports healthy. To roll the move back, get the previous release's images before you start it again (rebuild all four on a source install; restore the old `TRINITY_IMAGE_TAG` and pull on a hosted one), or the old compose file starts the newer backend image, which refuses SQLite. `update.sh --rollback` does that rebuild for you.
 
 **Upgrading a source-built install on a PostgreSQL container you started by hand.** `docker-compose.prod.yml` now runs that service itself, so the file stops at a render error until you adopt it. The same guide covers it, and no data is copied.
 
@@ -205,7 +205,7 @@ curl -s http://localhost:8080/health
 # Expected: 200 OK
 
 # 6. Vector (log aggregation)
-docker exec trinity-vector wget -q -O - http://localhost:8686/health
+docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health
 # Expected: non-empty response
 ```
 
@@ -234,7 +234,7 @@ The same metadata is visible in the UI via the version chip in the navigation ba
 
 ## Base Image Upgrade (if needed)
 
-Rebuild the base image only when `docker/base-image/Dockerfile` changes:
+The base image bakes in more than its Dockerfile: the agent server (`agent_server/`), the guard hooks (`hooks/`) and `startup.sh` are all copied into it. Rebuild it whenever anything under `docker/base-image/` changed in the release — `scripts/deploy/update.sh` (`trinity update`) does this for you:
 
 ```bash
 ./scripts/deploy/build-base-image.sh
@@ -249,7 +249,13 @@ What this means in practice:
 - A **running** agent is never replaced out from under you. Drift is detected but not acted on until the agent is next started cold.
 - **Restart the fleet** (Operations) to roll the new image out: each agent goes through the normal lifecycle, so a drifted agent is recreated and an up-to-date one keeps its container.
 - The **system agent** (`trinity-system`) follows the same rule and is deliberately never replaced while running. If its image goes stale you get an operator alert rather than a mid-operation container swap; it adopts the rebuild the next time it is started cold.
-- Rebuilding the base image is what makes newly shipped agent-side features available. Skipping it means agents keep running the old runtime, which is usually harmless but occasionally leaves a feature silently inert.
+- Rebuilding the base image is what makes newly shipped agent-side changes available, and an agent receives them only once it has restarted onto the new image. Until then the agent accepts the new platform's requests and ignores what it does not understand, so an agent-side fix in the release — a security fix included — does not apply to it.
+
+**After every upgrade, restart the fleet** (or stop and start each agent) so agents receive the release's agent-side changes.
+
+**Trinity tells you which agents are behind.** Shortly after the backend starts, and every ten minutes after that, it compares each running agent with the installed base image and keeps **one** alert in the operator queue naming the agents still on an older image. The alert updates as agents are restarted and ends by itself when none are left. It never restarts an agent for you. Ephemeral agents are not listed.
+
+The same alert also appears when the installed base image is itself older than the platform — the case where the update path did not rebuild it, so no agent looks out of date although all of them are. It names the fix: `./scripts/deploy/build-base-image.sh` on a source install, `./scripts/deploy/start.sh --hosted` on a hosted one, then a fleet restart. If the base image has no version label, or Docker cannot be read, nothing is reported as up to date: the backend log says the check could not run.
 
 ---
 
@@ -284,6 +290,10 @@ Agents' git remotes no longer carry the GitHub token. Git asks a credential help
 - A pass that cannot read an agent's workspace — usually a workspace ownership or permissions problem — files a separate alert, *Trinity could not check this agent's git remotes*. Check that agent's remotes by hand.
 
 Then rotate the platform GitHub token. Backups, log archives, and container logs from before the upgrade can still contain it. Rotation is mandatory if the cleanup reports a token in a committed `.gitmodules` file, because that token is already in the repository's history. Full runbook, including how to verify an agent: [`docs/migrations/GIT_REMOTE_TOKEN_SCRUB_2026-09.md`](../../../migrations/GIT_REMOTE_TOKEN_SCRUB_2026-09.md).
+
+## Agent SSH ports move to loopback (on recreate)
+
+Each agent's SSH port (2222–2262) is now published on `127.0.0.1` by default, not on every interface. The backend applies the binding when it creates or recreates an agent, so agents created before the upgrade keep the old all-interfaces binding until they are recreated. The SSH grant response says, for each agent, which host to use. To reach agents directly over a VPN instead, set `AGENT_SSH_BIND_ADDRESS` (and `SSH_HOST`) to that interface's IP before recreating them. See [Hardening](hardening.md) and the [`.env` reference](single-server.md#env-reference).
 
 ---
 

@@ -60,9 +60,11 @@ PUBLIC_TURN_REFUSED_MESSAGE = (
     "Please contact its owner."
 )
 # The agent server's refusal sentences (agent_server/services/turn_scope.py
-# REFUSED / REFUSED_VISITOR). A push terminal stores only this text, so the
-# async status read recognises it; a parity test pins both.
-_TURN_REFUSED_MARKERS = ("cannot limit what such a turn may do", "has not allowed those to run on")
+# REFUSED / REFUSED_VISITOR, and managed_hooks.py's for a Claude agent whose
+# guardrails are not running, trinity-enterprise#1176). A push terminal stores
+# only this text, so the async status read recognises it; a parity test pins them.
+_TURN_REFUSED_MARKERS = ("cannot limit what such a turn may do", "has not allowed those to run on",
+                         "guardrails are not running")
 
 
 def is_turn_refused(error_code, error_text) -> bool:

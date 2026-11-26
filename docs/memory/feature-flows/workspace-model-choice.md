@@ -74,8 +74,8 @@ The curated set (three):
 | id | tier | why |
 |---|---|---|
 | `claude-opus-5-5` | Most capable | the top tier (#2987) |
-| `claude-sonnet-5` | Balanced — fast and smart | the everyday choice |
-| `claude-haiku-4-5-20251001` | Fastest | the cheap/quick tier |
+| `claude-sonnet-5-5` | Balanced — fast and smart | the everyday choice (#4528) |
+| `claude-haiku-5-5` | Fastest | the cheap/quick tier (#4528) |
 
 `claude-fable-5` is out: its `note` also reads "Most capable", and Opus-vs-Fable is an
 operator distinction, not a client one. Every "Legacy" entry is out — a client-facing
@@ -192,7 +192,7 @@ like `claude-sonnet-4-6[1m]` are in legitimate circulation, so the resolver is
 
 ```
   Workspace composer (platform user, Claude runtime, control rendered)
-        │  BaseSelect:  "" = Agent's default (Sonnet 4.6) | <curated id>
+        │  BaseSelect:  "" = Agent's default (Sonnet 5.5) | <curated id>
         ▼
   POST /client-portal/agents/{n}/chat[/stream]        body.model
         │  ① (body.model or "").strip() or None   ← BEFORE validation, or "" 422s

@@ -1150,7 +1150,7 @@ class ChannelMessageRouter:
             placeholder = "[User sent a voice message — voice transcription is not yet available]"
             if placeholder in message.text:
                 message = message.model_copy(update={"text": message.text.replace(placeholder, voice_text)})
-                logger.info(f"[ROUTER:{channel}] Voice transcribed: {voice_text[:100]}...")
+                logger.info(f"[ROUTER:{channel}] Voice transcribed ({len(voice_text)} chars)")
         return message
 
     async def _enforce_rate_limits(

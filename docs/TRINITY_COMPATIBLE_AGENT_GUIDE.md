@@ -206,6 +206,12 @@ credentials.json
 # Large generated content - DO NOT COMMIT
 content/
 
+# Documents people hand the agent - DO NOT COMMIT (abilityai/trinity-enterprise#1373)
+# One folder per person under inbox/, one per session under uploads/.
+# Subfolders only. Keep one with !inbox/<folder>/<file> (no leading slash).
+/inbox/*/**
+/uploads/*/**
+
 # Bulk data / deps / cache / index dirs - DO NOT COMMIT (#1596)
 # These churn on every run and bloat .git unboundedly under auto-sync.
 # Git sync is for code + state, not datasets/indexes/deps — those belong
@@ -332,6 +338,42 @@ The workaround is to keep the file outside the excluded directory. When this
 bites you, the sync now **tells you**: its result carries
 `shadowed_negations`, e.g. `"!content/keep.md -> content/"`.
 
+**Documents people send you** (abilityai/trinity-enterprise#1373). The platform
+writes a person's Workspace drops to `inbox/<person>/` and chat, public-link
+and channel attachments to `uploads/<session>/`, inside your repository root.
+`/inbox/*/**` and `/uploads/*/**` keep them out of git — the subfolders only,
+so a file you write directly under `inbox/` still syncs. Being ignored also
+spares them from a force-replace pull, which deletes untracked files that are
+not ignored. These rules are contents-form, so a per-file negation works; write
+it **without** a leading slash, and for a file one folder deeper re-include the
+folder first:
+
+```gitignore
+!inbox/ada-1a2b3c4d/contract.pdf
+!inbox/ada-1a2b3c4d/signed/
+!inbox/ada-1a2b3c4d/signed/final.pdf
+```
+
+The simpler way to keep one is to copy it into a folder you commit (`docs/`,
+`knowledge/`, …). A folder of your own under `inbox/` or `uploads/` is ignored
+too, and if it was committed it is untracked like a person's drop (see below),
+with an alert naming it; negate it as above to keep it. `uploads/` files live
+only on the agent's volume; they do not survive a re-clone onto a fresh host.
+
+*Documents committed before these rules.* On the agent's next **start**, if it
+auto-syncs, or its next **Push**, the platform untracks them (index only — the
+files stay on disk), and the next sync commits the deletion; the operator queue
+gets an alert naming the paths. The untrack at start covers these two patterns
+and nothing else: it is the one exception to the rule that starting an agent
+only merges `.gitignore` and leaves untracking to a Push (#2069), because a
+never-Pushed auto-sync agent would otherwise re-commit a re-dropped document of
+the same name on every cycle. A `git pull` in any other clone of the repo then
+deletes those files from that clone's working tree. **History is not
+rewritten**: copies already pushed stay in the repo's history. Removing them is
+the owner's call — rewrite the history (`git filter-repo` or BFG, then a
+force-push), or make the repository private — and Trinity never does it for
+you.
+
 **Recovering a file a sync already untracked.** The sweep only touches the
 index, so the file is still on disk. Two steps:
 
@@ -394,7 +436,8 @@ Three zones: **Ⓟ platform-owned** (the platform reads or writes it by path —
 │
 ├── data/                    Ⓟ Ⓥ   # runtime state; the export/import boundary (data_paths)
 ├── public/                  Ⓟ     # the only folder share_file reads
-├── uploads/                 Ⓟ     # files people attach in chat or through the API
+├── uploads/<session>/       Ⓟ     # files people attach in chat or through the API; gitignored
+├── inbox/<person>/          Ⓟ     # files people send from the Workspace; gitignored
 ├── shared-out/              Ⓟ     # shared folder you expose (when enabled)
 ├── shared-in/<agent>/       Ⓟ     # shared folders you consume (when enabled)
 ├── content/                 Ⓟ Ⓥ   # large generated media; created at start, gitignored
@@ -406,7 +449,7 @@ Three zones: **Ⓟ platform-owned** (the platform reads or writes it by path —
 
 | Zone | What lives there | Committed? | Who writes it |
 |------|------------------|------------|---------------|
-| Ⓟ Platform-owned | `data/`, `public/`, `uploads/`, `shared-out/`, `shared-in/<agent>/`, `content/`, `.trinity/` | `data/` never (gitignored once you declare `data_paths`); `content/` never. Of `.trinity/`, only the re-includes in the [`.gitignore` list](#5-gitignore-required) (`setup.sh`, `pipelines/`, `plugins.yaml`, …) | The platform and the agent. `.trinity/` is reserved by the platform, but the agent itself writes `operator-queue.json`, `persistent-state.yaml` and `pipelines/` there; people cannot edit it from the Files tab |
+| Ⓟ Platform-owned | `data/`, `public/`, `uploads/`, `inbox/<person>/`, `shared-out/`, `shared-in/<agent>/`, `content/`, `.trinity/` | `data/` never (gitignored once you declare `data_paths`); `content/`, `uploads/<session>/` and `inbox/<person>/` never ([documents people send you](#5-gitignore-required)). Of `.trinity/`, only the re-includes in the [`.gitignore` list](#5-gitignore-required) (`setup.sh`, `pipelines/`, `plugins.yaml`, …) | The platform and the agent. `.trinity/` is reserved by the platform, but the agent itself writes `operator-queue.json`, `persistent-state.yaml` and `pipelines/` there; people cannot edit it from the Files tab |
 | Ⓒ Committed workspace | Identity and config files at the root, `.claude/{skills,agents,commands}/`, `memory/`, `docs/`, `reports/<kind>/`, `project_files/<slug>/`, `scripts/` | Yes | The author and the agent |
 | Ⓥ Volume-only runtime | `data/`, `content/`, `$TMPDIR` (`~/.tmp/`), side clones | No — they persist on the volume, not in git | The agent |
 
@@ -687,6 +730,14 @@ mcp_servers:
 skills:
   - name: my-skill
     description: "What this skill enables"
+
+# Skills from the platform skills library to ASSIGN when an agent is created
+# from this template (names only; skill sets are not supported here). Names the
+# library does not have are skipped. They are delivered once the agent is up,
+# then managed on its Skills tab like any other assignment.
+library_skills:
+  - research-planning
+  - user-research
 
 # Supported platforms (if applicable)
 platforms:
@@ -2208,7 +2259,7 @@ All human/operator communication on Trinity is **asynchronous**, mediated by the
 
 1. **Park** the request (approval / question / alert) with `ask_operator`, or, as the fallback, by appending an entry to the queue file.
 2. **End the turn.** A turn must never wait, poll, or sleep for a human response — a human may answer in minutes or days, and a blocked turn burns its entire timeout budget while pinning platform capacity. Never assume a synchronous human answer is available mid-turn.
-3. **Process the outcome in a later turn.** `get_my_ask` returns how an ask ended (answered, cancelled or expired, with the answer when there is one), and the Execution Context block of the system prompt lists the agent's asks that ended in the last 24 hours and the ones still pending. Do not re-ask what is still pending (#3247): if the facts changed, raise the new ask with `replaces` set to the pending ask's `request_id` — the earlier ask ends as replaced, never edited in place; if a person answered first the replace is refused `replaces_ended` and the answer stands, and repeating a pending ask's `proposal` without `replaces` is refused `already_pending`. For a queue-file entry, check the file for `status: "responded"` items, act on them, then mark them `"acknowledged"`. On an approval the answer is one of the agent's own options or the platform-reserved value `(something else)` (#3242): none of the options is approved — carry out none of them — and the person's instruction is in `response_text`. Never list `(something else)` as an option yourself; `ask_operator` refuses it. Write atomic asks (#3243): one decision per ask, a one-glance title (at most 120 characters), and at most 5 short options that name the choice only — the full rules are in the `ask_operator` tool description, and a queue-file entry over the caps is held as `invalid_options` / `invalid_title`.
+3. **Process the outcome in a later turn.** `get_my_ask` returns how an ask ended (answered, cancelled or expired, with the answer when there is one), and the Execution Context block of the system prompt lists the agent's asks that ended in the last 24 hours and the ones still pending. Do not re-ask what is still pending (#3247): if the facts changed, raise the new ask with `replaces` set to the pending ask's `request_id` — the earlier ask ends as replaced, never edited in place; if a person answered first the replace is refused `replaces_ended` and the answer stands, and repeating a pending ask's `proposal` without `replaces` is refused `already_pending`. For a queue-file entry, check the file for `status: "responded"` items, act on them, then mark them `"acknowledged"`. On an approval the answer is one of the agent's own options or the platform-reserved value `(something else)` (#3242): none of the options is approved — carry out none of them — and the person's instruction is in `response_text`. Never list `(something else)` as an option yourself; `ask_operator` refuses it. Write atomic asks (#3243): one decision per ask, a one-glance title (at most 120 characters), and at most 5 short options that name the choice only — the full rules are in the `ask_operator` tool description, and a queue-file entry over the caps is held as `invalid_options` / `invalid_title`. A queue-file entry with `type: "credential"` is addressed by the platform (the primary person, else the owner when the primary cannot open the agent in their Workspace; `addressed_to_email` is ignored), and one that cannot be filed is held as `role_cannot_open_agent`, `no_person` or `invalid_credential` (#4599): raise it with `ask_for_credential` instead, whose refusal names the reason and the remedy.
 
 **Ask before irreversible actions.** Before an action the platform cannot undo or verify — payments, emails/messages through the agent's own credentials, public posts, destructive deletions — park an `approval` and end the turn when uncertain. Put the exact action in the ask's `proposal`. This matters most under re-delivery: pull-mode coordination (#1081) re-runs a turn whose worker died, so a task you receive may have partially run before. Check your own records and your earlier asks before repeating an irreversible effect; do the reversible parts first and gate only the irreversible step.
 

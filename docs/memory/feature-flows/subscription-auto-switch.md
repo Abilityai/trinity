@@ -368,7 +368,7 @@ Narrow by construction: only after the switcher declined, only for a Claude runt
 
 The portal's AUTH/BILLING branch consults it **before** refusing:
 
-- **switched** → `503`, `category="auth_switched"`, `retryable=True`, naming the new subscription (or the platform API key). #2320's `retryable=False` rested on "re-sending re-fails", which holds only while nothing changed underneath — and a switch is exactly something changing underneath.
+- **switched** → `503`, `category="auth_switched"`, `retryable=True`, saying the turn moved onto another subscription (or the platform API key). The subscription's name is operator data and is never shown (#4482). #2320's `retryable=False` rested on "re-sending re-fails", which holds only while nothing changed underneath — and a switch is exactly something changing underneath.
 - **not switched** → still `502` / `retryable=False`, but the body now names the earliest reset instant the sampler already caches (`earliest_known_reset` → `_usage_limit_detail`). "Please try again later" is true and nearly useless: the person cannot tell whether later means ten minutes or two days, so they either give up or re-send in a loop that cannot succeed. Degrades to the original sentence whenever the instant is unknown or unreadable — a fabricated time would be worse than a vague one, and this runs where things are already going wrong, so it must not be able to raise.
 
 ### Not covered
@@ -584,6 +584,12 @@ persisted: a `docker restart` reverts to the DB baseline by construction.
   origin>)`: the first worker wins, the second reads `False` and skips its
   hot-reload and notification. `apply_rung_legacy` keeps the plain write (it
   runs before any re-issue, under the lock, as #792 did).
+- **A turn the agent refused never walks (trinity-enterprise#1176).** `classify_switch_failure`
+  reads any 403 as `auth`, but a 403 whose body is typed `error_code: "turn_refused"` is the agent
+  refusing the turn for who it is for (a runtime that cannot scope it, or a Claude agent whose guardrails
+  are not running): no credential changes that, so it returns `None` before the status rule. The
+  agent's "could not ask the platform" answer is a 502, never a 503, for the same reason. Pinned on
+  both push paths with a subscription in the pool (`test_3470_subscription_walk.py`).
 - **A container-fault 503 never walks.** `classify_switch_failure` reads a bare
   503 as `auth` (#285); the agent also answers 503 for *"Claude Code is not
   available in this container"* / *"Permission bypass failed"*. Looping a
@@ -669,7 +675,11 @@ new claim starts its own walk. Between attempts the worker holds the turn as
 pending in its process registry, so a terminate that lands while a refusal is
 being reported skips the next attempt and reports `cancelled`. A worker
 that cannot follow (older image, non-Claude runtime, a restarted worker
-resending from disk) keeps the pre-#3487 path. The #1085 governor is not
+resending from disk) keeps the pre-#3487 path. The periodic resend tick
+never sends a result the worker is still delivering itself (#4635): it
+resends as a worker that cannot follow a retry, and the sink would answer
+that with a terminal FAILED, so a refused credential lost its walk
+whenever the tick landed inside the 90 s in-loop window. The #1085 governor is not
 consulted — push has no such gate, and its pause is armed by several agents
 failing on shared credentials, the case the walk is for.
 

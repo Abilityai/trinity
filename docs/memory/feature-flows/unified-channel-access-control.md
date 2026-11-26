@@ -289,6 +289,8 @@ Then reply with /login 123456 to complete verification.
 state                                   action
 ─────────────────────────────────────────────────────────────────
 no pending login                        user sends `/login alice@x.com`
+                                        → channel_login_limit.login_code_request_allowed
+                                          (over limit → reply "Too many sign-in code requests", stop)
                                         → db.create_login_code(email, 10min)
                                         → EmailService.send_verification_code
                                         → _PENDING_LOGINS[(binding_id, tg_user)] = email
@@ -571,6 +573,8 @@ The component uses raw `axios` (matching the existing pattern in this file) rath
 ### Email
 On `/login email`, an email is sent via `EmailService.send_verification_code` — same path as web email auth (see [email-authentication.md](email-authentication.md)).
 
+**Rate limit (trinity-enterprise#1253).** Before minting a code, Telegram `/login <email>`, WhatsApp `/login <email>` and the Slack `require_email` email step call `services/channel_login_limit.login_code_request_allowed(channel, bot_key, sender_id, email)`. Caps over 10 minutes: 5 per sender (`{channel}:{sender_id}`; Slack `{team}:{user}`), 3 per address (one `rate_limiter` budget, `login_code_email:<sha256 of the stripped, lowercased email>`, a fixed-size key, shared with the web login and MCP inline auth, which charge it through `channel_login_limit.address_allowed` before their whitelist / known-address check; the cap never reads `email_login_codes`, because the web login writes rows only for whitelisted addresses and a reply derived from them would reveal whitelist membership), 20 per bot / WhatsApp binding / Slack workspace. Checked in that order; a request refused by any cap is charged to none (the caps it passed are refunded). Accepted risk: any sender can keep one named address from receiving a code everywhere by requesting 3 codes for it per 10 minutes. Requests are counted with `rate_limiter.check` keyed on the input, and the check runs after the email-format check and before the ent#849 membership branch, so the reply is the same for members and outsiders. Over the limit the bot replies "Too many sign-in code requests. Try again in 10 minutes.", sends nothing and logs a WARN; Slack keeps the pending row at `awaiting_email`. Commands reach `handle_command` straight from the transports and never pass the router's per-sender message limit, which is why this cap lives in the adapters.
+
 ### Whitelist auto-add — retired (trinity-enterprise#837)
 Approval no longer adds the email to the platform whitelist, matching `/share`. Rows written before the change keep `source="access_request"` and yield Workspace-only `user` accounts ([workspace-only-role.md](workspace-only-role.md)).
 
@@ -587,6 +591,7 @@ Approving an access request inserts the email into `agent_sharing` so all future
 | Verified email but not allowed (restrictive policy) | Channel reply: "🔒 Your access request is pending approval." |
 | `/login` with no arg | Telegram reply with usage instructions |
 | `/login {bad-email}` | Telegram reply: "That doesn't look like an email address." |
+| `/login {email}` over a rate cap (ent#1253) | Reply: "Too many sign-in code requests. Try again in 10 minutes." No code, no email, WARN log |
 | `/login {6-digit-code}` without pending | Telegram reply: "I don't have a pending login for you." |
 | `/login {wrong-code}` | Telegram reply: "❌ Invalid or expired code. Try again or request a new one." |
 | `decide` request not found / wrong agent | 404 |

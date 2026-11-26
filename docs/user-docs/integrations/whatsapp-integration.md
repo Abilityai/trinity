@@ -139,7 +139,7 @@ WhatsApp users can send these commands to the agent number:
 
 | Command | Action |
 |---------|--------|
-| `/login user@example.com` | Sends a 6-digit verification code to the email address |
+| `/login user@example.com` | Sends a 6-digit verification code to the email address. Code requests are capped (5 per number, 3 per address and 20 per WhatsApp binding in 10 minutes); over a cap the agent replies *Too many sign-in code requests. Try again in 10 minutes.* and sends no email |
 | `/login 123456` | Submits the code and verifies the email |
 | `/logout` | Unlinks the verified email from this WhatsApp number |
 | `/whoami` | Shows the currently verified email address |

@@ -7,7 +7,7 @@ import {
 
 describe('ent#661 v2 — tasks', () => {
   it('names every status and gives each a badge', () => {
-    expect(TASK_STATUSES).toEqual(['active', 'blocked', 'needs-decision', 'paused', 'pending-verification', 'done'])
+    expect(TASK_STATUSES).toEqual(['todo', 'active', 'blocked', 'needs-decision', 'paused', 'pending-verification', 'done'])
     for (const s of TASK_STATUSES) {
       expect(taskStatusLabel(s)).not.toBe('Unknown')
       expect(TASK_STATUS_BADGE[s]).toBeTruthy()

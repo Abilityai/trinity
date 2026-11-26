@@ -77,7 +77,11 @@ alembic>=1.14.0
 # pull these so `tests/unit/` runs green out-of-the-box. Versions match the
 # floors set in docker/backend/Dockerfile.
 pytz>=2024.1
-redis>=5.2.0
+# Capped below 8.2: redis 8.2.0 (2026-11-23) breaks fakeredis 2.40.0 — every
+# `FakeRedis()` raises "'method_descriptor' object has no attribute
+# '__closure__'". The image pins 5.2.1, so this only bounds what CI installs.
+# Lift the cap when a fakeredis release supports redis 8.2.
+redis>=5.2.0,<8.2
 # Configurable database backend (#300). sqlalchemy is imported by db/engine.py,
 # db/tables.py and the migrated db/users.py pilot; psycopg2-binary is the
 # PostgreSQL driver exercised by the dual-backend pilot test (skipped when no
@@ -104,7 +108,8 @@ idna>=3.10
 slack_sdk[socket-mode]>=3.41.0
 slackify-markdown>=0.2.0
 twilio>=9.10.0
-Pillow>=11.1.0
+# Floor matches docker/backend/Dockerfile's exact pin (trinity-enterprise#1124).
+Pillow>=13.0.0
 tenacity>=9.0.0
 passlib[bcrypt]>=1.7.4
 # Cap bcrypt <5: bcrypt 5.0.0 removed the `__about__` shim passlib 1.7.4 reads at

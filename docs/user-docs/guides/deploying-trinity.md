@@ -69,7 +69,7 @@ Starts all platform services (backend, frontend, MCP server, Redis, scheduler, V
 
 Open `http://localhost` (or `http://localhost:$FRONTEND_PORT` if you remapped) and log in with `admin` + the password from `.env`. Because `ADMIN_PASSWORD` was set, the admin account already exists — there is no setup screen. The Dashboard then opens the first-run setup sequence; connecting a Claude credential is its one required step. See [First-Time Setup](../getting-started/setup.md) for what a fresh install contains.
 
-To change the admin password later, edit `ADMIN_PASSWORD` in `.env` and recreate the backend container (`docker compose up -d backend`) — a plain `restart` does not re-read `.env`. The backend re-applies the value on every boot; there is no change-password form in the UI.
+To change the admin password later, sign in as `admin` and use the **Password** panel under **Settings → General** (current password, new password, confirm). The change survives restarts and upgrades, and signs out every other session. Then update `ADMIN_PASSWORD` in `.env` too, because the MCP server's legacy password sign-in and any scripts still read it there. The backend re-applies `ADMIN_PASSWORD` only when the value in `.env` changes, so to reset a forgotten password set a new value there and recreate the backend container (`docker compose up -d backend`) — a plain `restart` does not re-read `.env`.
 
 ### Step 5: Connect from Claude Code
 
@@ -219,7 +219,7 @@ It checks Docker, the six core containers, the HTTP health endpoints, the base a
 | Frontend | `curl -s -o /dev/null -w '%{http_code}' http://localhost` | `200` |
 | Redis | `docker exec trinity-redis redis-cli ping` | `PONG` |
 | MCP Server | `curl -s http://localhost:8080/health` | HTTP 200 |
-| Vector | `docker exec trinity-vector wget -q -O - http://localhost:8686/health` | Non-empty response |
+| Vector | `docker exec trinity-vector wget -q -O - http://127.0.0.1:8686/health` | Non-empty response |
 
 > The scheduler's port 8001 is not published to the host by any compose file, so probe it from inside its container: `docker exec trinity-scheduler curl -sf http://localhost:8001/health`. `verify-platform.sh` treats a failed scheduler probe as a warning for this reason.
 

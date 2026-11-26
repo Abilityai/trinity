@@ -37,7 +37,7 @@ _PROXY_AND_TLS = (
     "NO_PROXY", "no_proxy", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED",
     "SSL_CERT_FILE",
 )
-# Read from the CLI each image pins (Claude Code 2.1.281, Codex 0.147.0, Gemini 0.62.0).
+# Read from the CLI each image pins (Claude Code 2.1.322 — the name set is unchanged from 2.1.281, #4528 — Codex 0.147.0, Gemini 0.62.0).
 _CLAUDE_ENDPOINTS = (
     "ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
     "ANTHROPIC_AWS_BASE_URL", "ANTHROPIC_GOOGLE_CLOUD_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL",

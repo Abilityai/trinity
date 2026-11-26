@@ -30,7 +30,7 @@ from services.docker_utils import (
 from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
 from services.agent_ssh_binding import agent_ssh_port_binding, raise_for_ssh_bind_failure
-from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
+from services.settings_service import apply_opencode_provider_env, get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
 from services import skill_packaging
 from services.skill_service import skill_service
 from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_agent_name_env_matches, check_pull_mode_env_matches, check_agent_mcp_key_matches, check_base_image_matches, is_claude_runtime, is_system_agent_name
@@ -645,7 +645,13 @@ async def start_agent_internal(agent_name: str, *, allow_key_mint: bool = True) 
     try:
         if db.get_git_auto_sync_enabled(agent_name):
             from services import git_service
-            git_service.spawn_gitignore_merge_after_clone(agent_name)
+            # abilityai/trinity-enterprise#1373: the one exception to "start =
+            # prevent only" — also untrack committed uploaded documents (two
+            # patterns, nothing else), or a never-Pushed auto-sync agent keeps
+            # re-committing them. Creation does not pass this.
+            git_service.spawn_gitignore_merge_after_clone(
+                agent_name, untrack_dropped_documents=True
+            )
     except Exception as e:
         logger.warning(
             "[#2069] failed to spawn the creation-parity .gitignore merge for "
@@ -1136,6 +1142,10 @@ async def recreate_container_with_updated_config(
         # No subscription, no platform key — user will auth in terminal
         env_vars.pop('ANTHROPIC_API_KEY', None)
         env_vars.pop('CLAUDE_CODE_OAUTH_TOKEN', None)
+
+    # Abilityai/lilu#653: OpenCode's platform provider tier follows the current
+    # settings on every recreate, exactly as the platform Anthropic key does.
+    apply_opencode_provider_env(env_vars, _runtime)
 
     # ent#109: the whole GitHub-sync env block is derived from persisted DB
     # state by the single shared owner. Before this, THIS path re-derived only
@@ -1908,6 +1918,7 @@ def _apply_persisted_auth_env(agent_name: str, env_vars: dict, runtime: str) -> 
         else:
             env_vars.pop("ANTHROPIC_API_KEY", None)
             env_vars.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+    apply_opencode_provider_env(env_vars, runtime)  # Abilityai/lilu#653
 
     # Per-agent GitHub PAT (opt-in), plus GITHUB_REPO / GIT_SYNC from git config.
     # ent#123: gate on the REPO, not the PAT (see `_apply_git_env_from_db`).

@@ -35,11 +35,25 @@
 #      an agent is precisely the untrusted-code case. Written as the RFC range
 #      rather than the well-known .169.254 address: the property being blocked is
 #      "link-local, host-adjacent, not routable", not one magic host.
-#   3. -i docker0 / -i br+ — container->internet and container->container.
+#   3. a container reaching a PUBLISHED port through the host is dropped. Seen
+#      from inside, every published port is also reachable at the host's
+#      addresses (each bridge gateway, the public IP). When the port belongs to
+#      a container on a DIFFERENT bridge, Docker DNATs the connection and it is
+#      forwarded here — where rule 4 used to return it to Docker's own chains,
+#      which accept published ports from anywhere. So a service that sits only
+#      on the platform network and publishes a port was one hop from every
+#      agent, the network split notwithstanding. Containers reach each other by
+#      Docker DNS on a network they share, which is never DNAT'd, so the rule
+#      costs nothing legitimate. It has to sit ahead of the bridge RETURNs for
+#      the same reason rule 2 does. (A port owned by a container on the SAME
+#      bridge is not DNAT'd at all: it arrives on the host's INPUT chain for
+#      docker-proxy, which is ufw's ground, and `default deny incoming` drops
+#      it there.)
+#   4. -i docker0 / -i br+ — container->internet and container->container.
 #      Naming what is INSIDE, rather than which interface is outside, is why this
 #      also covers a cloud provider's PRIVATE interface (DigitalOcean's eth1 /
 #      VPC) for free. The old rule named eth0 and left the VPC side open.
-#   4. everything else entering a container: DROP.
+#   5. everything else entering a container: DROP.
 #
 # IPv4 only, deliberately: Docker only maintains a DOCKER-USER chain in ip6tables
 # when the daemon has IPv6 enabled, which no Trinity compose file does.
@@ -55,23 +69,39 @@ for _ in $(seq 1 30); do
     sleep 1
 done
 
-# Own chain, so the rules are idempotent without -C probing every line and
-# cannot stack duplicates. The chain is (re)populated ONLY when it is new or
-# incomplete — a steady-state boot finds the final DROP already in place and
-# touches nothing, so there is no window in which the chain is live but empty.
-if iptables -N TRINITY-FW 2>/dev/null || ! iptables -C TRINITY-FW -j DROP 2>/dev/null; then
-    iptables -F TRINITY-FW
-    iptables -A TRINITY-FW -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
-    iptables -A TRINITY-FW -d 169.254.0.0/16 -j DROP
-    iptables -A TRINITY-FW -i docker0 -j RETURN
-    iptables -A TRINITY-FW -i br+ -j RETURN
-    iptables -A TRINITY-FW -j DROP
-    echo "TRINITY-FW: rules (re)built."
+# Own chain, rebuilt on EVERY run, in one transaction. iptables-restore parses
+# the whole block and commits it atomically: a chain line under --noflush
+# creates TRINITY-FW or empties it, and the kernel swaps old rules for new in a
+# single step, so there is never a moment the chain is live but short of its
+# final DROP. A rule the kernel refuses fails the whole commit and leaves the
+# previous chain exactly as it was.
+#
+# This used to rebuild line by line, and only when the final DROP was missing.
+# Both halves were wrong for an upgrade: the probe is true on every existing
+# install, so a rule added to this file never reached one, and a rebuild that
+# died half-way under `set -e` left the chain flushed with the jump still
+# installed — every published port open to the internet.
+if ! iptables-restore --noflush <<'RULES'
+*filter
+:TRINITY-FW - [0:0]
+-A TRINITY-FW -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+-A TRINITY-FW -d 169.254.0.0/16 -j DROP
+-A TRINITY-FW -i docker0 -m conntrack --ctstate DNAT -j DROP
+-A TRINITY-FW -i br+ -m conntrack --ctstate DNAT -j DROP
+-A TRINITY-FW -i docker0 -j RETURN
+-A TRINITY-FW -i br+ -j RETURN
+-A TRINITY-FW -j DROP
+COMMIT
+RULES
+then
+    echo "TRINITY-FW: rebuild refused; the previous rules are untouched." >&2
+    exit 1
 fi
+echo "TRINITY-FW: rules applied."
 
-# Jump inserted only after the chain is populated, so a first run that dies
-# half-way leaves traffic hitting Docker's own rules rather than an empty
-# allow-everything chain.
+# Jump inserted only after the chain is populated, so a first run whose
+# commit is refused leaves traffic hitting Docker's own rules rather than an
+# empty allow-everything chain.
 if ! iptables -C DOCKER-USER -j TRINITY-FW 2>/dev/null; then
     iptables -I DOCKER-USER 1 -j TRINITY-FW
     echo "DOCKER-USER: published container ports are now unreachable from off-box."

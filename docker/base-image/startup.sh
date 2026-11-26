@@ -657,18 +657,144 @@ fi
 # (`_GITIGNORE_PATTERNS` in src/backend/services/git_service.py, applied on git
 # init/push by `_build_gitignore_merge_command`) carries `.tmp/`, so the
 # relocated CODEX_HOME under $TMPDIR is excluded from git without a shell write.
+# The AGENTS.md mirror is SHARED by every runtime that reads AGENTS.md as its
+# instruction file — Codex and OpenCode both do — so it lives outside the
+# per-runtime guards. Matched on the lowercased value (#1187 casing trap).
+_agent_runtime_lc="$(printf '%s' "${AGENT_RUNTIME:-}" | tr '[:upper:]' '[:lower:]')"
+case "$_agent_runtime_lc" in
+  codex|opencode)
+    # A REFRESHED COPY with a provenance record (Abilityai/lilu#627). Upstream's
+    # one-time `cp` froze the identity at first boot; lilu#257 made it a
+    # symlink, but ent#819 forbids the platform creating any link in an agent
+    # home. So: a plain copy, refreshed here and again at the start of every
+    # Codex/OpenCode turn (agent_server/services/agents_md_mirror.py, which
+    # applies the same rule and reads the same record).
+    #
+    # A regular AGENTS.md is either our copy or one the template author wrote.
+    # The record (sha256 of the last copy WE wrote) tells them apart:
+    #   * absent, or a leftover lilu#257 symlink     -> copy
+    #   * byte-identical to CLAUDE.md                -> ours, current
+    #   * sha256 matches the record                  -> our stale copy, refresh
+    #   * anything else                              -> authored, left alone
+    _agents_md_record="${AGENT_TMPDIR}/agents-md.sha256"
+    if [ -f "/home/developer/CLAUDE.md" ] && [ ! -L "/home/developer/CLAUDE.md" ]; then
+        _claude_sha="$(sha256sum /home/developer/CLAUDE.md | cut -d' ' -f1)"
+        _agents_ours=0
+        if [ -L "/home/developer/AGENTS.md" ] || [ ! -e "/home/developer/AGENTS.md" ]; then
+            _agents_ours=1
+        elif cmp -s /home/developer/CLAUDE.md /home/developer/AGENTS.md; then
+            _agents_ours=1
+        elif [ -f "$_agents_md_record" ] && \
+             [ "$(sha256sum /home/developer/AGENTS.md | cut -d' ' -f1)" = "$(tr -d '[:space:]' < "$_agents_md_record")" ]; then
+            _agents_ours=1
+        fi
+        if [ "$_agents_ours" = 1 ]; then
+            rm -f /home/developer/AGENTS.md 2>/dev/null
+            if cp /home/developer/CLAUDE.md /home/developer/AGENTS.md 2>/dev/null; then
+                mkdir -p "${AGENT_TMPDIR}" 2>/dev/null
+                printf '%s\n' "$_claude_sha" > "$_agents_md_record" 2>/dev/null || true
+                echo "  Mirrored CLAUDE.md -> AGENTS.md for Codex/OpenCode"
+            else
+                echo "  Warning: could not create AGENTS.md"
+            fi
+        else
+            echo "  Warning: AGENTS.md is a regular file Trinity did not write (it differs" \
+                 "from CLAUDE.md and from the last mirror) — leaving it alone. Codex and" \
+                 "OpenCode read AGENTS.md, so this agent identity will NOT track CLAUDE.md." \
+                 "Delete AGENTS.md to adopt the mirror."
+        fi
+    fi
+    ;;
+esac
+
 if [ "${AGENT_RUNTIME}" = "codex" ]; then
     echo "Configuring Codex runtime..."
-
-    if [ -f "/home/developer/CLAUDE.md" ] && [ ! -f "/home/developer/AGENTS.md" ]; then
-        cp /home/developer/CLAUDE.md /home/developer/AGENTS.md 2>/dev/null && \
-            echo "  Mirrored CLAUDE.md -> AGENTS.md for Codex" || \
-            echo "  Warning: could not create AGENTS.md"
-    fi
 
     CODEX_HOME_DIR="${CODEX_HOME:-${AGENT_TMPDIR}/codex}"
     mkdir -p "${CODEX_HOME_DIR}" 2>/dev/null && chmod 700 "${CODEX_HOME_DIR}" 2>/dev/null || \
         echo "  Warning: could not create CODEX_HOME ${CODEX_HOME_DIR}"
+fi
+
+# === OpenCode runtime setup (Abilityai/lilu#257) ===
+# Matched on the LOWERCASED runtime value. The Codex block above compares
+# `"${AGENT_RUNTIME}" = "codex"` literally, which is safe only because
+# crud.py lowercases before writing the env var — a single backend change away
+# from silently skipping the whole block (#1187 casing trap). This one does not
+# depend on that (_agent_runtime_lc is derived above, before the mirror block).
+if [ "$_agent_runtime_lc" = "opencode" ]; then
+    echo "Configuring OpenCode runtime..."
+
+    # XDG relocation (verified working against v1.18.32): opencode.db, logs,
+    # snapshots, the models.json cache and the config tree all follow these.
+    # Left under $HOME they would land inside the git-tracked workspace and
+    # dirty auto-sync on every turn. $AGENT_TMPDIR is the disk-backed scratch
+    # dir (#1098), already covered by the canonical gitignore's `.tmp/` — so
+    # startup.sh still writes no .gitignore (#953).
+    #
+    # $HOME itself is deliberately UNCHANGED: the `.claude/skills` scan and the
+    # `~/.claude/CLAUDE.md` read both resolve through it, and relocating HOME
+    # to make one CLI tidy would blind the platform to the agent's own skills.
+    OPENCODE_ROOT="${AGENT_TMPDIR}/opencode"
+    export XDG_DATA_HOME="${OPENCODE_ROOT}/data"
+    export XDG_CONFIG_HOME="${OPENCODE_ROOT}/config"
+    export XDG_CACHE_HOME="${OPENCODE_ROOT}/cache"
+    export XDG_STATE_HOME="${OPENCODE_ROOT}/state"
+    OPENCODE_CONFIG_DIR="${XDG_CONFIG_HOME}/opencode"
+    mkdir -p "${XDG_DATA_HOME}" "${OPENCODE_CONFIG_DIR}" "${XDG_CACHE_HOME}" \
+             "${XDG_STATE_HOME}" 2>/dev/null || \
+        echo "  Warning: could not create OpenCode XDG dirs under ${OPENCODE_ROOT}"
+    chmod 700 "${OPENCODE_ROOT}" 2>/dev/null || true
+
+    # Nothing here may reach the network at turn time. autoupdate off keeps the
+    # pinned binary pinned; the LSP download and the default plugin set are
+    # both cold-start npm/HTTP fetches; `share: disabled` stops a turn from
+    # being publishable to opencode's hosted share service. Env AND config,
+    # because the env vars cover the paths the config file does not.
+    export OPENCODE_DISABLE_AUTOUPDATE=1
+    export OPENCODE_DISABLE_LSP_DOWNLOAD=1
+    export OPENCODE_DISABLE_DEFAULT_PLUGINS=1
+
+    # Generated, not shipped, and written only if absent so an operator's own
+    # additions survive a restart.
+    #
+    # The Ollama / OpenAI-compatible provider block is deliberately NOT written
+    # here. It is computed per turn by
+    # `agent_server/services/opencode_provider.py` from
+    # OPENCODE_OLLAMA_BASE_URL + the turn's model, because the agent's .env is
+    # re-read at every spawn (#1999): a block baked once at boot would be stale
+    # from the operator's first change onward, and nothing inside the container
+    # should ever need hand-editing to point an agent at a different DGX.
+    # An operator block placed in THIS file is still honoured — the per-turn
+    # merge treats it as authoritative for npm/options.
+    if [ ! -f "${OPENCODE_CONFIG_DIR}/opencode.json" ]; then
+        cat > "${OPENCODE_CONFIG_DIR}/opencode.json" <<'OPENCODE_JSON'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "share": "disabled",
+  "autoupdate": false
+}
+OPENCODE_JSON
+        echo "  Wrote ${OPENCODE_CONFIG_DIR}/opencode.json (privacy defaults)"
+    fi
+
+    # The image pre-seeds the provider npm packages into /opt/trinity/opencode
+    # because OpenCode installs them at RUNTIME into
+    # $XDG_CONFIG_HOME/opencode/node_modules — a live npm-registry dependency
+    # on every cold container, and an air-gap failure. Copy, don't link:
+    # ent#819 forbids the platform creating links in the agent home
+    # (Abilityai/lilu#627). Measured: ~21 MB, well under a second.
+    if [ -d /opt/trinity/opencode/node_modules ] && \
+       [ ! -e "${OPENCODE_CONFIG_DIR}/node_modules" ]; then
+        cp -R /opt/trinity/opencode/node_modules "${OPENCODE_CONFIG_DIR}/node_modules" \
+            && echo "  Copied pre-seeded OpenCode provider packages" \
+            || echo "  Warning: could not copy pre-seeded provider packages"
+        for _f in package.json package-lock.json; do
+            if [ -f "/opt/trinity/opencode/$_f" ] && [ ! -e "${OPENCODE_CONFIG_DIR}/$_f" ]; then
+                cp "/opt/trinity/opencode/$_f" "${OPENCODE_CONFIG_DIR}/$_f" 2>/dev/null || true
+            fi
+        done
+    fi
+
 fi
 
 # Ensure core agent-server dependencies are installed correctly

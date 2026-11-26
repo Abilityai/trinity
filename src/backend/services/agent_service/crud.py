@@ -47,9 +47,11 @@ from services.template_service import (
 )
 from services.template_schedules import normalize_declared_schedules
 from services.template_plugins import normalize_declared_plugins
+from services.template_skills import normalize_declared_library_skills
 from services import metric_registry
+from services import agent_model_seed
 from services import git_service
-from services.settings_service import get_anthropic_api_key, resolve_github_pat, resolve_github_pat_candidates, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
+from services.settings_service import apply_opencode_provider_env, get_anthropic_api_key, resolve_github_pat, resolve_github_pat_candidates, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
 from services import rate_limiter
 from services import template_source_policy
@@ -65,7 +67,7 @@ from .fork_to_own import (
     saved_token_needs_a_session,
 )
 from . import snapshot_import
-from .helpers import validate_base_image, is_claude_runtime, validate_runtime
+from .helpers import validate_base_image, is_claude_runtime, validate_runtime, validate_runtime_model
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
 from .capabilities import (
     AGENT_TMPFS_MOUNT,
@@ -418,6 +420,15 @@ class _TemplateResolution:
     # reconcile, not a no-op: a template that DROPPED its block retires the
     # rows it used to declare.
     declared_metrics: list = field(default_factory=list)
+    # §21.3.4: NORMALIZED declared `library_skills:` (skills-library names to
+    # assign at creation), fed by ALL THREE resolver branches — the same
+    # one-carrier shape as `declared_plugins`, for the same reason. Empty = none.
+    declared_library_skills: list = field(default_factory=list)
+    # #4442: the model the template declares (`runtime.model`, else a top-level
+    # `model:`), fed by both resolver branches. Seeds the agent's own model
+    # (`default_model`) at registration; the `github:` path never set
+    # `config.runtime_model`, so its agents' wakes ran on the platform default.
+    declared_model: Optional[str] = None
     # trinity-enterprise#15: staged backend-materialized snapshot for the
     # "copy" import intent. When set, `github_repo_for_agent` stays None by
     # design — the container gets NO GitHub env, no git-config row, no PAT.
@@ -426,6 +437,10 @@ class _TemplateResolution:
     # or avatar.png). None when no such file exists or fetch failed. Installed
     # after `_register_agent` via `_install_bundled_avatar_bytes`.
     bundled_avatar_bytes: Optional[bytes] = None
+    # #4570: the GitHub template's own `avatar_prompt` (its template.yaml, read
+    # as `source_metadata`), seeded with the installed file so `avatar_url`
+    # resolves. None when the template declares none.
+    bundled_avatar_prompt: Optional[str] = None
 
 
 @dataclass
@@ -872,6 +887,26 @@ def _declared_plugins_for_snapshot(snapshot) -> dict:
             snapshot.source_repo, e,
         )
         return {}
+
+
+def _declared_library_skills_for_snapshot(snapshot) -> list:
+    """Normalized `library_skills:` for a copy-intent agent, read from the
+    STAGED tree (§21.3.4) — twin of `_declared_plugins_for_snapshot`. Non-fatal:
+    any read failure yields the empty declaration."""
+    template_yaml = Path(snapshot.staging_dir) / "template.yaml"
+    if not template_yaml.is_file():
+        return []
+    try:
+        metadata = load_template_yaml(template_yaml.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            return []
+        return normalize_declared_library_skills(metadata.get("library_skills"))
+    except Exception as e:  # noqa: BLE001 — advisory, never fatal
+        logger.warning(
+            "snapshot-import: could not read template.yaml library_skills for %s: %s",
+            snapshot.source_repo, e,
+        )
+        return []
 
 
 def _declared_metrics_for_snapshot(snapshot) -> list:
@@ -1960,6 +1995,9 @@ async def _resolve_template(
                 tr.declared_metrics = _declared_metrics_for_snapshot(
                     tr.copy_snapshot
                 )
+                tr.declared_library_skills = _declared_library_skills_for_snapshot(
+                    tr.copy_snapshot
+                )
                 return tr
 
             (
@@ -2028,6 +2066,10 @@ async def _resolve_template(
             tr.declared_metrics = metric_registry.declared_metrics_from_template(
                 source_metadata
             )
+            tr.declared_library_skills = normalize_declared_library_skills(
+                source_metadata.get("library_skills")
+            )
+            tr.declared_model = agent_model_seed.declared_model(source_metadata)
             (
                 tr.github_repo_for_agent,
                 tr.github_pat_for_agent,
@@ -2101,6 +2143,9 @@ async def _resolve_template(
                         _avatar_bytes = None
                     if _avatar_bytes:
                         tr.bundled_avatar_bytes = _avatar_bytes
+                        _declared_prompt = (source_metadata or {}).get("avatar_prompt")
+                        if isinstance(_declared_prompt, str) and _declared_prompt.strip():
+                            tr.bundled_avatar_prompt = _declared_prompt.strip()
                         break
         elif config.template.startswith("local:"):
             tr.template_data, tr.template_shared_folders = _resolve_local_template(config)
@@ -2115,6 +2160,10 @@ async def _resolve_template(
             tr.declared_metrics = metric_registry.declared_metrics_from_template(
                 tr.template_data
             )
+            tr.declared_library_skills = normalize_declared_library_skills(
+                tr.template_data.get("library_skills")
+            )
+            tr.declared_model = agent_model_seed.declared_model(tr.template_data)
     return tr
 
 
@@ -2273,6 +2322,10 @@ def _build_base_env(config: AgentConfig) -> dict:
         # The dir is created at container start by startup.sh.
         'TMPDIR': AGENT_DEFAULT_TMPDIR,
     }
+
+    # Abilityai/lilu#653: the platform OpenCode provider tier (OpenRouter key,
+    # default Ollama base URL) — `runtime == opencode` only; a no-op otherwise.
+    apply_opencode_provider_env(env_vars, config.runtime)
 
     # #1369: operator-configurable headless per-tool stall-watchdog ceiling.
     # Only propagate when the backend env sets it — an unset value leaves the
@@ -2801,17 +2854,18 @@ _BUNDLED_AVATAR_NAMES = ("avatar.webp", "avatar.png")
 _BUNDLED_AVATAR_MAX_BYTES = 2 * 1024 * 1024
 
 
-def _install_bundled_avatar(config: AgentConfig) -> None:
+def _install_bundled_avatar(config: AgentConfig) -> bool:
     """#2693: copy a `local:` template's bundled `avatar.webp`/`avatar.png` into
     the avatar store, so an agent has a face with no Gemini key and no network.
 
-    Stored as a DEFAULT avatar (the caller writes `is_default_avatar=1`), so
-    Settings → Generate Default Avatars still overwrites it once a key exists.
-    Always re-encoded through `optimize_avatar`: the deploy-local root holds
+    Returns True only when a file was written. #4750: the caller then stamps it
+    as a KEPT avatar (`is_default_avatar=0`) — a shipped image is the author's
+    choice, so Generate Default Avatars leaves it alone; nothing written means
+    the caller seeds a default as before. Always re-encoded through `optimize_avatar`: the deploy-local root holds
     user-uploaded templates, and a decode/re-encode is what keeps an arbitrary
     file from being served verbatim on the unauthenticated avatar route."""
     if not config.template or not config.template.startswith("local:"):
-        return
+        return False
     # Both paths come from request fields. `_resolve_local_template_dir` and
     # agent-name validation already contain them, but CodeQL's
     # `py/path-injection` can't follow those callees — so the destination goes
@@ -2821,12 +2875,12 @@ def _install_bundled_avatar(config: AgentConfig) -> None:
     template_roots = tuple(os.path.join(str(r.resolve()), "") for r in _LOCAL_TEMPLATE_ROOTS)
     dest = avatar_paths.avatar_path_or_none(config.name, ".webp")
     if dest is None:
-        return
+        return False
     template_dir = str(_resolve_local_template_dir(config.template[6:]))
     for filename in _BUNDLED_AVATAR_NAMES:
         source = os.path.normpath(os.path.join(template_dir, filename))
         if not source.startswith(template_roots):
-            return
+            return False
         if not os.path.isfile(source) or os.path.getsize(source) > _BUNDLED_AVATAR_MAX_BYTES:
             continue
         from PIL import Image
@@ -2838,11 +2892,14 @@ def _install_bundled_avatar(config: AgentConfig) -> None:
         with Image.open(io.BytesIO(data)) as img:
             if img.width * img.height > 4096 * 4096:
                 raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
+        # Re-encode before opening `dest`: a failure must not leave a 0-byte file.
+        out = optimize_avatar(data)
         avatar_paths.ensure_avatar_store()
         with open(dest, "wb") as f:
-            f.write(optimize_avatar(data))
+            f.write(out)
         logger.info(f"[AVATAR-003] Installed bundled avatar from {config.template} for {config.name}")
-        return
+        return True
+    return False
 
 
 def _fetch_github_file_bytes(
@@ -2878,13 +2935,33 @@ def _fetch_github_file_bytes(
         return None
 
 
-def _install_bundled_avatar_bytes(agent_name: str, data: bytes) -> None:
+def _stamp_bundled_avatar(agent_name: str, prompt: Optional[str]) -> None:
+    """#4570: point the agent at a just-installed GitHub bundled avatar.
+
+    `db.get_avatar_identity` ignores a row whose identity prompt is empty, so a
+    template that ships the file without an `avatar_prompt` still needs a
+    prompt for `avatar_url` to resolve.
+    #4750: stamped as KEPT (`set_avatar_identity`, is_default_avatar=0), not as
+    a default — Generate Default Avatars leaves a shipped image alone, and the
+    Workspace shows it (#4609). The owner replaces it with Generate or Delete.
+    Log-and-continue: the agent is registered and works without an avatar.
+    """
+    identity_prompt = prompt or f"an AI agent named {agent_name}"
+    try:
+        db.set_avatar_identity(agent_name, identity_prompt, datetime.now(timezone.utc).isoformat())
+        logger.info(f"[AVATAR-003] Stamped GitHub bundled avatar as kept (not a default) for {agent_name}")
+    except Exception as e:
+        logger.warning(f"[AVATAR-003] Failed to stamp GitHub bundled avatar for {agent_name}: {e}")
+
+
+def _install_bundled_avatar_bytes(agent_name: str, data: bytes) -> bool:
     """ent#1173 (AC-2): install a GitHub template's bundled avatar from raw bytes.
 
     Unlike the `local:` path (which reads from a filesystem path), the GitHub
     path delivers raw bytes fetched from the API. Same size/pixel caps as the
-    local version. Stored as a default avatar (is_default_avatar=1) so
-    Settings → Generate Default Avatars can still overwrite it.
+    local version. Returns True only when a file was written, like the `local:`
+    installer; the caller stamps it as kept (`_stamp_bundled_avatar`, #4750)
+    only on True, so a refused destination leaves the row unstamped.
     """
     import io as _io
     from PIL import Image
@@ -2892,14 +2969,17 @@ def _install_bundled_avatar_bytes(agent_name: str, data: bytes) -> None:
 
     dest = avatar_paths.avatar_path_or_none(agent_name, ".webp")
     if dest is None:
-        return
+        return False
     with Image.open(_io.BytesIO(data)) as img:
         if img.width * img.height > 4096 * 4096:
             raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
+    # Re-encode before opening `dest`: a failure must not leave a 0-byte file.
+    out = optimize_avatar(data)
     avatar_paths.ensure_avatar_store()
     with open(dest, "wb") as f:
-        f.write(optimize_avatar(data))
+        f.write(out)
     logger.info(f"[AVATAR-003] Installed GitHub bundled avatar for {agent_name}")
+    return True
 
 
 def _register_agent(
@@ -2908,10 +2988,12 @@ def _register_agent(
     template_data: dict,
     ephemeral_expires_at: Optional[str],
     auto_assigned_subscription_id: Optional[str],
+    declared_model: Optional[str] = None,
 ) -> None:
     """DB registration: ownership row (require_email #1129 + ephemeral fields +
     provenance), the ent#69 parent→child spawn edge, the auto-assigned
-    subscription (#74), the AVATAR-003 avatar seed, and default permissions.
+    subscription (#74), the AVATAR-003 avatar seed, the agent's own model
+    (#4442), and default permissions.
     Each post-registration grant is log-and-continue (non-fatal)."""
     # #1129: seed require_email from the fleet-wide default
     # (secure-by-default ON) at creation; owners can override per agent.
@@ -2951,6 +3033,16 @@ def _register_agent(
         except Exception as e:
             logger.warning(f"Could not set display label for {config.name}: {e}")
 
+    # #4442: seed the agent's own model, the one its wakes and other
+    # platform-started turns run on, from the request's runtime model or the
+    # template's declared one. Fill-blank only, so another writer's value stays.
+    _own_model = config.runtime_model or declared_model
+    if _own_model:
+        try:
+            agent_model_seed.seed_default_model(config.name, _own_model, config.runtime, db_ops=db)
+        except Exception as e:
+            logger.warning(f"Could not seed the model of {config.name}: {type(e).__name__}")
+
     # trinity-enterprise#69 Part 2: auto-grant the parent→child
     # permission edge so the spawning agent can immediately
     # chat/list/info its child (the MCP layer gates on
@@ -2984,16 +3076,24 @@ def _register_agent(
     # durable-identity nicety a disposable agent never benefits from)
     _avatar_prompt = (template_data.get("avatar_prompt") if template_data else None) if not config.ephemeral else None
     if _avatar_prompt:
+        _installed = False
         try:
             # #2693: install the template's bundled image BEFORE the DB row, so
             # `avatar_url` never points at a file that isn't there yet. A bad
             # image must not cost the prompt seed — that is the regeneration path.
-            _install_bundled_avatar(config)
+            _installed = _install_bundled_avatar(config)
         except Exception as e:
             logger.warning(f"[AVATAR-003] Failed to install bundled avatar for {config.name}: {e}")
         try:
-            db.set_default_avatar(config.name, _avatar_prompt, datetime.now(timezone.utc).isoformat())
-            logger.info(f"[AVATAR-003] Seeded avatar prompt from template for {config.name}")
+            _now = datetime.now(timezone.utc).isoformat()
+            if _installed:
+                # #4750: a shipped image is kept — Generate Default Avatars
+                # leaves it alone and the Workspace shows it (#4609).
+                db.set_avatar_identity(config.name, _avatar_prompt, _now)
+                logger.info(f"[AVATAR-003] Stamped bundled avatar as kept (not a default) for {config.name}")
+            else:
+                db.set_default_avatar(config.name, _avatar_prompt, _now)
+                logger.info(f"[AVATAR-003] Seeded avatar prompt from template for {config.name}")
         except Exception as e:
             logger.warning(f"[AVATAR-003] Failed to seed avatar prompt for {config.name}: {e}")
 
@@ -3088,6 +3188,180 @@ def reconcile_declared_schedules(
     )
 
 
+# §21.3.4 — template-declared library skills ----------------------------------
+
+# Creation starts the container directly (not via `start_agent_internal`), so
+# nothing else delivers assigned skills until the agent's next start. Startup can
+# install plugins and clone repos, so the readiness wait is generous. A constant,
+# not a setting: a missed delivery is repaired by the next start anyway.
+LIBRARY_SKILLS_READY_TIMEOUT_S = 900
+
+# Strong refs for the fire-and-forget deliveries (the asyncio `create_task`
+# garbage-collection footgun; same pattern as `spawn_gitignore_merge_after_clone`).
+_inflight_library_skill_deliveries: set = set()
+
+
+async def _permitted_library_skills(
+    request: Optional[Request], current_user, declared: list, agent_name: str,
+) -> list:
+    """The declared names this creator may have assigned — all or none.
+
+    The §21.3.1 fence, applied at creation: assigning skills is the
+    `skills.manage` capability. People, user keys and the system key pass; an
+    agent key passes only while its agent holds the grant; every other scope,
+    and a principal with no scope at all, is refused. Without this, any agent
+    key could obtain library skills by creating an agent from a template that
+    names them. A refusal costs the skills, never the creation.
+
+    Audited like the route fence: a refusal leaves a `capability_refused` row
+    and an agent key the grant admits leaves a `capability_used` row. Both
+    writers are best-effort and safe with `request=None`.
+    """
+    if not declared:
+        return []
+    try:
+        from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+        from dependencies import (
+            _audit_capability, capability_refusal, record_capability_use,
+        )
+
+        refusal = capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE)
+        if refusal is None:
+            await record_capability_use(
+                request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name,
+            )
+            return list(declared)
+        logger.warning(
+            "[§21.3.4] Not assigning template library_skills %s: the creating key "
+            "lacks skills.manage (%s). The agent is created without them.",
+            declared, refusal[0],
+        )
+        await _audit_capability(
+            request, current_user, "capability_refused", CAPABILITY_SKILLS_MANAGE,
+            agent_name, code=refusal[0], library_skills=list(declared),
+        )
+    except Exception as e:  # noqa: BLE001 — runs inside the creation fence
+        logger.warning(
+            "[§21.3.4] Could not check skills.manage for template library_skills "
+            "(%s); the agent is created without them.", e,
+        )
+    return []
+
+
+def _library_skills_attribution(current_user) -> Optional[str]:
+    """`dependencies.acting_agent_name`, never raising (it runs inside the
+    creation fence). None for a person, the agent for an agent or system key."""
+    try:
+        from dependencies import acting_agent_name
+
+        return acting_agent_name(current_user)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _assign_declared_library_skills(
+    agent_name: str, declared: list, owner_username: str,
+    assigned_by_agent: Optional[str],
+    *,
+    current_user=None,
+    request: Optional[Request] = None,
+) -> list:
+    """Assign each declared name the library has, as the owner. Returns the
+    names now assigned. Names the library lacks are skipped and logged; the
+    route's own rule (assign only what the library has) applies here too.
+
+    The gates follow the rows before anything is delivered (ent#753), as on
+    every other `agent_skills` writer; the reconcile never raises. It runs as
+    `current_user`, the creating principal, so a default gate applied here is
+    set by and audited to whoever created the agent, with the request's ip,
+    endpoint and id when there is a request (a system deploy has none). A
+    caller that supplies no principal gets the actor-less `system` context."""
+    from services import skill_gate_map_service
+    from services.skill_service import skill_service
+
+    assigned: list = []
+    missing: list = []
+    for name in declared:
+        if not skill_service.get_skill(name):
+            missing.append(name)
+            continue
+        db.assign_skill(
+            agent_name, name, owner_username, assigned_by_agent=assigned_by_agent,
+        )
+        assigned.append(name)
+    if missing:
+        logger.warning(
+            "[§21.3.4] Template library_skills not in the skills library, skipped "
+            "for %s: %s", agent_name, missing,
+        )
+    if assigned:
+        if current_user is None:
+            gate_ctx = skill_gate_map_service.GateContext(trigger="assignment")
+        else:
+            # Built as `skill_assignment_service.sync_gates` builds it.
+            gate_ctx = skill_gate_map_service.gate_context(
+                current_user, trigger="assignment",
+                ip=request.client.host if request is not None and request.client else None,
+                endpoint=request.scope.get("path") if request is not None else None,
+                request_id=(
+                    getattr(request.state, "request_id", None)
+                    if request is not None else None
+                ),
+            )
+        await skill_gate_map_service.reconcile_library_gates(agent_name, ctx=gate_ctx)
+        logger.info("[§21.3.4] Assigned library skills to %s: %s", agent_name, assigned)
+    return assigned
+
+
+async def _deliver_library_skills_when_ready(agent_name: str) -> None:
+    """Wait for the new agent's server, then run the start-path injection.
+
+    Reuses `lifecycle.inject_assigned_skills`, so sets, gates and the prune
+    behave exactly as on a start. Never raises: assignments are already in the
+    DB, so the next agent start delivers anything this misses.
+    """
+    from . import lifecycle
+
+    try:
+        ready = await lifecycle.wait_for_agent_ready(
+            agent_name, timeout_s=LIBRARY_SKILLS_READY_TIMEOUT_S
+        )
+        if not ready:
+            logger.warning(
+                "[§21.3.4] %s was not ready within %ss; its library skills will "
+                "be delivered on its next start.",
+                agent_name, LIBRARY_SKILLS_READY_TIMEOUT_S,
+            )
+            return
+        result = await lifecycle.inject_assigned_skills(agent_name)
+        logger.info(
+            "[§21.3.4] Delivered library skills to %s: %s",
+            agent_name, (result or {}).get("status"),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[§21.3.4] Could not deliver library skills to %s (%s); they will be "
+            "delivered on its next start.", agent_name, e,
+        )
+
+
+def _spawn_library_skill_delivery(agent_name: str) -> None:
+    """Fire `_deliver_library_skills_when_ready` without delaying creation.
+    With no running loop the coroutine is closed and logged, never raised."""
+    coro = _deliver_library_skills_when_ready(agent_name)
+    try:
+        task = asyncio.create_task(coro)
+    except RuntimeError as e:
+        coro.close()
+        logger.info(
+            "[§21.3.4] Library skill delivery for %s deferred to its next start "
+            "(no event loop: %s).", agent_name, e,
+        )
+        return
+    _inflight_library_skill_deliveries.add(task)
+    task.add_done_callback(_inflight_library_skill_deliveries.discard)
+
+
 async def _materialize_agent_files(
     config: AgentConfig,
     template_data: dict,
@@ -3098,6 +3372,11 @@ async def _materialize_agent_files(
     owner_username: str = "",
     declared_plugins: Optional[dict] = None,
     declared_metrics: Optional[list] = None,
+    *,
+    declared_library_skills: Optional[list] = None,
+    library_skills_assigned_by_agent: Optional[str] = None,
+    current_user=None,
+    request: Optional[Request] = None,
 ) -> None:
     """Materialize the S4 persistent-state allowlist (#383), the declared
     data_paths (#1169), the declared `plugins:` (#1704) and the declared
@@ -3159,6 +3438,28 @@ async def _materialize_agent_files(
         except Exception as e:
             logger.warning(
                 f"[#1704] Failed to materialize plugins.yaml for "
+                f"{config.name}: {e}"
+            )
+
+    # §21.3.4: assign the template's declared `library_skills:` as the owner,
+    # reconcile the agent's skill gates as the creating principal
+    # (`current_user`, with `request` for the audit row; both optional), then
+    # deliver them once the agent is ready. `declared_library_skills` has
+    # already passed the §21.3.1 fence (`_permitted_library_skills`). Ghost-
+    # skipped (an ephemeral agent never persists an assignment), and non-fatal
+    # inside the rollback fence: a raise must never cost a successful creation.
+    if declared_library_skills and not config.ephemeral:
+        try:
+            assigned = await _assign_declared_library_skills(
+                config.name, declared_library_skills, owner_username,
+                library_skills_assigned_by_agent,
+                current_user=current_user, request=request,
+            )
+            if assigned:
+                _spawn_library_skill_delivery(config.name)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[§21.3.4] Failed to assign template library skills to "
                 f"{config.name}: {e}"
             )
 
@@ -3916,6 +4217,13 @@ async def create_agent_internal(
     # `clear_agent_breakers`: that also runs on every start.
     from services import agent_skills_listing
     agent_skills_listing.forget(config.name)
+    # trinity-enterprise#165: and the guardrail-event reporter record, for the
+    # same two reasons (a teardown whose fail-open Redis clear failed, or an
+    # ingest in flight during the delete writing it back). Its
+    # `first_report_at` would otherwise date the new agent's coverage before
+    # the agent existed: history it never reported would read as covered.
+    from services import guardrail_event_service
+    guardrail_event_service.clear_reporter(config.name)
 
     # QUOTA-001: per-role durable-agent quota (429; ephemeral agents bypass it).
     _enforce_role_quota(config, current_user)
@@ -3944,6 +4252,13 @@ async def create_agent_internal(
     # startup setup (AGENTS.md mirror / CODEX_HOME) or Gemini's credential inject.
     if config.runtime:
         config.runtime = config.runtime.lower()
+
+    # The runtime is final, so the runtime/model PAIRING can be checked too
+    # (#2981). OpenCode's `-m` takes `provider/model`; a bare model id would
+    # otherwise surface as a failed turn inside the container, long after
+    # creation reported success. Runs AFTER the lowercase normalization above so
+    # a template `runtime: OpenCode` is checked, not skipped.
+    validate_runtime_model(config.runtime, config.runtime_model)
 
     # #2215: the SSH-port allocation moved INTO the docker try-block below (just
     # before the container run) — see the comment there. `config.port` is
@@ -4097,15 +4412,33 @@ async def create_agent_internal(
                 tr.template_data,
                 ephemeral_expires_at,
                 auto_assigned_subscription_id,
+                declared_model=tr.declared_model,
+            )
+            # Nothing is assigned to an ephemeral agent, so the fence is not
+            # run for one: it would leave a capability audit row for a
+            # capability that was neither used nor refused.
+            permitted_library_skills = [] if config.ephemeral else (
+                await _permitted_library_skills(
+                    request, current_user, tr.declared_library_skills, config.name,
+                )
             )
             # ent#1173 (AC-2): install a GitHub template's bundled avatar bytes
             # (fetched during _resolve_template). Best-effort — the agent is
             # already registered and fully functional without an avatar.
             if tr.bundled_avatar_bytes and not config.ephemeral:
                 try:
-                    _install_bundled_avatar_bytes(config.name, tr.bundled_avatar_bytes)
+                    _gh_installed = _install_bundled_avatar_bytes(config.name, tr.bundled_avatar_bytes)
                 except Exception as _e:
+                    _gh_installed = False
                     logger.warning(f"[AVATAR-003] Failed to install GitHub avatar for {config.name}: {_e}")
+                if _gh_installed:
+                    # #4570: the file alone is invisible — `avatar_url` is built
+                    # only from a row with a non-empty identity prompt and a
+                    # timestamp. Stamp it as KEPT, like the `local:` path
+                    # (#4750), so Generate Default Avatars leaves it alone.
+                    # Only after a successful install: a URL to a file that was
+                    # never written breaks the image instead of showing initials.
+                    _stamp_bundled_avatar(config.name, tr.bundled_avatar_prompt)
             await _materialize_agent_files(
                 config,
                 tr.template_data,
@@ -4116,6 +4449,10 @@ async def create_agent_internal(
                 current_user.username,
                 tr.declared_plugins,
                 tr.declared_metrics,
+                declared_library_skills=permitted_library_skills,
+                library_skills_assigned_by_agent=_library_skills_attribution(current_user),
+                current_user=current_user,
+                request=request,
             )
             return agent_status
         except Exception as e:

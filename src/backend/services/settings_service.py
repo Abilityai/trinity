@@ -14,17 +14,29 @@ import json
 import logging
 import os
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from database import db
 
 logger = logging.getLogger(__name__)
 
-# Platform default model (#831)
+# Platform default model (#831). Sonnet 5.5 since #4757 (was Sonnet 4.6): an
+# install with no `platform_default_model` row resolves this, so it moves on
+# upgrade; an admin's saved choice is a row and is kept. Mirrored as
+# `DEFAULT_CLAUDE_MODEL` in the agent image (claude_code.py), parity-tested.
 PLATFORM_DEFAULT_MODEL_KEY = "platform_default_model"
-PLATFORM_DEFAULT_MODEL_VALUE = "claude-sonnet-4-6"
+PLATFORM_DEFAULT_MODEL_VALUE = "claude-sonnet-5-5"
 _platform_model_cache: Optional[str] = None
 _platform_model_cache_ts: float = 0.0
+# Whether the cached value came from a saved row (#4757): refreshed in the same
+# block as `_platform_model_cache`, so resetting that cache resets this too.
+_platform_model_saved_cache: bool = False
 _PLATFORM_MODEL_CACHE_TTL = 60.0
+# Abilityai/lilu#652: OpenCode's platform default is its own setting, because
+# the fleet default above is a bare Claude id OpenCode refuses ("missing a
+# provider prefix"). NO code default on purpose: unset means "send no model and
+# let the agent's own `get_default_model()` decide" — a hardcoded local-model
+# id here would be wrong on every install that does not run that model.
+PLATFORM_DEFAULT_MODEL_OPENCODE_KEY = "platform_default_model_opencode"
 
 # #894: current-gen models an agent owner may select as a per-agent override for
 # public-facing channels. Derived from the single source of truth,
@@ -84,6 +96,7 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "operator_queue_aging_hours": "Hours a pending operator-queue item may wait before it is marked as aging on the card and the filing agent receives a receipt (0 = disabled; default: 24, #2915)",
     "operator_queue_retention_days": "Days to retain terminal operator_queue rows (acknowledged/cancelled/expired; default: 90, 0 = disabled, #1142)",
     "agent_reminders_retention_days": "Days to retain terminal agent_reminders rows (fired/cancelled/failed; default: 90, 0 = disabled, #1296)",
+    "guardrail_event_retention_days": "Days to retain guardrail events an agent reported, counted from when they arrived (default: 90, 0 = disabled, trinity-enterprise#165)",
     "subscription_headroom_retention_days": "Days to retain subscription headroom probe history used for utilization trends (default: 30, 0 = disabled, ent#433)",
     "subscription_failure_event_retention_days": "Days to retain subscription rate-limit/auth failure events (default: 30, 0 = disabled; was a hardcoded 24h sweep before ent#433)",
     "backup_retention_days": "Days to retain database-backup artifacts in /data/backups (default: 14, bounds 1-3650 — 0 is invalid; the newest 3 artifacts are always kept; disable backups via DB_BACKUP_ENABLED=false, #2216)",
@@ -295,6 +308,29 @@ class SettingsService:
     def get_google_api_key(self) -> str:
         """Get Google API key: encrypted setting → legacy → env → ''."""
         return self._resolve_secret_setting('google_api_key', 'GOOGLE_API_KEY')
+
+    # =========================================================================
+    # OpenCode provider tier (Abilityai/lilu#653)
+    # =========================================================================
+    #
+    # Injected into the container env of `runtime == opencode` agents ONLY, at
+    # create/recreate. They are the PLATFORM tier: the agent's `.env` and its
+    # `template.yaml runtime.env` both sit above the container baseline in the
+    # agent-server spawn env, so a per-agent value always wins.
+
+    def get_openrouter_api_key(self) -> str:
+        """Platform OpenRouter key: encrypted setting → legacy → env → ''."""
+        return self._resolve_secret_setting('openrouter_api_key', 'OPENROUTER_API_KEY')
+
+    def get_opencode_default_provider_base_url(self) -> str:
+        """Platform Ollama base URL for OpenCode agents: setting → env → ''.
+
+        Not a credential (a URL), so a plain setting.
+        """
+        return (
+            self.get_setting('opencode_default_provider_base_url')
+            or os.getenv('OPENCODE_DEFAULT_PROVIDER_BASE_URL', '')
+        ).strip()
 
     # =========================================================================
     # Platform keys configurable from the first-run flow (trinity-enterprise#582)
@@ -968,21 +1004,40 @@ class SettingsService:
         """
         db.set_setting(TEMPLATE_REGISTRY_LKG_KEY, json.dumps(payload))
 
-    def get_platform_default_model(self) -> str:
+    def get_platform_default_model(self, runtime: Optional[str] = None) -> Optional[str]:
         """
-        Return the platform-wide default Claude model (#831).
+        Return the platform-wide default model for ``runtime`` (#831, lilu#652).
 
         Resolution: system_settings.platform_default_model → PLATFORM_DEFAULT_MODEL_VALUE.
         Result is cached for 60 s to avoid per-turn SQLite reads during burst drain.
+
+        ``runtime="opencode"`` resolves ``platform_default_model_opencode``
+        instead, and returns ``None`` when it is unset (never the Claude
+        default, which OpenCode cannot run). Uncached, so an operator's write
+        applies on the next turn with no invalidation hook.
         """
+        if runtime == "opencode":
+            value = self.get_setting(PLATFORM_DEFAULT_MODEL_OPENCODE_KEY, None)
+            return (value or "").strip() or None
         global _platform_model_cache, _platform_model_cache_ts
         now = time.monotonic()
         if _platform_model_cache is not None and (now - _platform_model_cache_ts) < _PLATFORM_MODEL_CACHE_TTL:
             return _platform_model_cache
-        value = self.get_setting(PLATFORM_DEFAULT_MODEL_KEY, PLATFORM_DEFAULT_MODEL_VALUE)
-        _platform_model_cache = value or PLATFORM_DEFAULT_MODEL_VALUE
+        global _platform_model_saved_cache
+        row = self.get_setting(PLATFORM_DEFAULT_MODEL_KEY, None)
+        _platform_model_saved_cache = bool(row)
+        _platform_model_cache = row or PLATFORM_DEFAULT_MODEL_VALUE
         _platform_model_cache_ts = now
         return _platform_model_cache
+
+    def platform_default_model_is_saved(self) -> bool:
+        """True when an admin saved a ``platform_default_model`` row (#4757).
+
+        The resolver's old-CLI step-down applies only when this is False: a
+        saved default is used as saved, exactly as before #4757.
+        """
+        self.get_platform_default_model()  # refreshes the flag with the value
+        return _platform_model_saved_cache
 
     def resolve_ops_setting(self, key: str):
         """`(value, source)` for one ops setting — the whole chain, once.
@@ -1034,6 +1089,43 @@ settings_service = SettingsService()
 def get_anthropic_api_key() -> str:
     """Get Anthropic API key from settings, fallback to env var."""
     return settings_service.get_anthropic_api_key()
+
+
+def get_opencode_provider_env() -> dict:
+    """Container env for a `runtime == opencode` agent's platform provider tier.
+
+    Only non-empty values: an unset setting must not plant an empty
+    `OPENROUTER_API_KEY` that a turn would read as "configured".
+    """
+    env = {}
+    key = settings_service.get_openrouter_api_key()
+    if key:
+        env['OPENROUTER_API_KEY'] = key
+    base_url = settings_service.get_opencode_default_provider_base_url()
+    if base_url:
+        env['OPENCODE_DEFAULT_PROVIDER_BASE_URL'] = base_url
+    return env
+
+
+#: Every env key `get_opencode_provider_env` may emit — the set a recreate
+#: clears before re-deriving, so a removed setting stops applying.
+OPENCODE_PROVIDER_ENV_KEYS = ('OPENROUTER_API_KEY', 'OPENCODE_DEFAULT_PROVIDER_BASE_URL')
+
+
+def apply_opencode_provider_env(env_vars: dict, runtime) -> None:
+    """Re-derive the platform provider tier into ``env_vars`` — OpenCode only.
+
+    The single writer for create (``crud._build_base_env``) and both rebuild
+    paths in ``lifecycle``, mirroring how ``ANTHROPIC_API_KEY`` follows the
+    platform setting. Any other runtime returns WITHOUT touching
+    ``env_vars``: a Claude agent's container env is byte-identical with or
+    without this feature, and must not grow a second provider's key.
+    """
+    if (runtime or '').strip().lower() != 'opencode':
+        return
+    for key in OPENCODE_PROVIDER_ENV_KEYS:
+        env_vars.pop(key, None)
+    env_vars.update(get_opencode_provider_env())
 
 
 def get_github_pat() -> str:
@@ -1125,6 +1217,40 @@ def resolve_github_pat_candidates(agent_name: Optional[str] = None,
     return ladder
 
 
+async def resolve_github_token(repo: str,
+                               agent_name: Optional[str] = None,
+                               owner_id: Optional[int] = None,
+                               permissions: Optional[dict] = None) -> tuple:
+    """Resolve a GitHub credential for ONE operation on ``repo`` (trinity-enterprise#1277).
+
+    Returns ``(token, tier, expires_at)``. Order: per-agent PAT, per-user PAT,
+    the registered repo-token provider (tier ``"app"``), platform PAT. PAT
+    tiers carry ``expires_at`` None.
+
+    An ``"app"`` token expires within the hour. Use it for the operation at
+    hand; never persist it or put it in a container environment. That is why
+    this is separate from ``resolve_github_pat``, whose answer the create path
+    bakes into the container.
+
+    Raises ``github_token_provider.GithubTokenUnavailable`` when the provider
+    covers ``repo`` and cannot produce a token. The platform PAT is not used
+    as a fallback in that case.
+
+    Caller contract: this function does NO per-caller authorization. The call
+    site must already have established that the caller may act on ``repo``.
+    ``permissions`` is handed to the provider as given, unvalidated.
+    """
+    from services import github_token_provider
+
+    pat, tier = resolve_github_pat(agent_name=agent_name, owner_id=owner_id)
+    if tier in ("per_agent", "per_user"):
+        return pat, tier, None
+    scoped = await github_token_provider.token_for_repo(repo, permissions)
+    if scoped:
+        return scoped.token, "app", scoped.expires_at
+    return pat, tier, None
+
+
 def get_google_api_key() -> str:
     """Get Google API key from settings, fallback to env var."""
     return settings_service.get_google_api_key()
@@ -1176,6 +1302,20 @@ def set_secret_setting(key: str, value: str) -> None:
 def clear_secret_setting(key: str) -> bool:
     """Remove a credential-bearing setting (encrypted + any legacy row)."""
     return settings_service.clear_secret_setting(key)
+
+
+def get_stored_secret_setting(key: str) -> str:
+    """A credential-bearing setting's decrypted value from the DB, '' if absent. No env leg.
+
+    Only for keys in ``SECRET_SETTING_KEYS``: the read lazily migrates a legacy
+    cleartext row to ``<key>_encrypted``, which must never happen to an ordinary
+    setting.
+    """
+    from services.secret_settings import SECRET_SETTING_KEYS
+
+    if key not in SECRET_SETTING_KEYS:
+        raise ValueError(f"{key!r} is not a credential-bearing setting")
+    return settings_service._stored_secret_setting(key)
 
 
 def has_secret_setting(key: str) -> bool:
@@ -1688,6 +1828,24 @@ def get_effective_max_parallel_tasks(agent_name: str) -> int:
     return clamp_to_ceiling(db.get_max_parallel_tasks(agent_name))
 
 
+def get_effective_max_parallel_tasks_for(agent_names) -> Dict[str, int]:
+    """``get_effective_max_parallel_tasks`` for many agents at once (#4635).
+
+    One roster read and one ceiling read whatever the count — the queue-stall
+    monitor asks for every agent with a queue head on each tick. An agent with
+    no live roster row gets 3, the value ``get_max_parallel_tasks`` returns for
+    one. Raises when the roster cannot be read; the caller decides what an
+    unknown cap means.
+    """
+    names = list(agent_names)
+    if not names:
+        return {}
+    from database import db
+    caps = db.get_all_agents_parallel_capacity()
+    ceiling = get_max_parallel_tasks_ceiling()
+    return {name: min(int(caps.get(name, 3)), ceiling) for name in names}
+
+
 # ============================================================================
 # Agent Default Access Policy (#1129 — secure-by-default require_email)
 # ============================================================================
@@ -1731,6 +1889,11 @@ def is_template_registry_enabled() -> bool:
     return settings_service.is_template_registry_enabled()
 
 
-def get_platform_default_model() -> str:
-    """Return the platform-wide default Claude model (#831)."""
-    return settings_service.get_platform_default_model()
+def get_platform_default_model(runtime: Optional[str] = None) -> Optional[str]:
+    """Return the platform-wide default model for ``runtime`` (#831, lilu#652)."""
+    return settings_service.get_platform_default_model(runtime)
+
+
+def platform_default_model_is_saved() -> bool:
+    """True when an admin saved a platform default model (#4757)."""
+    return settings_service.platform_default_model_is_saved()

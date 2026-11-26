@@ -24,7 +24,7 @@ import httpx
 
 from database import db
 from adapters.base import ChannelAdapter, FileAttachment, NormalizedMessage, ChannelResponse
-from services import login_policy_gate
+from services import channel_login_limit, login_policy_gate
 from services.email_service import EmailService
 from services.telegram_group_context import fetch_can_read_all_group_messages
 
@@ -1060,6 +1060,14 @@ class TelegramAdapter(ChannelAdapter):
         email = arg.lower()
         if "@" not in email or " " in email or len(email) > 254:
             return "That doesn't look like an email address. Try <code>/login you@example.com</code>."
+
+        # ent#1253: cap code requests per sender, address and bot before the
+        # ent#849 branch, so both paths are capped and the reply is the same
+        # for members and outsiders.
+        if not channel_login_limit.login_code_request_allowed(
+            "telegram", str(binding["id"]), str(message.sender_id), email
+        ):
+            return channel_login_limit.OVER_LIMIT_REPLY
 
         # ent#849: while the login policy refuses email codes, every address
         # takes the same background path: members get no code, and neither the

@@ -1614,6 +1614,9 @@ function onWorkState(sig) {
   // ent#475: a turn just ended (1:1: `sending` fell; room: the server's
   // `working` list went idle) — the moment a canvas or a file may have
   // changed. One trigger for both chats, no timer.
+  // #4671: a turn ending is a change — the read below must not join one that
+  // left while the turn was still running (the 12 s Work poll, a tab open).
+  if (wasLive && !workSignal.value.live) store.noteWorkspaceChange?.()
   if (wasLive && !workSignal.value.live) rail.refresh()
   // ent#525: a turn STARTING is when its row (and, soon, its delegated
   // children) appear — read the feed once the row exists; the 12 s poll then
@@ -3130,7 +3133,18 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
 // `sessionId` watcher above watches both: on a cold deep link the agent name
 // arrives long before the threads do, so a param-only watcher would resolve
 // against an empty list and always mint a new chat.
-watch([activeAgentPageName, () => threads.value.length], ([name], [prevName]) => {
+// #4517: also the roster verdict. The body returns while the roster has not
+// loaded, and a person with no chats keeps `threads.length` at 0, so nothing
+// else re-arms it — `activeAgent` then falls back to `agents[0]` and the
+// unshared URL shows that agent's composer. Landing still waits for the
+// thread list: a roster-only wake would mint a chat against an empty list,
+// and the later length change would treat that landing as already done.
+// `threadsLoaded` is a source because the body waits on it: a first read that
+// settles empty leaves `threads.length` at 0, so an agent clicked while that
+// read was in flight would otherwise never land.
+watch(
+  [activeAgentPageName, () => threads.value.length, () => store.rosterLoaded, () => store.sessionsFailed, threadsLoaded],
+  ([name], [prevName]) => {
   if (!name || !store.isClientSignedIn) return
   // Wait for the roster verdict. Landing before it means `activeAgent` cannot
   // resolve the name yet, and the "you don't have access" branch would fire for
@@ -3143,6 +3157,9 @@ watch([activeAgentPageName, () => threads.value.length], ([name], [prevName]) =>
     unreachableAgent.value = name
     return
   }
+  // A list that FAILED is settled too: nothing more is coming, and waiting would
+  // leave the stage on the previous agent under the new URL. Land as before.
+  if (!threadsLoaded.value && !store.sessionsFailed) return
   // ent#784: the landing no longer navigates away, so — unlike every earlier
   // version of this watcher — it can re-fire with the route unchanged, once per
   // thread-list refresh, for as long as the person stays on this URL. The

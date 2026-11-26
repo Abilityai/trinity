@@ -175,6 +175,37 @@ class IdempotencyOperations:
                     "updated_at": row["updated_at"],
                 }
 
+    def peek(self, scope: str, key: str, ttl_hours: int = 24) -> Optional[dict]:
+        """Read (scope, key) without claiming it; None when absent or expired.
+
+        The read half of ``claim``: same row, same TTL cutoff, no delete and no
+        insert, so looking can never take a claim or start a dispatch (the
+        hazard #2671 names). Returns {state, execution_id, claim_token,
+        updated_at} — ``updated_at`` is the instant ``claim`` reports as the
+        claim's ``updated_at``.
+        """
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(
+                    idempotency_keys.c.status,
+                    idempotency_keys.c.execution_id,
+                    idempotency_keys.c.claim_token,
+                    idempotency_keys.c.updated_at,
+                ).where(and_(
+                    idempotency_keys.c.scope == scope,
+                    idempotency_keys.c.idempotency_key == key,
+                    idempotency_keys.c.created_at >= iso_cutoff(hours=ttl_hours),
+                ))
+            ).mappings().first()
+        if row is None:
+            return None
+        return {
+            "state": row["status"],
+            "execution_id": row["execution_id"],
+            "claim_token": row["claim_token"],
+            "updated_at": row["updated_at"],
+        }
+
     def attach_execution(
         self, scope: str, key: str, execution_id: str, *, claim_token: Optional[str] = None,
     ) -> None:

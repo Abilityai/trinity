@@ -51,7 +51,7 @@
           data-testid="portal-agent-picker"
           @click="pickerOpen = !pickerOpen"
         >
-          <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="26" />
+          <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="26" />
           <span class="font-semibold truncate">{{ agentDisplayName(agent) }}</span>
           <svg class="w-4 h-4 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
         </button>
@@ -65,7 +65,7 @@
             class="w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-800"
             @click="pickAgent(a)"
           >
-            <PortalAvatar :name="a.name" :avatar-url="a.avatar_url" :size="28" />
+            <PortalAvatar :name="agentDisplayName(a)" :avatar-url="a.avatar_url" :size="28" />
             <span class="min-w-0">
               <span class="block text-sm font-medium truncate">
                 {{ a.name === agent.name ? agentDisplayName(a) : `New chat with ${agentDisplayName(a)}` }}
@@ -297,14 +297,35 @@
           :all-done="progressData.all_done"
           :active="progressData.active"
         />
-        <!-- #2694: the window is counted in typed turns under a row ceiling.
-             When the ceiling cut the OLD end, say so — a thread that silently
-             starts mid-call is the very symptom the window fix removes. -->
-        <p
-          v-if="historyTruncated"
-          :class="PLATFORM_LINE_CLASS"
-          data-testid="portal-history-truncated"
-        >Earlier messages in this chat aren't shown</p>
+        <!-- trinity-enterprise#594: the read is a window (#2694); older rows
+             are one click away. One fixed-height row for every state — the
+             control, a failed page (the same control retries), and "Start of
+             this chat" once paging reached the head — so nothing below it
+             shifts when the state changes. Nothing for a thread that never had
+             earlier rows. -->
+        <div
+          v-if="hasEarlier || pagedOnce"
+          class="h-8 flex items-center justify-center gap-2 text-xs"
+          data-testid="portal-history-earlier-row"
+        >
+          <template v-if="hasEarlier">
+            <span
+              v-if="earlierFailed"
+              :class="META_INK_CLASS"
+              data-testid="portal-history-earlier-failed"
+            >Couldn't load earlier messages</span>
+            <BaseButton
+              variant="ghost"
+              size="sm"
+              :loading="loadingEarlier"
+              loading-label="Loading…"
+              :disabled="earlierBlocked"
+              data-testid="portal-history-earlier"
+              @click="showEarlier"
+            >Show earlier</BaseButton>
+          </template>
+          <span v-else :class="META_INK_CLASS" data-testid="portal-history-start">Start of this chat</span>
+        </div>
         <template v-for="(item, k) in threadRows" :key="rowKey(item)">
         <!-- trinity-enterprise#610 (the 09-30 ruling, amended) × ent#734: an
              ask this chat's own turn raised is a row of the thread, placed by
@@ -313,7 +334,7 @@
              background ask never reaches this loop — its home is the Inbox. -->
         <div v-if="item.kind === 'ask'" :data-ask-id="item.ask.id">
           <div v-if="item.mode === 'card'" class="flex items-start gap-2.5" data-testid="portal-chat-ask-tile">
-            <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
+            <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
             <!-- `relative`: each card's sr-only text stays inside the thread's scroll box. -->
             <div class="relative min-w-0 flex-1 max-w-[min(85%,40rem)]">
               <PortalAsks
@@ -385,7 +406,7 @@
               :data-message-id="t.id || undefined"
               data-testid="portal-voice-turn"
             >
-              <PortalAvatar v-if="t.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="24" class="mt-0.5" />
+              <PortalAvatar v-if="t.role !== 'user'" :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="24" class="mt-0.5" />
               <div
                 v-if="t.role === 'user'"
                 class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-2 text-sm leading-relaxed whitespace-pre-wrap bg-action-primary-600 text-white"
@@ -408,7 +429,7 @@
           data-testid="portal-system-line"
         >{{ item.message.content }}</p>
         <div v-else :class="item.message.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'">
-          <PortalAvatar v-if="item.message.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
+          <PortalAvatar v-if="item.message.role !== 'user'" :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <div v-if="item.message.role === 'user'" class="max-w-[85%] flex flex-col items-end gap-1">
             <!-- ent#610 round 8: what this message replied to (this visit —
                  the stored row keeps only what was typed). Removable only while
@@ -533,7 +554,7 @@
              (ent#155) and Open in Work. The feed's row wins once it has the
              turn — matched by execution id, never "latest running". -->
         <div v-if="sending" class="flex items-start gap-2.5">
-          <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
+          <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <PortalWorkCard
             :item="liveCardItem"
             :live-step="liveStepLine"
@@ -553,7 +574,7 @@
              exactly as the red message does. Success collapses into the
              reply — the reply IS the outcome. "Ask about it" is a prefill. -->
         <div v-else-if="terminalCardItem" class="flex items-start gap-2.5" data-testid="portal-work-terminal">
-          <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
+          <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <PortalWorkCard
             :item="terminalCardItem"
             show-open-in-work
@@ -985,7 +1006,7 @@ import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
 import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, viewerIsMemberTier, assistantStarting, memberTierRefusal, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags, isNewChatTranscript } from './portalUtils'
-import { tailSignature, tailLimit, adoptLocalIds, freshRows, tailOverflowed, TAIL_LIMIT_CAP } from './portalThreadTail'
+import { tailSignature, tailLimit, adoptLocalIds, freshRows, tailOverflowed, tailHeld, TAIL_LIMIT_CAP } from './portalThreadTail'
 // ent#621: the same wrap the typeahead's roving selection uses — one modulo.
 import { cycleIndex } from './portalKeymap'
 // ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
@@ -999,6 +1020,7 @@ import PortalAttachmentChip from './PortalAttachmentChip.vue'
 import PortalMessageAttachments from './PortalMessageAttachments.vue'
 import { sentAttachments, attachmentsForRequest } from './portalMessageAttachments'
 import { useStickToBottom } from '@/composables/useStickToBottom'
+import { prependEarlier, mergeWindow } from './portalThreadPages'
 import { useConversationAnchor } from '@/composables/useConversationAnchor'
 import { useRoute, useRouter } from 'vue-router'
 import { useComposerDraft } from '@/composables/useComposerDraft'
@@ -1205,9 +1227,26 @@ const loadingHistory = ref(false)
 // condition). Never goes false again on this instance, so the adoption-path
 // refetch swaps messages in place with no beam; `convKey` remounts re-derive it.
 const historyLoaded = ref(!(props.sessionId && !props.newChat))
-// #2694: the history window is counted in typed turns and bounded by a row
-// ceiling; true when the ceiling cut rows off the OLD end of this thread.
-const historyTruncated = ref(false)
+// trinity-enterprise#594: the history read is a WINDOW (#2694 — typed turns
+// under a row ceiling); "Show earlier" pages past it with the server's cursor.
+// The page state belongs to ONE thread (`pageSid`); a load of any other thread
+// starts it over, and `pageGen` drops a page that lands after the switch.
+const hasEarlier = ref(false)
+const earlierCursor = ref(null)
+const loadingEarlier = ref(false)
+const earlierFailed = ref(false)
+const pagedOnce = ref(false)
+let pageSid = null
+let pageGen = 0
+function resetPages(sid = null) {
+  pageGen += 1
+  pageSid = sid
+  hasEarlier.value = false
+  earlierCursor.value = null
+  loadingEarlier.value = false
+  earlierFailed.value = false
+  pagedOnce.value = false
+}
 // The platform speaking ABOUT the thread — one look for the ent#523 system
 // line and the #2694 window notice: centred, muted, no avatar, so neither is
 // read as something the agent said. Dark meta text stops at gray-400 (the
@@ -1440,39 +1479,87 @@ onMounted(() => { if (isMainChat.value || memberTier.value) progressStore.fetchP
 // Text, reply and tags are held; a send carrying files is not held — it goes out
 // as ever, because a held file chip would have to outlive the composer.
 const HELD_SEND_CEILING_MS = 3 * 60 * 1000
+// ent#1220: one lost progress event must not cost the member the whole ceiling.
+// While a send is held the card is re-read every 30 s, and once more before the
+// words are handed back; a flip a re-read caught is logged, because it means
+// the event that should have flipped it never arrived.
+const HELD_SEND_REREAD_MS = 30 * 1000
 const assistantIsStarting = computed(() => memberTier.value && assistantStarting(progressData.value))
 const heldSend = ref(null)
 let heldSendTimer = null
+let heldSendPoll = null
+let heldSendReread = false
+let conversationUnmounted = false
 
 function holdSend(text, reply, tags) {
   heldSend.value = { text, reply, tags }
   clearTimeout(heldSendTimer)
+  clearInterval(heldSendPoll)
+  // The ceiling first: at the instant both are due, the hand-back's own re-read runs.
   heldSendTimer = setTimeout(handBackHeldSend, HELD_SEND_CEILING_MS)
+  heldSendPoll = setInterval(() => { void rereadHeldSendProgress() }, HELD_SEND_REREAD_MS)
 }
 
+// The one consumer: whichever path takes the held send first sends or hands it back.
 function takeHeldSend() {
   clearTimeout(heldSendTimer)
+  clearInterval(heldSendPoll)
   heldSendTimer = null
+  heldSendPoll = null
   const h = heldSend.value
   heldSend.value = null
   return h
 }
 
-function handBackHeldSend() {
+function giveBackHeldSend() {
   const h = takeHeldSend()
   if (!h) return
   input.value = restoreDraft(h.text, input.value)
   autoGrowAfterUpdate()
 }
 
-watch(assistantIsStarting, (isStarting) => {
-  if (isStarting || !heldSend.value) return
-  const failed = (progressData.value?.steps || [])
-    .some((s) => s?.key === 'assistant_ready' && s.state === 'failed')
-  if (failed) return handBackHeldSend()
+function sendHeld() {
   const h = takeHeldSend()
+  if (!h) return
   void submitUserText(h.text, { replyId: h.reply?.messageId || null, replyExcerpt: h.reply?.excerpt || '',
                                 tags: h.tags })
+}
+
+function assistantReadyState() {
+  return (progressData.value?.steps || []).find((s) => s?.key === 'assistant_ready')?.state
+}
+
+// A forced read of the card. A flip it brings sends through the watch below.
+async function rereadHeldSendProgress() {
+  if (!heldSend.value) return
+  heldSendReread = true
+  try {
+    await progressStore.fetchProgress(props.agent.name, { force: true })
+  } finally {
+    heldSendReread = false
+  }
+}
+
+// The ceiling: read the card once more, then send only on a read that says
+// ready. Starting, failed, a failed read or a missing step all hand back.
+async function handBackHeldSend() {
+  if (!heldSend.value) return
+  clearInterval(heldSendPoll)
+  heldSendPoll = null
+  await rereadHeldSendProgress()
+  if (conversationUnmounted || !heldSend.value) return   // left the chat, or the watch sent it
+  if (!progressData.value?.error && assistantReadyState() === 'done') return sendHeld()
+  giveBackHeldSend()
+}
+
+watch(assistantIsStarting, (isStarting) => {
+  if (isStarting || !heldSend.value) return
+  if (assistantReadyState() !== 'done') return giveBackHeldSend()
+  if (heldSendReread) {
+    console.warn('[portal] the assistant read ready on a re-read of its progress, not on its '
+      + 'progress event — the event did not arrive (ent#1220)')
+  }
+  sendHeld()
 })
 
 // While a send is held its words ARE this chat's draft, ahead of anything typed
@@ -1487,7 +1574,9 @@ watch([input, heldSend], ([text, h], [, wasHeld]) => {
 
 // Leaving the chat with a send still held keeps the words as this chat's draft.
 onBeforeUnmount(() => {
+  conversationUnmounted = true
   clearTimeout(heldSendTimer)
+  clearInterval(heldSendPoll)
   const h = heldSend.value
   if (h && draftKey.value) drafts.set(draftKey.value, restoreDraft(h.text, input.value))
 })
@@ -1634,6 +1723,7 @@ const {
   scrollToLatest,
   reset: resetFollowing,
   detach: detachFollowing,
+  holdPosition,
 } = useStickToBottom(scrollEl, {
   // An empty chat is not a transcript: it reads from the top, and a section that
   // arrives late (the suggestions) grows downward without moving the hints or
@@ -1672,7 +1762,10 @@ function historyRow(m) {
       : { role: m.role, content: m.content, id: m.id, myRating: m.my_rating || null,
           source: m.source || null, voiceCallId: m.voice_call_id || null,
           // #3265: what the turn carried, stored on its row.
-          attachments: m.attachments || null }),
+          attachments: m.attachments || null,
+          // trinity-enterprise#594: the turn id, so a reply on the other side
+          // of a page boundary pairs with it once both pages are on screen.
+          executionId: m.execution_id || null }),
     at: m.created_at || null,
   }
 }
@@ -1680,18 +1773,23 @@ function historyRow(m) {
 // ---- Load history when the thread/agent changes -------------------------------
 async function loadThread(sessionId) {
   loadingHistory.value = true
-  messages.value = []
-  historyTruncated.value = false
   terminalOutcome.value = null
+  // trinity-enterprise#594: a reload of the thread whose earlier pages are on
+  // screen (a call ended, a turn settled) MERGES the newest window under them —
+  // replacing would throw away every page the reader asked for.
+  const keepPages = !!sessionId && sessionId === pageSid && pagedOnce.value
+  if (!keepPages) {
+    resetPages(sessionId || null)
+    messages.value = []
+  }
   let inFlight = null
   let inFlightBudget = null
   let budgetReadAt = null
   let outcome = null
   try {
     const { sessionId: resolved, messages: msgs, inFlightExecutionId, inFlightWaitBudgetSeconds,
-            lastTurnOutcome, truncated } =
+            lastTurnOutcome, hasEarlier: more, nextBefore } =
       await store.fetchHistory(props.agent.name, sessionId || null)
-    historyTruncated.value = truncated === true
     // #2214: the budget is the marker's REMAINING TTL, honest only from the
     // instant it was measured — stamp that instant beside the fetch, not when
     // the (possibly long) reattached stream later ends.
@@ -1705,7 +1803,17 @@ async function loadThread(sessionId) {
     // trinity-enterprise#610: `at` is the row's persisted time, which is what
     // places a chat-turn ask among the messages (`threadRows`).
     // #3166: each reply under its own question, when two turns overlapped.
-    messages.value = pairRepliesWithQuestions(msgs).map(historyRow)
+    const rows = pairRepliesWithQuestions(msgs).map(historyRow)
+    const merged = keepPages ? mergeWindow(messages.value, rows) : null
+    messages.value = merged ? merged.rows : rows
+    if (!merged || merged.reset) {
+      // A fresh window (or one that could not be placed under the pages):
+      // its own cursor is the page state.
+      if (merged) resetPages(sessionId)
+      pageSid = currentSessionId.value
+      hasEarlier.value = more === true
+      earlierCursor.value = nextBefore || null
+    }
     // trinity-enterprise#1010: the history now on screen is read, up to its
     // newest row. The open's own read covers only what the chat state held, so
     // without this an arrival that landed between that read and this load would
@@ -1747,6 +1855,44 @@ async function loadThread(sessionId) {
   // the client that happened to be watching.
   if (outcome) markLastUserTurnFailed(outcome)
   if (outcome) rememberVerdict(outcome)
+}
+
+// trinity-enterprise#594: blocked while anything holds an index into
+// `messages` across an await or rewrites the thread wholesale — a turn
+// sending, a history load, a call (whose end reloads the thread).
+const earlierBlocked = computed(() => sending.value || loadingHistory.value || anyCallActive.value)
+
+// Read the next OLDER window and put it above the rows on screen, holding the
+// reader's place (`holdPosition`: the distance from the bottom is what a
+// prepend leaves unchanged). A failure keeps everything on screen and turns the
+// same control into the retry.
+async function showEarlier() {
+  const sid = currentSessionId.value
+  const cursor = earlierCursor.value
+  if (!sid || !cursor || loadingEarlier.value || earlierBlocked.value) return
+  const gen = pageGen
+  loadingEarlier.value = true
+  earlierFailed.value = false
+  let page
+  try {
+    page = await store.fetchHistory(props.agent.name, sid, { before: cursor })
+  } catch {
+    if (gen === pageGen) {
+      earlierFailed.value = true
+      loadingEarlier.value = false
+    }
+    return
+  }
+  // A thread switch (or a reload that could not keep the pages) started over.
+  if (gen !== pageGen || currentSessionId.value !== sid) return
+  const older = pairRepliesWithQuestions(page.messages || []).map(historyRow)
+  await holdPosition(() => {
+    messages.value = prependEarlier(messages.value, older)
+    hasEarlier.value = page.hasEarlier === true
+    earlierCursor.value = page.nextBefore || null
+    pagedOnce.value = true
+  })
+  loadingEarlier.value = false
 }
 
 // Apply a server verdict to the most recent user message. Used by the two
@@ -1826,6 +1972,8 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
       messages.value.push({ ...assistantRow({ content: data.response, id: data.id, my_rating: data.myRating,
         ...turnGateFlags(data) }),
       at: data.at || null })
+      settleOwnTail(currentSessionId.value, data.tailRows)
+      store.noteWorkspaceChange?.()
       refreshAsksAfterTurn()
       // A reattached reply is still a reply the user just watched land, so it
       // has to announce itself like `deliver()` does. Without this the thread
@@ -1871,9 +2019,9 @@ watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
   // which the backend answers with the most-recent thread — so New chat with an
   // agent you had spoken to before resumed it, while New chat with the agent
   // you were already on correctly started fresh. The asymmetry was the tell.
-  if (props.newChat && !sid) { messages.value = []; currentSessionId.value = null; return }
+  if (props.newChat && !sid) { resetPages(); messages.value = []; currentSessionId.value = null; return }
   if (props.agent.name !== oldName || sid) await loadThread(sid)
-  else { messages.value = []; currentSessionId.value = null }   // brand-new chat
+  else { resetPages(); messages.value = []; currentSessionId.value = null }   // brand-new chat
 })
 
 watch(() => props.prefill, (v) => {
@@ -2439,6 +2587,10 @@ async function deliver(text, { replyId = null, attachments = null, tags = null }
       }),
       at: data.at || null,
     })
+    settleOwnTail(data.session_id || currentSessionId.value, data.tailRows)
+    // #4671: the turn ended — every list refresh that follows must describe
+    // the Workspace AFTER it, never join a read that left before the reply.
+    store.noteWorkspaceChange?.()
     refreshAsksAfterTurn()
     terminalOutcome.value = null   // ent#525: the reply IS the outcome
     // ent#534: never narrate over a live voice call — the orb owns playback
@@ -2730,7 +2882,9 @@ async function awaitPersistedReply(sessionId, baseline, budgetSeconds,
     // #3166: matched on THIS turn's id — another turn on the thread may have
     // written its reply after our baseline was read.
     const reply = replyFromHistory(data.messages, baseline, executionId)
-    if (reply) return { ...reply, session_id: data.sessionId || sessionId }
+    // #4671: the rows the reply was found in ride along — they are a tail read
+    // already paid for (`settleOwnTail`).
+    if (reply) return { ...reply, session_id: data.sessionId || sessionId, tailRows: data.messages }
     // #2320: the server told us how this turn ended. Authoritative regardless
     // of the marker — a verdict naming THIS execution means it is over — and
     // read before the idle timer so a diagnosed failure is reported at once
@@ -2942,6 +3096,8 @@ async function submitUserText(text, { spoken = false, replyId = null, replyExcer
     // clock taking part (`placeAsksInThread`); the reload brings the server's time.
     local: true,
   }) - 1
+  // Taken before any await: a page landing above it moves its index.
+  const sentRow = messages.value[index]
   // #2624: sending is an explicit intent to follow the bottom — it pins and
   // re-arms whatever the prior scroll position, so the reader is never handed
   // an unread badge for their own message.
@@ -2950,7 +3106,7 @@ async function submitUserText(text, { spoken = false, replyId = null, replyExcer
   // A stale "couldn't stop the turn" must not outlive the turn it described.
   cancelError.value = ''
   const res = await deliver(text, { replyId, attachments: carried, tags })
-  return settleDelivery(index, text, res)
+  return settleDelivery(indexOfRow(sentRow, index), text, res)
 }
 
 // trinity-enterprise#620 AC #5: when the person's OWN send starts work, the
@@ -3064,7 +3220,16 @@ async function retry(i) {
   const res = await deliver(content, { replyId: msg.replyTo?.messageId || null,
                                        attachments: msg.attachments || null,
                                        tags: msg.tagEmails || null })
-  settleDelivery(i, content, res)
+  settleDelivery(indexOfRow(msg, i), content, res)
+}
+
+// trinity-enterprise#594: where a row held across an await sits NOW — a page
+// of earlier messages can land above it while its turn runs, so `send` and
+// `retry` settle it by identity, falling back to the index it had (whose
+// content check in `markFailed` still guards it).
+function indexOfRow(row, fallback) {
+  const at = row ? messages.value.indexOf(row) : -1
+  return at === -1 ? fallback : at
 }
 
 // ---- Voice: speak replies (TTS) + dictate (STT) — carried over from #78 -------
@@ -3474,7 +3639,7 @@ const threadItems = computed(() => groupVoiceBlocks(messages.value, { liveCallId
 const chatTurnNoticeList = computed(() => (
   chatRead.value.sid === currentSessionId.value ? chatTurnNotices(chatRead.value.rows, currentSessionId.value) : []
 ))
-const threadRows = computed(() => placeAsksInThread(threadItems.value, [...chatTurnAskList.value, ...chatTurnNoticeList.value], { truncated: historyTruncated.value, sessionId: currentSessionId.value }).map((row) => (
+const threadRows = computed(() => placeAsksInThread(threadItems.value, [...chatTurnAskList.value, ...chatTurnNoticeList.value], { truncated: hasEarlier.value, sessionId: currentSessionId.value }).map((row) => (
   row.kind === 'ask-notice' ? { ...row, line: askNoticeLine(row.notice) }
   : row.kind !== 'ask' ? row
     // trinity-enterprise#748: a dismissal inside its Undo window keeps the card,
@@ -3505,8 +3670,11 @@ async function announceEnded(ask) {
 function refreshAsksAfterTurn() {
   store.fetchAsks().catch(() => {})
 }
+// trinity-enterprise#594: a message keys on its id, so prepending a page does
+// not re-patch every bubble below it; the index only for a local unsent row.
 const rowKey = (item) => (
-  item.kind === 'ask' ? `ask-${item.ask.id}` : item.kind === 'ask-notice' ? `ask-notice-${item.notice.id}` : item.kind === 'voice-call' ? `call-${item.callId}` : `m-${item.index}`
+  item.kind === 'ask' ? `ask-${item.ask.id}` : item.kind === 'ask-notice' ? `ask-notice-${item.notice.id}` : item.kind === 'voice-call' ? `call-${item.callId}`
+    : item.message?.id ? `mid-${item.message.id}` : `m-${item.index}`
 )
 
 // The shell reads these to swap the rail for the canvas column and to refuse
@@ -3710,6 +3878,32 @@ async function reconcileTail(sid, { limit = REPLY_POLL_ROWS } = {}) {
   return fresh
 }
 
+// #4671: a turn's own path already read the thread's tail — the reply poll
+// found the reply IN the newest rows, and those rows came back with it. Fold
+// them in here, exactly as `reconcileTail` would after a fetch (adopt the id of
+// the person's own question, append anything that arrived on its own while the
+// turn ran), and remember that this thread's tail is settled. The watcher below
+// then finds the row's newest instant already on screen (`tailHeld`) and does
+// not read history again for what it was just handed — the read that made
+// every turn end fetch the same rows twice.
+//
+// Nothing is settled when the rows are missing (the synchronous fallback has
+// none), belong to another thread (a switch mid-turn), or overflow the read
+// (a gap deeper than the poll's window): the watcher fetches as before.
+let settledTailFor = null
+function settleOwnTail(sid, rows) {
+  settledTailFor = null
+  if (!sid || !Array.isArray(rows) || currentSessionId.value !== sid) return
+  if (tailOverflowed(messages.value, rows, REPLY_POLL_ROWS)) return
+  adoptLocalIds(messages.value, rows)
+  const fresh = freshRows(messages.value, rows)
+  if (fresh.length) {
+    messages.value = [...messages.value, ...fresh.map(historyRow)]
+    onMessagesArrived(fresh.length)
+  }
+  settledTailFor = sid
+}
+
 // What the open thread's row last looked like when this component read its
 // tail — compared as a STRING (`tailSignature`), because `decorate()` hands
 // down new objects every tick. Set only when a reconcile actually ran, so a move
@@ -3731,6 +3925,13 @@ watch(
     if (inTurn || inCall || loading) return
     const before = reconciledSignature
     reconciledSignature = sig
+    // #4671: the person's own turn moved the row, and its rows are already
+    // here. The mark stands while the row's newest instant is still one the
+    // transcript holds — a long turn moves the row twice (the question on a
+    // 20 s tick, the reply on the turn-end refresh) — and is dropped the
+    // moment the row is ahead: that move is something else's, and is read.
+    if (settledTailFor === sid && tailHeld(currentThread.value, messages.value)) return
+    settledTailFor = null
     const fresh = await reconcileTail(sid, { limit: tailLimit(currentThread.value?.unread, REPLY_POLL_ROWS, TAIL_LIMIT_CAP) })
     if (currentSessionId.value !== sid) return
     if (fresh.length) {

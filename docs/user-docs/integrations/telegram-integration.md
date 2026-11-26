@@ -71,9 +71,14 @@ After connecting:
 | Status | Meaning |
 |--------|---------|
 | Green "Connected" | Bot configured, webhook active |
-| Yellow "Bot connected but webhook not registered" | Bot configured, but no Public URL set in Settings -- messages won't be received |
+| Yellow "Bot connected, but Telegram can't deliver messages to it yet." | Bot configured, but Telegram has no working webhook for it -- messages won't be received |
 
-If you see the yellow warning, go to **Settings → General** and set **Public URL** to your Trinity instance's public URL. The webhook registers automatically once saved.
+Telegram delivers messages to Trinity over the internet, so Trinity needs a public HTTPS address. The yellow warning says which case you are in:
+
+- **No Public URL is set.** An admin sets it under **Settings → General → Public URL** (the warning links there; anyone else is told to ask an admin). Once saved, the bot registers automatically; nothing needs redoing in the dialog.
+- **The Public URL is set, but Telegram has not accepted the webhook.** Check that the Public URL is reachable from the internet over HTTPS, then press **Verify** to retry.
+
+**Verify** checks the whole path, not only the bot token. It reads Telegram's own record of the webhook, registers it when Telegram holds none or one for another address, and answers **Operational** beside the button only when Telegram can deliver. Otherwise it shows **Not receiving messages**, and the warning adds Telegram's own reason under *Last attempt*. A delivery error Telegram is still reporting while updates wait counts as not operational. The binding refreshes in place, and the result clears when you connect or disconnect the bot.
 
 ### Message Flow
 
@@ -143,7 +148,7 @@ Users in Telegram can use these commands:
 | `/start` | Welcome message |
 | `/help` | Shows capabilities |
 | `/reset` | Clears conversation history |
-| `/login <email>` | Verify email for access-controlled agents |
+| `/login <email>` | Verify email for access-controlled agents. Code requests are capped (5 per sender, 3 per address and 20 per bot in 10 minutes); over a cap the bot says *Too many sign-in code requests. Try again in 10 minutes.* |
 | `/logout` | Clear verified email |
 | `/whoami` | Show current verified email |
 
@@ -226,10 +231,10 @@ Click the remove button next to a group to deactivate it. The bot will stop resp
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents/{name}/telegram` | GET | Bot binding status |
+| `/api/agents/{name}/telegram` | GET | Bot binding status; `webhook_url` only while it is registered under the current Public URL, and `public_url_set` |
 | `/api/agents/{name}/telegram` | PUT | Configure bot token |
 | `/api/agents/{name}/telegram` | DELETE | Remove bot binding |
-| `/api/agents/{name}/telegram/test` | POST | Verify bot or send test message |
+| `/api/agents/{name}/telegram/test` | POST | Verify the bot and its webhook (registering a missing one; `webhook_registered` and `webhook_error` in the answer), or send a test message |
 | `/api/agents/{name}/telegram/groups` | GET | List group configs |
 | `/api/agents/{name}/telegram/groups/{id}` | PUT | Update trigger mode / welcome, plus the group's `allow_proactive` consent flag and its `context_enabled` (Group context) switch — those two are human-only |
 | `/api/agents/{name}/telegram/groups/{id}` | DELETE | Deactivate group config |
@@ -277,9 +282,9 @@ curl -X PUT http://localhost:8000/api/agents/my-agent/telegram/groups/1 \
 3. **Check trigger mode**: In Trinity, verify the group is set to the expected trigger mode
 4. **Check agent status**: Ensure the agent container is running
 
-### "Bot connected but webhook not registered" warning
+### "Bot connected, but Telegram can't deliver messages to it yet" warning
 
-Set **Public URL** under **Settings → General** to your Trinity instance's publicly accessible URL. The webhook registers automatically.
+If no Public URL is set, set **Public URL** under **Settings → General** to your Trinity instance's publicly accessible HTTPS URL; the webhook registers automatically. If one is set, make sure it is reachable from the internet over HTTPS and press **Verify**: it re-registers the webhook and shows Telegram's reason if delivery still fails.
 
 ### Messages delayed or not arriving
 

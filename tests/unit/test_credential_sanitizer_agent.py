@@ -87,6 +87,32 @@ class TestPatternDetection:
         assert "ghs_" not in result
         assert REDACTION_PLACEHOLDER in result
 
+    def test_github_app_installation_token_new_format(self):
+        """Installation tokens are ``ghs_<appid>_<JWT>``, ~390 chars, with ``.``/``-``/``_``
+        outside the old ``[a-zA-Z0-9]`` class (trinity-enterprise#1277). The whole
+        token must go, not the prefix up to the first separator."""
+        jwt = ".".join(["eyJ" + "aB3-_" * 24] * 3)
+        token = "ghs_1234567_" + jwt
+        assert len(token) > 380
+        result = sanitize_text(f"remote: bad credentials {token} for repo")
+        assert REDACTION_PLACEHOLDER in result
+        for piece in ("ghs_", "1234567", "aB3-_"):
+            assert piece not in result
+
+    def test_a_word_ending_in_ghs_before_a_long_file_name_is_left_alone(self):
+        """`boroughs_…` contains `ghs_` followed by 36+ token-class characters."""
+        text = "see boroughs_population_by_year_2020-2024_final.csv for totals"
+        assert sanitize_text(text) == text
+
+    def test_installation_token_pattern_is_linear_on_repeated_prefixes(self):
+        """`ghs_1_` repeated 16,000 times has no dot, so nothing matches. With
+        unbounded segments this took over a second; bounded it takes milliseconds."""
+        import time
+        text = "ghs_1_" * 16000
+        started = time.perf_counter()
+        assert sanitize_text(text) == text
+        assert time.perf_counter() - started < 0.5
+
     def test_github_refresh_token(self):
         """Detect and redact GitHub refresh tokens (ghr_...)."""
         text = "Refresh: ghr_1234567890abcdefghij1234567890abcdef"

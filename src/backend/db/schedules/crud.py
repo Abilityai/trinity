@@ -2,12 +2,12 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict
 
 import pytz
 from croniter import croniter
-from sqlalchemy import select, insert, update, delete, and_
+from sqlalchemy import select, insert, update, delete, and_, case
 from sqlalchemy.exc import IntegrityError
 
 from ..engine import get_engine
@@ -20,6 +20,13 @@ from db_models import Schedule, ScheduleCreate
 from utils.helpers import utc_now_iso, parse_iso_timestamp
 
 logger = logging.getLogger("db.schedules")
+
+
+def _same_instant(stored: datetime, expected: datetime) -> bool:
+    """Equal as points in time; a naive value is UTC (`parse_iso_timestamp`'s rule)."""
+    def utc(value: datetime) -> datetime:
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return utc(stored) == utc(expected)
 
 class ScheduleCrudMixin:
     """Schedule CRUD + lifecycle operations."""
@@ -100,6 +107,10 @@ class ScheduleCrudMixin:
                 row["deliver_to_workspace_email"]
                 if "deliver_to_workspace_email" in row_keys else None
             ),
+            # ent#1391: NULL (and a pre-migration row) mails nothing.
+            email_results_user_id=row["email_results_user_id"] if "email_results_user_id" in row_keys else None,
+            email_results_error=row["email_results_error"] if "email_results_error" in row_keys else None,
+            email_results_error_at=row["email_results_error_at"] if "email_results_error_at" in row_keys else None,
         )
 
     # =========================================================================
@@ -453,12 +464,22 @@ class ScheduleCrudMixin:
 
         values["updated_at"] = utc_now_iso()
 
+        # #4281: a creator's write lands only while they are still the creator.
+        # The check above and this UPDATE are two statements, so without the
+        # predicate an edit authorized just before a take-over would commit
+        # just after it, onto a schedule whose runs now have owner tier. An
+        # admin is allowed by role, not as the creator, so keeps its own rule.
+        where = [agent_schedules.c.id == schedule_id]
+        if user["role"] != "admin":
+            where.append(agent_schedules.c.owner_id == user["id"])
         with get_engine().begin() as conn:
-            conn.execute(
+            result = conn.execute(
                 update(agent_schedules)
-                .where(agent_schedules.c.id == schedule_id)
+                .where(and_(*where))
                 .values(**values)
             )
+            if result.rowcount == 0:
+                return None
 
         return self.get_schedule(schedule_id)
 
@@ -508,17 +529,116 @@ class ScheduleCrudMixin:
                 # idempotent success (router → 204).
                 return True
 
+            # #4281: bound to the creator it authorized, like `update_schedule`.
+            where = [agent_schedules.c.id == schedule_id, agent_schedules.c.deleted_at.is_(None)]
+            if user["role"] != "admin":
+                where.append(agent_schedules.c.owner_id == user["id"])
+            result = conn.execute(
+                update(agent_schedules)
+                .where(and_(*where))
+                .values(deleted_at=utc_now_iso())
+            )
+            return result.rowcount > 0
+
+    # ---- take-over in place (#4281) ---------------------------------------------
+
+    # A run in one of these states could switch from a shared person's tier to
+    # the owner's mid-run. A retry reuses its execution row, so `pending_retry`
+    # counts as in flight.
+    TAKE_OVER_IN_FLIGHT = ("queued", "running", "pending_retry")
+    # What the take-over write is pinned to: every column the caller's decision
+    # read. A change to any of them since that read refuses the write.
+    _TAKE_OVER_PINNED = (
+        "owner_id", "updated_at", "message", "allowed_tools", "model",
+        "validation_enabled", "validation_prompt", "deliver_to_workspace_email",
+    )
+
+    def _take_over_snapshot(self, schedule_id: str) -> Optional[Dict]:
+        """The live row the take-over compares, as stored (raw columns)."""
+        stmt = select(agent_schedules).where(
+            and_(agent_schedules.c.id == schedule_id, agent_schedules.c.deleted_at.is_(None))
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return dict(row) if row else None
+
+    def reassign_schedule_creator(
+        self,
+        schedule_id: str,
+        *,
+        new_owner_id: int,
+        expected_owner_id: int,
+        expected_updated_at: datetime,
+        expected: Dict,
+        clear_delivery: bool,
+    ) -> Dict:
+        """Make `new_owner_id` the schedule's creator, if it is still exactly
+        what the caller decided on.
+
+        `expected_updated_at` is compared as an instant (the column holds an
+        ISO string in whichever form wrote it; a reader sees a datetime), and
+        `expected` maps schedule fields (`Schedule` names and types: `message`,
+        `allowed_tools`, ...) to the values the caller reviewed. One UPDATE
+        pins the row to the snapshot those comparisons read, requires no run of
+        the schedule in flight, sets the creator, revokes the webhook (the
+        columns `revoke_webhook_token` clears) and, with `clear_delivery`,
+        removes the Workspace delivery. `owner_id` stays out of
+        `update_schedule`'s fields: this is its only writer after create.
+
+        Returns `{"outcome": ...}`: `taken_over` (with `webhook_revoked`),
+        `gone` (no live row), `changed` (differs from what was expected, or
+        changed while this ran) or `in_progress` (a run is in flight).
+        """
+        row = self._take_over_snapshot(schedule_id)
+        if row is None:
+            return {"outcome": "gone"}
+        current = self._row_to_schedule(row)
+        if row["owner_id"] != expected_owner_id or not _same_instant(
+                parse_iso_timestamp(row["updated_at"]), expected_updated_at):
+            return {"outcome": "changed"}
+        if any(getattr(current, field) != value for field, value in expected.items()):
+            return {"outcome": "changed"}
+
+        in_flight = (
+            select(schedule_executions.c.id)
+            .where(
+                and_(
+                    schedule_executions.c.schedule_id == schedule_id,
+                    schedule_executions.c.status.in_(self.TAKE_OVER_IN_FLIGHT),
+                )
+            )
+            .exists()
+        )
+        values = {"owner_id": new_owner_id, **self._webhook_revoked_values(), "updated_at": utc_now_iso(),
+                  # ent#1391: result mail to anyone but the taker stops: the runs
+                  # now have the taker's access, and mailing them on to someone
+                  # else was never the taker's decision. The taker's own stays.
+                  "email_results_user_id": case(
+                      (agent_schedules.c.email_results_user_id == new_owner_id, new_owner_id),
+                      else_=None),
+                  }
+        if clear_delivery:
+            values["deliver_to_workspace_email"] = None
+        pinned = [agent_schedules.c[col].is_not_distinct_from(row[col]) for col in self._TAKE_OVER_PINNED]
+        with get_engine().begin() as conn:
             result = conn.execute(
                 update(agent_schedules)
                 .where(
                     and_(
                         agent_schedules.c.id == schedule_id,
                         agent_schedules.c.deleted_at.is_(None),
+                        *pinned,
+                        ~in_flight,
                     )
                 )
-                .values(deleted_at=utc_now_iso())
+                .values(**values)
             )
-            return result.rowcount > 0
+            if result.rowcount:
+                return {"outcome": "taken_over", "webhook_revoked": row["webhook_token"] is not None}
+            busy = conn.execute(select(in_flight)).scalar()
+        if busy:
+            return {"outcome": "in_progress"}
+        return {"outcome": "changed" if self._take_over_snapshot(schedule_id) else "gone"}
 
     def purge_schedule(self, schedule_id: str) -> bool:
         """Hard-delete a soft-deleted schedule (#834 Phase 1b).
@@ -600,6 +720,34 @@ class ScheduleCrudMixin:
         )
         with get_engine().connect() as conn:
             return [dict(row) for row in conn.execute(stmt).mappings()]
+
+    def set_schedule_email_results(self, schedule_id: str, user_id: Optional[int], *,
+                                   error: Optional[str] = None) -> bool:
+        """ent#1391: who each run of this schedule is mailed to (None: nobody), and
+        why mail stopped when it stopped by itself (`error`). Only
+        `services.schedule_result_email` calls this, with the caller's own id."""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_schedules)
+                .where(agent_schedules.c.id == schedule_id)
+                .values(email_results_user_id=user_id, email_results_error=error,
+                        email_results_error_at=utc_now_iso() if error else None,
+                        updated_at=utc_now_iso())
+            )
+        return result.rowcount > 0
+
+    def record_schedule_email_results_outcome(self, schedule_id: str, error: Optional[str]) -> bool:
+        """ent#1391: the last result mail went (`error` None) or why it did not.
+        Leaves `updated_at` alone: a delivery is not an edit, and a take-over is
+        pinned to `updated_at` (a mail must not stale the taker's review)."""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_schedules)
+                .where(agent_schedules.c.id == schedule_id)
+                .values(email_results_error=error,
+                        email_results_error_at=utc_now_iso() if error else None)
+            )
+        return result.rowcount > 0
 
     def set_schedule_enabled(self, schedule_id: str, enabled: bool) -> bool:
         """Enable or disable a schedule.

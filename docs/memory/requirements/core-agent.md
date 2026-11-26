@@ -115,6 +115,12 @@
 - **Description**: Real-time container metrics on the agent's Overview tab (moved from the header by trinity-enterprise#887)
 - **Key Features**: CPU/memory usage, network I/O, uptime display, auto-refresh every 10 seconds
 
+### 1.6a Agent Overview tab (#1107; rebuilt trinity-enterprise#1317)
+- **Status**: 🚧 In Dev
+- **Description**: The default tab on the agent page is a page about the agent, top to bottom: **Now** (state, next scheduled run, items needing attention, New task), **Activity** (runs per day with failures on the same scale, and what started the window's runs as one split bar, 7d/14d/30d) beside **Recent work**, three measures over the same window (**Finished** with its denominator, **Time per run**, **Context used** as a share of the window), **Reported by this agent** (declared metrics), **Schedules** and **Health**.
+- **Rules**: every section keeps one footprint across loading, empty, failed and ready; an agent with no runs, schedules, metrics or health checks still gets the whole page (ghost charts, `—` for anything never measured, an empty state naming what will appear and one next action); a failed read is a failed section and never another agent's figures; no cost tile (the header owns cost); the compatibility report is not on this tab (Settings › General).
+- **Flow**: `feature-flows/agent-overview-dashboard.md`
+
 ### 1.7 Agent Settings home (trinity#966; trinity-enterprise#887, #888, #890, #891, #353, #951)
 - **Status**: 🚧 In Dev — General, Credentials, Guardrails, People, Storage panes built; Channels and Integrations hold only the cards the old flat Settings list carried, and point at the Sharing / Permissions / A2A / Payments tabs until their steps land
 - **Description**: The agent page splits into a working strip and ONE Settings home: Settings is the last tab, pinned outside the overflow menu, with a left rail of panes, each answering one question. The header keeps identity (avatar, name, id, description), running state, the autonomy chip, the Brain door and Start/Stop; trinity-enterprise#950 amended it to also show the bound GitHub repository (linked, with branch and changed / ahead / behind counts, from the live git status — nothing when no repo is bound or the agent is stopped), the tags (two chips and a counted "+N"; owners add and remove them in a dialog that reuses the Settings › General tag editor) and a small context-window chart for a running agent ("—" until there is a reading, never a 0% ring), and to drop the Workspace and Talk doors (the Workspace is in the nav; the voice call lives in its composer). trinity-enterprise#955 (operator, 2026-10-19) brought two in-place edits back to the header for owners: a pencil beside the name that edits the **display label** inline (pre-filled with the label, never the slug; Enter/blur save, Esc cancels, empty clears), and the hover overlay on the avatar (camera when there is none; change-prompt + next-emotion when one exists with an identity prompt) — the same `set-label` / `open-avatar-modal` / `cycle-emotion` events Settings › General's Identity rows emit, so the page keeps one handler per verb. The id rename stays in Settings only. The same ruling restored the pre-#3798 rows: the funding badge doubling as the subscription switcher (row 1), the autonomy and read-only toggles with the tags and the live CPU / MEM sparklines (row 2), the 7-day spend row (row 3), and the GitHub line — repo, branch, commit, changed / ahead / behind — only when a repository is connected and **without** Pull / Push / Refresh (row 4; the Git tab keeps the verbs). `AgentLiveStrip` is deleted and Overview no longer shows a strip. Nothing else.
@@ -181,7 +187,7 @@
 ### 4.2 GitHub Templates
 - **Status**: ✅ Implemented
 - **Description**: Clone via `github:Org/repo` format with PAT authentication
-- **Ref pinning (trinity#4165)**: `github:owner/repo@ref` takes the ref whole — a branch or a tag, dots included (`v1.2.0`, `releases/v1.2.0`) — and pins the clone to it. The ref is interpolated into startup.sh's eval-built clone command, so the charset stays a shell-safety barrier (`[A-Za-z0-9_./-]`) and the git ref-format shapes a dotted ref cannot take (`..`, a component starting with `.`, a trailing `.` or `.lock`) are refused, as is a leading `-` (a value at every live site today, an option to `git checkout` one shell edit away). An unusable ref is a named 400, never a silent fall-back to `main`. The three ref-existence checks the create runs before the clone accept a branch or a tag alike — the anonymous `ls-remote` (`refs/heads/<ref>` and `refs/tags/<ref>`, never `--heads`), the REST branch check (a 404 there is answered by the tag ref before the ref is called missing), and the tokened `ls-remote` re-check after a REST 403 — with the ref always a value after the URL, never an option; a branch wins over a same-named tag, as in `git clone -b`, and an annotated tag resolves to its peeled commit. A ref that is neither is 400 "Branch or tag '…' not found". A tag never pulls; re-pinning is a recreate. Tests: `tests/unit/test_4165_github_ref_tag.py` (parser), `tests/unit/test_4165_ref_existence_checks.py` (the three checks, driven through `_validate_github_access`).
+- **Ref pinning (trinity#4165)**: `github:owner/repo@ref` takes the ref whole — a branch or a tag, dots included (`v1.2.0`, `releases/v1.2.0`) — and pins the clone to it. The ref is interpolated into startup.sh's eval-built clone command, so the charset stays a shell-safety barrier (`[A-Za-z0-9_./-]`) and the git ref-format shapes a dotted ref cannot take (`..`, a component starting with `.`, a trailing `.` or `.lock`) are refused, as is a leading `-` (a value at every live site today, an option to `git checkout` one shell edit away). An unusable ref is a named 400, never a silent fall-back to `main`. The three ref-existence checks the create runs before the clone accept a branch or a tag alike — the anonymous `ls-remote` (`refs/heads/<ref>` and `refs/tags/<ref>`, never `--heads`), the REST branch check (a 404 there is answered by the tag ref before the ref is called missing), and the tokened `ls-remote` re-check after a REST 403 — with the ref always a value after the URL, never an option; a branch wins over a same-named tag, as in `git clone -b`, and an annotated tag resolves to its peeled commit. A ref that is neither is 400 "Branch or tag '…' not found". A tag never pulls; re-pinning is a recreate. That holds for both pull paths: the automatic cycle records a named skip, and a manual Pull (`POST /api/agents/{name}/git/pull`, the Git tab and the `git_pull` MCP tool) is refused 400 with the reason, for every strategy including `force_reset`, before anything is fetched (trinity#4470 — the manual route used to read the detached HEAD as a branch named `HEAD` and pull the remote's default branch). Tests: `tests/unit/test_4165_github_ref_tag.py` (parser), `tests/unit/test_4165_ref_existence_checks.py` (the three checks, driven through `_validate_github_access`), `tests/unit/test_4165_pull_cycle_pinned_tag.py` (the automatic cycle), `tests/unit/test_4470_manual_pull_pinned_tag.py` (the manual route).
 
 ### 4.2.1 Admin-Configurable GitHub Templates (TMPL-001)
 - **Status**: ✅ Implemented
@@ -2203,7 +2209,10 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   | `agent.task.*` event dispatch | the finished row's depth + 1 | unchanged; still a hop |
 
   Before #4357 a wake was stamped one hop deeper than the run that ended, and its next delegation counted that wake row, so every delegate→wake round added two and an orchestrator working through wakes was refused after about four rounds. A chain of hops from turns that are still running grows by one per hop and is refused at `max + 1` exactly as before.
-- **Wake budget (#4357)**: depth no longer bounds how many wakes follow one another, so a per-pair hourly budget does. Ops setting `caller_wake_max_per_hour` (**default 120**, validated 0–10000, `0` or less = unlimited; resolved `system_settings` row → env `CALLER_WAKE_MAX_PER_HOUR` → default) caps the wakes one callee's ended runs may send one delegator per one-hour window (Redis `INCR` + `EXPIRE NX`, key `trinity:wake_fires:{callee}:{caller}`, the event-budget shape below). Only a wake about to be dispatched spends a unit; a wake collapsed into the 15-second per-caller window spends nothing. A wake past the budget is skipped and audited `skipped_budget`, the delegator gets one notification per window, and the ending stays readable through `get_execution_result`. Fails open when Redis is unavailable.
+- **Wake budget (#4357)**: depth no longer bounds how many wakes follow one another, so a per-pair hourly budget does. Ops setting `caller_wake_max_per_hour` (**default 120**, validated 0–10000, `0` or less = unlimited; resolved `system_settings` row → env `CALLER_WAKE_MAX_PER_HOUR` → default) caps the wakes one callee's ended runs may send one delegator per one-hour window (Redis `INCR` + `EXPIRE NX`, key `trinity:wake_fires:{callee}:{caller}`, the event-budget shape below). Only a wake about to be dispatched spends a unit; an ending folded into or parked behind a running wake spends nothing. A wake past the budget is skipped and audited `skipped_budget`, the delegator gets one notification per window, and the ending stays readable through `get_execution_result`. Fails open when Redis is unavailable. The budget is per pair, so it does not bound a chain spread across many callees; the caller's hold below bounds a sweep.
+- **One wake per caller at a time; collisions are parked, never dropped (#4536, #4733)**: every wake, a first ending's and a parked one's, claims the caller's one hold (`caller_wake:{caller}:running`, an idempotency claim). It replaced the 15-second window key (`caller_wake:{caller}:{bucket}`), which a wake outlived: an ending in a later window started a second wake beside the running one (#4733). The caller is held while a `caller_wake` row of it is `queued`, `running` or `pending_retry`, or while a claim is younger than 120 s (the gap before that row exists). An older claim with no live row is reclaimed by its owner token, so a clean backend stop, which cancels the holder and writes the wake row FAILED with no terminal fan-out, does not hold the caller. The holder releases the hold when its dispatch returns; the wake row's own terminal releases it too, but only a claim taken at or before that row's admission (`queued_at`, else `started_at`), never a later wake's. An ending that ended at or before the running wake's claim, and reached the hook within 15 s of ending, folds into that wake (its `list_recent_executions` shows it), so a cleanup sweep is one wake; a late write back-dated before the claim does not fold. Any other ending while the caller is held is parked in Redis (`trinity:wake_missed:{caller}`, latest wins, 24 h TTL, audited `parked` once per ending) and delivered once when that wake ends, from the wake row's own terminal and from the holder after it returns or raises. A finished wake holds nothing, so the next ending wakes at once. A holder cancelled by a backend stop, or closed with its loop, leaves the marker. Bound: one running wake plus one pending per caller. Redis trouble on the park does not raise and is audited `skipped_window`.
+- **At capacity the wake is parked, not a failed row (#4733)**: before the wake row exists the caller's slot meter is read. Full, with one of the caller's runs `running`, means admission would refuse, so the ending is parked (`parked`, `reason: "at_capacity"`) and delivered when any run of the caller ends: every terminal fan-out reaches the hook (a person's run and a platform turn included) and drains the marker while no wake of the caller is live, and a push `/chat`, which writes its terminal without the fan-out, drains it where its slot is released. A full meter with no running run is a slot no run holds (expired, or leaked until it is reclaimed), so it dispatches and admission decides; a pull pilot queues its wake and is not checked; an unreadable meter dispatches. A refusal that races the check leaves one FAILED `caller_wake` row, and its ending is parked too, except on a pilot, where a refusal is a full backlog that would repeat.
+- **Residuals (#4733)**: an ending parked when no wake or run of the caller is left to end (a backend stop inside the 120 s grace, then nothing) is delivered by the caller's next run end or next ending, or not at all if none comes within 24 h. The marker keeps only the latest ending; the others are in `list_recent_executions`, which is narrowed while a shared person's or a visitor's turn runs (#4173). A wake can still run beside the turn that delegated it, and an answer wake (`operator_response`) beside a caller wake. A claim that fails on a DB error, or a stale hold that cannot be reclaimed, dispatches without the hold (fail-open; parking there would loop, since the next read calls the caller free); an unreadable wake-row read holds the caller instead, and the ending waits. While the caller is at capacity every ending is parked and audited on its own (one `parked` row each, as behind a running wake), so a sweep then writes one audit row per ending. An ending folded into a claim that then dispatches nothing (a budget cap, a dispatch error) is not woken. A wake for a waited, synchronous call is #4538.
 - **Named residuals** (the guarantee holds for a call made with an agent-scoped credential while the calling agent has a running execution): **(a)** a non-agent credential held by an agent (a hand-pasted user-scoped key, detected by #1854) resolves to the human owner and counts as a root; **(b)** agent-key calls with no running row (a web-terminal session, a spawned background process, an orphan after its row went terminal) count as depth 1, or max+1 over any other running rows. An exact parent link needs a platform-injected execution id (#2392).
 - **New roots closed (#2973)**: four agent-initiated paths inherit the caller's depth instead of starting at 0, each refused at the max with the same 403 contract (mapped by an app-level exception handler, `error_handlers.inter_agent_depth_exceeded`):
   - **Loops** — `POST /api/agents/{name}/loops` computes the depth at start and persists it on `agent_loops.chain_depth`; every iteration row carries it, because later iterations run after the starter's turn has ended.
@@ -2325,6 +2334,7 @@ bounding the table. OSS-core (Workspace rule above). Flow:
 - **Description**: The Timeline / Grid / List switcher renders at a mode- and fetch-independent position — it is the LAST child of the right-anchored header controls cluster, and nothing conditional may be appended after it — and `v` cycles the modes in the switcher's visual order (Timeline → Grid → List → Timeline). Frontend only; **zero backend changes**.
 - **Activation**: `v` on the same Dashboard-scoped document keydown listener as `/` (`V` without Shift — i.e. Caps Lock — also fires; `Shift+V` is inert by design, reserved). Guards shared, in order: `defaultPrevented`/`repeat` → non-hotkey key (layout-produced via `e.key`; `shiftKey` NOT excluded for `/`, excluded for `v`) → Ctrl/Meta/Alt chords → IME composition → editable targets (INPUT / TEXTAREA / SELECT / `isContentEditable`) → open modals (first-run overlay, System View editor, Create Agent modal). One document listener for both keys; armed at mount above every `await` (design-system principle 23, `mountListenerOrdering.spec.js`).
 - **Cycle order = visual order = default**: one exported constant `VIEW_MODES = ['timeline','grid','list']` in `utils/viewModes.js` (a zero-import leaf, the #2199 `gridStorageKeys` shape) feeds the store whitelist, the switcher `v-for`, `nextViewMode()`, and the e2e specs; index 0 is the degrade default. An unknown mode wraps to `timeline`.
+- **First view (trinity-enterprise#1357)**: a person with no stored choice opens in Grid (`FIRST_VIEW_MODE`, applied by `initialViewMode()` in the store); a stored known mode always wins; a stored unknown mode still degrades to `timeline`. Opening writes nothing — only `setViewMode` records a choice — so the first view can change later without overriding anyone. A first agent built while the Grid is open arrives through the existing `agent_created` refetch (#3109) with no reload. Pinned by `tests/unit/dashboardFirstView.mount.spec.js`.
 - **Persistence**: the hotkey calls `setViewMode(mode)` (default `persist: true`), so `localStorage['trinity-dashboard-view']` and the active button stay in sync; the `?view=` deep-link path (`persist: false`, §9.9) is untouched.
 - **Discoverability**: the switcher wrapper carries `title="Switch view (press v to cycle)"` — the same pattern as the filter button's `title="Filter agents (press /)"`. No `aria-label` on the mode buttons (their accessible names `timeline` / `grid` / `list` are contract for five e2e specs).
 - **Layout invariant**: the switcher's bounding box is identical in all three modes, with and without the history spinner (pinned by `tests/unit/viewModeStructure.spec.js` — last element child, the required CI gate — and `e2e/dashboard-mode-switcher.spec.js`). Tidy up / Reset sit immediately to the switcher's left (the grid tools stay beside the Grid button); the spinner stays a `v-if` (its replacement is #1921's remit).
@@ -2469,6 +2479,22 @@ with a `template.yaml` allow-list ceiling + #1083 detached-execution integration
 issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
 
 ---
+- **FR-12 — Ambient (watch-only) mode (trinity-enterprise#1302)**: one control and one key (`M`) switch
+  the orb into a hands-off view for a wall screen; any deliberate key, click or scroll returns to the
+  interactive orb with selection, scope and camera as they were (a moving pointer does nothing). With no
+  input it shows: a plain-language line for the current run's step, the notes used in the current or most
+  recent run (lit on the graph, listed by title, the camera glides to them), live stats (status, running /
+  last run, next scheduled, queued, context, 24h runs / failures / cost, note and link counts), and a
+  **mood** — one word from a fixed first-match ladder (unknown · asleep · struggling · strained · working ·
+  backed up · digesting · neglected · resting) with the deciding signal shown beside it. **Frontend-only
+  and read-only**: it composes existing viewer-scoped `GET` routes (agent, executions list / stream / log,
+  queue, schedules, brain-orb data) and issues nothing else — no new endpoint, no write, no run, no voice
+  session. **Withheld by construction**: prompt text, reply text, reasoning, raw commands, search queries,
+  web addresses and the names of files that are not notes; a run is named only when it is a playbook
+  (`/name`) or a named schedule. **Honest status**: a stopped agent, a lost feed and an expired sign-in are
+  each stated in words and the visuals drop to rest; the idle replay of the last run is labelled "not live";
+  a viewer who cannot read the agent's runs sees graph + status and is told what is hidden. Buffers are
+  capped and every scene object it creates is disposed, so it can run for hours.
 
 ## Default Cornelius Agent — Auto-Seed on Fresh Install (trinity-enterprise#107)
 
@@ -2656,6 +2682,20 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   an `operator_resume_dispatch` audit entry (ent#329). An absent or false
   `resume_requested` says only "Sent." — reading `null` as "started" would be
   the over-claim ent#430 spent a blocker removing.
+  **An agent that is not running also gets only "Sent."** (#4502):
+  `resume_requested` says a wake was
+  requested, not that it could be delivered, and the response is projected
+  before the dispatch learns the agent is stopped. So the card re-reads the
+  roster after such an answer and keeps "is picking this up" only when the
+  agent's `availability` is not `stopped` / `unavailable` (and the row does not
+  already say `wake_state: pending`); `unknown` — Docker could not be asked —
+  keeps it, as the dispatch itself still tries. Nothing is said while the read
+  is out, and a read that fails or takes longer than 1.5 s says only "Sent.":
+  the roster in hand is from page load, so it is not evidence the agent still
+  runs. The line is drawn only where the card outlives the answer — a project's
+  "Needs you" card. The Inbox pane shows none (it opens the next ask, §5.40),
+  and the tile in a chat never did: it becomes its history row, which is the
+  confirmation there.
 - The confirmation cannot live on the ask row, because answering removes it.
   `PortalAsks.visible` therefore also stays true while a confirmation is up —
   gating on `items.length` alone unmounted the surface at the same instant the
@@ -3240,9 +3280,10 @@ to localStorage in the clear.
 - **AC-1 — curation is a policy dimension on the ONE catalog**: `workspace` +
   `workspace_tier` are appended to `ModelEntry` (`services/model_catalog.py`,
   §47.2 in `public-access.md`), never a second hand-typed list — the drift the
-  #2086 registry exists to prevent. Three entries carry it: `claude-opus-5`
-  ("Most capable"), `claude-sonnet-5` ("Balanced — fast and smart"),
-  `claude-haiku-4-5-20251001` ("Fastest"). Fable 5 is out (its `note` also reads
+  #2086 registry exists to prevent. Three entries carry it, one per tier, and
+  the id behind a tier moves with the lineup: today `claude-opus-5-5`
+  ("Most capable"), `claude-sonnet-5-5` ("Balanced — fast and smart"),
+  `claude-haiku-5-5` ("Fastest"). Fable 5 is out (its `note` also reads
   "Most capable"; Opus-vs-Fable is an operator distinction), and every "Legacy"
   entry is out — a client-facing surface offering "Claude Opus 4.6 — Legacy" *is*
   the combobox this reacts against. Two import-time assertions make the
@@ -3976,15 +4017,27 @@ to localStorage in the clear.
   read from that, never parsed out of the body (an agent reply that begins "**Finished**" is
   not a run outcome).
 - **The pane (AC 3)**: an ask renders the existing ask card for that one ask (select-option,
-  note, Send — never a one-tap Approve) and stays selected after an answer, shown ended in
-  place. A chat renders its newest arrivals (from the first unread message) and its
+  note, Send — never a one-tap Approve). **Answer, then next**: once the server confirms the
+  reader's OWN answer given in the pane (a typed answer, an approval, a one-click gate
+  Approve / Reject, "Got it", a credential), the row holds its ended badge for a short beat,
+  the next pending ask in the visible order opens (the one below, else the one above; ended
+  rows are skipped; `?item=` is replaced, never pushed) and the row collapses out of the list
+  — about 350 ms in all, at once under `prefers-reduced-motion`. After the last one the pane
+  says "All caught up" with a next action; a `?from=` filter the reader's own answers emptied
+  is kept, with "Show all agents". On All the row stays (it is a member for 7 days) and only
+  the selection moves on. An ask that ends any other way — another person's answer, an
+  expiry, a withdrawal, the reader's own answer from another tab, a Dismiss (which keeps its
+  Undo), a failed answer — stays selected, shown ended in place. For 300 ms after the next
+  ask opens this way its answer controls ignore input, so a late second click cannot answer
+  an ask the reader has not seen. A chat renders its newest arrivals (from the first unread message) and its
   deliverables through `ReportRenderer` with the summary fallback. Opening a chat row (or
   arriving on its `?item=` deep link) marks it read only AFTER the pane has rendered it —
   history, deliverables and every deliverable payload on screen (§3g S5, D-3); a failed load
   leaves it unread, a failed write says so in the pane, and the pane's **Mark read** (shown
   while the chat has new messages) reads it on demand. The row keeps its place, drawn read, for the rest of the tab visit (§3g S1: a row that
   leaves any tab stays as a ghost — a chat drawn read, an ask drawn ended — and a poll never
-  re-sorts; leaving the tab, clicking it again or a completed Mark all read starts a new visit). **Open
+  re-sorts; leaving the tab, clicking it again or a completed Mark all read starts a new visit; the
+  one exception is the reader's own answer in Action, above, which removes its row). **Open
   in chat** / **Reply in chat** open the chat at the first arrival (`?anchor=`), with the
   composer focused for Reply (A2 — no composer in the pane). **Reply to one message** works
   through both doors (ent#738): each agent message in the pane, and each persisted agent

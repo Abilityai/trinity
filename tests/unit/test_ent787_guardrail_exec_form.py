@@ -61,9 +61,12 @@ _STARTUP = (H.BASE / "startup.sh").read_text()
 _SKILL_GATE_DROP_IN = H.HOOKS / "managed-settings.d" / "50-skill-gate.json"
 _FIXTURES = _HERE / "fixtures" / "ent787"
 
-# The CLI build every fact in this file was read from (offsets in the 2.1.281
-# binary: hook spawn `_F`, prefix gate `Yt?n9(Yt,Pt):Pt`, Bash-tool `if(gt)`).
-_CLI_VERIFIED = "2.1.281"
+# The CLI build every fact in this file was last checked on. They were read
+# from the 2.1.281 binary (hook spawn `_F`, prefix gate `Yt?n9(Yt,Pt):Pt`,
+# Bash-tool `if(gt)`); on 2.1.322 (#4528) each was re-checked by running it in
+# the image against a stub API, with 2.1.281 beside it, not by re-reading the
+# binary, so the symbol names above are still 2.1.281's.
+_CLI_VERIFIED = "2.1.322"
 
 ROOT_READ_ONLY_CONFIG = "/opt/trinity/read-only-config.json"
 LEGACY_READ_ONLY_CONFIG = "/home/developer/.trinity/read-only-config.json"
@@ -86,8 +89,18 @@ EXPECTED = {
             {"matcher": "Edit|Write|NotebookEdit|MultiEdit",
              "hooks": [_entry("file-guardrail.py"), _entry("read-only-guard.py")]},
         ],
+        # trinity-enterprise#165: the scanner reads what the model reads. The
+        # built-in tools are an exact list (letters and `|` only); the MCP entry
+        # is a regex, anchored because a matcher regex is unanchored (S5).
         "PostToolUse": [
             {"matcher": "Bash", "hooks": [_entry("output-scanner.py")]},
+            {"matcher": "Read|Grep|WebFetch", "hooks": [_entry("output-scanner.py")]},
+            {"matcher": "^mcp__", "hooks": [_entry("output-scanner.py")]},
+        ],
+        # A failing command's (or an MCP error result's) output is warned about here.
+        "PostToolUseFailure": [
+            {"matcher": "Bash", "hooks": [_entry("output-scanner.py")]},
+            {"matcher": "^mcp__", "hooks": [_entry("output-scanner.py")]},
         ],
     },
 }
@@ -147,7 +160,8 @@ def test_the_spawn_facts_were_read_from_the_cli_the_image_pins():
         f"The image now pins Claude Code {pinned}; the GUARD-002 registration facts were read "
         f"from {_CLI_VERIFIED}. Re-read in {pinned}: exec form (`args`) is spawned with no shell; "
         "CLAUDE_CODE_SHELL_PREFIX wraps only a hook with no `args` and only when truthy; policy "
-        "`env` beats user/project settings and the process env; one bad entry voids the file. "
+        "`env` beats user/project settings and the process env; one bad entry voids the file; "
+        "a shell command the Monitor tool starts still reaches the hooks registered for Bash. "
         "Then move _CLI_VERIFIED.")
 
 
@@ -205,7 +219,9 @@ def test_read_only_guard_denies_under_the_registered_invocation(tmp_path):
 def test_output_scanner_still_records_a_leak_under_the_registered_invocation(tmp_path):
     result = _registered("output-scanner.py", tmp_path, payload=_SCAN)
     assert result.returncode == 0, result.stderr
-    events = [e for e in H.log_events(tmp_path) if e["event"] == "credential_pattern_in_output"]
+    # trinity-enterprise#165: it hides the key too (test_ent165_output_scanner.py).
+    assert _SECRET not in result.stdout and "[REDACTED:sk]" in result.stdout
+    events = [e for e in H.log_events(tmp_path) if e["event"] == "credential_redacted"]
     assert events and _SECRET not in json.dumps(events)
 
 

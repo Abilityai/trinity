@@ -25,7 +25,7 @@ from starlette.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
-from config import CORS_ORIGINS, VOICE_ENABLED
+from config import ASK_TRINITY_ENABLED, BUG_REPORTING_ENABLED, CORS_ORIGINS, VOICE_ENABLED
 from models import User
 from dependencies import get_current_user, is_workspace_only_role, owner_is_suspended, owner_is_workspace_only, scope_may_open_event_stream, terms_route, workspace_route
 from services.docker_service import docker_client, list_all_agents_fast
@@ -50,6 +50,8 @@ from routers.agent_config import router as agent_config_router
 from routers.agent_data import router as agent_data_router
 from routers.agent_files import router as agent_files_router
 from routers.metric_points import router as metric_points_router
+from routers.guardrail_events import router as guardrail_events_router  # trinity-enterprise#165 GUARD-005
+from routers.guardrail_events import ops_router as guardrail_stats_router  # trinity-enterprise#165 S4 fleet counts
 from routers.agent_brain_orb import router as agent_brain_orb_router  # #58 Brain Orb proxy
 from routers.agent_rename import router as agent_rename_router, set_websocket_manager as set_agent_rename_ws_manager, set_filtered_websocket_manager as set_agent_rename_filtered_ws_manager
 from routers.agent_ssh import router as agent_ssh_router
@@ -462,6 +464,11 @@ async def _init_logging_and_first_run_notice() -> None:
             "admin account. On an internet-reachable instance, keep it behind a "
             "tunnel/VPN until setup completes (docs/DEPLOYMENT.md → Security)."
         )
+    else:
+        # #4693: installs set up before the admin's email was allow-listed at
+        # setup. Once per install, never raises, logs no address.
+        from services.admin_email_allowlist import backfill_admin_email_once
+        backfill_admin_email_once()
 
 
 async def _start_event_bus() -> None:
@@ -665,6 +672,13 @@ async def _start_maintenance_services() -> None:
     except Exception as e:
         logger.error(f"Error registering the rooms ask ending observer: {e}")
 
+    # trinity-enterprise#1363: ONE-SHOT removal of links in the
+    # deployed-templates store that leave their own template directory. A
+    # deploy refuses them now; this covers what was stored before it did.
+    # Idempotent, so every worker may run it; rationale in the service.
+    from services.agent_service import deploy as _deploy_boot
+    _deploy_boot.schedule_store_link_scan()
+
 
 async def _schedule_staggered_services() -> None:
     """PERF-269 staggered starts. Each spawns a delayed task; none blocks boot.
@@ -744,6 +758,11 @@ async def _schedule_staggered_services() -> None:
     from services import git_service as _git_service_boot
     _git_service_boot.schedule_fleet_git_remote_token_sweep()
 
+    # #4442: ONE-SHOT fill of each agent's NULL `default_model` (fill-blank and
+    # conditional, so every worker may run it; stagger and rationale in the service).
+    from services import agent_model_seed as _agent_model_seed_boot
+    _agent_model_seed_boot.schedule_boot_fill()
+
     # #447: subscription recovery probe — re-asks the provider whether a
     # subscription believed rate-limited is back. Nothing else can clear the
     # badge (no success path clears a failure row), and the ambient refresh is
@@ -794,9 +813,11 @@ async def _start_capacity_and_canary() -> None:
             # small startup jitter so replicas don't realign their maintenance
             # ticks after a coordinated restart.
             await asyncio.sleep(15 + random.uniform(0, 2))
+            from services import loop_health
             while True:
                 try:
-                    await capacity.run_maintenance(max_age_hours=24)
+                    with loop_health.tick("capacity_maintenance"):
+                        await capacity.run_maintenance(max_age_hours=24)
                 except Exception as exc:
                     logger.warning(f"[Capacity] maintenance tick failed: {exc}")
                 # #1085: jitter the loop period so concurrent replicas' drain
@@ -821,9 +842,11 @@ async def _start_capacity_and_canary() -> None:
         async def _loop_due_sweep():
             await asyncio.sleep(8 + random.uniform(0, 2))
             service = get_loop_service()
+            from services import loop_health
             while True:
                 try:
-                    await service.dispatch_due_loops()
+                    with loop_health.tick("loop_due_sweep"):
+                        await service.dispatch_due_loops()
                 except Exception as exc:
                     logger.warning(f"[Loop] due sweep tick failed: {exc}")
                 await asyncio.sleep(5 + random.uniform(0, 1))
@@ -841,6 +864,14 @@ async def _schedule_watch_loops() -> None:
     former 580-line `lifespan`; the body below is unchanged. Ordering between
     phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
     """
+    # #4671 / #4674: this worker's event-loop probe — names what blocked the
+    # loop, with the pid. No lease by design: a worker measures its own loop.
+    try:
+        from services import loop_health
+        loop_health.start()
+    except Exception as e:
+        logger.error(f"Error starting the event-loop probe: {e}")
+
     # RELIABILITY-004 / #307: agent heartbeat watch loop — 5s cadence,
     # staggered +10s. Actively downgrades an agent to a soft `degraded` health
     # state after 3 consecutive missed heartbeats (additive to the 30s
@@ -879,6 +910,12 @@ async def _schedule_watch_loops() -> None:
         except Exception as e:
             logger.error(f"Error resuming monitoring service: {e}")
     asyncio.create_task(_start_monitoring_delayed())
+
+    # #4483: fleet base-image check — one alert naming the running agents still
+    # on an old agent image. Read-only, leader-locked; stagger, rationale and
+    # the never-raises fence live in the service.
+    from services import fleet_image_service as _fleet_image_boot
+    _fleet_image_boot.fleet_image_check_service.start()
 
 
 async def _run_startup_recovery() -> None:
@@ -1176,12 +1213,27 @@ async def _shutdown_loops_and_transports(app: FastAPI) -> None:
     except Exception as e:
         logger.error(f"Error stopping skills library sync service: {e}")
 
+    # #4483: fleet base-image check — releases its leader lease. Never raises.
+    from services import fleet_image_service as _fleet_image_stop
+    _fleet_image_stop.fleet_image_check_service.stop()
+
+    # #4635: the queue-stall monitor's leader lease, so a restarted worker need
+    # not wait out its TTL before the monitor runs again. Never raises.
+    from services import queue_stall_service as _queue_stall_stop
+    _queue_stall_stop.release_lease()
+
 
 async def _shutdown_probes_and_clients(app: FastAPI) -> None:
     """Subscription-recovery probe, canary, operator-queue sync, pooled HTTP clients.
 
     Extracted VERBATIM (#1028); the body below is unchanged.
     """
+    try:
+        from services import loop_health
+        await loop_health.stop()
+    except Exception as e:
+        logger.error(f"Error stopping the event-loop probe: {e}")
+
     # Shutdown subscription recovery probe service (#447) — releases the
     # leader lease so a sibling worker takes over immediately instead of
     # waiting out the TTL.
@@ -1399,6 +1451,13 @@ async def add_security_headers(request: Request, call_next):
     return response
 
 
+# trinity-enterprise#978 — a response computed under a narrowed view of an
+# agent's executions carries `X-Trinity-Read-Narrowed`. Pure ASGI: it installs
+# the per-request holder the auth seam notes into, so it must wrap the routers.
+from utils.read_narrowing import ReadNarrowedMiddleware
+
+app.add_middleware(ReadNarrowedMiddleware)
+
 # trinity-enterprise#873 — one canonical client address per request, before any
 # route, limiter or audit writer reads `request.client`. Registered just before
 # the Host guard so it runs immediately INSIDE it and outside everything else;
@@ -1432,6 +1491,7 @@ app.include_router(agent_files_router)
 # agents router's single-segment `/{name}` routes (Invariant #4) — a static
 # path under /api/agents must be declared before anything that could shadow it.
 app.include_router(metric_points_router)
+app.include_router(guardrail_events_router)  # guardrail events: own-key ingest + owner read (trinity-enterprise#165)
 app.include_router(agent_brain_orb_router)  # #58: Brain Orb read-only data proxy
 app.include_router(agent_rename_router)
 app.include_router(agent_ssh_router)
@@ -1452,6 +1512,7 @@ app.include_router(settings_router)
 app.include_router(systems_router)
 app.include_router(system_agent_router)
 app.include_router(ops_router)
+app.include_router(guardrail_stats_router)  # GET /api/ops/guardrail-stats (trinity-enterprise#165 S4)
 app.include_router(public_links_router)
 app.include_router(public_router)
 app.include_router(files_router)  # FILES-001: /api/files/{id} — token-gated downloads
@@ -2052,7 +2113,7 @@ def _build_version_payload(
             "agent_server": version,
             "base_image": f"trinity-agent-base:{version}"
         },
-        "runtimes": ["claude-code", "gemini-cli", "codex"],
+        "runtimes": ["claude-code", "gemini-cli", "codex", "opencode"],
         # #1814: the version baked into the running image. Equal to `version`
         # on a normally-built stack; DIFFERENT means the image is stale
         # relative to the code being executed (an in-place upgrade without
@@ -2111,10 +2172,16 @@ async def get_version(current_user: User = Depends(get_current_user)):
     # #2380: resolved here, not inside the builder — that function is
     # exec-sliced by its own tests and must stay stdlib-only.
     install_source = _settings_service.get_install_source()
-    return _build_version_payload(
+    payload = _build_version_payload(
         VOICE_ENABLED and bool(_settings_service.get_gemini_api_key()),
         edition, features, install_source,
     )
+    # #4499: the help widget's two vendor-hosted channels, decided at RUN time
+    # (`BUG_REPORTING_ENABLED` / `ASK_TRINITY_ENABLED` / `DO_NOT_TRACK`). Added
+    # here, not in the builder: that function is exec-sliced by its tests and
+    # reads no module state. The widget shows a tab only for a literal `true`.
+    payload["help"] = {"docs_qa": ASK_TRINITY_ENABLED, "bug_reporting": BUG_REPORTING_ENABLED}
+    return payload
 
 
 # User info endpoint

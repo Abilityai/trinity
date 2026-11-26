@@ -41,7 +41,7 @@ dig +short your-domain.com
 # Expected: the droplet's IP address
 ```
 
-Then, in Trinity: **Settings → General → Public URL**, enter the full address including `https://`, and save. No terminal step, no certificate to install.
+Then, in Trinity: **Settings → General → Public URL**, enter the full address including `https://`, and save. A trailing dot after the host name (`your-domain.com.`) is dropped on save, because the certificate is issued for the name without it. No terminal step, no certificate to install.
 
 What saving it does:
 
@@ -129,7 +129,7 @@ Order matters — the tailnet rule has to exist before the deny takes effect. (T
 Two more things specific to this image:
 
 - **Install Tailscale *after* provisioning, never before.** The installer resets the host firewall when it provisions a machine, discarding rules you added by hand. If you re-run provisioning later, re-add these.
-- **Container ports stay unreachable over the tailnet.** 8000 for the API, 8080 for MCP, 8686 for the log collector, 2222–2262 for agent SSH — a firewall rule cannot open them, because Trinity's container rules are evaluated first. (On this image MCP's 8080 and the agent SSH ports are published on `127.0.0.1` only anyway — `MCP_BIND_ADDRESS` and `AGENT_SSH_BIND_ADDRESS`; MCP clients use `https://your-domain.com/mcp`, once External MCP access is on.)
+- **Container ports stay unreachable over the tailnet.** 8000 for the API, 8080 for MCP, 2222–2262 for agent SSH (the log collector publishes no port at all) — a firewall rule cannot open them, because Trinity's container rules are evaluated first. (On this image MCP's 8080 and the agent SSH ports are published on `127.0.0.1` only anyway — `MCP_BIND_ADDRESS` and `AGENT_SSH_BIND_ADDRESS`; MCP clients use `https://your-domain.com/mcp`, once External MCP access is on.)
 - **Agent SSH over the tailnet.** The SSH grant (`get_agent_ssh_access`, or `POST /api/agents/<name>/ssh-access`) tells you how to connect to each agent; with the loopback default that is from the droplet itself, or through it: `ssh -J you@trinity -p <port> developer@127.0.0.1`. To dial agents directly at the tailnet address instead, set `AGENT_SSH_BIND_ADDRESS` to the output of `tailscale ip -4` (and `SSH_HOST` to the same value), restart the backend, and recreate the agents you want reachable. Two costs: Trinity's container rules still drop that traffic unless you add a `DOCKER-USER` rule for `tailscale0`, and every agent start then needs the tailnet interface up — after a reboot, agents restart-loop until `tailscaled` is. The default plus `-J` has neither cost.
 
 Worth knowing: a new tailnet's default policy lets **every** device on your tailnet reach this one, not only the laptop you joined from. And Slack is the one integration that survives this path, because Trinity connects outward to Slack over a WebSocket — though installing the Slack app the first time still needs a public address for the OAuth callback.
@@ -225,3 +225,4 @@ The full six-probe check is in [Monitoring](monitoring.md) — run it if anythin
 - [Single-Server Deployment](single-server.md) — base server setup
 - [Backup and Restore](backup-and-restore.md) — have this in place before the instance matters
 - [Monitoring](monitoring.md) — the six health probes and resource thresholds
+- [Security and Compliance for Evaluators](https://docs.ability.ai/getting-started/security-and-compliance) — on the docs site: each security claim marked documented, tested or unsupported, for teams evaluating Trinity

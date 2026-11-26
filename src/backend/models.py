@@ -568,6 +568,9 @@ class ChatMessageRequest(BaseModel):
     """Request model for chat messages."""
     message: str
     model: Optional[str] = None  # Model alias: sonnet, opus, haiku, or full model name
+    # ent#1105: an edition may attribute this execution to a project. Checked
+    # before the row exists; refused 422 project_attribution_unavailable in OSS.
+    project_id: Optional[str] = Field(None, min_length=1, max_length=64)
 
 
 class ReportBackRequest(BaseModel):
@@ -611,6 +614,9 @@ class ParallelTaskRequest(BaseModel):
     # can be reported back to the Slack thread the work actually came from.
     # Optional and fail-open — absent means "no channel context to inherit".
     parent_execution_id: Optional[str] = None
+    # ent#1105: an edition may attribute this execution to a project. Checked
+    # before the row exists; refused 422 project_attribution_unavailable in OSS.
+    project_id: Optional[str] = Field(None, min_length=1, max_length=64)
 
 
 # ============================================================================
@@ -3038,6 +3044,9 @@ class AgentAnalyticsTimelinePoint(BaseModel):
     success_rate: Optional[float] = None
     duration_avg_ms: Optional[int] = None
     context_avg: Optional[int] = None
+    # Share of each run's own context window, averaged (0-100); null when no
+    # run that day recorded a window (trinity-enterprise#1317).
+    context_pct_avg: Optional[int] = None
     by_type: Dict[str, int] = {}
 
 
@@ -3059,6 +3068,7 @@ class AgentAnalyticsResponse(BaseModel):
     success_rate: float
     duration_ms: DurationStats
     context_avg: Optional[int] = None
+    context_pct_avg: Optional[int] = None
     by_type: List[AgentTypeTotal] = []
     buckets: List[str] = []
     timeline: List[AgentAnalyticsTimelinePoint] = []
@@ -3297,6 +3307,85 @@ class HeartbeatPayload(BaseModel):
     executions: Optional[List[HeartbeatExecutionActivity]] = Field(
         default=None, max_length=HEARTBEAT_ACTIVITY_MAX_EXECUTIONS
     )
+
+
+# =============================================================================
+# Guardrail Event Models (routers/guardrail_events.py, trinity-enterprise#165)
+# =============================================================================
+
+
+class GuardrailEventBatch(BaseModel):
+    """The forwarder's envelope. Only the ENVELOPE is validated here: each event
+    is validated on its own by the service (one bad event never fails a batch),
+    so `events` is a plain list. Unknown top-level keys are ignored, and a newer
+    `schema` number is read event by event rather than refused (version skew).
+    """
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    schema_version: StrictInt = Field(alias="schema", ge=1)
+    runtime: Optional[str] = Field(default=None, max_length=64)
+    events: List[Any]
+    dropped: StrictInt = Field(default=0, ge=0, le=1_000_000_000)
+
+
+class GuardrailEventIngestResponse(BaseModel):
+    accepted: int
+    duplicates: int
+    rejected: int
+
+
+class GuardrailReportingState(BaseModel):
+    """`never` | `reporting` | `stale` — so "no events" is never mistaken for
+    "not reporting". `first_report_at` is the coverage start (ISO-8601 UTC,
+    `Z`): events before it were never reported, so history before it is not
+    "clean". Null exactly when `state` is `never`."""
+    state: str
+    last_report_at: Optional[str] = None
+    first_report_at: Optional[str] = None
+    runtime: Optional[str] = None
+    dropped_total: int = 0
+
+
+class GuardrailEventItem(BaseModel):
+    event_id: str
+    occurred_at: str
+    received_at: str
+    kind: str
+    hook: str
+    tool: Optional[str] = None
+    code: Optional[str] = None
+    execution_id: Optional[str] = None
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+class GuardrailEventsPage(BaseModel):
+    events: List[GuardrailEventItem]
+    next_cursor: Optional[str] = None
+    reporting: GuardrailReportingState
+
+
+class GuardrailStatsAgent(BaseModel):
+    """One agent in the fleet read. `coverage` is `no_hooks` | `never` |
+    `stale` | `reporting`: an agent with no events is still listed, so silence
+    is visible."""
+    agent_name: str
+    runtime: Optional[str] = None
+    coverage: str
+    events: int
+    by_kind: Dict[str, int] = Field(default_factory=dict)
+    reporting: GuardrailReportingState
+    # The system agent never reports by design (#1816); the UI words it so.
+    system: bool = False
+
+
+class GuardrailStatsResponse(BaseModel):
+    """`GET /api/ops/guardrail-stats` (trinity-enterprise#165 S4)."""
+    hours: int
+    since: str
+    events: int
+    by_kind: Dict[str, int] = Field(default_factory=dict)
+    coverage: Dict[str, int] = Field(default_factory=dict)
+    agents: List[GuardrailStatsAgent]
 
 
 # =============================================================================
@@ -3649,6 +3738,9 @@ class FanOutRequest(BaseModel):
     # `GET /api/agents/{name}/fan-out/{fan_out_id}`. Default False keeps the
     # blocking contract every existing caller depends on.
     async_mode: Optional[bool] = False
+    # ent#1105: an edition may attribute this execution to a project. Checked
+    # before the row exists; refused 422 project_attribution_unavailable in OSS.
+    project_id: Optional[str] = Field(None, min_length=1, max_length=64)
 
     @field_validator("tasks")
     @classmethod
@@ -3713,6 +3805,9 @@ class FanOutResponse(BaseModel):
     results: List[FanOutTaskResponse]
     # trinity-enterprise#751: subtasks held by the skill gate (neither run nor failed).
     pending_approval: int = 0
+    # ent#1105: "failed" when a named project_id passed the check but the batch
+    # (or, on a sync batch, one of its subtasks) was not attributed to it.
+    project_attribution: Optional[str] = None
 
 
 # --- #2670: the batch's read surface ----------------------------------------
@@ -3870,6 +3965,16 @@ class InternalTaskExecutionRequest(BaseModel):
     # (#2426). `execute_task_internal` resolves and stamps the pre-created row
     # before dispatch.
     deliver_to_workspace_email: Optional[str] = None
+
+
+class ScheduleEmailMeRequest(BaseModel):
+    """ent#1391: mail each run of this schedule to me (the caller), or stop. No address: it is the caller's own."""
+    enabled: bool = True
+
+
+class InternalScheduleRetryDroppedRequest(BaseModel):
+    """ent#1391: the scheduler dropped a pending retry of this failed attempt."""
+    execution_id: str
 
 
 class InternalPreCheckRequest(BaseModel):
@@ -4310,7 +4415,8 @@ class SendMessageResponse(BaseModel):
     The ent#665 fields are set only when the request carried an idempotency_key;
     the route uses ``response_model_exclude_unset`` so a keyless response is
     unchanged. ``sent=false`` + ``suppressed_by`` means nothing was delivered
-    because an earlier run already sent it.
+    because an earlier run already sent it. ``delivery`` is set only for a
+    Workspace delivery (trinity-enterprise#1221).
     """
     success: bool
     channel: str
@@ -4320,6 +4426,9 @@ class SendMessageResponse(BaseModel):
     suppressed_by: Optional[str] = None
     first_sent_at: Optional[str] = None
     first_execution_id: Optional[str] = None
+    # trinity-enterprise#1221: set only for a Workspace delivery —
+    # "workspace_inbox" = in their conversation, nothing notifies them.
+    delivery: Optional[str] = None
 
 
 class ProactiveShareUpdate(BaseModel):
@@ -4378,6 +4487,27 @@ class OperatorCancel(BaseModel):
     reason: Optional[str] = Field(None, max_length=500)
 
     _blank_is_none = field_validator("reason")(_blank_reason_is_none)
+
+
+class OperatorReaddress(BaseModel):
+    """Body for an admin re-addressing one pending card
+    (abilityai/trinity-enterprise#1096).
+
+    `to`: `rule` re-runs the rule that raised the card (a registered platform
+    family's resolver, or the role a role-addressed row went to); `admin`
+    moves a registered family's card to the admin seat. There is no person
+    picker. `reason` is required (1-500 chars after trimming); only whether one
+    was given reaches the audit row."""
+    to: Literal["rule", "admin"]
+    reason: str = Field(..., max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_present(cls, value: str) -> str:
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("reason must be 1 to 500 characters after trimming")
+        return value
 
 
 class OperatorAskCreate(BaseModel):
@@ -4521,7 +4651,8 @@ class SkillGateMapResponse(BaseModel):
     trinity-enterprise#754: `approvers` is `approver_kinds` with each kind's
     reach and whether the caller fills it. `hook` is the in-agent gate check's
     state (`ok`, `missing`, `not_root_owned`, `writable`, `unsupported_runtime`,
-    `predates` or `unknown`), read only on `?probe=true` by a person who may
+    `skipped` — Claude Code is not applying the managed hooks,
+    trinity-enterprise#1176 — `predates` or `unknown`), read only on `?probe=true` by a person who may
     manage the agent's skills; null otherwise."""
     agent_name: str
     gates: List[SkillGateEntry]
@@ -4678,6 +4809,14 @@ class ScheduleUpdateRequest(BaseModel):
         return ScheduleCreate._normalize_delivery_email(v)
 
 
+class ScheduleRunsAsReason(BaseModel):
+    """Why a schedule's runs have the tier `runs_as` names (#4281)."""
+    # creator_owner_tier | no_recorded_creator | creator_not_owner_tier |
+    # agent_has_no_owner | creator_missing | unknown (the cause could not be read)
+    code: str
+    message: str
+
+
 class ScheduleResponse(BaseModel):
     """Response model for schedule data."""
     id: str
@@ -4704,6 +4843,16 @@ class ScheduleResponse(BaseModel):
     # it the field is silently dropped from every response — `ScheduleResponse`
     # is built with `**schedule.model_dump()`, and pydantic ignores extra keys.
     deliver_to_workspace_email: Optional[str] = None
+    # ent#1391: whether each run's result is mailed, and whether to THIS caller.
+    # Never the address: a person the agent is shared with must not read the
+    # owner's email off a schedule read, and the caller's own needs no echo.
+    # Set only through POST .../schedules/{id}/email-me, by the person it mails.
+    email_results: bool = False
+    email_results_to_me: bool = False
+    # Why the last result mail did not go (NULL after one that went), for the
+    # schedule card: a dropped mail is never silent.
+    email_results_error: Optional[str] = None
+    email_results_error_at: Optional[str] = None
     # ent#875: whether THIS caller may mint, rotate, revoke or read the schedule's
     # webhook (its creator, the agent owner, an admin). Computed server-side by
     # both checks the webhook routes enforce — the principal rule (a person, or an
@@ -4712,9 +4861,50 @@ class ScheduleResponse(BaseModel):
     # and the creator's id is not exposed.
     # Defaults False: a response built without the predicate claims nothing.
     can_manage_webhook: bool = False
+    # #4281: the tier this schedule's runs get, computed live from its creator
+    # (`turn_tier_service.schedule_run_tier`). `shared_person` runs have no
+    # shell and no owner-added tools. None = not computed (a lookup failed),
+    # never a guessed `owner`.
+    runs_as: Optional[Literal["owner", "shared_person"]] = None
+    runs_as_reason: Optional[ScheduleRunsAsReason] = None
+    # Whether the caller created it. The creator's id stays unexposed.
+    created_by_you: bool = False
+    # The creator's display name, else username: only for the agent's owner
+    # tier and for an agent key that is not acting for a shared person.
+    created_by: Optional[str] = None
+    # Whether THIS caller may take the schedule over (#4281): a person at the
+    # agent's owner tier who did not create it, on a schedule whose runs are a
+    # shared person's because of its creator. Defaults False, like
+    # `can_manage_webhook`.
+    can_take_over: bool = False
 
     class Config:
         from_attributes = True
+
+
+class ScheduleReviewed(BaseModel):
+    """What a schedule's runs will do, as the person taking it over read it
+    (#4281). Every field is required, null included, and is echoed verbatim
+    from the `ScheduleResponse` the person reviewed: the take-over adopts
+    exactly this, or nothing."""
+    message: str
+    allowed_tools: Optional[List[str]]
+    model: Optional[str]
+    validation_enabled: bool
+    validation_prompt: Optional[str]
+
+
+class ScheduleTakeOverRequest(BaseModel):
+    """`POST /api/agents/{name}/schedules/{id}/take-over` (#4281).
+
+    `expected_updated_at` is the reviewed response's `updated_at`, compared as
+    an instant. `delivery` decides a delivery to another person's Workspace:
+    `clear` removes it; `keep` keeps it only when `keep_delivery_to` repeats
+    the address. A delivery to the taker's own Workspace needs neither."""
+    expected_updated_at: datetime
+    reviewed: ScheduleReviewed
+    delivery: Optional[Literal["clear", "keep"]] = None
+    keep_delivery_to: Optional[str] = None
 
 
 class ExecutionSummary(BaseModel):
@@ -4823,6 +5013,9 @@ class ExecutionResponse(BaseModel):
     # trinity-enterprise#754 — as on ExecutionSummary.
     gate_self_approved: bool = False
     gate_self_approved_by_viewer: bool = False
+    # ent#1105: the project an edition attributed this execution to, present
+    # only when the reader may see that project (the attribution seam's annotate).
+    project_id: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -5043,9 +5236,14 @@ class SetAdminPasswordRequest(BaseModel):
     # #3004: under ADMIN_PASSWORD_SOURCE=instance-id the handler accepts a blank
     # value (AWS review: no PII required); the field itself stays required.
     email: str = Field(..., max_length=254)
-    # #3004 (PROV-018): the EC2 instance ID, checked only when
+    # #3004 (PROV-018): the EC2 instance ID, or the code from an emailed setup
+    # link (trinity-enterprise#1312), checked only when
     # ADMIN_PASSWORD_SOURCE=instance-id and ignored otherwise.
     claim_code: Optional[str] = Field(None, max_length=64)
+    # trinity-enterprise#1329: the registration-terms version the person
+    # accepted on the setup page. Read only when a provider of registration
+    # terms is registered and the claim is an emailed link; ignored otherwise.
+    registration_terms_version: Optional[str] = Field(None, max_length=100)
     # Optional operator profile — all skippable; setup completes without them.
     company: Optional[str] = Field(None, max_length=200)
     name: Optional[str] = Field(None, max_length=200)
@@ -5137,6 +5335,8 @@ class TelegramBindingResponse(BaseModel):
     warning: Optional[str] = None
     # ent#264: in-progress indicator toggle (default ON); None when unconfigured.
     progress_indicator_enabled: Optional[bool] = None
+    # ent#1189: whether a Public URL is set, so the panel names the right fix.
+    public_url_set: Optional[bool] = None
 
 
 class TelegramConfigureRequest(BaseModel):
@@ -5845,6 +6045,9 @@ class FirstRunState(BaseModel):
     seeded_agents: List[str] = []
     own_agent_count: int = 0
     demo_agent: Optional[str] = None
+    # A short opaque mark of this install: the browser remembers "setup closed"
+    # against it, so a fresh install at the same address offers setup again.
+    install: Optional[str] = None
 
 
 # =============================================================================
