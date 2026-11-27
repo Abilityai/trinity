@@ -166,7 +166,7 @@ class TestBrainState:
         agent = FakeAgent()
         _use_agent(monkeypatch, agent)
         _read(admin_user)
-        assert "/api/files?path=/home/developer/.trinity-bootstrap.done" in agent.paths
+        assert "/api/files/download?path=/home/developer/.trinity-bootstrap.done" in agent.paths
 
 
 class TestBrainRoute:
@@ -211,3 +211,77 @@ class TestBrainRouteIsForAPerson:
         r = self._client(admin_user).get("/api/onboarding/brain")
         assert r.status_code == 200
         assert r.json() == {"agent": "cornelius", "state": "ready", "notes": 2}
+
+
+# --- through the shipped agent server, over the template's real layout -------
+#
+# The files the Cornelius template ships in `Brain/` (Abilityai/cornelius at
+# 6044b3b, `find Brain -type f`), laid out under a temporary home. The agent
+# door is the SHIPPED agent-server files router (loaded by path, #1795), with
+# the container's `/home/developer` mapped onto that home.
+
+import importlib.util as _ilu
+import logging as _logging
+from pathlib import Path as _Path
+
+TEMPLATE_BRAIN_FILES = [
+    "Brain/00-Inbox/README.md",
+    "Brain/01-Sources/Books/_SAMPLE - Book Note Template.md",
+    "Brain/02-Permanent/README.md",
+    "Brain/02-Permanent/_SAMPLE - Permanent Note Template.md",
+    "Brain/04-Output/Articles/ARTICLE-INDEX.md",
+    "Brain/05-Meta/Changelogs/_SAMPLE - Changelog Template.md",
+    "Brain/05-Meta/Templates/MOC-Template.md",
+    "Brain/05-Meta/Templates/Permanent-Note-Template.md",
+    "Brain/05-Meta/Templates/Source-Note-Template.md",
+    "Brain/CHANGELOG.md",
+    "Brain/README.md",
+    "Brain/AI Extracted Notes/.gitkeep",
+    "Brain/Document Insights/.gitkeep",
+    "Brain/03-MOCs/.gitkeep",
+]
+_AGENT_FILES = _Path(__file__).resolve().parents[2] / "docker/base-image/agent_server/routers/files.py"
+
+
+@pytest.fixture()
+def cornelius_home(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    spec = _ilu.spec_from_file_location("_test1409_agent_files", str(_AGENT_FILES))
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    base = (tmp_path / "home").resolve()
+    for rel in TEMPLATE_BRAIN_FILES:
+        (base / rel).parent.mkdir(parents=True, exist_ok=True)
+        (base / rel).write_text("scaffold\n")
+    monkeypatch.setattr(mod, "_HOME", base)
+    app = FastAPI()
+    app.include_router(mod.router)
+    client = TestClient(app)
+
+    class Door:
+        async def get(self, path, timeout=None, **kwargs):
+            return client.get(path.replace("/home/developer", str(base)))
+
+    _use_agent(monkeypatch, Door())
+    _patch_db(monkeypatch, metadata={"cornelius": _meta()})
+    return base
+
+
+class TestAgainstTheTemplateLayout:
+    def test_a_fresh_fork_is_not_set_up_with_no_notes(self, cornelius_home, admin_user):
+        assert _read(admin_user) == {"agent": "cornelius", "state": "not_set_up", "notes": 0}
+
+    def test_set_up_counts_only_the_persons_notes(self, cornelius_home, admin_user):
+        (cornelius_home / ".trinity-bootstrap.done").write_text("ok\n")
+        assert _read(admin_user) == {"agent": "cornelius", "state": "ready", "notes": 0}
+        (cornelius_home / "Brain/Document Insights/Q3 pricing memo.md").write_text("# memo\n")
+        (cornelius_home / "Brain/02-Permanent/Pricing follows value.md").write_text("# note\n")
+        assert _read(admin_user) == {"agent": "cornelius", "state": "ready", "notes": 2}
+
+    def test_reading_the_marker_logs_no_error_on_the_agent(self, cornelius_home, admin_user, caplog):
+        (cornelius_home / ".trinity-bootstrap.done").write_text("ok\n")
+        with caplog.at_level(_logging.WARNING):
+            _read(admin_user)
+        assert [r.getMessage() for r in caplog.records if r.levelno >= _logging.ERROR] == []

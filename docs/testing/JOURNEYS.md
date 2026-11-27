@@ -35,10 +35,11 @@ coverage debt is queryable rather than rediscovered.
 | **J22** | A project is worked by agents and people from open to close: an agent cannot close its own task, a person verifies it, and anyone on the project can read who did what. | user | local | live-stack | **no** | `tests/system_chains/test_j22_project_chain.py` | — | abilityai/trinity-enterprise#795 |
 | **J23** | My project's record shows an action approved inside it: who approved it and how it ended. | user | local | live-stack | **no** | `tests/system_chains/test_j23_approved_action_in_project_chain.py` | — | abilityai/trinity-enterprise#795 |
 | **J24** | My fresh install does not serve MCP to clients outside the machine until I turn it on, and a refused client is told why. | operator | local | journey-smoke | yes | `tests/journeys/test_j24_external_mcp_access_journey.py` | — | abilityai/trinity-enterprise#1101 |
+| **J25** | My company brain is introduced after my first result, set up when I say yes, and the first document I give it comes back as notes I can ask about. | user | local | live-stack | **no** | `tests/journeys/test_j25_company_brain_first_document_journey.py` | — | abilityai/trinity-enterprise#1409 |
 
-**1 of 24 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
+**1 of 25 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
 
-_Harnesses not present in `tests/registry.json`: J20, J21, J22, J23._
+_Harnesses not present in `tests/registry.json`: J20, J21, J22, J23, J25._
 
 ## Variants
 

@@ -132,7 +132,7 @@ def test_no_status_field_is_committed(catalog):
 # ent#600 added J14 (the agent knows the group's conversation when tagged).
 # ent#631 added J20 (a colleague is told about the work — the pointer half of ent#630).
 # ent#1101 added J24 (a fresh install keeps MCP on the machine until the operator opens it).
-DECLARED_JOURNEY_COUNT = 24
+DECLARED_JOURNEY_COUNT = 25
 
 
 def test_every_journey_is_declared_densely_and_in_order(catalog):

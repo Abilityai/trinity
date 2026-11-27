@@ -437,3 +437,21 @@ journeys:
     # No catalog invariant covers "the perimeter is closed by default" yet. An
     # empty list, not an invented id.
     invariants: []
+
+  - id: J25
+    # ent#1409 (epic ent#1407) — "company-brain-first-document". `built: false`:
+    # the unit island proves the state read over the template's real layout
+    # (test_ent1409_brain_state.py) and the mount proves the offer and the setup
+    # card (assistantCompanyBrain1409.mount.spec.js); neither is a person's
+    # first document going into a real Cornelius and coming back as notes.
+    issue: "abilityai/trinity-enterprise#1409"
+    promise: "My company brain is introduced after my first result, set up when I say yes, and the first document I give it comes back as notes I can ask about."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: tests/journeys/test_j25_company_brain_first_document_journey.py
+    built: false
+    owner: trinity
+    # No catalog invariant covers "a seeded agent's readiness is read from the
+    # agent, never guessed" yet — an empty list, not an invented id.
+    invariants: []

@@ -200,7 +200,9 @@ async def get_brain_state(current_user: User) -> dict:
     unknown = {"agent": brain, "state": "unknown", "notes": None}
     client = get_agent_client(brain)
     try:
-        marker = await client.get(f"/api/files?path={_BRAIN_MARKER}", timeout=10.0)
+        # A single file: `download` answers 200 or 404. The listing route would
+        # log "Not a directory" on the agent for every read.
+        marker = await client.get(f"/api/files/download?path={_BRAIN_MARKER}", timeout=10.0)
         if marker.status_code == 200:
             state = "ready"
         elif marker.status_code == 404:

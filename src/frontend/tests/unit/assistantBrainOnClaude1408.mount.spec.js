@@ -214,6 +214,16 @@ describe('the seeded Cornelius goes onto the Claude connected in the first sessi
     expect(useCard().text()).not.toContain('acme-scout')
   })
 
+  it('while the Grid hides the examples, the page still adds Cornelius to a card that named only examples (ent#1409)', async () => {
+    // The assistant named only an example: the panel drops it (out of sight)
+    // and adds the brain, which the Grid shows (ent#1409: never an example).
+    present = [...EXAMPLES]
+    off = { subscription: [BRAIN, 'acme-scout'], api_key: [BRAIN, 'acme-scout'] }
+    await connectThenOffer(['acme-scout'])
+    expect(useCard().text()).toContain(`Use this subscription on these agents: ${BRAIN}`)
+    expect(useCard().text()).not.toContain('acme-scout')
+  })
+
   it('an instance that names no brain keeps Cornelius out of sight, as before (ent#1390)', async () => {
     brain = undefined
     wrapper.unmount()
