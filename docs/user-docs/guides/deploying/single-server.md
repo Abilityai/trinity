@@ -278,8 +278,11 @@ Every platform service carries `restart: unless-stopped`, and so does every agen
 After starting, verify all services are healthy:
 
 ```bash
-# Backend
+# Backend: up, with a complete schema
 curl -s http://localhost:8000/health
+
+# Backend: database, Redis and Docker reachable (503 names the one that is not)
+curl -s http://localhost:8000/health/ready
 
 # Scheduler
 curl -s http://localhost:8001/health

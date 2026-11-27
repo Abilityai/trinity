@@ -389,6 +389,7 @@ NO_TRINITY_CREDENTIAL = {
     "client_portal/router.py::portal_auth_request": UNAUTHENTICATED,
     "client_portal/router.py::portal_auth_verify": OTHER_CREDENTIAL + " (emailed code)",
     "main.py::health_check": UNAUTHENTICATED,
+    "main.py::readiness_check": UNAUTHENTICATED,
 }
 
 # Never-grantable families, through their real routes with a real agent and
