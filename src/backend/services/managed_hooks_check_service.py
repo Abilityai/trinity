@@ -17,9 +17,22 @@ It runs inside the fleet-image cycle (`fleet_image_service.FleetImageCheckServic
 
 **"Could not check" is its own answer** (the #4483 rule): Docker unreadable
 leaves the alert as it is. An agent whose `/health` gives no answer stays
-named, and holds the alert, if the last reading in this process named it, or if
-this process has not read the fleet yet; one silent agent the alert never named
-must not keep a fixed fleet's alert open forever.
+named, and holds the alert, only if the alert's pending row names it; one
+silent agent the alert never named must not keep a fixed fleet's alert open
+forever.
+
+**The pending row is the only memory (#4778).** Who is named is read from the
+alert's own row (`context.agents`) on every pass, never kept in this process:
+the pass runs in whichever worker holds the fleet cycle's lease (in every
+worker when the lease fails open), and a restart or a lease move must not
+change the answer. With no pending row nobody is named, so a silent agent holds
+nothing. A row whose list cannot be read, or a read that fails, is "could not
+tell": any silent agent then holds the alert. Stated limits: the list stores
+the first 500 names (`_CONTEXT_MAX_AGENTS`), so an agent named beyond that
+cannot hold the alert; a pass that only holds does not rewrite the row, so an
+agent named there keeps holding while silent even if an earlier pass read it
+clean; and after a person ends the alert, a silent agent is named again only
+once it reads `skipped`.
 
 The system agent is checked (no other alert covers it). Ephemeral agents are
 left out: they come and go, so they would churn the named set; their turns are
@@ -32,7 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +61,6 @@ PROBE_CONCURRENCY = 8
 
 _TEXT_MAX_AGENTS = 25
 _CONTEXT_MAX_AGENTS = 500
-
-# The agents the last reading in this process named; None = no reading yet.
-_last_named: Optional[Set[str]] = None
 
 
 def describe(agents: List[str]) -> Dict[str, str]:
@@ -128,6 +138,33 @@ async def _read_registration(agent_name: str) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
+def _named_from(row: Any) -> Tuple[Set[str], bool]:
+    """`(names, complete)` of the alert's pending row. No row: nobody is named,
+    and that is the whole answer. A row without a list in `context.agents` is
+    not readable: `complete` is False and the caller must not conclude that a
+    silent agent was never named."""
+    if row is None:
+        return set(), True
+    context = row.get("context") if isinstance(row, dict) else None
+    agents = context.get("agents") if isinstance(context, dict) else None
+    if not isinstance(agents, list):
+        return set(), False
+    return {a for a in agents if isinstance(a, str)}, True
+
+
+def _pending_named() -> Tuple[Set[str], bool]:
+    """The agents the pending alert names, read from its row (#4778). Blocking:
+    call it off the event loop. Never raises: a failed read is "could not tell"."""
+    try:
+        from database import db
+        from services import platform_alerts
+        subject = platform_alerts.subject_for(ALERT_KIND, ALERT_KEY)
+        return _named_from(db.find_pending_operator_queue_by_subject(ALERT_AGENT_NAME, subject))
+    except Exception:  # noqa: BLE001 — "could not check" is its own answer
+        logger.warning("[managed-hooks] could not read the pending alert", exc_info=True)
+        return set(), False
+
+
 # ---------------------------------------------------------------------------
 # One pass
 # ---------------------------------------------------------------------------
@@ -145,7 +182,6 @@ async def run_once() -> Dict[str, Any]:
 
 
 async def _run_once() -> Dict[str, Any]:
-    global _last_named
     from services import platform_alerts
 
     states = await _container_states()
@@ -168,9 +204,11 @@ async def _run_once() -> Dict[str, Any]:
     values = await asyncio.gather(*(read(n) for n in names))
     skipped = [n for n, v in zip(names, values) if v == SKIPPED]
     unreadable = [n for n, v in zip(names, values) if v is None]
-    # An agent the last reading named that gives no answer now is still named:
-    # it has not been proven clean.
-    held = [n for n in unreadable if _last_named and n in _last_named]
+    # An agent the pending alert names that gives no answer now is still named:
+    # it has not been proven clean. Read after the probes, so the decision uses
+    # the row as it is now.
+    was_named, complete = await asyncio.to_thread(_pending_named)
+    held = [n for n in unreadable if n in was_named]
     named = sorted(set(skipped) | set(held))
     result: Dict[str, Any] = {"skipped": skipped, "unchecked": unreadable}
 
@@ -187,17 +225,16 @@ async def _run_once() -> Dict[str, Any]:
                 "agents_unchecked": len(unreadable),
             },
         )
-        _last_named = set(named)
         logger.warning("[managed-hooks] %d agent(s) not applying the managed hooks: alert %s",
                        len(skipped), outcome)
         return {"status": "skipped", **result}
 
-    holding = unreadable if _last_named is None else held
+    # The row's list could not be read: any silent agent may be one it names.
+    holding = held if complete else unreadable
     if holding:
         logger.warning("[managed-hooks] could not check %d agent(s); the alert is left as it is",
                        len(holding))
         return {"status": "could_not_check", "reason": "partial", **result}
 
     platform_alerts.clear(ALERT_AGENT_NAME, ALERT_KIND, ALERT_KEY)
-    _last_named = set()
     return {"status": "clear", **result}

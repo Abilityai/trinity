@@ -34,49 +34,21 @@ from services import fleet_image_service as fis  # noqa: E402
 from services import managed_hooks_check_service as mhc  # noqa: E402
 from services import platform_alerts  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `_managed_hooks_fleet_world`, as `_route_census`
+from _managed_hooks_fleet_world import Fleet, REAL_ALERT_AGENT_NAME  # noqa: E402
+
 SYS = "trinity-system"
 
 
 # ---------------------------------------------------------------------------
-# The fleet check
+# The fleet check. `Fleet` stubs the reads of the fleet and runs the alert for
+# real, on a queue of the test's own (`fleet.queue`): which silent agent holds
+# the alert is read from the alert's pending row (#4778).
 # ---------------------------------------------------------------------------
-
-class _Fleet:
-    def __init__(self):
-        self.states = {}          # name -> "running" | "stopped"; None = Docker unreadable
-        self.health = {}          # name -> /health value, or None = no answer
-        self.ephemeral = set()
-        self.observe = MagicMock(return_value="filed")
-        self.clear = MagicMock(return_value=0)
-
-    def agent(self, name, value="ok", *, state="running", ephemeral=False):
-        self.states[name] = state
-        self.health[name] = value
-        if ephemeral:
-            self.ephemeral.add(name)
-        return self
-
-    def install(self, monkeypatch):
-        async def states():
-            return self.states
-
-        async def read(name):
-            return self.health[name]
-        monkeypatch.setattr(mhc, "_container_states", states)
-        monkeypatch.setattr(mhc, "_read_registration", read)
-        monkeypatch.setattr(mhc, "_is_ephemeral", lambda name: name in self.ephemeral)
-        monkeypatch.setattr(platform_alerts, "observe", self.observe)
-        monkeypatch.setattr(platform_alerts, "clear", self.clear)
-        monkeypatch.setattr(mhc, "_last_named", None)
-        return self
-
-    def run(self):
-        return asyncio.run(mhc.run_once())
-
 
 @pytest.fixture
 def fleet(monkeypatch):
-    return _Fleet().install(monkeypatch)
+    return Fleet().install(monkeypatch)
 
 
 def test_skipped_agents_are_named_in_one_alert(fleet):
@@ -85,7 +57,7 @@ def test_skipped_agents_are_named_in_one_alert(fleet):
     assert out["status"] == "skipped" and out["skipped"] == ["alpha", "gamma"]
     fleet.observe.assert_called_once()
     args, kwargs = fleet.observe.call_args
-    assert args == (SYS, mhc.ALERT_KIND, mhc.ALERT_KEY)
+    assert args == (fleet.queue, mhc.ALERT_KIND, mhc.ALERT_KEY)
     assert kwargs["priority"] == "high"
     assert kwargs["context"]["agents"] == ["alpha", "gamma"]
     assert kwargs["title"] == "Guardrails are not running on 2 agents"
@@ -118,7 +90,7 @@ def test_the_system_agent_is_checked_and_stopped_or_ephemeral_agents_are_not(fle
 def test_the_alert_ends_when_no_agent_is_skipped(fleet):
     fleet.agent("alpha", "ok").agent("beta", "missing")
     assert fleet.run()["status"] == "clear"
-    fleet.clear.assert_called_once_with(SYS, mhc.ALERT_KIND, mhc.ALERT_KEY)
+    fleet.clear.assert_called_once_with(fleet.queue, mhc.ALERT_KIND, mhc.ALERT_KEY)
     fleet.observe.assert_not_called()
 
 
@@ -129,10 +101,16 @@ def test_docker_unreadable_leaves_the_alert(fleet):
     fleet.clear.assert_not_called()
 
 
-def test_before_any_reading_an_unreadable_agent_holds_the_alert(fleet):
+def test_the_alert_lives_on_the_system_agents_queue():
+    from db.agents import SYSTEM_AGENT_NAME
+    assert REAL_ALERT_AGENT_NAME == SYSTEM_AGENT_NAME == SYS
+
+
+def test_with_no_pending_alert_an_unreadable_agent_holds_nothing(fleet):
+    """#4778: a fresh process used to let any silent agent hold the alert."""
     fleet.agent("alpha", "ok").agent("beta", None)
-    assert fleet.run()["status"] == "could_not_check"
-    fleet.clear.assert_not_called()
+    out = fleet.run()
+    assert out["status"] == "clear" and out["unchecked"] == ["beta"]
 
 
 def test_an_unreadable_agent_the_alert_named_holds_it(fleet):

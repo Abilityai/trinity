@@ -1029,6 +1029,10 @@ _ROW_READERS = {
         "internal", "the stall monitor's own pending rows (#4257, #4635): read to end the row "
                     "of an agent whose queue drained and to compare a reading's priority with "
                     "the row's; agent names and a priority decide, nothing leaves"),
+    ("services/managed_hooks_check_service.py", "_pending_named"): (
+        "internal", "the managed-hooks check's own pending alert (#4778): the agent names in its "
+                    "`context.agents` decide which silent agent holds the alert, and go only "
+                    "into the same alert's next reading"),
     (_PROMPT, "_resolve_ended_asks"): (
         "agent", "the agent's own ended asks for its prompt: reserved prefixes excluded in SQL"),
     (_PROMPT, "_resolve_pending_asks"): (
