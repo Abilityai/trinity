@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4407_health_probes.py",
+      "feature": "#4407",
+      "added": "2026-11-27",
+      "categories": [
+        "backend",
+        "reliability",
+        "unit"
+      ],
+      "description": "#4407: against a real SQLAlchemy engine carrying alembic_version and the real revision files, a database at the shipped head is at_head, a pending revision, an unstamped database and an unknown revision are behind, a database that cannot be asked is unknown, and at_head is remembered while behind is not; the database, Redis (a real client on a closed port) and Docker probes answer fixed words; loop ticks carry their time and age and the telemetry snapshot keeps its shape; readiness names the one dependency that is down, cuts off a hanging probe, survives a raising one, is cached briefly and leaks no error text; health_check and readiness_check compiled out of main.py answer 503 for a pending revision, stay healthy through a database blip, probe no dependency on liveness, and answer 200 or 503 on readiness."
+    },
+    {
       "file": "unit/test_ent978_narrowed_read_marker.py",
       "feature": "trinity-enterprise#978",
       "added": "2026-11-24",

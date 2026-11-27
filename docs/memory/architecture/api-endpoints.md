@@ -268,7 +268,8 @@ The four `terms_*` keys are refused on `PUT` and `DELETE /api/settings/{key}` (4
 | GET | `/api/mcp/info` | MCP server info |
 | POST/GET/DELETE | `/api/mcp/keys` (`/{id}`) | Create / list / delete API keys |
 | GET | `/oauth/{provider}/authorize` / `/callback` | OAuth start / callback |
-| GET | `/health` | Health check (unauthenticated, top-level — no `/api/` prefix) |
+| GET | `/health` | Liveness (unauthenticated, top-level — no `/api/` prefix). 503 only when the schema is known incomplete: pending SQLite migrations (#1160), or on PostgreSQL a database not at the Alembic head the image ships (#4407). A database that could not be asked leaves it healthy with `schema: unverified`. Probes no other dependency; this is what the compose healthcheck reads |
+| GET | `/health/ready` | Readiness (#4407, unauthenticated). Probes the database, Redis and Docker, each bounded at 3 s, and reports `checks` (`ok` / `unreachable` / `unavailable` / `timeout`, plus the schema state) and `loops` (per background loop of this worker: last completed cycle, age, duration). 503 when a dependency is down or the schema is behind; loop ages are reported and never decide it. Answers carry fixed words only, never a dependency's error text. Logic in `services/health_service.py` |
 | GET | `/api/version` | Platform version + build-time git provenance (`git_commit`, `git_commit_short`, `git_commit_subject`, `git_commit_timestamp`, `git_branch`, `build_date`) from Dockerfile ARG/ENV wired through compose build args + `start.sh`; all default `"unknown"` when absent (#926). Also `edition: "oss"\|"enterprise"` + `enterprise_features` — effective entitlement state from `entitlement_service.list_entitled_features()`, same source as feature-flags (#1443) |
 
 ### Soft-Delete Admin Recovery (#834 Phase 1c)

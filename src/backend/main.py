@@ -1986,11 +1986,30 @@ async def health_check():
     from db.engine import is_sqlite
     from fastapi.responses import JSONResponse
 
-    # PostgreSQL (#300) builds the schema fresh from schema.py at head and does
-    # not run the sqlite-only PRAGMA migrations, so there is no schema_migrations
-    # table to count. The migration-completeness gate is SQLite-only.
+    # PostgreSQL has no schema_migrations table to count; its gate is Alembic
+    # (#4407): unhealthy when the database is not at the head this image ships.
+    # A database that could not be asked is not a failed gate, so a connection
+    # blip leaves liveness healthy and says the schema was not verified.
     if not is_sqlite():
-        return {"status": "healthy", "timestamp": utc_now_iso()}
+        from services import health_service
+
+        schema = await asyncio.to_thread(health_service.postgres_schema_state)
+        if schema["state"] == health_service.BEHIND:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "unhealthy",
+                    "timestamp": utc_now_iso(),
+                    "migrations": {
+                        "current": schema.get("current", []),
+                        "head": schema.get("head", []),
+                    },
+                },
+            )
+        body = {"status": "healthy", "timestamp": utc_now_iso()}
+        if schema["state"] == health_service.UNKNOWN:
+            body["schema"] = "unverified"
+        return body
 
     from db.migrations import migration_health
 
@@ -2021,6 +2040,30 @@ async def health_check():
             },
         )
     return {"status": "healthy", "timestamp": datetime.now()}
+
+
+@app.get("/health/ready")
+async def readiness_check():
+    """Readiness (#4407): can this worker do its work right now?
+
+    Probes the database, Redis and Docker and reports each, with the schema
+    state and when each background loop last completed a cycle. 503 when a
+    dependency is down or the schema is behind. `/health` stays the cheap
+    liveness check and is what the compose healthcheck reads.
+    """
+    from fastapi.responses import JSONResponse
+    from services import health_service
+
+    result = await health_service.readiness()
+    return JSONResponse(
+        status_code=200 if result["ready"] else 503,
+        content={
+            "status": "ready" if result["ready"] else "not_ready",
+            "timestamp": utc_now_iso(),
+            "checks": result["checks"],
+            "loops": result["loops"],
+        },
+    )
 
 
 def _build_version_payload(

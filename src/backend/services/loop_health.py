@@ -280,6 +280,10 @@ class EventLoopProbe:
 
 _ticks_lock = threading.Lock()
 _ticks: Dict[str, Dict[str, Any]] = {}
+# #4407: wall-clock time each loop last completed a cycle, for the readiness
+# endpoint. Kept beside `_ticks` rather than in it: `tick_snapshot()` is the
+# telemetry shape and stays as it is.
+_last_tick_at: Dict[str, float] = {}
 
 
 def record_tick(name: str, seconds: float) -> None:
@@ -290,6 +294,7 @@ def record_tick(name: str, seconds: float) -> None:
         entry["slow_ticks"] += 1 if slow else 0
         entry["last_ms"] = round(seconds * 1000, 1)
         entry["max_ms"] = max(entry["max_ms"], entry["last_ms"])
+        _last_tick_at[name] = time.time()
     if slow:
         logger.warning(
             "[LoopHealth] %s tick took %d ms pid=%d", name, round(seconds * 1000), os.getpid(),
@@ -320,6 +325,12 @@ def tick(name: str) -> Iterator[None]:
 def tick_snapshot() -> Dict[str, Dict[str, Any]]:
     with _ticks_lock:
         return {name: dict(entry) for name, entry in sorted(_ticks.items())}
+
+
+def last_tick_times() -> Dict[str, float]:
+    """Epoch seconds at which each loop last completed a cycle (#4407)."""
+    with _ticks_lock:
+        return dict(_last_tick_at)
 
 
 # ---------------------------------------------------------------------------
