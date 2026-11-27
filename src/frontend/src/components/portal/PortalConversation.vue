@@ -2002,7 +2002,7 @@ watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
   // #4456: words parked behind a turn that has not settled were for the agent and
   // thread being left, and the call need not still be on for them to be waiting.
   // Dropped before anything is awaited: the turn can settle while the call winds down.
-  if (props.agent.name !== oldName || sid !== currentSessionId.value) dropSpokenQueue()
+  if (sid !== currentSessionId.value || props.agent.name !== oldName) dropSpokenQueue()
   if (threadChangeEndsCall({
     callActive: anyCallActive.value,
     agentChanged: props.agent.name !== oldName,
