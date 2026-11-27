@@ -45,9 +45,21 @@ function notesWords(n) {
   return n === 1 ? '1 note' : `${n} notes`
 }
 
-/** The card's title. */
+/**
+ * The card's title: who is already on the person's team, as a list of
+ * `{ name, role }`. A second core agent joins the same card with one more
+ * entry: "Already on your team: Cornelius, your company brain".
+ */
+export function teamLabel(members = []) {
+  const parts = (members || []).filter((m) => m?.name && m?.role).map((m) => `${m.name}, your ${m.role}`)
+  if (!parts.length) return ''
+  const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join('; ')}; and ${parts[parts.length - 1]}`
+  return `Already on your team: ${list}`
+}
+
+/** The card's title for the company brain. */
 export function brainLabel(name) {
-  return `${name}, your company brain`
+  return teamLabel([{ name, role: 'company brain' }])
 }
 
 /** The line under it: what the brain is, and where it stands now. */

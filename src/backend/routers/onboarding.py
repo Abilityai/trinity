@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from dependencies import get_current_user
+from dependencies import get_current_user, require_person
 from models import BrainState, FirstRunState, User
 from services import onboarding_service
 
@@ -29,7 +29,10 @@ def get_first_run(current_user: User = Depends(get_current_user)):
 
 
 @router.get("/brain", response_model=BrainState)
-async def get_brain(current_user: User = Depends(get_current_user)):
+async def get_brain(current_user: User = Depends(require_person)):
     """The company brain's state (trinity-enterprise#1409): absent, not set up,
-    ready (with how many notes) or unknown. Read-only; never raises."""
+    ready (with how many notes) or unknown. Read-only; never raises.
+
+    For the person's assistant panel: a person only (`require_person`), so an
+    agent's key, a connector or a delegate gets 403 (#2996 route census)."""
     return await onboarding_service.get_brain_state(current_user)

@@ -61,7 +61,7 @@ vi.mock('@/stores/agents', () => ({ useAgentsStore: () => ({ fetchAgents: async 
 import AssistantWidget from '@/components/assistant/AssistantWidget.vue'
 import { useAssistantStore } from '@/stores/assistant'
 import { useFirstRunStore } from '@/stores/firstRun'
-import { BRAIN_OFFER_KEY } from '@/utils/companyBrain'
+import { BRAIN_OFFER_KEY, teamLabel } from '@/utils/companyBrain'
 import { FIRST_RESULT_KEY, examplesOutOfSight, examplesToHide } from '@/utils/firstSession'
 
 const TURN = '/api/enterprise/assistant/turn'
@@ -134,7 +134,7 @@ describe('the company brain (ent#1409)', () => {
       await firstResult()
       expect(localStorage.getItem(FIRST_RESULT_KEY)).toBeTruthy()
       const [card] = brainCards(wrapper)
-      expect(card.text()).toContain('Cornelius, your company brain')
+      expect(card.text()).toContain('Already on your team: Cornelius, your company brain')
       expect(card.text()).toContain('came with this instance')
       expect(card.text()).toContain("you don't type anything")
       expect(card.findAll('button').map((b) => b.text())).toEqual(['Set it up', 'Not now'])
@@ -211,5 +211,14 @@ describe('the company brain (ent#1409)', () => {
       expect(text).toContain("That didn't work.")
       expect(text).toContain('Not logged in')
     })
+  })
+})
+
+describe('the offer card names a team, not one agent (ent#1409, ent#1416)', () => {
+  it('a second core agent joins the same title with one more entry', () => {
+    expect(teamLabel([{ name: 'Cornelius', role: 'company brain' }])).toBe('Already on your team: Cornelius, your company brain')
+    expect(teamLabel([{ name: 'Corbin', role: 'Chief of Staff' }, { name: 'Cornelius', role: 'company brain' }]))
+      .toBe('Already on your team: Corbin, your Chief of Staff; and Cornelius, your company brain')
+    expect(teamLabel([])).toBe('')
   })
 })

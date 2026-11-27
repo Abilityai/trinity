@@ -181,3 +181,33 @@ class TestBrainRoute:
         import routers.onboarding as onboarding_router
         paths = {(r.path, tuple(sorted(r.methods))) for r in onboarding_router.router.routes}
         assert ("/api/onboarding/brain", ("GET",)) in paths
+
+
+class TestBrainRouteIsForAPerson:
+    """The brain's state is read for the person's assistant panel. An agent's
+    key, a connector or a delegate never reads it (the #2996 route census)."""
+
+    def _client(self, principal):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        import routers.onboarding as onboarding_router
+
+        app = FastAPI()
+        app.include_router(onboarding_router.router)
+        app.dependency_overrides[onboarding_router.get_current_user] = lambda: principal
+        return TestClient(app)
+
+    def test_an_agent_key_is_refused(self, monkeypatch):
+        _patch_db(monkeypatch, metadata={"cornelius": _meta()})
+        _use_agent(monkeypatch, FakeAgent(tree=_with_notes(2)))
+        agent = User(id=1, username="admin", email="admin@example.com", role="admin",
+                     mcp_scope="agent", agent_name="scout")
+        assert self._client(agent).get("/api/onboarding/brain").status_code == 403
+
+    def test_a_person_reads_it(self, monkeypatch, admin_user):
+        _patch_db(monkeypatch, metadata={"cornelius": _meta()})
+        _use_agent(monkeypatch, FakeAgent(tree=_with_notes(2)))
+        r = self._client(admin_user).get("/api/onboarding/brain")
+        assert r.status_code == 200
+        assert r.json() == {"agent": "cornelius", "state": "ready", "notes": 2}
