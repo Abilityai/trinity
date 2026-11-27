@@ -333,6 +333,19 @@ def is_hard_disabled() -> bool:
     return not TELEMETRY_SHARING_ENABLED
 
 
+def _switch_on_with_terms_sync() -> tuple:
+    """The decision and the write behind ``switch_on_with_terms``, run in a
+    worker thread: ``("off", None)`` (kill switch or a refusal on record),
+    ``("already_on", None)``, or ``("switched", <set_consent status>)``."""
+    if is_hard_disabled():
+        return "off", None
+    if is_consent_enabled():
+        return "already_on", None
+    if has_opted_out():
+        return "off", None
+    return "switched", set_consent(True)
+
+
 async def switch_on_with_terms(actor_user: Any, *, via: str) -> bool:
     """Switch sharing on because the person just accepted terms that say
     accepting them does (abilityai/trinity-enterprise#1403).
@@ -345,17 +358,14 @@ async def switch_on_with_terms(actor_user: Any, *, via: str) -> bool:
     the consent-time backfill share. Returns whether sharing is on afterwards.
     Never raises: a caller completing setup must not fail on it."""
     try:
-        if is_hard_disabled():
-            return False
-        if is_consent_enabled():
-            return True
-        if has_opted_out():
-            return False
-        status = await asyncio.to_thread(set_consent, True)
+        # The consent reads and the write are sync db calls: off the loop (#4674).
+        outcome, status = await asyncio.to_thread(_switch_on_with_terms_sync)
     except Exception:  # noqa: BLE001 - never fail the caller's acceptance
         logger.warning("[telemetry-share] could not switch sharing on with the terms (%s)", via,
                        exc_info=True)
         return False
+    if outcome != "switched":
+        return outcome == "already_on"
     try:
         from services.platform_audit_service import AuditEventType, platform_audit_service
 

@@ -66,6 +66,7 @@ A malformed secret refuses every setup. The instance-ID form is unchanged. The
 take re-reads the taken file and re-verifies it, so a claim replaced between the
 check and the take is refused, and a restore never overwrites a newer claim.
 """
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -552,7 +553,7 @@ async def set_admin_password(
     if registration_terms is not None and registration_terms.get("usage_sharing_on_accept") is True:
         try:
             from services import telemetry_sharing_service
-            admin_row = db.get_user_by_username(admin_username()) or {}
+            admin_row = await asyncio.to_thread(db.get_user_by_username, admin_username()) or {}
             await telemetry_sharing_service.switch_on_with_terms(
                 SimpleNamespace(id=admin_row.get("id"), email=admin_row.get("email"),
                                 username=admin_username(), role="admin"),
