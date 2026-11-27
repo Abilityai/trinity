@@ -325,6 +325,43 @@ def instance_has_api_key() -> bool:
     return bool((get_anthropic_api_key() or "").strip())
 
 
+def no_credential_next_step(agent_name: str) -> Optional[str]:
+    """trinity-enterprise#1408: what a person does when a run failed because the
+    agent is on no Claude credential at all, as one sentence; None otherwise.
+
+    "No credential" is ``credentialless_agent_names``' predicate for one agent:
+    no subscription, the platform's key in use, and the platform holding none,
+    plus the sweep's condition 4: the agent runs Claude (#1187 decision 7).
+    Codex, Gemini and OpenCode agents answer their own credential faults with
+    503 too, and Claude is not their next step. The runtime is read
+    LABEL-STRICT, as the sweep reads it: no container, no label or Docker
+    unreadable is no evidence of Claude, so no sentence. An agent with
+    ``use_platform_api_key`` off brings its own key, which the backend cannot
+    see, so it is never told it has none. Kept short: the assistant's run card
+    shows only the first 300 characters of the error. Never raises — an
+    unreadable row gets no sentence.
+
+    SYNCHRONOUS — call via ``asyncio.to_thread``.
+    """
+    from services.agent_service.helpers import is_claude_runtime
+    from services import docker_service
+
+    try:
+        if db.get_agent_subscription_id(agent_name) is not None:
+            return None
+        if not db.get_use_platform_api_key(agent_name) or instance_has_api_key():
+            return None
+        container = docker_service.get_agent_container(agent_name)
+        runtime = (container.labels or {}).get("trinity.agent-runtime") if container is not None else None
+        if not runtime or not is_claude_runtime(runtime):
+            return None
+    except Exception:  # noqa: BLE001 — the failure stands without a next step
+        logger.debug("[ent#1408] credential state of '%s' unreadable", agent_name, exc_info=True)
+        return None
+    return (f"{agent_name} is not on a Claude credential. Next: ask the assistant to put it on this "
+            "instance's Claude, or assign it in Settings → Integrations → Claude Subscriptions.")
+
+
 def credentialless_agent_names() -> List[str]:
     """Agents whose ACTIVE auth mode resolves to no usable credential.
 

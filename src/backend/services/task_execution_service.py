@@ -3393,6 +3393,13 @@ class TaskExecutionService:
         elif agent_status_code == 503:
             logger.warning(f"[TaskExecService] Auth failure detected on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.AUTH
+            # trinity-enterprise#1408: an agent on no Claude credential at all
+            # is told what to do next, not only "Not logged in". Appended, so
+            # every reader keyed on the agent's own prefix still matches.
+            from services.subscription_service import no_credential_next_step
+            next_step = await asyncio.to_thread(no_credential_next_step, agent_name)
+            if next_step:
+                error_msg = f"{error_msg} {next_step}"
         elif agent_status_code == 429:
             # #2638: a Claude subscription usage limit surfaces from the agent
             # as 429, not 503 — and this branch classified only 503, so the code
