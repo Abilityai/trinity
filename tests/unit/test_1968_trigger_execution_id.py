@@ -292,7 +292,6 @@ def test_service_does_not_recreate_a_passed_execution(tmp_path):
         dispatched.append(execution.id)
 
     service._dispatch_and_record_outcome = _no_dispatch
-    service._publish_event = lambda *a, **k: asyncio.sleep(0)
 
     asyncio.run(
         service._execute_schedule_with_lock(

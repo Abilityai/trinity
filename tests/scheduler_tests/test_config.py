@@ -67,15 +67,3 @@ class TestSchedulerConfig:
         with patch.dict(os.environ, {"REDIS_URL": _TEST_REDIS_URL, "PRE_CHECK_TIMEOUT": "90"}, clear=True):
             config = SchedulerConfig()
             assert config.pre_check_timeout == 90.0
-
-    def test_publish_events_default(self):
-        """Test event publishing is enabled by default."""
-        with patch.dict(os.environ, {"REDIS_URL": _TEST_REDIS_URL}, clear=True):
-            config = SchedulerConfig()
-            assert config.publish_events is True
-
-    def test_publish_events_disabled(self):
-        """Test event publishing can be disabled."""
-        with patch.dict(os.environ, {"REDIS_URL": _TEST_REDIS_URL, "PUBLISH_EVENTS": "false"}, clear=True):
-            config = SchedulerConfig()
-            assert config.publish_events is False

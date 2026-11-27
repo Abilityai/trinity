@@ -237,18 +237,20 @@ export const useExecutionsStore = defineStore('executions', () => {
     refresh({ keepLoaded: false })
   }
 
-  // WS: agent_activity events with schedule_start / schedule_end trigger a refresh.
+  // WS: an agent_activity event for a run's start or end triggers a refresh.
+  // #4813: every dispatch — chat, task or scheduled — opens a `chat_start`
+  // activity, and the run's end closes that same activity (completed / failed /
+  // cancelled), so `chat_start` in any state is the trigger. The backend writes
+  // no `schedule_start` for a run; the two `schedule_*` types stay for the
+  // events that still carry them.
   // We refetch rather than patch in-place because the event payload doesn't carry
   // the full row data (cost, duration, etc.) needed to update the list accurately.
   // #3451: only while a panel shows the list; a burst during a read collapses into
   // the one refresh that follows it (a Load more reads only the tail, so an event
   // it overlapped used to be lost until the next poll).
+  const RUN_ACTIVITY_TYPES = new Set(['chat_start', 'schedule_start', 'schedule_end'])
   function handleWebSocketEvent(data) {
-    if (
-      _listLive &&
-      data.type === 'agent_activity' &&
-      (data.activity_type === 'schedule_start' || data.activity_type === 'schedule_end')
-    ) {
+    if (_listLive && data.type === 'agent_activity' && RUN_ACTIVITY_TYPES.has(data.activity_type)) {
       refresh()
     }
   }

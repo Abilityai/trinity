@@ -241,7 +241,6 @@ def mock_redis() -> MagicMock:
     redis_mock.exists.return_value = 0
     redis_mock.setex.return_value = True
     redis_mock.eval.return_value = 1
-    redis_mock.publish.return_value = 1
     return redis_mock
 
 

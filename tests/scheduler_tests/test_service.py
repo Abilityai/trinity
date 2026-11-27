@@ -168,9 +168,8 @@ class TestScheduleExecution:
         mock_lock.acquire.return_value = True
         mock_lock_manager.try_acquire_schedule_lock = MagicMock(return_value=mock_lock)
 
-        # Mock backend call and event publishing
-        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock):
+        # Mock backend call
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend:
 
             mock_backend.return_value = {
                 "status": "success",
@@ -214,8 +213,7 @@ class TestScheduleExecution:
         mock_lock_manager.try_acquire_schedule_lock = MagicMock(return_value=mock_lock)
 
         # Try to execute disabled schedule
-        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock):
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend:
             await service._execute_schedule("schedule-3")  # Disabled
 
         mock_backend.assert_not_called()
@@ -256,33 +254,10 @@ class TestScheduleExecution:
         mock_lock.acquire.return_value = True
         mock_lock_manager.try_acquire_schedule_lock = MagicMock(return_value=mock_lock)
 
-        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock):
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend:
             await service._execute_schedule("schedule-no-auto")
 
         mock_backend.assert_not_called()
-
-
-class TestEventPublishing:
-    """Tests for event publishing."""
-
-    @pytest.mark.asyncio
-    async def test_publish_event(self, db_with_data: SchedulerDatabase, mock_lock_manager: LockManager, mock_redis: MagicMock):
-        """Test event publishing to Redis."""
-        service = SchedulerService(
-            database=db_with_data,
-            lock_manager=mock_lock_manager
-        )
-        service._redis = mock_redis
-
-        await service._publish_event({
-            "type": "test_event",
-            "data": "test"
-        })
-
-        mock_redis.publish.assert_called_once()
-        call_args = mock_redis.publish.call_args
-        assert call_args[0][0] == "scheduler:events"
 
 
 class TestBackendDelegation:
@@ -301,9 +276,8 @@ class TestBackendDelegation:
             lock_manager=mock_lock_manager
         )
 
-        # Mock backend call and event publishing
-        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock):
+        # Mock backend call
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend:
 
             mock_backend.return_value = {
                 "status": "success",
@@ -328,9 +302,8 @@ class TestBackendDelegation:
             lock_manager=mock_lock_manager
         )
 
-        # Mock backend call and event publishing
-        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock):
+        # Mock backend call
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend:
 
             mock_backend.return_value = {
                 "status": "success",
@@ -350,27 +323,23 @@ class TestBackendDelegation:
     @pytest.mark.asyncio
     async def test_execute_schedule_dispatched_updates_runtimes(self, db_with_data, mock_lock_manager):
         """Fire-and-forget (#132): a 'dispatched' result updates run times
-        immediately and returns before any 'completed' event."""
+        immediately and returns."""
         service = SchedulerService(database=db_with_data, lock_manager=mock_lock_manager)
         with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock) as pub, \
              patch.object(service.db, 'update_schedule_run_times') as rt:
             backend.return_value = {"status": "dispatched", "execution_id": "x"}
             await service._execute_schedule_with_lock("schedule-1", triggered_by="schedule")
         rt.assert_called_once()
-        assert pub.await_count == 1  # 'started' only — no 'completed' on dispatch
 
     @pytest.mark.asyncio
-    async def test_execute_schedule_failed_publishes_failed(self, db_with_data, mock_lock_manager):
+    async def test_execute_schedule_failed_is_logged(self, db_with_data, mock_lock_manager, caplog):
         service = SchedulerService(database=db_with_data, lock_manager=mock_lock_manager)
-        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock) as pub:
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as backend:
             backend.return_value = {"status": "failed", "error": "boom"}
-            await service._execute_schedule_with_lock("schedule-1", triggered_by="schedule")
-        assert pub.await_count == 2  # started + completed(failed)
-        last = pub.await_args_list[-1].args[0]
-        assert last["status"] == "failed"
-        assert last["error"] == "boom"
+            with caplog.at_level("ERROR"):
+                await service._execute_schedule_with_lock("schedule-1", triggered_by="schedule")
+        backend.assert_awaited_once()
+        assert "execution failed: boom" in caplog.text
 
     @pytest.mark.asyncio
     async def test_execute_schedule_exception_does_not_overwrite_finalized(self, db_with_data, mock_lock_manager):
@@ -380,13 +349,11 @@ class TestBackendDelegation:
         finalized = MagicMock()
         finalized.status = ExecutionStatus.SUCCESS
         with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock) as pub, \
              patch.object(service.db, 'get_execution', return_value=finalized), \
              patch.object(service.db, 'update_execution_status') as upd:
             backend.side_effect = RuntimeError("conn dropped")
             await service._execute_schedule_with_lock("schedule-1", triggered_by="schedule")
         upd.assert_not_called()  # anti-overwrite
-        assert pub.await_args_list[-1].args[0]["status"] == ExecutionStatus.SUCCESS
 
     @pytest.mark.asyncio
     async def test_execute_schedule_precheck_skip(self, db_with_data, mock_lock_manager):
@@ -394,7 +361,6 @@ class TestBackendDelegation:
         service = SchedulerService(database=db_with_data, lock_manager=mock_lock_manager)
         with patch.object(service, '_run_pre_check', new_callable=AsyncMock) as pc, \
              patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock), \
              patch.object(service.db, 'create_skipped_execution') as skip, \
              patch.object(service.db, 'update_schedule_run_times'):
             pc.return_value = {"fire": False, "reason": "nope"}

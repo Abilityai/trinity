@@ -137,8 +137,9 @@ Events are broadcast from multiple sources and filtered by the `/ws/events` endp
 | `agent_activity` | `activity_service.py:138` | Chat, task, tool call completions |
 | `agent_started` | `routers/agents.py:324-329` | Agent container started |
 | `agent_stopped` | `routers/agents.py:356-361` | Agent container stopped |
-| `schedule_execution_completed` | Dedicated scheduler (`src/scheduler/`) | Scheduled task finished |
 | `agent_collaboration` | `activity_service.py` | Agent-to-agent MCP call |
+
+A scheduled run has no event type of its own (#4813). It arrives as `agent_activity` with `activity_type: "chat_start"` and `details.triggered_by: "schedule"` when it starts, and the same `activity_id` closes with `activity_state` `completed`, `failed` or `cancelled` when it ends. A skipped run sends no event; read it from the executions API (see [scheduling.md](scheduling.md#websocket-events)).
 
 ### Event Payloads
 
@@ -190,10 +191,8 @@ Events are broadcast to both the main WebSocket manager (UI) and the filtered ma
    - Filtered broadcast: `filtered_manager.broadcast_filtered(event)`
 
 2. **Dedicated Scheduler Service** (`src/scheduler/service.py`):
-   - Publishes events to Redis channel `scheduler:events`
-   - Backend subscribes and relays to WebSocket managers
-   - Main broadcast: via Redis pub/sub
-   - Filtered broadcast: via Redis pub/sub to `filtered_manager.broadcast_filtered()`
+   - Sends no events (#4813)
+   - Dispatches each run through `POST /api/internal/execute-task`; the Activity Service above broadcasts the run's start and end
 
 3. **Agents Router** (`routers/agents.py:324-340, 356-368`):
    - Both broadcasts for agent_started/agent_stopped events
@@ -206,9 +205,6 @@ Events are broadcast to both the main WebSocket manager (UI) and the filtered ma
 # Inject filtered manager into routers and services
 set_agents_filtered_ws_manager(filtered_manager)
 activity_service.set_filtered_websocket_manager(filtered_manager)
-
-# Subscribe to scheduler events from Redis and relay to filtered manager
-# (Dedicated scheduler publishes to scheduler:events channel)
 ```
 
 ## Data Layer
@@ -320,7 +316,6 @@ export TRINITY_API_KEY="trinity_mcp_xxx"
 | `src/backend/db/agents.py` | Added get_accessible_agent_names() method |
 | `src/backend/database.py` | Exposed get_accessible_agent_names() |
 | `src/backend/services/activity_service.py` | Added filtered broadcast calls |
-| `src/scheduler/service.py` | Publishes events to Redis `scheduler:events` channel |
 | `src/backend/routers/agents.py` | Added filtered broadcasts for agent_started/stopped |
 | `scripts/trinity-listen.sh` | New listener script |
 
@@ -328,5 +323,6 @@ export TRINITY_API_KEY="trinity_mcp_xxx"
 
 | Date | Changes |
 |------|---------|
+| 2026-11-27 | #4813: the scheduler's Redis events are removed (nothing read them, so they never reached this endpoint); a scheduled run is the backend's `agent_activity` |
 | 2026-02-11 | Updated to reflect scheduler consolidation - schedule events now via Redis pub/sub from dedicated scheduler |
 | 2026-02-05 | Initial implementation |

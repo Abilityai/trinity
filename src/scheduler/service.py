@@ -7,7 +7,6 @@ Uses distributed locks to prevent duplicate executions.
 
 import asyncio
 import logging
-import json
 import time
 import zoneinfo
 from datetime import datetime, timedelta
@@ -131,7 +130,6 @@ class SchedulerService:
     Key features:
     - APScheduler with AsyncIO for non-blocking execution
     - Distributed locking to prevent duplicate executions
-    - Event publishing for WebSocket compatibility
     - Periodic sync to detect new/updated/deleted schedules
     """
 
@@ -147,7 +145,7 @@ class SchedulerService:
         Args:
             database: Database access instance
             lock_manager: Distributed lock manager
-            redis_url: Redis URL for event publishing
+            redis_url: Redis URL
         """
         self.db = database or SchedulerDatabase()
         self.lock_manager = lock_manager or get_lock_manager()
@@ -176,7 +174,7 @@ class SchedulerService:
 
     @property
     def redis(self) -> redis.Redis:
-        """Get or create Redis connection for events."""
+        """Get or create the Redis connection."""
         if self._redis is None:
             self._redis = redis.from_url(self.redis_url, decode_responses=True)
         return self._redis
@@ -687,7 +685,6 @@ class SchedulerService:
         self,
         schedule_id: str,
         skip_reason: str = "Previous execution still running (max_instances reached)",
-        event_reason: str = "Previous execution still running",
     ):
         """
         Record a skipped agent schedule execution in the database.
@@ -695,10 +692,9 @@ class SchedulerService:
         Creates an execution record with status='skipped' so it appears in
         the execution history and provides an audit trail.
 
-        `skip_reason` / `event_reason` are parameterised (#1808) so the
-        sync-freeze gate can reuse this exact audit path; the defaults preserve
-        the original max_instances wording for the EVENT_JOB_MAX_INSTANCES
-        caller.
+        `skip_reason` is parameterised (#1808) so the sync-freeze gate can
+        reuse this exact audit path; the default preserves the original
+        max_instances wording for the EVENT_JOB_MAX_INSTANCES caller.
         """
         try:
             schedule = self.db.get_schedule(schedule_id)
@@ -717,16 +713,6 @@ class SchedulerService:
 
             if execution:
                 logger.info(f"Recorded skipped execution {execution.id} for schedule {schedule.name}")
-
-                # Publish event for WebSocket notification
-                asyncio.create_task(self._publish_event({
-                    "type": "schedule_execution_skipped",
-                    "agent": schedule.agent_name,
-                    "schedule_id": schedule.id,
-                    "execution_id": execution.id,
-                    "schedule_name": schedule.name,
-                    "reason": event_reason
-                }))
             else:
                 logger.error(f"Failed to create skipped execution record for schedule {schedule_id}")
 
@@ -770,7 +756,6 @@ class SchedulerService:
             self._record_skipped_agent_schedule(
                 schedule_id,
                 skip_reason="Previous execution still running (distributed lock held)",
-                event_reason="Previous execution still running",
             )
             return
 
@@ -900,7 +885,6 @@ class SchedulerService:
             self._record_skipped_agent_schedule(
                 schedule_id,
                 skip_reason=f"Git sync frozen: {freeze_reason}",
-                event_reason="Git sync frozen (schedules paused)",
             )
             # Same projection advance as the autonomy branch (#1472) so the
             # schedule never renders a receding "Next: Nd ago" while frozen.
@@ -972,16 +956,6 @@ class SchedulerService:
         _fire_next = self._get_next_run_time(schedule.cron_expression, schedule.timezone)
         self.db.update_schedule_run_times(schedule.id, last_run_at=_fire_now, next_run_at=_fire_next)
 
-        # Broadcast execution started
-        await self._publish_event({
-            "type": "schedule_execution_started",
-            "agent": schedule.agent_name,
-            "schedule_id": schedule.id,
-            "execution_id": execution.id,
-            "schedule_name": schedule.name,
-            "triggered_by": triggered_by
-        })
-
         await self._dispatch_and_record_outcome(schedule, execution, effective_message, triggered_by)
 
     async def _apply_pre_check_gate(self, schedule, triggered_by: str) -> tuple[bool, str]:
@@ -989,11 +963,11 @@ class SchedulerService:
         triggers from the UI are an explicit operator decision and always fire.
 
         Returns ``(should_fire, effective_message)``. On a ``fire=false``
-        decision this records a skipped execution, advances the schedule run
-        times, and publishes the skipped event, then returns
-        ``(False, ...)`` — the caller aborts. A string ``message`` override is
-        threaded back as ``effective_message``. Fail-open: a ``None`` decision
-        (no hook, or the call errored) falls through to normal firing.
+        decision this records a skipped execution and advances the schedule
+        run times, then returns ``(False, ...)`` — the caller aborts. A string
+        ``message`` override is threaded back as ``effective_message``.
+        Fail-open: a ``None`` decision (no hook, or the call errored) falls
+        through to normal firing.
         """
         effective_message = schedule.message
         if triggered_by != "schedule":
@@ -1006,7 +980,7 @@ class SchedulerService:
         if not decision.get("fire", True):
             reason = decision.get("reason") or "pre-check returned fire=false"
             await self._record_gate_skip(
-                schedule, triggered_by, skip_reason=f"pre-check: {reason}", reason=reason,
+                schedule, triggered_by, skip_reason=f"pre-check: {reason}",
             )
             logger.info(
                 f"Schedule {schedule.name} skipped by pre-check: {reason}"
@@ -1022,11 +996,11 @@ class SchedulerService:
             )
         return True, effective_message
 
-    async def _record_gate_skip(self, schedule, triggered_by: str, *, skip_reason: str, reason: str) -> None:
+    async def _record_gate_skip(self, schedule, triggered_by: str, *, skip_reason: str) -> None:
         """One skip recording for every pre-dispatch gate (#454 pre-check,
-        ent#689 readiness): a skipped execution carrying the reason, the run
-        times advanced, and the skipped event — so the gates cannot drift."""
-        skipped = self.db.create_skipped_execution(
+        ent#689 readiness): a skipped execution carrying the reason and the run
+        times advanced — so the gates cannot drift."""
+        self.db.create_skipped_execution(
             schedule_id=schedule.id,
             agent_name=schedule.agent_name,
             message=schedule.message,
@@ -1040,14 +1014,6 @@ class SchedulerService:
         self.db.update_schedule_run_times(
             schedule.id, last_run_at=now, next_run_at=next_run
         )
-        await self._publish_event({
-            "type": "schedule_execution_skipped",
-            "agent": schedule.agent_name,
-            "schedule_id": schedule.id,
-            "execution_id": skipped.id if skipped else None,
-            "schedule_name": schedule.name,
-            "reason": reason,
-        })
 
     async def _apply_readiness_gate(self, schedule, triggered_by: str) -> bool:
         """Readiness gate on a companion's proactive brief (trinity-enterprise#689).
@@ -1063,7 +1029,7 @@ class SchedulerService:
         if decision is None or decision.get("fire", True) is not False:
             return True
         reason = decision.get("reason") or "held: the companion is not marked ready"
-        await self._record_gate_skip(schedule, triggered_by, skip_reason=reason, reason=reason)
+        await self._record_gate_skip(schedule, triggered_by, skip_reason=reason)
         logger.info(f"Schedule {schedule.name} held by the readiness gate: {reason}")
         return False
 
@@ -1103,7 +1069,7 @@ class SchedulerService:
         meter) and record the outcome.
 
         Handles the three result modes — fire-and-forget ``dispatched`` (#132,
-        advance run times + return, the background poll emits completion),
+        advance run times + return, the background poll follows the run),
         ``success``, and failure — plus the exception path's SCHED-ASYNC-001
         anti-overwrite guard (don't clobber an execution the backend already
         finalized).
@@ -1127,7 +1093,7 @@ class SchedulerService:
             # When status == "dispatched", the backend accepted the task and a
             # background poll task is running. Update last_run_at immediately
             # (to ensure missed schedule detection works on restart) and return.
-            # The background task will handle completion events.
+            # The background task follows the run to its terminal.
             if status == "dispatched":
                 # #1472: run-time projection already advanced at fire time in
                 # _execute_schedule_with_lock; the background poll finalizes.
@@ -1135,20 +1101,11 @@ class SchedulerService:
                     f"Schedule {schedule.name} dispatched (fire-and-forget), "
                     f"execution_id={execution.id}, background poll running"
                 )
-                return  # Background task handles completion events
+                return  # The background poll follows the run to its terminal
 
             if status == ExecutionStatus.SUCCESS:
                 # #1472: run-time projection already advanced at fire time.
                 logger.info(f"Schedule {schedule.name} executed successfully")
-
-                # Broadcast execution completed
-                await self._publish_event({
-                    "type": "schedule_execution_completed",
-                    "agent": schedule.agent_name,
-                    "schedule_id": schedule.id,
-                    "execution_id": execution.id,
-                    "status": "success"
-                })
             else:
                 # TaskExecutionService already updated the execution record with
                 # failure status. The run-time projection was advanced at fire
@@ -1162,15 +1119,6 @@ class SchedulerService:
                         logger.error(f"Schedule {schedule.name} execution failed: {error_msg}")
                 else:
                     logger.error(f"Schedule {schedule.name} execution failed (no error detail)")
-
-                await self._publish_event({
-                    "type": "schedule_execution_completed",
-                    "agent": schedule.agent_name,
-                    "schedule_id": schedule.id,
-                    "execution_id": execution.id,
-                    "status": "failed",
-                    "error": error_msg
-                })
 
         except Exception as e:
             # #1022: never persist a blank error — the cron path's only handler
@@ -1189,37 +1137,25 @@ class SchedulerService:
                     f"Schedule {schedule.name} execution {execution.id} already finalized "
                     f"as '{current.status}' — not overwriting with 'failed'"
                 )
-                actual_status = current.status
-            elif current is None or self.db.update_execution_status(
+            elif current is not None and not self.db.update_execution_status(
                 execution_id=execution.id,
                 status=ExecutionStatus.FAILED,
                 error=error_msg,
                 expected_status=ExecutionStatus.RUNNING,
                 require_unclaimed=True,
             ):
-                # Genuinely failed — nothing else owns the row
-                actual_status = ExecutionStatus.FAILED
-            else:
                 # #2514: the row is `queued` or claimed — the backend handed it
                 # to the durable queue before the dispatch call failed, and a
                 # pull worker owns it (or it finished between the read and the
-                # write). Poll it to its real terminal, which publishes the
-                # completion and runs retry/validation.
+                # write). Poll it to its real terminal, which runs
+                # retry/validation.
                 logger.info(
                     f"Schedule {schedule.name} execution {execution.id} is owned by "
                     f"the pull queue ('{current.status}') — polling for its terminal"
                 )
                 self._spawn_poll(execution.id, schedule.timeout_seconds, schedule.agent_name)
-                return
-
-            await self._publish_event({
-                "type": "schedule_execution_completed",
-                "agent": schedule.agent_name,
-                "schedule_id": schedule.id,
-                "execution_id": execution.id,
-                "status": actual_status,
-                "error": error_msg if actual_status == ExecutionStatus.FAILED else None
-            })
+            # Otherwise the run genuinely failed and nothing else owns the row:
+            # the FAILED write above landed, or the row is gone.
 
     async def _run_pre_check(self, agent_name: str, schedule=None) -> Optional[dict]:
         """Run the agent's optional pre-check hook (#454, SCHED-COND-001).
@@ -1480,8 +1416,7 @@ class SchedulerService:
             # #2391: `queued` is NOT a terminal. A pull-pilot agent's scheduled
             # row is handed to the durable queue and sits there until a worker
             # claims it back to `running`; treating that as "completed" would
-            # publish a bogus schedule_execution_completed(status=queued),
-            # classify it as a failure (anything != success is), and hand it to
+            # classify it as a failure (anything != success is) and hand it to
             # `_maybe_schedule_retry` — a duplicate run of work that is queued
             # and about to run. Poll through it like `running`.
             if execution.status not in _NON_TERMINAL_POLL_STATES:
@@ -1518,7 +1453,8 @@ class SchedulerService:
         agent_name: str,
     ):
         """
-        Background task that polls for execution completion and publishes events.
+        Background task that polls for execution completion, then runs
+        validation (on success) or schedules a retry (on failure).
 
         Issue #132: This runs as a fire-and-forget background task so the
         APScheduler job function can return immediately, preventing
@@ -1529,7 +1465,7 @@ class SchedulerService:
             timeout_seconds: Task timeout for polling deadline. None ⇒ use
                 _POLL_DEADLINE_WHEN_NULL (#913 — schedule inherits per-agent
                 value, which the scheduler does not have locally).
-            agent_name: Agent name for logging and events
+            agent_name: Agent name for logging and validation
         """
         try:
             result = await self._poll_execution_completion(
@@ -1540,19 +1476,11 @@ class SchedulerService:
             status = result.get("status", ExecutionStatus.FAILED)
             error_msg = result.get("error")
 
-            # Look up schedule_id from execution record for WebSocket event
+            # The row the validation and retry steps below act on
             execution = self.db.get_execution(execution_id)
-            schedule_id = execution.schedule_id if execution else None
 
             if status == ExecutionStatus.SUCCESS:
                 logger.info(f"Background poll: execution {execution_id} succeeded")
-                await self._publish_event({
-                    "type": "schedule_execution_completed",
-                    "agent": agent_name,
-                    "schedule_id": schedule_id,
-                    "execution_id": execution_id,
-                    "status": "success"
-                })
 
                 # VALIDATE-001: Check if validation is enabled and trigger it
                 await self._maybe_trigger_validation(
@@ -1570,15 +1498,6 @@ class SchedulerService:
                         logger.error(f"Background poll: execution {execution_id} failed: {error_msg}")
                 else:
                     logger.error(f"Background poll: execution {execution_id} failed (no error detail)")
-
-                await self._publish_event({
-                    "type": "schedule_execution_completed",
-                    "agent": agent_name,
-                    "schedule_id": schedule_id,
-                    "execution_id": execution_id,
-                    "status": "failed",
-                    "error": error_msg
-                })
 
                 # RETRY-001: Check if retry is eligible and schedule it
                 await self._maybe_schedule_retry(
@@ -1831,21 +1750,13 @@ class SchedulerService:
                     f"Retry for schedule {schedule_id} skipped: agent {agent_name} "
                     f"git sync frozen ({freeze_reason})"
                 )
-                skipped = self.db.create_skipped_execution(
+                self.db.create_skipped_execution(
                     schedule_id=schedule_id,
                     agent_name=agent_name,
                     message=message,
                     triggered_by="retry",
                     skip_reason=f"Git sync frozen: {freeze_reason}",
                 )
-                await self._publish_event({
-                    "type": "schedule_execution_skipped",
-                    "agent": agent_name,
-                    "schedule_id": schedule_id,
-                    "execution_id": skipped.id if skipped else None,
-                    "schedule_name": schedule.name,
-                    "reason": "Git sync frozen (schedules paused)",
-                })
                 await self._report_retry_dropped(failed_execution_id)
                 return
 
@@ -2342,26 +2253,6 @@ class SchedulerService:
                 WHERE id = ?
             """, (business_status, to_utc_iso(datetime.utcnow()), execution_id))
             conn.commit()
-
-    # =========================================================================
-    # Event Publishing
-    # =========================================================================
-
-    async def _publish_event(self, event: dict):
-        """
-        Publish an event to Redis for WebSocket compatibility.
-
-        Events are published to a channel that the backend can subscribe to.
-        """
-        if not config.publish_events:
-            return
-
-        try:
-            event_json = json.dumps(event)
-            self.redis.publish("scheduler:events", event_json)
-            logger.debug(f"Published event: {event['type']}")
-        except Exception as e:
-            logger.error(f"Failed to publish event: {e}")
 
     # =========================================================================
     # Status & Health

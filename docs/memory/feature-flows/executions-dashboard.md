@@ -24,7 +24,7 @@
   ├── onMounted → store.startPolling(30000)   [tears down onUnmounted / on tab leave]
   │     ├── refresh({keepLoaded: false}) → page one (limit 51) + GET /api/executions/stats
   │     └── every 30 s → refresh() → re-reads the loaded window (#3451; during a read: once, after it)
-  ├── WS agent_activity event (schedule_start / schedule_end)
+  ├── WS agent_activity event (a run's chat_start activity, at its start and at its end)
   │     └── store.handleWebSocketEvent() → refresh() [only while the panel is mounted; during a read: once, after it]
   ├── filter change → store.setFilter(key, value) → refresh({keepLoaded: false}) + the list scrolls to its top
   └── load more → store.loadMore() → GET /api/executions?offset=N&limit=51
@@ -138,9 +138,12 @@ if (data.type === 'agent_activity') {
 }
 ```
 
-Store handler refreshes on `schedule_start` / `schedule_end` activity types only, only
-while the panel is mounted (the socket feeds this store on every operator page, #3451), and
-guarded by `!loading.value` to prevent concurrent fetches on burst events.
+Store handler refreshes when a run starts or ends (#4813): every dispatch (chat, task or
+scheduled) opens a `chat_start` activity and the run's end closes that same activity, so
+`chat_start` in any state is the trigger. `schedule_start` / `schedule_end` are accepted too,
+though the backend writes neither for a run. Only while the panel is mounted (the socket
+feeds this store on every operator page, #3451); a burst during a read collapses into the
+one refresh that follows it.
 
 ## Whose Executions a Viewer Sees (trinity-enterprise#875)
 
@@ -212,7 +215,7 @@ running_count, queued_count, total_cost, success_rate, hours.
 
 **Verify**:
 - [ ] The count disappears when execution completes (WS event fires refresh) — requires live schedule run to fully verify end-to-end; WS handler logic confirmed via code review
-- [x] No manual refresh required — `handleWebSocketEvent` calls `refresh()` on `schedule_start`/`schedule_end` events
+- [x] No manual refresh required — `handleWebSocketEvent` calls `refresh()` on a run's `chat_start` activity, at its start and at its end (#4813)
 
 ### 5. Load more pagination
 **Action**:

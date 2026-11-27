@@ -1,6 +1,16 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4813_scheduler_publishes_nothing.py",
+      "feature": "#4813",
+      "added": "2026-11-27",
+      "categories": [
+        "scheduler",
+        "unit"
+      ],
+      "description": "#4813: the scheduler sends nothing on Redis. Every path that used to publish a schedule_execution_* event (a run that starts, ends inline, fails to dispatch or is finished by the background poll; a tick skipped by an overlap, the agent's pre-check, the readiness gate or a sync freeze on a retry) runs on a real SchedulerService whose Redis client records its calls, and none publishes; an AST scan of src/scheduler/ finds no publish or xadd call and no mention of the old channel; SchedulerConfig has no publish_events field and no compose file sets PUBLISH_EVENTS."
+    },
+    {
       "file": "unit/test_ent978_narrowed_read_marker.py",
       "feature": "trinity-enterprise#978",
       "added": "2026-11-24",

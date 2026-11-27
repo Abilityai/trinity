@@ -52,7 +52,6 @@ if triggered_by == "schedule":
     if decision is not None:
         if not decision.get("fire", True):
             self.db.create_skipped_execution(...)
-            self._publish_event({"type": "schedule_execution_skipped", ...})
             return
         override = decision.get("message")
         if override:
@@ -68,23 +67,11 @@ if triggered_by == "schedule":
 Skip rows carry `status='skipped'`, `error="pre-check: <reason>"`, `duration_ms=0`, `started_at == completed_at`.
 
 ## WebSocket Layer
-New event type: `schedule_execution_skipped`.
-
-```json
-{
-  "type": "schedule_execution_skipped",
-  "agent": "pr-reviewer",
-  "schedule_id": "LidXcOwtDsDuFTFGvkUqCw",
-  "execution_id": "I2DWodfpYpuJbs1TTZ42Ig",
-  "schedule_name": "PR review poll",
-  "reason": "pre-check: pre-check returned empty stdout"
-}
-```
+None. A skipped firing sends no event (#4813): the skip row is the record. Its reason (`pre-check: <reason>`) is in `error` on `GET /api/agents/{name}/schedules/{schedule_id}/executions` and `GET /api/agents/{name}/executions/{execution_id}`.
 
 ## Side Effects
 - Skipped execution row written to `schedule_executions`
 - `schedule.last_run_at` and `next_run_at` updated (so missed-schedule detection still works)
-- WebSocket event broadcast
 - No `/api/internal/execute-task` call, no backend task creation, no Claude invocation, no backlog slot acquisition
 
 ## Error Handling

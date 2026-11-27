@@ -65,7 +65,6 @@ def _service(*, original_trigger="schedule", autonomy=True, freeze=None, deliver
     svc.db.create_execution.return_value = SimpleNamespace(id="retry-1")
     svc.db.create_skipped_execution.return_value = SimpleNamespace(id="skipped-1")
     svc._call_backend_execute_task = AsyncMock(return_value={"status": "dispatched"})
-    svc._publish_event = AsyncMock()
     return svc
 
 

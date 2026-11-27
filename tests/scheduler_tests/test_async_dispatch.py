@@ -307,8 +307,7 @@ class TestStatusOverwriteGuard:
         mock_lock_manager.try_acquire_schedule_lock = MagicMock(return_value=mock_lock)
 
         # Mock backend call to raise an exception (simulating connection drop)
-        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock):
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend:
 
             mock_backend.side_effect = Exception("Server disconnected without sending a response")
 
@@ -367,8 +366,7 @@ class TestStatusOverwriteGuard:
             raise Exception("Server disconnected without sending a response")
 
         with patch.object(db_with_data, 'create_execution', side_effect=create_and_capture), \
-             patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock):
+             patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend:
 
             mock_backend.side_effect = backend_raises_after_success
 
@@ -494,8 +492,7 @@ class TestEndToEndAsyncSchedule:
                 "cost": 0.25,
             }
 
-        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock) as mock_publish:
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend:
 
             mock_backend.side_effect = mock_backend_call
 
@@ -643,8 +640,7 @@ class TestFireAndForget:
                 "execution_id": kwargs.get("execution_id"),
             }
 
-        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock):
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend:
 
             mock_backend.side_effect = mock_dispatch
 
@@ -825,8 +821,7 @@ class TestDispatchTimeoutRegression:
         mock_lock = MagicMock()
         mock_lock_manager.try_acquire_schedule_lock = MagicMock(return_value=mock_lock)
 
-        with patch("httpx.AsyncClient") as mock_client_cls, \
-             patch.object(service, "_publish_event", new_callable=AsyncMock):
+        with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             # Every POST (pre-check fail-open + dispatch) blank-stringifies.
             mock_client.post.side_effect = httpx.ReadTimeout("")

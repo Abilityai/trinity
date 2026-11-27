@@ -211,8 +211,8 @@ CREATE UNIQUE INDEX idx_schedules_webhook_token
 ## Side Effects
 
 - **Audit log**: `event_type=EXECUTION`, `event_action="task_triggered"`, `source="api"`, `actor_type="system"` — logs caller IP and whether a context body was provided. Token is truncated to first 8 chars in the `endpoint` field.
-- **WebSocket**: Same `schedule_execution_started` / `schedule_execution_completed` events as manual or cron triggers — broadcast via Redis pub/sub `scheduler:events`.
-- **Activity stream**: Same `schedule_start` activity record as other trigger paths.
+- **WebSocket**: the same `agent_activity` as a manual or cron run (#4813): the dispatch activity (`activity_type: "chat_start"`, `details.triggered_by: "webhook"`) when the run starts, and the same `activity_id` closed when it ends.
+- **Activity stream**: the same `chat_start` dispatch activity record as other trigger paths.
 
 ---
 

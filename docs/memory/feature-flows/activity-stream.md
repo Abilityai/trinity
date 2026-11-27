@@ -1038,8 +1038,9 @@ await filtered_manager.broadcast_filtered(event)
 | `agent_activity` | activity_service.py | `agent_name` |
 | `agent_started` | routers/agents.py | `name` |
 | `agent_stopped` | routers/agents.py | `name` |
-| `schedule_execution_completed` | dedicated scheduler (src/scheduler/) | `agent` |
 | `agent_collaboration` | activity_service.py | `agent_name` |
+
+A scheduled run is an `agent_activity` (`activity_type: "chat_start"`, `details.triggered_by: "schedule"`): the scheduler sends no event of its own (#4813).
 
 ### Initialization
 

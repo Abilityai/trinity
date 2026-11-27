@@ -3719,8 +3719,9 @@ to localStorage in the clear.
   not deliver to a seat are untouched. The gate sits in the scheduler just ahead of the
   #454 pre-check skip gate (so a held brief never runs the agent's hook) and asks the backend (`GET /api/internal/agents/{name}/brief-readiness`)
   for the verdict: a held brief is a `skipped` execution whose reason names the fix
-  ("Held: … runs once its owner marks it ready"), a `schedule_execution_skipped` event, and
-  advanced run times — never a failure, a retry or an alert. **Every ambiguity fails open
+  ("Held: … runs once its owner marks it ready") and advanced run times — never a failure,
+  a retry or an alert. A held brief has no live event; it is read from the schedule's
+  executions (#4813). **Every ambiguity fails open
   and is logged** (verdict call failed, stamp unreadable). `x-role.status` is
   agent-writable and is never trusted (#663). **Who is a companion (trinity-enterprise#813,
   ruling 2026-10-06):** asked only for an unstamped agent, and answered by the seat on

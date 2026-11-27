@@ -183,7 +183,6 @@ def mock_scheduler(db_with_data):
     svc = SchedulerService.__new__(SchedulerService)
     svc.db = db_with_data
     svc.lock_manager = MagicMock()
-    svc._publish_event = AsyncMock()
     svc._call_backend_execute_task = AsyncMock(
         return_value={"status": "dispatched"}
     )
@@ -203,15 +202,14 @@ class TestSchedulerPreCheckBranch:
 
         mock_scheduler._call_backend_execute_task.assert_not_called()
 
-        mock_scheduler._publish_event.assert_awaited()
-        event = mock_scheduler._publish_event.await_args.args[0]
-        assert event["type"] == "schedule_execution_skipped"
-        assert event["reason"] == "no new PRs"
-
-        skipped = db_with_data.get_execution(event["execution_id"])
-        assert skipped is not None
-        assert skipped.status == ExecutionStatus.SKIPPED
-        assert "no new PRs" in (skipped.error or "")
+        with db_with_data.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT error FROM schedule_executions "
+                "WHERE schedule_id = 'schedule-1' AND status = ?",
+                (ExecutionStatus.SKIPPED,),
+            ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["error"] == "pre-check: no new PRs"
 
     @pytest.mark.asyncio
     async def test_fire_with_override_message(self, mock_scheduler, db_with_data):
