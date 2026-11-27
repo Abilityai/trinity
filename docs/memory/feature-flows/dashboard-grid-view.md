@@ -132,7 +132,16 @@ explains the colors once — never repeated per tile.
   placement. FleetGrid reads the first-run state itself on mount; until it
   lands an unsaved board is held (`arrange` returns `null`: nothing placed,
   nothing saved), so the old default is never written over a fresh install
-  before it can be told apart.
+  before it can be told apart. **Not known is never "existing"**: when the
+  read fails, errors or times out, or answers `fresh_install: null` (the
+  backend has not recorded the verdict yet, or cannot read it; its error
+  fallback answers `null` too), the board shows the old placement through
+  `fleetGrid.defaultArrangement` but stays automatic — nothing saved — and
+  `firstRun.ensureInstallKind()` asks again on a backing-off schedule
+  (`INSTALL_KIND_RETRY_MS`, 2 s / 6 s / 18 s; the retry writes only
+  `freshInstall` + `coreAgents`). A known answer re-arranges an untouched
+  board: fresh → the first-load arrangement; existing → the old placement,
+  saved then. A person's move saves at any point.
 - Layout = per-user map `agent|widget:* → {c, r}`. **Since trinity-enterprise#413
   the record of truth is the SERVER** — `user_ui_preferences` key `grid_layout`
   (the Tiles ▾ override map is `grid_widgets`, the org Zones/Lines toggles

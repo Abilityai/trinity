@@ -236,19 +236,26 @@ def _resolve_chief_of_staff_verdict(fresh: Optional[bool]) -> Optional[bool]:
         return None
 
 
-def is_fresh_install() -> bool:
+def is_fresh_install() -> Optional[bool]:
     """Was this install's first seed run under ent#1416 (the core pair)?
 
     Read-only view of the persisted Chief of Staff verdict, for the first-run
     state the browser reads: the Grid's new first-load arrangement is for these
-    installs only. Absent (not decided yet) or unreadable reads as False, the
-    old behaviour. Never raises.
+    installs only. Three answers: True (fresh), False (existing install), and
+    None when the verdict is not known — not decided yet (the browser asked
+    before the setup pass recorded it) or unreadable. None is never folded into
+    False: the browser saves the old placement for an existing install, and a
+    saved layout always wins, so "not known" read as "existing" would keep a
+    fresh install off its first-load arrangement for good. Never raises.
     """
     try:
-        return db.get_setting_value(_CHIEF_OF_STAFF_VERDICT_KEY, None) == "true"
+        stored = db.get_setting_value(_CHIEF_OF_STAFF_VERDICT_KEY, None)
     except Exception:
         logger.debug("Fresh-install read failed (non-fatal)", exc_info=True)
-        return False
+        return None
+    if stored is None:
+        return None
+    return stored == "true"
 
 
 def _acquire_pass_lock():

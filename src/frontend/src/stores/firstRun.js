@@ -17,6 +17,11 @@
 import { defineStore } from 'pinia'
 import api from '../api'
 
+// trinity-enterprise#1416: while `fresh_install` is not known (the read failed,
+// errored or timed out, or the backend has not recorded its verdict yet) the
+// read is asked again on this backing-off schedule, then left alone.
+export const INSTALL_KIND_RETRY_MS = [2000, 6000, 18000]
+
 export const useFirstRunStore = defineStore('firstRun', {
   state: () => ({
     // `loaded` is a required term for every consumer: it is true only once the
@@ -36,7 +41,12 @@ export const useFirstRunStore = defineStore('firstRun', {
     // trinity-enterprise#1416: this install's first seed ran under the version
     // that seeds the core pair; only then does the Grid open on its new
     // first-load arrangement (an existing install keeps the old placement).
-    freshInstall: false,
+    // null = NOT KNOWN (no answer yet, a failed read, or the backend has not
+    // recorded its verdict): never read as "existing install" — the Grid then
+    // shows the old placement without saving it, and the read is retried.
+    freshInstall: null,
+    installKindRetries: 0,
+    installKindRetryPending: false,
     install: null,        // a short mark of this install: "setup closed" is remembered against it
     overlayOpen: false,   // the setup overlay has the screen (set by FirstRunOverlay)
   }),
@@ -53,17 +63,50 @@ export const useFirstRunStore = defineStore('firstRun', {
         this.demoAgent = r.data?.demo_agent ?? null
         this.brainAgent = typeof r.data?.brain_agent === 'string' ? r.data.brain_agent : null
         this.coreAgents = Array.isArray(r.data?.core_agents) ? r.data.core_agents : []
-        this.freshInstall = r.data?.fresh_install === true
+        const fresh = r.data?.fresh_install
+        this.freshInstall = fresh === true || fresh === false ? fresh : null
         this.install = r.data?.install ?? null
       } catch (e) {
         // Fail toward "not first run": a missed nudge is a non-event, whereas a
         // prompt that appears over a mature fleet is noise nobody asked for.
+        // `freshInstall` is left as it was: still not known (null) on a first
+        // read, and a kind already known is never erased by a failed re-read.
         this.firstRun = false
         console.warn('[firstRun] state unavailable:', e?.message || e)
       } finally {
         this.loading = false
         this.loaded = true
       }
+    },
+
+    /**
+     * trinity-enterprise#1416: ask again, backing off, while the install kind
+     * is not known. Called by the Grid (the one consumer of `freshInstall`)
+     * each time it shows an unsaved board for an unknown install; idempotent.
+     * A retry applies only the install-kind fields, so no other first-run
+     * consumer sees its state change under it.
+     */
+    ensureInstallKind() {
+      if (this.freshInstall !== null || this.installKindRetryPending) return
+      if (this.installKindRetries >= INSTALL_KIND_RETRY_MS.length) return
+      const delay = INSTALL_KIND_RETRY_MS[this.installKindRetries]
+      this.installKindRetries += 1
+      this.installKindRetryPending = true
+      setTimeout(async () => {
+        try {
+          const r = await api.get('/api/onboarding/first-run')
+          const fresh = r.data?.fresh_install
+          if (fresh === true || fresh === false) {
+            if (Array.isArray(r.data?.core_agents)) this.coreAgents = r.data.core_agents
+            this.freshInstall = fresh
+          }
+        } catch (e) {
+          console.warn('[firstRun] install kind still unavailable:', e?.message || e)
+        } finally {
+          this.installKindRetryPending = false
+        }
+        this.ensureInstallKind()
+      }, delay)
     },
   },
 })

@@ -10,7 +10,7 @@
  * the network mocked. jsdom has no layout, so the canvas size is given through
  * clientWidth/clientHeight and the fit is read back from the world transform.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 import { nextTick } from 'vue'
@@ -207,5 +207,74 @@ describe('FleetGrid first load (ent#1416)', () => {
     expect(store.layoutIsAuto).toBe(true)
     expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
     expect(layoutPuts()).toEqual([])
+  })
+
+  // Validation vrtwKN9y0mZ42UNpVdCSHQ: "not known" is never "existing install".
+  // A failed read, or the backend answering unknown (asked before the setup
+  // pass recorded its verdict), shows the old placement WITHOUT saving it and
+  // asks again; only a known answer or a person's move saves a layout.
+  describe('when the install kind is not known', () => {
+    const layoutPuts = () => axiosMock.put.mock.calls.filter(([url]) => String(url).endsWith('/grid_layout'))
+    const roster = [SYSTEM, BRAIN, CHIEF]
+    const old = () => defaultLayout(roster.map((a) => a.name), new Set(['trinity-system']))
+    const firstRunReads = () => axiosMock.get.mock.calls.filter(([url]) => String(url).includes('/onboarding/first-run')).length
+
+    beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }) })
+    afterEach(() => { vi.useRealTimers() })
+
+    it('a failed first-run read shows the old placement and saves nothing to /grid_layout', async () => {
+      firstRunRead = () => Promise.reject(new Error('Network Error'))
+      await mountGrid(roster, ['cornelius'])
+      const store = useFleetGridStore()
+
+      for (const a of roster) expect(store.layout[a.name]).toEqual(old()[a.name])
+      expect(store.layoutIsAuto).toBe(true)   // shown, not saved
+
+      await vi.advanceTimersByTimeAsync(120000)   // every retry, and any debounced save
+      expect(firstRunReads()).toBeGreaterThan(1)  // it asked again
+      expect(layoutPuts()).toEqual([])
+      expect(store.layoutIsAuto).toBe(true)
+    })
+
+    it('retries the read and opens on the first-load arrangement once it is known', async () => {
+      let calls = 0
+      firstRunRead = () => (++calls === 1
+        ? Promise.reject(new Error('timeout of 30000ms exceeded'))
+        : Promise.resolve({ data: { fresh_install: true }, headers: {} }))
+      await mountGrid(roster)
+      const store = useFleetGridStore()
+      expect(store.layout.corbin).toEqual(old().corbin)
+
+      await vi.advanceTimersByTimeAsync(120000)
+      expect(store.layoutIsAuto).toBe(true)
+      expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
+      expect(store.layout.cornelius).toEqual({ c: 0, r: 1 })
+      expect(layoutPuts()).toEqual([])
+    })
+
+    it('the backend answering unknown saves nothing; a later "existing install" answer saves the old placement', async () => {
+      let calls = 0
+      firstRunRead = () => Promise.resolve({ data: { fresh_install: ++calls === 1 ? null : false }, headers: {} })
+      await mountGrid(roster, ['cornelius'])
+      const store = useFleetGridStore()
+      expect(store.layoutIsAuto).toBe(true)
+      expect(layoutPuts()).toEqual([])
+
+      await vi.advanceTimersByTimeAsync(120000)
+      expect(store.layoutIsAuto).toBe(false)
+      for (const a of roster) expect(store.layout[a.name]).toEqual(old()[a.name])
+      expect(layoutPuts().length).toBe(1)
+    })
+
+    it('a tile the person moves is saved even while the install kind is unknown', async () => {
+      firstRunRead = () => Promise.reject(new Error('Network Error'))
+      await mountGrid(roster, ['cornelius'])
+      const store = useFleetGridStore()
+      store.moveTile('corbin', 6, 3)
+      await vi.advanceTimersByTimeAsync(120000)
+      expect(store.layoutIsAuto).toBe(false)
+      expect(layoutPuts().length).toBe(1)
+      expect(store.layout.corbin).toEqual({ c: 6, r: 3 })
+    })
   })
 })

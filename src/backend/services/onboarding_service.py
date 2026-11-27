@@ -137,6 +137,7 @@ def get_first_run_state(current_user: User) -> dict:
             "brain_agent": CORNELIUS_AGENT_NAME if CORNELIUS_AGENT_NAME in seeded_present else None,
             "core_agents": [n for n in CORE_AGENTS if n in seeded_present],
             # ent#1416: the Grid's new first-load arrangement is for these only.
+            # None until the setup pass has recorded the verdict.
             "fresh_install": is_fresh_install(),
             "install": _install_marker(),
         }
@@ -148,5 +149,7 @@ def get_first_run_state(current_user: User) -> dict:
             "own_agent_count": 0,
             "demo_agent": None,
             "core_agents": [],
-            "fresh_install": False,
+            # ent#1416: not known, never "existing install" (the browser would
+            # save the old placement over a fresh install for good).
+            "fresh_install": None,
         }

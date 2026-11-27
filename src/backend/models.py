@@ -6069,8 +6069,10 @@ class FirstRunState(BaseModel):
     # trinity-enterprise#1416: this install's first seed ran under the version
     # that seeds the core pair (the persisted Chief of Staff verdict). Only then
     # does the Grid open on the new first-load arrangement; an existing install
-    # with nothing saved keeps the old default placement.
-    fresh_install: bool = False
+    # with nothing saved keeps the old default placement. None = not known yet
+    # (the verdict is not recorded, or unreadable): the browser then shows the
+    # old placement WITHOUT saving it and asks again.
+    fresh_install: Optional[bool] = None
     # A short opaque mark of this install: the browser remembers "setup closed"
     # against it, so a fresh install at the same address offers setup again.
     install: Optional[str] = None

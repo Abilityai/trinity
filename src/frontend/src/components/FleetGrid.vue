@@ -520,7 +520,10 @@ function isCellBlocked(c, r) {
 // (`fresh_install` on the first-run read); an existing install with nothing
 // saved (a new teammate, a new browser) keeps the old default placement. Until
 // that read lands nothing is placed or saved, so the old default is never
-// written over a fresh install that has not been told apart yet.
+// written over a fresh install that has not been told apart yet. When the read
+// fails or answers "not known" (`freshInstall === null`), the old placement is
+// SHOWN but kept automatic — not saved — while the store asks again; it is
+// saved only once the answer is known or the person moves a tile.
 const firstRunStore = useFirstRunStore()
 function arrangeFirstLoad(widgetKeys) {
   const roster = unfilteredAgents.value
@@ -534,7 +537,11 @@ function syncLayoutFromAgents() {
   const systemNames = new Set(props.agents.filter((a) => a.is_system).map((a) => a.name))
   let arrange = null
   if (!firstRunStore.loaded) arrange = waitForInstallKind
-  else if (firstRunStore.freshInstall) arrange = arrangeFirstLoad
+  else if (firstRunStore.freshInstall === true) arrange = arrangeFirstLoad
+  else if (firstRunStore.freshInstall !== false) {
+    arrange = () => gridStore.defaultArrangement(names, systemNames, newcomerOriginFor, isCellBlocked)
+    firstRunStore.ensureInstallKind()   // not known: shown unsaved, and asked again
+  }
   gridStore.syncLayout(names, systemNames, newcomerOriginFor, isCellBlocked, arrange)
   if (arrange === waitForInstallKind && !Object.keys(gridStore.layout).length) heldForInstallKind = true
 }
@@ -546,6 +553,18 @@ watch(
   (loaded) => {
     if (!loaded || !heldForInstallKind) return
     heldForInstallKind = false
+    syncLayoutFromAgents()
+    nextTick(fitBoard)
+  }
+)
+
+// A retried read that settles the install kind re-arranges a board nobody has
+// arranged yet: fresh → the first-load arrangement; existing → the old
+// placement, now saved.
+watch(
+  () => firstRunStore.freshInstall,
+  () => {
+    if (!gridStore.layoutIsAuto) return
     syncLayoutFromAgents()
     nextTick(fitBoard)
   }

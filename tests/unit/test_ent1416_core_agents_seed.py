@@ -475,8 +475,29 @@ class TestFreshInstallMark:
         assert install.settings.get("chief_of_staff_fresh") == "false"
         assert self._state(monkeypatch, install.settings) is False
 
-    def test_no_verdict_yet_is_not_fresh(self, monkeypatch):
-        assert self._state(monkeypatch, _Settings()) is False
+    def test_no_verdict_yet_is_unknown_not_existing(self, monkeypatch):
+        """Asked before the setup pass has recorded the verdict: the answer is
+        "not known yet" (None), never False — a False here makes the browser
+        save the old placement over a fresh install for good."""
+        assert self._state(monkeypatch, _Settings()) is None
+
+    def test_an_unreadable_verdict_is_unknown(self, monkeypatch):
+        class _Broken(_Settings):
+            def get(self, key, default=None):
+                if key == "chief_of_staff_fresh":
+                    raise RuntimeError("db down")
+                return super().get(key, default)
+        assert self._state(monkeypatch, _Broken()) is None
+
+    def test_the_error_fallback_answers_unknown(self, monkeypatch):
+        import services.onboarding_service as onb
+        from models import FirstRunState, User
+
+        def boom(*_a, **_kw):
+            raise RuntimeError("db down")
+        monkeypatch.setattr(onb, "get_seeded_agent_names", boom)
+        state = onb.get_first_run_state(User(id=1, username="admin", role="admin"))
+        assert FirstRunState(**state).fresh_install is None
 
 
 class TestRouterMcpHeader:

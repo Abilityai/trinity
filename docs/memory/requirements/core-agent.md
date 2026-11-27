@@ -2586,7 +2586,10 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
     stays readable with the assistant open) until the first pan/zoom, which saves
     the board. A saved layout always wins. This arrangement is for **fresh installs only** (first-run
     state `fresh_install`, read from the persisted verdict); a person with no saved layout on an existing
-    install keeps the old default placement.
+    install keeps the old default placement. When the answer is not known (the read failed, or the
+    verdict is not recorded yet — the backend answers `null`, never `false`), the old placement is shown
+    without being saved and the read is retried; a layout is saved only once the answer is known or the
+    person moves a tile.
   - **Upgrades keep their examples**: an install seeded with the starter fleet before this change keeps
     those agents as examples. The stored seed record holds the system name and a count, so the names are
     derived from the bundled manifest when the recorded system is its system.

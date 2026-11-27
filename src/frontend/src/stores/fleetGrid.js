@@ -369,6 +369,33 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     prefs.flushNow({ keepalive })
   }
 
+  function _healLayout(saved, agentNames, originFor, isCellBlocked, widgetKeys) {
+    // Seed any enabled tile that has never been placed into the band ABOVE the
+    // fleet, consulting the caller's veto for cells inside a department frame
+    // (#305 interlock D). Seeding BEFORE normalize means the tile arrives with
+    // a real position rather than being treated as a homeless newcomer and
+    // dropped at the board origin, on top of the agents.
+    const unplaced = widgetKeys.filter((k) => !saved[k])
+    if (unplaced.length) {
+      saved = { ...saved, ...seedWidgetCells(saved, unplaced, isCellBlocked) }
+    }
+    const { layout: healed, changed } = normalizeLayout(saved, agentNames, originFor, widgetKeys)
+    return { layout: healed, changed, unplaced }
+  }
+
+  /**
+   * trinity-enterprise#1416: the old default placement as an ARRANGEMENT —
+   * exactly what the reconcile below would place with nothing saved, but
+   * returned rather than saved. For a board whose install kind is not known
+   * yet: shown now, saved only once the answer is known or the person moves a
+   * tile.
+   */
+  function defaultArrangement(agentNames, systemNames = new Set(), originFor = null, isCellBlocked = null) {
+    return _healLayout(
+      defaultLayout(agentNames, systemNames), agentNames, originFor, isCellBlocked, activeWidgetKeys.value
+    ).layout
+  }
+
   /**
    * Reconcile the layout with the live agent list (self-healing, #47 AC):
    * new agents take the first free cell near the origin, deleted agents
@@ -401,30 +428,22 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
       layoutIsAuto.value = true
       return
     }
+    // An automatic board with nothing saved that now takes this path is one
+    // whose install kind just became known as "existing": its placement is
+    // the old default, which is saved now (ent#1416).
+    const settledFromAuto = layoutIsAuto.value && Object.keys(_loadSavedRaw()).length === 0
     layoutIsAuto.value = false
     let saved = { ..._loadSavedRaw(), ...layout.value }
     if (Object.keys(saved).length === 0) {
       saved = defaultLayout(agentNames, systemNames)
     }
-    // Seed any enabled tile that has never been placed into the band ABOVE the
-    // fleet, consulting the caller's veto for cells inside a department frame
-    // (#305 interlock D). Seeding BEFORE normalize means the tile arrives with
-    // a real position rather than being treated as a homeless newcomer and
-    // dropped at the board origin, on top of the agents.
-    const unplaced = widgetKeys.filter((k) => !saved[k])
-    if (unplaced.length) {
-      saved = { ...saved, ...seedWidgetCells(saved, unplaced, isCellBlocked) }
-    }
-    const { layout: healed, changed } = normalizeLayout(
-      saved,
-      agentNames,
-      originFor,
-      widgetKeys
+    const { layout: healed, changed, unplaced } = _healLayout(
+      saved, agentNames, originFor, isCellBlocked, widgetKeys
     )
     layout.value = healed
     // A reconcile-born write: if it 409s against a newer save from another
     // tab, the engine adopts the server record rather than clobbering it.
-    if (changed || unplaced.length) _persist('reconcile')
+    if (changed || unplaced.length || settledFromAuto) _persist('reconcile')
   }
 
   /** Drop a tile on `(c, r)`; an occupied target swaps with the dragged tile. */
@@ -881,6 +900,7 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
   return {
     layout,
     layoutIsAuto,
+    defaultArrangement,
     layoutSource,
     layoutGeneration,
     loadPreferences,
