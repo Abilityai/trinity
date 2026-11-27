@@ -2553,6 +2553,36 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   already fully OSS (flag-gated, not entitlement-gated), so no de-gating was needed.
 - **Flow**: `docs/memory/feature-flows/cornelius-default-agent.md`
 
+## Core Agents on a Fresh Install — the Company Brain and a Chief of Staff (trinity-enterprise#1416)
+
+- **Status**: ✅ Implemented (2026-11-27)
+- **Description**: A fresh install seeds two agents of the person's own — the Company Brain (`cornelius`,
+  above) and a Chief of Staff (`corbin`, from the public template `github:Abilityai/corbin`) — and opens
+  on a Grid that shows them together. The three starter-fleet example agents are no longer deployed
+  unless `TRINITY_DEFAULT_SYSTEM_MANIFEST` names a manifest (`bundled`, or a path); their templates
+  stay in the Library.
+- **Key Features**:
+  - **Same seeder, second instance**: `cornelius_agent_service` is parametrised; `corbin` seeds under its
+    own flag and lock with the same tokenless, pull-only rules.
+  - **Fresh installs only**: the Chief of Staff verdict (`chief_of_staff_fresh`) is decided once, before
+    Cornelius runs, and is false on any install whose first seed finished under an earlier version — an
+    upgrade is never given a new agent. Persisting the verdict lets a failed fetch retry on a later boot
+    without the (by then seeded) Brain reading the install as established.
+  - **A miss never costs the Brain**: a failed create raises `system_seed:chief-of-staff-failed` (the
+    Cornelius-failure shape); the fixed name plus the create path's 409 keep the retry from duplicating.
+  - **Organized on creation only**: on a pass that created either agent, both get `dept-headquarters`,
+    Cornelius gets `reports-to-corbin`, and `corbin → cornelius` is permitted. A later boot never
+    re-applies these, so a person's own changes stand.
+  - **Memory ceiling 2g each**, passed to the create path; `crud._apply_memory_ceiling` caps a template's
+    declaration and never raises it.
+  - **Never examples**: first-run state carries `core_agents`; the frontend keeps them on the Grid and in
+    what the assistant is told, and the ent#1408 Connect-Claude card offers both.
+  - **Grid first load**: with nothing saved the layout is automatic and persists nothing — fleet tiles in
+    one row above the agents, the core pair side by side in their group, other agents next to them, the
+    system agent one column apart — and it is fitted to the window until the first pan/zoom, which saves
+    the board. A saved layout always wins.
+- **Flow**: `docs/memory/feature-flows/cornelius-default-agent.md` → Chief of Staff
+
 ### 5.23 Workspace — agents at the centre: the pinned Main chat, Reset, and files onto the conversation (trinity-enterprise#523, trinity-enterprise#524)
 
 - **Status**: ✅ Implemented · **ID**: `WORKSPACE_AGENTS_AT_CENTRE`
