@@ -204,3 +204,58 @@ def test_a_live_pid_with_an_unreadable_cgroup_is_still_foreign(monkeypatch):
         child.kill(); child.wait(timeout=10)
     refused = sg.consume_violations()
     assert len(refused) == 1 and "outside the session cgroup" in refused[0]
+
+
+def _exits_during_the_cgroup_read(monkeypatch, victim: subprocess.Popen) -> None:
+    """Make `victim` exit at the exact moment the guard reads its cgroup: alive
+    for the liveness read that came before, gone for the read itself."""
+    real_cg = sg._cgroup_of
+
+    def _cgroup_of(pid):
+        if pid == victim.pid and victim.poll() is None:
+            sg._real_kill(victim.pid, signal.SIGKILL)
+            victim.wait(timeout=10)              # reaped: /proc/<pid> is gone
+        return real_cg(pid)
+    monkeypatch.setattr(sg, "_cgroup_of", _cgroup_of)
+
+
+def test_a_member_that_exits_between_the_liveness_and_cgroup_reads_is_not_foreign(monkeypatch):
+    """#4138: the remaining window after the mid-walk fix above. The member
+    passes `_is_gone` (it is alive), exits, and its cgroup is then unreadable.
+    The group was entirely ours; the kill must go through."""
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+    )
+    racer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    pgid = os.getpgid(child.pid)
+    real_walk = sg._pgid_members
+    monkeypatch.setattr(sg, "_pgid_members", lambda g: real_walk(g) + [racer.pid] if g == pgid else real_walk(g))
+    _exits_during_the_cgroup_read(monkeypatch, racer)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+        child.wait(timeout=10)
+    finally:
+        monkeypatch.undo()
+        for proc in (child, racer):
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+    assert racer.returncode is not None, "the race was not exercised"
+    assert sg.consume_violations() == []
+
+
+def test_a_pid_that_exits_during_the_cgroup_read_is_not_refused(monkeypatch):
+    """The same window on `os.kill`: the real call answers ESRCH, as it does
+    for any pid that is gone."""
+    racer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    _exits_during_the_cgroup_read(monkeypatch, racer)
+    try:
+        with pytest.raises(ProcessLookupError):
+            os.kill(racer.pid, signal.SIGTERM)
+    finally:
+        monkeypatch.undo()
+        if racer.poll() is None:
+            racer.kill()
+            racer.wait(timeout=10)
+    assert sg.consume_violations() == []
+
