@@ -16,11 +16,16 @@ import secrets
 from typing import List, Optional
 
 from sqlalchemy import select, insert, update, delete, and_, or_
+from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine
 from .tables import agent_event_subscriptions, agent_events
 from db_models import EventSubscription, EventSubscriptionCreate, AgentEvent
 from utils.helpers import utc_now_iso
+
+
+class DuplicateEventSubscription(Exception):
+    """A (subscriber_agent, source_agent, event_type) subscription already exists."""
 
 
 class EventSubscriptionOperations:
@@ -40,20 +45,32 @@ class EventSubscriptionOperations:
         sub_id = f"esub_{secrets.token_urlsafe(12)}"
         now = utc_now_iso()
 
-        with get_engine().begin() as conn:
-            conn.execute(
-                insert(agent_event_subscriptions).values(
-                    id=sub_id,
-                    subscriber_agent=subscriber_agent,
-                    source_agent=data.source_agent,
-                    event_type=data.event_type,
-                    target_message=data.target_message,
-                    enabled=1 if data.enabled else 0,
-                    created_at=now,
-                    updated_at=now,
-                    created_by=created_by,
+        try:
+            with get_engine().begin() as conn:
+                conn.execute(
+                    insert(agent_event_subscriptions).values(
+                        id=sub_id,
+                        subscriber_agent=subscriber_agent,
+                        source_agent=data.source_agent,
+                        event_type=data.event_type,
+                        target_message=data.target_message,
+                        enabled=1 if data.enabled else 0,
+                        created_at=now,
+                        updated_at=now,
+                        created_by=created_by,
+                    )
                 )
+        except IntegrityError as e:
+            t = agent_event_subscriptions
+            stmt = select(t.c.id).where(
+                t.c.subscriber_agent == subscriber_agent,
+                t.c.source_agent == data.source_agent,
+                t.c.event_type == data.event_type,
             )
+            with get_engine().connect() as conn:
+                if conn.execute(stmt).first():
+                    raise DuplicateEventSubscription() from e
+            raise
 
         return EventSubscription(
             id=sub_id,

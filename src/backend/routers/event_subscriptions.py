@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from models import EmitEventRequest
 
 from database import db
+from db.event_subscriptions import DuplicateEventSubscription
 from dependencies import get_current_user, AuthorizedAgent, OwnedAgent, agent_principal_name, assert_agent_owner, assert_agent_access, assert_own_agent, is_person_principal, principal_reach, _SCOPE_ABSENT
 from db_models import (
     User,
@@ -190,13 +191,11 @@ async def create_event_subscription(
             data=data,
             created_by=current_user.username,
         )
-    except Exception as e:
-        if "UNIQUE constraint" in str(e):
-            raise HTTPException(
-                status_code=409,
-                detail=f"Subscription already exists for {name} -> {data.source_agent}:{data.event_type}",
-            )
-        raise
+    except DuplicateEventSubscription:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Subscription already exists for {name} -> {data.source_agent}:{data.event_type}",
+        )
 
     logger.info(
         f"[EVT-001] Created subscription {subscription.id}: "
