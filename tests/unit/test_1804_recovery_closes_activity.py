@@ -712,10 +712,11 @@ class TestShutdownHandlersCloseActivity:
         task_service = MagicMock(execute_task=AsyncMock(side_effect=asyncio.CancelledError()))
         request = MagicMock(execution_id="exec-shutdown-2", agent_name="test-agent")
 
-        with (
-            patch.object(internal, "db", mock_db),
-            patch.object(internal, "activity_service", mock_activity),
-        ):
+        # #4408: both shutdown handlers share one writer, which lives in the
+        # service. Patched through the function the router holds, so a second
+        # import of the service by another test module cannot make this miss.
+        writer_globals = internal.settle_cancelled_dispatch.__globals__
+        with patch.dict(writer_globals, {"db": mock_db, "activity_service": mock_activity}):
             with pytest.raises(asyncio.CancelledError):
                 _await(internal._execute_task_internal_background(task_service, request))
 
@@ -739,10 +740,11 @@ class TestShutdownHandlersCloseActivity:
         task_service = MagicMock(execute_task=AsyncMock(side_effect=asyncio.CancelledError()))
         request = MagicMock(execution_id="exec-shutdown-3", agent_name="test-agent")
 
-        with (
-            patch.object(internal, "db", mock_db),
-            patch.object(internal, "activity_service", mock_activity),
-        ):
+        # #4408: both shutdown handlers share one writer, which lives in the
+        # service. Patched through the function the router holds, so a second
+        # import of the service by another test module cannot make this miss.
+        writer_globals = internal.settle_cancelled_dispatch.__globals__
+        with patch.dict(writer_globals, {"db": mock_db, "activity_service": mock_activity}):
             with pytest.raises(asyncio.CancelledError):
                 _await(internal._execute_task_internal_background(task_service, request))
 

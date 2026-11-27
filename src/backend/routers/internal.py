@@ -28,7 +28,7 @@ from models import (
 )
 from services import execution_attribution  # ent#1105
 from services.activity_service import activity_service
-from services.task_execution_service import get_task_execution_service
+from services.task_execution_service import get_task_execution_service, settle_cancelled_dispatch
 from services.skill_gate_errors import SkillGateError
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services import (
@@ -681,39 +681,14 @@ async def _execute_task_internal_background(
         )
     except asyncio.CancelledError:
         # Python 3.11+: CancelledError is BaseException, bypasses except Exception.
-        # On backend shutdown, in-flight background tasks are cancelled; close the
-        # record synchronously so cleanup_service doesn't inflate duration (#767).
-        if request.execution_id:
-            try:
-                existing = db.get_execution(request.execution_id)
-                if existing and existing.status not in (
-                    TaskExecutionStatus.SUCCESS,
-                    TaskExecutionStatus.FAILED,
-                    TaskExecutionStatus.CANCELLED,
-                ):
-                    won = db.update_execution_status(
-                        execution_id=request.execution_id,
-                        status=TaskExecutionStatus.FAILED,
-                        result=ExecutionResult(
-                            error="Execution cancelled (backend shutdown)",
-                        ),
-                    )
-                    logger.info(f"Updated execution {request.execution_id} to FAILED on cancel")
-                    # #1804: the second backend-shutdown terminal writer (the
-                    # first is task_execution_service's own CancelledError
-                    # handler). Both wrote the execution terminal and left the
-                    # paired activity open — and because the row is now `failed`,
-                    # startup recovery never revisits it, so nothing but the
-                    # 120-minute duration-fabricating backstop ever closed it.
-                    # No activity_id in scope here; the helper looks it up.
-                    if won:
-                        await activity_service.close_execution_activity(
-                            request.execution_id,
-                            TaskExecutionStatus.FAILED,
-                            error="Execution cancelled (backend shutdown)",
-                        )
-            except Exception as db_err:
-                logger.error(f"Failed to update execution status on cancel: {db_err}")
+        # The second place a shutdown cancellation lands (the first is
+        # execute_task's own handler), for a cancel that arrives outside that
+        # function's try. One rule for both (#4408): a turn the agent already
+        # holds stays `running` for the result path; one that never reached the
+        # agent is closed now, with its activity (#767, #1804).
+        outcome = await settle_cancelled_dispatch(request.execution_id)
+        if outcome == "failed":
+            logger.info(f"Updated execution {request.execution_id} to FAILED on cancel")
         raise
 
     except SkillGateError as e:

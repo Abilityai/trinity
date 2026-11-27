@@ -257,8 +257,8 @@ the close.
 | `_write_terminal_and_gate` (won) | its own terminal |
 | `_write_terminal_and_gate` (**lost**) | the persisted row's terminal (`superseded by …`) — this branch did not exist |
 | `apply_result` (success / failure) | its own terminal; lost SUCCESS reconciles (#1332) |
-| `execute_task` `except asyncio.CancelledError` | FAILED (backend shutdown) |
-| `routers/internal._execute_task_internal_background` same | FAILED (backend shutdown) |
+| `execute_task` `except asyncio.CancelledError` | FAILED (backend shutdown), only for a turn that never reached the agent. Both handlers call `settle_cancelled_dispatch` (#4408): a turn the agent already holds (the row carries the dispatch marker) is left `running`, and whoever settles it later closes the activity |
+| `routers/internal._execute_task_internal_background` same | same writer, same rule |
 | watchdog `_recover_execution` | FAILED, before the WS watchdog event |
 | startup `_recover_execution` | FAILED — its CAS bool used to be **discarded** |
 | the two bulk sweeps | FAILED, batched |

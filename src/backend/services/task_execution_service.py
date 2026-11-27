@@ -1452,6 +1452,77 @@ def _circuit_breaker_error(transport_open: bool, dispatch_open: bool) -> str:
 # Service
 # ---------------------------------------------------------------------------
 
+
+SHUTDOWN_CANCEL_ERROR = "Execution cancelled (backend shutdown)"
+
+
+async def settle_cancelled_dispatch(
+    execution_id: Optional[str], *, activity_id: Optional[str] = None,
+) -> str:
+    """Decide what a cancelled dispatch writes to its execution row (#4408).
+
+    A dispatch coroutine is cancelled when the backend shuts down (and when a
+    waiting caller goes away). Cancelling it does not stop the agent: the turn
+    keeps running in the agent container and can finish successfully.
+
+    - **The turn was handed to the agent** (`claude_session_id` carries the
+      dispatch marker `mark_execution_dispatched` writes just before the agent
+      call): nothing is written. The row stays `running` and whoever observes
+      the real outcome settles it: the result callback or the lease reaper for
+      an async dispatch, and for a sync one the startup recovery and the
+      watchdog, which ask the agent and claim a terminal it retained (#2944).
+      Each of those closes the dispatch activity when it wins the row (#1804).
+      Writing FAILED here recorded a failure for work that then completed, and
+      a schedule with retries ran the same turn a second time beside it.
+    - **The turn never reached the agent**: FAILED is written now, and the
+      activity closed if the write won, so no sweep closes the row later with a
+      fabricated duration (#767, #1804).
+
+    Returns ``"left_running"``, ``"failed"``, ``"already_terminal"``,
+    ``"not_found"`` or ``"error"``. Never raises: it runs inside a cancellation
+    handler that must go on to re-raise.
+    """
+    if not execution_id:
+        return "not_found"
+    try:
+        existing = db.get_execution(execution_id)
+        if not existing:
+            return "not_found"
+        if existing.status in (
+            TaskExecutionStatus.SUCCESS,
+            TaskExecutionStatus.FAILED,
+            TaskExecutionStatus.CANCELLED,
+        ):
+            return "already_terminal"
+        marker = getattr(existing, "claude_session_id", None)
+        if isinstance(marker, str) and marker:
+            logger.info(
+                "[TaskExecService] Dispatch of %s cancelled after the turn reached "
+                "the agent; leaving the row %s for the result path to settle",
+                execution_id, existing.status,
+            )
+            return "left_running"
+        won = db.update_execution_status(
+            execution_id=execution_id,
+            status=TaskExecutionStatus.FAILED,
+            result=ExecutionResult(error=SHUTDOWN_CANCEL_ERROR),
+        )
+        if won:
+            await activity_service.close_execution_activity(
+                execution_id,
+                TaskExecutionStatus.FAILED,
+                error=SHUTDOWN_CANCEL_ERROR,
+                activity_id=activity_id,
+            )
+        return "failed"
+    except Exception as e:  # noqa: BLE001 — must not mask the cancellation
+        logger.error(
+            "[TaskExecService] Could not settle cancelled dispatch %s: %s",
+            execution_id, e,
+        )
+        return "error"
+
+
 @dataclass
 class _AttemptState:
     """Mutable call-attempt bookkeeping for one execute_task turn (#2314).
@@ -2186,39 +2257,10 @@ class TaskExecutionService:
 
         except asyncio.CancelledError:
             # Python 3.11+: CancelledError is BaseException, bypasses except Exception.
-            # On backend shutdown, background tasks are cancelled; close the record
-            # immediately so cleanup_service doesn't inflate duration (#767).
-            if execution_id:
-                try:
-                    existing = db.get_execution(execution_id)
-                    if existing and existing.status not in (
-                        TaskExecutionStatus.SUCCESS,
-                        TaskExecutionStatus.FAILED,
-                        TaskExecutionStatus.CANCELLED,
-                    ):
-                        won = db.update_execution_status(
-                            execution_id=execution_id,
-                            status=TaskExecutionStatus.FAILED,
-                            result=ExecutionResult(
-                                error="Execution cancelled (backend shutdown)",
-                            ),
-                        )
-                        # #1804: #767 closed the execution record here so the
-                        # cleanup sweep wouldn't inflate ITS duration — but left
-                        # the paired activity open, so the 120-minute activity
-                        # backstop inflated that instead. Worse: the row is now
-                        # `failed`, so startup recovery (which scans `running`)
-                        # skips it forever and the activity orphans permanently.
-                        # This is the issue's own reproduction step.
-                        if won:
-                            await activity_service.close_execution_activity(
-                                execution_id,
-                                TaskExecutionStatus.FAILED,
-                                error="Execution cancelled (backend shutdown)",
-                                activity_id=activity_id,
-                            )
-                except Exception:
-                    pass
+            # On backend shutdown background tasks are cancelled. #4408: a turn
+            # the agent already holds is left for the result path to settle; a
+            # turn that never reached the agent is closed at once (#767, #1804).
+            await settle_cancelled_dispatch(execution_id, activity_id=activity_id)
             raise
 
         finally:
