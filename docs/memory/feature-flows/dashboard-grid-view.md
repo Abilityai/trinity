@@ -112,13 +112,17 @@ explains the colors once — never repeated per tile.
   the user (no server record, no per-user cache), `fleetGrid.syncLayout(…,
   arrange)` shows `utils/gridOrg.js::firstLoadLayout` — info tiles in one row
   directly above the agents (row −1), the core agents' department block first
-  (the Chief of Staff, then the Company Brain, side by side under
-  `dept-headquarters`, joined by the `reports-to-corbin` line), other
+  (the Chief of Staff with the Company Brain directly below, under
+  `dept-headquarters`, so the `reports-to-corbin` line is one short straight
+  arrow down the gap — side by side, #2066 routing drew a loop), other
   departments, then agents in no department (a newly built agent lands beside
   the pair), one empty column, then the system agent. It is recomputed on every
   reconcile and **persists nothing** (`layoutIsAuto`), so a reconcile never
   passes for a person's layout; FleetGrid keeps it fitted to the canvas (agent
-  arrivals, assistant panel open/close) until the person pans or zooms. The
+  arrivals, assistant panel open/close) until the person pans or zooms, with
+  `firstLoadFit`: placed from the top with 28px padding, framed on the agents
+  and the tiles row above them — tiles wider than the agents run on to the
+  right (reached by panning) instead of setting the zoom. The
   first gesture (`_persist()`: drag, tidy, group, block move) saves the board,
   and from then on the saved layout wins and newcomers are placed by
   `normalizeLayout` as before. A record already on the server or in the

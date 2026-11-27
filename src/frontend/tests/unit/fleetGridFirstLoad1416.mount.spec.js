@@ -52,6 +52,7 @@ globalThis.ResizeObserver = class {
 import FleetGrid from '@/components/FleetGrid.vue'
 import { useFleetGridStore } from '@/stores/fleetGrid'
 import { useFirstRunStore } from '@/stores/firstRun'
+import { cellXY } from '@/utils/gridLayout'
 
 const SYSTEM = { name: 'trinity-system', status: 'running', is_system: true, tags: [] }
 const CHIEF = { name: 'corbin', status: 'running', tags: ['dept-headquarters'] }
@@ -92,14 +93,14 @@ function worldTransform(wrapper) {
 }
 
 describe('FleetGrid first load (ent#1416)', () => {
-  it('arranges the core pair side by side and the system agent apart', async () => {
+  it('stacks the Brain below the Chief of Staff and sets the system agent apart', async () => {
     await mountGrid([SYSTEM, BRAIN, CHIEF])
     const store = useFleetGridStore()
 
     expect(store.layoutIsAuto).toBe(true)
     expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
-    expect(store.layout.cornelius).toEqual({ c: 1, r: 0 })
-    expect(store.layout['trinity-system']).toEqual({ c: 3, r: 0 })
+    expect(store.layout.cornelius).toEqual({ c: 0, r: 1 })
+    expect(store.layout['trinity-system']).toEqual({ c: 2, r: 0 })
     // the info tiles sit in the row directly above
     const tiles = Object.entries(store.layout).filter(([k]) => k.startsWith('widget:'))
     expect(tiles.length).toBeGreaterThan(0)
@@ -110,7 +111,7 @@ describe('FleetGrid first load (ent#1416)', () => {
     await mountGrid([SYSTEM, BRAIN, CHIEF], ['cornelius', 'corbin'])
     const store = useFleetGridStore()
     expect(store.layout.cornelius).toEqual({ c: 0, r: 0 })
-    expect(store.layout.corbin).toEqual({ c: 1, r: 0 })
+    expect(store.layout.corbin).toEqual({ c: 0, r: 1 })
   })
 
   it('writes no layout while nobody has arranged it', async () => {
@@ -126,7 +127,7 @@ describe('FleetGrid first load (ent#1416)', () => {
     await wrapper.setProps({ agents: roster, orgAgents: roster })
     await flushPromises()
     const store = useFleetGridStore()
-    expect(store.layout['lead-finder']).toEqual({ c: 2, r: 0 })
+    expect(store.layout['lead-finder']).toEqual({ c: 1, r: 0 })
   })
 
   it('re-fits when the canvas changes size (assistant opened or closed)', async () => {
@@ -138,6 +139,19 @@ describe('FleetGrid first load (ent#1416)', () => {
     await nextTick()
 
     expect(worldTransform(wrapper)).not.toBe(wide)
+  })
+
+  it('places the board from the top and stays readable with the assistant open', async () => {
+    canvas = { w: 1042, h: 788 }   // 1440x900 with the assistant panel open
+    const wrapper = await mountGrid([SYSTEM, BRAIN, CHIEF])
+    const store = useFleetGridStore()
+    const m = worldTransform(wrapper).match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)\s*scale\(([-\d.]+)\)/)
+    const [tx, ty, z] = m.slice(1).map(Number)
+    expect(z).toBeGreaterThanOrEqual(0.75)
+    const topRow = Math.min(...Object.values(store.layout).map((p) => p.r))
+    const [, y] = cellXY(0, topRow)
+    expect(y * z + ty).toBeCloseTo(28, 5)   // normal padding, no empty band above
+    expect(tx).toBeGreaterThan(0)
   })
 
   it('stops re-fitting once the person zooms', async () => {

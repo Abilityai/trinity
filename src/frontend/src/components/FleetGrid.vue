@@ -375,7 +375,7 @@ import {
   widgetById,
   widgetIdFromKey,
 } from '@/utils/gridWidgets'
-import { zoneAt, firstLoadLayout, orgMeta } from '@/utils/gridOrg'
+import { zoneAt, firstLoadLayout, firstLoadFit, orgMeta } from '@/utils/gridOrg'
 import { useFirstRunStore } from '@/stores/firstRun'
 import { useOrgOverlay } from '@/composables/useOrgOverlay'
 
@@ -775,7 +775,7 @@ function land(names) {
   const fresh = names.filter((n) => !arriving.value[n] && layout.value[n])
   if (!fresh.length) return
   // A landing nobody can see is no landing: bring the whole fleet into view.
-  if (fresh.some((n) => !inView(n))) fitView()
+  if (fresh.some((n) => !inView(n))) fitBoard()
   const next = { ...arriving.value }
   fresh.forEach((name, i) => {
     const delay = reducedMotion ? 0 : i * ARRIVE_STAGGER_MS
@@ -1089,9 +1089,20 @@ function measureCanvas() {
 // agents arrive, and when the assistant panel opens or closes — until the
 // person pans or zooms. A saved layout is never re-fitted here.
 function fitIfAutomatic() {
-  if (gridStore.layoutIsAuto && !viewTouched) fitView()
+  if (!gridStore.layoutIsAuto || viewTouched || !canvasW.value || !canvasH.value) return
+  // Placed from the top, framed on the agents and the tiles row above them;
+  // extra tiles run on to the right rather than shrinking the board.
+  const f = firstLoadFit(layout.value, placedAgents.value.map((a) => a.name), canvasW.value, canvasH.value)
+  vz.value = f.z
+  vtx.value = f.tx
+  vty.value = f.ty
 }
 watch(() => gridStore.layout, () => nextTick(fitIfAutomatic))
+// The automatic board's own fit while it applies, otherwise the whole board.
+function fitBoard() {
+  if (gridStore.layoutIsAuto && !viewTouched) fitIfAutomatic()
+  else fitView()
+}
 
 onMounted(() => {
   gridStore.startPolling()
@@ -1109,7 +1120,7 @@ onMounted(() => {
     if (!document.hidden) now.value = Date.now()
   }, 1000)
   nextTick(() => {
-    fitView()
+    fitBoard()
     land(props.arrivals)
   })
 })

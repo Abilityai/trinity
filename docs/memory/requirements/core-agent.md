@@ -2580,8 +2580,10 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   - **Never examples**: first-run state carries `core_agents`; the frontend keeps them on the Grid and in
     what the assistant is told, and the ent#1408 Connect-Claude card offers both.
   - **Grid first load**: with nothing saved the layout is automatic and persists nothing — fleet tiles in
-    one row above the agents, the core pair side by side in their group, other agents next to them, the
-    system agent one column apart — and it is fitted to the window until the first pan/zoom, which saves
+    one row above the agents, the Chief of Staff with the Brain directly below in their group (one short
+    arrow between them), other agents next to them, the system agent one column apart — and it is placed
+    from the top and framed on the agents (tiles wider than them run on to the right, so a small fleet
+    stays readable with the assistant open) until the first pan/zoom, which saves
     the board. A saved layout always wins.
 - **Flow**: `docs/memory/feature-flows/cornelius-default-agent.md` → Chief of Staff
 
