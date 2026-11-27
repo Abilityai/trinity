@@ -140,10 +140,15 @@ if (data.type === 'agent_activity') {
 
 Store handler refreshes when a run starts or ends (#4813): every dispatch (chat, task or
 scheduled) opens a `chat_start` activity and the run's end closes that same activity, so
-`chat_start` in any state is the trigger. `schedule_start` / `schedule_end` are accepted too,
-though the backend writes neither for a run. Only while the panel is mounted (the socket
-feeds this store on every operator page, #3451); a burst during a read collapses into the
-one refresh that follows it.
+`chat_start` in any state is the trigger. Only while the panel is mounted (the socket feeds
+this store on every operator page, #3451); a burst during a read collapses into the one
+refresh that follows it.
+
+Socket-driven refreshes are paced: at most one per 2 s. The first event after a quiet spell
+refreshes at once, and the events inside the window collapse into one refresh at its end. A
+refresh also reads `/api/executions/stats`, which aggregates the whole executions table, and
+a busy fleet sends two events per run. A run that never reaches dispatch (refused at
+admission, cancelled while queued) sends no event, so the list shows it at the 30 s poll.
 
 ## Whose Executions a Viewer Sees (trinity-enterprise#875)
 

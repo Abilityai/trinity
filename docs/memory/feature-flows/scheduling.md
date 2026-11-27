@@ -795,9 +795,17 @@ The scheduler sends no events of its own (#4813). It dispatches a run through `P
 
 The end event does not repeat `execution_id` or `triggered_by`: match it to its start by `activity_id`.
 
-### Skipped run
+One run normally sends exactly these two events; there are no updates in between. Two cases send more: a run re-delivered from the durable queue opens a new activity for each delivery attempt (one start and one end per attempt), and a late result can correct a provisional `failed` close, which sends a second end event (`completed`) for the same `activity_id`.
 
-No event. A run a gate held back (the previous run still going, a sync freeze, the agent's pre-check, the readiness gate) is a `skipped` row the scheduler writes itself, and nothing broadcasts it. Read it from the executions API: `GET /api/agents/{name}/executions` lists it with `status: "skipped"`; the reason is in `error` on `GET /api/agents/{name}/schedules/{schedule_id}/executions` and `GET /api/agents/{name}/executions/{execution_id}` (MCP: `get_schedule_executions` with a `schedule_id`).
+### Runs with no live signal
+
+The events above belong to the run's dispatch activity, so a run that never reaches dispatch sends none:
+
+- **Skipped.** A run a gate held back (the previous run still going, a sync freeze, the agent's pre-check, the readiness gate) is a `skipped` row the scheduler writes itself, and nothing broadcasts it. `GET /api/agents/{name}/executions` lists it with `status: "skipped"`; the reason is in `error` on `GET /api/agents/{name}/schedules/{schedule_id}/executions` and `GET /api/agents/{name}/executions/{execution_id}` (MCP: `get_schedule_executions` with a `schedule_id`).
+- **Refused before dispatch.** When the backend's admission gate refuses a run (no free slot, an open circuit breaker, a spent ephemeral budget), the row is written `failed` before any activity opens.
+- **Queued.** A run handed to the durable queue has no event until a worker claims it, and none at all if it is cancelled while still queued.
+
+A listener waiting on a start or end event for one of these waits forever: read the run's row from the executions API instead.
 
 ---
 
@@ -1082,24 +1090,9 @@ JOIN schedule_executions e ON a.related_execution_id = e.id
 WHERE e.agent_name = ?;
 ```
 
-### WebSocket Events
+### Activity Events
 
-Activity events broadcast in addition to existing schedule events:
-```json
-{
-  "type": "agent_activity",
-  "agent_name": "my-agent",
-  "activity_id": "uuid-123",
-  "activity_type": "schedule_start",
-  "activity_state": "started",
-  "action": "Running: Daily Report",
-  "timestamp": "2025-12-02T09:00:00.000Z",
-  "details": {
-    "schedule_name": "Daily Report",
-    "schedule_id": "sched-456"
-  }
-}
-```
+The activity record above is what clients receive live: its opening and its close are the two `agent_activity` events shown under [WebSocket Events](#websocket-events). There is no separate schedule event.
 
 ### Query Examples
 
@@ -1113,14 +1106,15 @@ sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_activities WHERE agent_na
 SELECT a.*, se.response, se.error, se.cost, se.tool_calls
 FROM agent_activities a
 JOIN schedule_executions se ON a.related_execution_id = se.id
-WHERE a.activity_type = 'schedule_start'
+WHERE a.activity_type = 'chat_start'
+  AND a.triggered_by = 'schedule'
   AND a.agent_name = 'my-agent'
 ORDER BY a.started_at DESC
 ```
 
-**Cross-agent schedule timeline**:
+**Cross-agent run timeline** (scheduled runs are the rows whose `triggered_by` is `schedule`):
 ```bash
-curl "http://localhost:8000/api/activities/timeline?activity_types=schedule_start&start_time=2025-12-02T00:00:00"
+curl "http://localhost:8000/api/activities/timeline?activity_types=chat_start&start_time=2025-12-02T00:00:00"
 ```
 
 ### Benefits

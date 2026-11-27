@@ -127,7 +127,7 @@
     "reported": 0,
     "dropped": 1,
     "dropped_reasons": [
-      "socket-driven refetch rate (denial of service is excluded; reads collapse to one in flight and one queued, no model cost)"
+      "socket-driven refetch rate (denial of service is excluded; paced to one refresh per 2 s per open tab after the pre-landing review, no model cost)"
     ]
   },
   "totals": {

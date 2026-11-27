@@ -282,7 +282,7 @@ The scheduler runs as a **dedicated standalone service** (not embedded in backen
 |   |   7. Update schedule run times                                             ||
 |   |      - last_run_at, next_run_at                                            ||
 |   |                                                                            ||
-|   |   8. Publish "completed" event to Redis                                    ||
+|   |   8. The backend closes the run's activity (agent_activity)                ||
 |   |                                                                            ||
 |   |   9. Release lock                                                          ||
 |   |                                                                            ||

@@ -139,7 +139,7 @@ Events are broadcast from multiple sources and filtered by the `/ws/events` endp
 | `agent_stopped` | `routers/agents.py:356-361` | Agent container stopped |
 | `agent_collaboration` | `activity_service.py` | Agent-to-agent MCP call |
 
-A scheduled run has no event type of its own (#4813). It arrives as `agent_activity` with `activity_type: "chat_start"` and `details.triggered_by: "schedule"` when it starts, and the same `activity_id` closes with `activity_state` `completed`, `failed` or `cancelled` when it ends. A skipped run sends no event; read it from the executions API (see [scheduling.md](scheduling.md#websocket-events)).
+A scheduled run has no event type of its own (#4813). It arrives as `agent_activity` with `activity_type: "chat_start"` and `details.triggered_by: "schedule"` when it starts, and the same `activity_id` closes with `activity_state` `completed`, `failed` or `cancelled` when it ends. A run that never reaches dispatch (skipped by the scheduler, refused at admission, cancelled while queued) sends no event; read it from the executions API (see [scheduling.md](scheduling.md#runs-with-no-live-signal)).
 
 ### Event Payloads
 

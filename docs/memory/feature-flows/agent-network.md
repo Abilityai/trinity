@@ -1729,7 +1729,7 @@ else:
 **Activity Types Considered**:
 - `chat_start` - Agent processing a chat message
 - `tool_call` - Agent executing a tool
-- `schedule_start` - Agent running scheduled task
+- `schedule_start` - Historical rows only; a scheduled run is a `chat_start` today
 - `agent_collaboration` - Agent communicating with another agent
 
 ### Dashboard Lifecycle Integration

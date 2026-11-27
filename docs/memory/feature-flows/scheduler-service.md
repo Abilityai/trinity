@@ -395,6 +395,7 @@ POST /api/internal/execute-task     activity_service                 agent_activ
 | A run starts | `agent_activity`: `activity_type: "chat_start"`, `activity_state: "started"`, `details.triggered_by`, `details.execution_id` | the event |
 | A run ends | `agent_activity` for the same `activity_id`: `activity_state` `completed` / `failed` / `cancelled` | the event |
 | A run is skipped | none | `GET /api/agents/{name}/executions` lists it with `status: "skipped"`; the reason is in `error` on `GET /api/agents/{name}/schedules/{schedule_id}/executions` and `GET /api/agents/{name}/executions/{execution_id}` (MCP: `get_schedule_executions` with a `schedule_id`) |
+| A run never reaches dispatch (refused at admission, or cancelled while still queued) | none; a queued run's start event is sent when a worker claims it | the executions API, as above |
 
 Payloads: [scheduling.md](scheduling.md#websocket-events). A new live signal from the scheduler is a call to an internal backend route (the pattern `POST /api/internal/schedule-retry-dropped` follows), and the backend broadcasts it through the event bus (Invariant #10); it never goes from the scheduler straight to Redis: `tests/unit/test_4813_scheduler_publishes_nothing.py` holds that.
 

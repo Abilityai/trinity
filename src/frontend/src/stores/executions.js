@@ -240,19 +240,41 @@ export const useExecutionsStore = defineStore('executions', () => {
   // WS: an agent_activity event for a run's start or end triggers a refresh.
   // #4813: every dispatch — chat, task or scheduled — opens a `chat_start`
   // activity, and the run's end closes that same activity (completed / failed /
-  // cancelled), so `chat_start` in any state is the trigger. The backend writes
-  // no `schedule_start` for a run; the two `schedule_*` types stay for the
-  // events that still carry them.
+  // cancelled), so `chat_start` in any state is the trigger. No run writes a
+  // `schedule_start`, and `schedule_end` is a subscription switch's system
+  // event, not a run.
   // We refetch rather than patch in-place because the event payload doesn't carry
   // the full row data (cost, duration, etc.) needed to update the list accurately.
   // #3451: only while a panel shows the list; a burst during a read collapses into
   // the one refresh that follows it (a Load more reads only the tail, so an event
   // it overlapped used to be lost until the next poll).
-  const RUN_ACTIVITY_TYPES = new Set(['chat_start', 'schedule_start', 'schedule_end'])
   function handleWebSocketEvent(data) {
-    if (_listLive && data.type === 'agent_activity' && RUN_ACTIVITY_TYPES.has(data.activity_type)) {
-      refresh()
+    if (_listLive && data.type === 'agent_activity' && data.activity_type === 'chat_start') {
+      _refreshFromSocket()
     }
+  }
+
+  // #4813: a socket-driven refresh at most once per WS_REFRESH_MIN_MS. A refresh
+  // also reads the stats, an aggregate over the whole executions table, and a
+  // busy fleet sends two events per run; the read in flight bounds how many
+  // run at once, not how often. The first event after a quiet spell refreshes
+  // at once; the events inside the window collapse into one refresh at its end.
+  const WS_REFRESH_MIN_MS = 2000
+  let _wsRefreshedAt = 0
+  let _wsRefreshTimer = null
+  function _refreshFromSocket() {
+    if (_wsRefreshTimer) return
+    const wait = _wsRefreshedAt + WS_REFRESH_MIN_MS - Date.now()
+    if (wait <= 0) {
+      _wsRefreshedAt = Date.now()
+      refresh()
+      return
+    }
+    _wsRefreshTimer = setTimeout(() => {
+      _wsRefreshTimer = null
+      _wsRefreshedAt = Date.now()
+      refresh()
+    }, wait)
   }
 
   // #3451: a panel that mounts starts from page one (its list opens at the top);
@@ -267,6 +289,10 @@ export const useExecutionsStore = defineStore('executions', () => {
   function stopPolling() {
     _listLive = false
     _refreshQueued = false
+    if (_wsRefreshTimer) {
+      clearTimeout(_wsRefreshTimer)
+      _wsRefreshTimer = null
+    }
     if (_pollTimer) {
       clearInterval(_pollTimer)
       _pollTimer = null

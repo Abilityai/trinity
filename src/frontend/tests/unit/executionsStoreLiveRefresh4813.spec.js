@@ -6,6 +6,11 @@
  * opens a `chat_start` activity and closes that same activity when the run
  * ends. So the socket trigger never fired and the list waited for its 30 s
  * poll. These specs drive the real store with the events the backend sends.
+ *
+ * Each refresh also reads the stats, an aggregate over the whole executions
+ * table, and a busy fleet sends two events per run. So the socket trigger is
+ * paced: the first event after a quiet spell refreshes at once, and the events
+ * inside the window collapse into one refresh at its end.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
@@ -82,9 +87,11 @@ describe('executions store — a run refreshes the live list (#4813)', () => {
     expect(reads()).toBe(before + 1)
   })
 
-  it('a tool call inside a run does not refresh the list', async () => {
+  // `agent_collaboration` is the caller's edge (the callee's own run sends its
+  // `chat_start`); `schedule_end` is a system event of a subscription switch.
+  it.each(['agent_collaboration', 'schedule_end'])('a %s activity is not a run and does not refresh the list', async (type) => {
     const before = await openPanel()
-    store.handleWebSocketEvent({ ...runStarted, activity_type: 'tool_call' })
+    store.handleWebSocketEvent({ ...runStarted, activity_type: type })
     await flush()
     expect(reads()).toBe(before)
   })
@@ -101,5 +108,70 @@ describe('executions store — a run refreshes the live list (#4813)', () => {
     store.handleWebSocketEvent({ ...runStarted, type: 'agent_collaboration' })
     await flush()
     expect(reads()).toBe(before)
+  })
+})
+
+describe('executions store — socket refreshes are paced (#4813)', () => {
+  const WINDOW_MS = 2000
+  let store
+  let reads
+  const settle = (ms = 0) => vi.advanceTimersByTimeAsync(ms)
+
+  beforeEach(async () => {
+    vi.useFakeTimers()
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    reads = serveExecutions()
+    store = useExecutionsStore()
+    store.startPolling(30000)
+    await settle()
+  })
+  afterEach(() => {
+    store.stopPolling()
+    vi.useRealTimers()
+  })
+
+  it('a burst refreshes at once, then once more when the window ends', async () => {
+    const before = reads()
+    store.handleWebSocketEvent(runStarted)
+    await settle()
+    expect(reads()).toBe(before + 1)
+
+    // Three more runs start and end inside the window.
+    for (let i = 0; i < 3; i++) {
+      store.handleWebSocketEvent(runStarted)
+      store.handleWebSocketEvent(runEnded('completed'))
+    }
+    await settle()
+    expect(reads()).toBe(before + 1)
+    await settle(WINDOW_MS - 1)
+    expect(reads()).toBe(before + 1)
+    await settle(1)
+    expect(reads()).toBe(before + 2)
+
+    // Nothing else is owed: the next read is the 30 s poll.
+    await settle(WINDOW_MS * 3)
+    expect(reads()).toBe(before + 2)
+  })
+
+  it('after a quiet window the next event refreshes at once again', async () => {
+    const before = reads()
+    store.handleWebSocketEvent(runStarted)
+    await settle(WINDOW_MS)
+    expect(reads()).toBe(before + 1)
+    store.handleWebSocketEvent(runEnded('completed'))
+    await settle()
+    expect(reads()).toBe(before + 2)
+  })
+
+  it('a refresh still owed when the panel closes is dropped', async () => {
+    const before = reads()
+    store.handleWebSocketEvent(runStarted)
+    store.handleWebSocketEvent(runEnded('failed'))
+    await settle()
+    expect(reads()).toBe(before + 1)
+    store.stopPolling()
+    await settle(WINDOW_MS * 2)
+    expect(reads()).toBe(before + 1)
   })
 })
