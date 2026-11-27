@@ -17,12 +17,18 @@ import { nextTick } from 'vue'
 
 vi.hoisted(() => {
   const store = new Map()
-  globalThis.localStorage = {
-    getItem: (k) => (store.has(k) ? store.get(k) : null),
-    setItem: (k, v) => store.set(k, String(v)),
-    removeItem: (k) => store.delete(k),
-    clear: () => store.clear(),
-  }
+  // jsdom on Node 20 (CI) exposes `window.localStorage` as a getter-only
+  // accessor, so a plain assignment throws at load. Define it instead
+  // (autonomyDialPanel.spec.js).
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+      clear: () => store.clear(),
+    },
+  })
   window.matchMedia = window.matchMedia || ((q) => ({
     matches: false, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
   }))
@@ -52,13 +58,15 @@ globalThis.ResizeObserver = class {
 import FleetGrid from '@/components/FleetGrid.vue'
 import { useFleetGridStore } from '@/stores/fleetGrid'
 import { useFirstRunStore } from '@/stores/firstRun'
-import { cellXY } from '@/utils/gridLayout'
+import { cellXY, defaultLayout } from '@/utils/gridLayout'
 
 const SYSTEM = { name: 'trinity-system', status: 'running', is_system: true, tags: [] }
 const CHIEF = { name: 'corbin', status: 'running', tags: ['dept-headquarters'] }
 const BRAIN = { name: 'cornelius', status: 'running', tags: ['dept-headquarters', 'reports-to-corbin'] }
 
 let canvas = { w: 1440, h: 800 }
+// The first-run read FleetGrid makes for itself: a fresh install by default.
+let firstRunRead
 Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get() { return this.classList?.contains('fleet-canvas') ? canvas.w : 0 } })
 Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get() { return this.classList?.contains('fleet-canvas') ? canvas.h : 0 } })
 
@@ -69,13 +77,16 @@ beforeEach(() => {
   canvas = { w: 1440, h: 800 }
   axiosMock.get.mockReset()
   axiosMock.put.mockReset()
-  axiosMock.get.mockImplementation(() => Promise.resolve({ data: {}, headers: {} }))
+  firstRunRead = () => Promise.resolve({ data: { fresh_install: true, core_agents: ['corbin', 'cornelius'] }, headers: {} })
+  axiosMock.get.mockImplementation((url) => (String(url).includes('/onboarding/first-run')
+    ? firstRunRead()
+    : Promise.resolve({ data: {}, headers: {} })))
   axiosMock.put.mockImplementation(() => Promise.resolve({ data: { updated_at: 's1' } }))
 })
 
 async function mountGrid(agents, core = ['corbin', 'cornelius']) {
-  const firstRun = useFirstRunStore()
-  firstRun.coreAgents = core
+  const fresh = firstRunRead
+  firstRunRead = () => fresh().then((r) => ({ ...r, data: { ...r.data, core_agents: core } }))
   const wrapper = mount(FleetGrid, {
     props: { agents, orgAgents: agents, arrivals: [] },
     global: { stubs: { AgentTile: true, RouterLink: true, 'router-link': true } },
@@ -165,5 +176,36 @@ describe('FleetGrid first load (ent#1416)', () => {
     await nextTick()
 
     expect(worldTransform(wrapper)).toBe(zoomed)
+  })
+
+  it('an existing install with nothing saved keeps the old default placement', async () => {
+    firstRunRead = () => Promise.resolve({ data: { fresh_install: false, core_agents: ['cornelius'] }, headers: {} })
+    const roster = [SYSTEM, BRAIN, CHIEF]
+    await mountGrid(roster, ['cornelius'])
+    const store = useFleetGridStore()
+
+    expect(store.layoutIsAuto).toBe(false)
+    const old = defaultLayout(roster.map((a) => a.name), new Set(['trinity-system']))
+    for (const a of roster) expect(store.layout[a.name]).toEqual(old[a.name])
+  })
+
+  it('arranges nothing, and saves nothing, until it knows the install is fresh', async () => {
+    let answer
+    firstRunRead = () => new Promise((r) => { answer = r })
+    await mountGrid([SYSTEM, BRAIN, CHIEF])
+    const store = useFleetGridStore()
+    const layoutPuts = () => axiosMock.put.mock.calls.filter(([url]) => String(url).endsWith('/grid_layout'))
+
+    expect(store.layoutIsAuto).toBe(false)
+    expect(store.layout.corbin).toBeUndefined()
+    expect(layoutPuts()).toEqual([])
+
+    answer({ data: { fresh_install: true, core_agents: ['corbin', 'cornelius'] }, headers: {} })
+    await flushPromises()
+    await nextTick()
+
+    expect(store.layoutIsAuto).toBe(true)
+    expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
+    expect(layoutPuts()).toEqual([])
   })
 })

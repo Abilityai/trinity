@@ -516,17 +516,40 @@ function isCellBlocked(c, r) {
 // trinity-enterprise#1416: the board nobody has arranged yet. Arranged from the
 // roster WITHOUT the type-to-filter (typing must not reshuffle it); the core
 // agents (the Chief of Staff and the Company Brain) lead, side by side.
+// Only an install whose first seed ran under ent#1416 opens on it
+// (`fresh_install` on the first-run read); an existing install with nothing
+// saved (a new teammate, a new browser) keeps the old default placement. Until
+// that read lands nothing is placed or saved, so the old default is never
+// written over a fresh install that has not been told apart yet.
 const firstRunStore = useFirstRunStore()
 function arrangeFirstLoad(widgetKeys) {
   const roster = unfilteredAgents.value
   return firstLoadLayout(roster, widgetKeys, orgMeta(roster), firstRunStore.coreAgents || [])
 }
+const waitForInstallKind = () => null
+let heldForInstallKind = false
 
 function syncLayoutFromAgents() {
   const names = props.agents.map((a) => a.name)
   const systemNames = new Set(props.agents.filter((a) => a.is_system).map((a) => a.name))
-  gridStore.syncLayout(names, systemNames, newcomerOriginFor, isCellBlocked, arrangeFirstLoad)
+  let arrange = null
+  if (!firstRunStore.loaded) arrange = waitForInstallKind
+  else if (firstRunStore.freshInstall) arrange = arrangeFirstLoad
+  gridStore.syncLayout(names, systemNames, newcomerOriginFor, isCellBlocked, arrange)
+  if (arrange === waitForInstallKind && !Object.keys(gridStore.layout).length) heldForInstallKind = true
 }
+
+// The first-run read decides which board an unsaved layout gets; once it
+// lands, place the board and frame it (the mount-time fit saw an empty board).
+watch(
+  () => firstRunStore.loaded,
+  (loaded) => {
+    if (!loaded || !heldForInstallKind) return
+    heldForInstallKind = false
+    syncLayoutFromAgents()
+    nextTick(fitBoard)
+  }
+)
 
 // While the board is automatic, its shape also follows the org tags (a
 // department or line that lands a poll after the agent) and the core-agent
@@ -1106,6 +1129,7 @@ function fitBoard() {
 
 onMounted(() => {
   gridStore.startPolling()
+  firstRunStore.fetchState()   // ent#1416: fresh install or not (no-op once read)
   measureCanvas()
   resizeObserver = new ResizeObserver(() => measureCanvas())
   resizeObserver.observe(canvasEl.value)

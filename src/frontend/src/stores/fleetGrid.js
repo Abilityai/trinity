@@ -388,9 +388,16 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     // caller's arrangement (a pure function of the roster) is recomputed on
     // every reconcile and nothing is persisted, so a reconcile can never pass
     // for a person's layout. The first gesture (`_persist()`) saves the board,
-    // and from then on the saved layout always wins.
+    // and from then on the saved layout always wins. An arrangement of `null`
+    // means "not known yet" (the caller cannot tell a fresh install from an
+    // existing one): nothing is placed and nothing is saved until it can.
     if (arrange && Object.keys(_loadSavedRaw()).length === 0) {
-      layout.value = arrange(widgetKeys)
+      const auto = arrange(widgetKeys)
+      if (auto === null) {
+        layoutIsAuto.value = false
+        return
+      }
+      layout.value = auto
       layoutIsAuto.value = true
       return
     }

@@ -281,12 +281,61 @@ class TestSeededNames:
     def test_nothing_is_derived_from_the_bundled_file_by_default(self, install):
         assert sss.seeded_agent_names() == set()
 
-    def test_what_an_earlier_seed_created_still_counts(self, install):
-        install.settings.set("default_system_seed_info", json.dumps(
-            {"system": "acme", "agents_created": ["acme-scout", "acme-sage"]}
-        ))
+    # The seed record is written the way production writes it: through the
+    # real `_store_seed_info`, whose `agents_created` is a COUNT
+    # (`len(deploy.agents_created)` on the deploy path, `len(reserved)` on the
+    # converged path), never a list of names.
+    ACME = {"acme-scout", "acme-sage", "acme-scribe"}
 
-        assert sss.seeded_agent_names() == {"acme-scout", "acme-sage"}
+    @pytest.fixture
+    def bundled_file(self, monkeypatch):
+        from pathlib import Path
+        repo = Path(__file__).resolve().parents[2]
+        path = repo / sss.BUNDLED_MANIFEST_PATH
+        monkeypatch.setattr(sss, "BUNDLED_MANIFEST_PATH", str(path))
+        return path.read_text(encoding="utf-8")
+
+    def _seeded_earlier(self, install, manifest_yaml, *, status, created, failed,
+                        system="acme", source="bundled"):
+        install.settings.set("default_system_seeded", "true")
+        sss.SystemSeedService._store_seed_info(
+            system, manifest_yaml, source, status, created, failed
+        )
+        info = json.loads(install.settings.get("default_system_seed_info"))
+        assert isinstance(info["agents_created"], int)  # the production shape
+
+    def test_an_acme_seeded_install_keeps_its_examples(self, install, bundled_file):
+        self._seeded_earlier(install, bundled_file, status="deployed", created=3, failed=0)
+
+        assert sss.seeded_agent_names() == self.ACME
+
+    def test_a_partly_seeded_install_keeps_every_example_name(self, install, bundled_file):
+        self._seeded_earlier(install, bundled_file, status="partial", created=2, failed=1)
+
+        assert sss.seeded_agent_names() == self.ACME
+
+    def test_a_converged_seed_keeps_its_examples(self, install, bundled_file):
+        # the existence backstop records `len(reserved)` with status "converged"
+        self._seeded_earlier(install, bundled_file, status="converged", created=1, failed=2)
+
+        assert sss.seeded_agent_names() == self.ACME
+
+    def test_the_examples_are_not_counted_as_the_persons_own(self, install, bundled_file):
+        import services.onboarding_service as onb
+        self._seeded_earlier(install, bundled_file, status="deployed", created=3, failed=0)
+
+        assert onb.get_seeded_agent_names() >= self.ACME | {"cornelius", "corbin"}
+
+    def test_a_record_naming_another_system_derives_nothing(self, install, bundled_file):
+        # an operator's own manifest, no longer named: its names are unknown,
+        # and the bundled file's are not borrowed for it
+        self._seeded_earlier(install, "name: mine\nagents: {}\n", status="deployed",
+                             created=2, failed=0, system="mine", source="override")
+
+        assert sss.seeded_agent_names() == set()
+
+    def test_a_fresh_install_has_no_examples(self, install, bundled_file):
+        assert sss.seeded_agent_names() == set()
 
 
 class TestMemoryCeiling:
@@ -395,3 +444,47 @@ class TestFirstRunState:
         assert state["core_agents"] == ["cornelius"]   # corbin deleted: not named
         assert "acme-scout" in state["seeded_agents"]
         assert "acme-scout" not in state["core_agents"]
+
+
+class TestFreshInstallMark:
+    """Only an install whose first seed ran under this version gets the new Grid
+    arrangement; an existing one (a new teammate, a new browser) keeps the old
+    default placement. The browser reads that from the first-run state, which
+    carries the persisted Chief of Staff verdict."""
+
+    def _state(self, monkeypatch, settings):
+        import services.onboarding_service as onb
+        from models import FirstRunState, User
+
+        monkeypatch.setattr(onb, "manifest_seeded_agent_names", lambda: set())
+        monkeypatch.setattr(onb, "_install_marker", lambda: None)
+        monkeypatch.setattr(onb, "_visible_agents", lambda u: [{"name": "cornelius"}])
+        monkeypatch.setattr(sss.db, "get_setting_value", settings.get)
+        state = onb.get_first_run_state(User(id=1, username="admin", role="admin"))
+        return FirstRunState(**state).fresh_install
+
+    def test_a_fresh_install_is_marked(self, install, monkeypatch):
+        _pass()   # the real orchestrator persists the verdict
+        assert install.settings.get("chief_of_staff_fresh") == "true"
+        assert self._state(monkeypatch, install.settings) is True
+
+    def test_an_install_seeded_under_an_earlier_version_is_not(self, install, monkeypatch):
+        install.settings.set("cornelius_seeded", "true")
+        install.settings.set("first_run_fresh", "true")
+        _pass()
+        assert install.settings.get("chief_of_staff_fresh") == "false"
+        assert self._state(monkeypatch, install.settings) is False
+
+    def test_no_verdict_yet_is_not_fresh(self, monkeypatch):
+        assert self._state(monkeypatch, _Settings()) is False
+
+
+class TestRouterMcpHeader:
+    def test_agents_router_declares_its_mcp_surface(self):
+        """Invariant #13: a changed router outside the by-design exclusions
+        carries a first-line `# mcp:` header. Its consumer is CI itself
+        (`/validate-architecture` reads it), so a source read is the test."""
+        from pathlib import Path
+        src = Path(__file__).resolve().parents[2] / "src/backend/routers/agents.py"
+        first = src.read_text(encoding="utf-8").splitlines()[0]
+        assert first.startswith("# mcp: agents.ts (")

@@ -33,6 +33,10 @@ export const useFirstRunStore = defineStore('firstRun', {
     // the start (the Company Brain and the Chief of Staff). Still "seeded" (they
     // do not end the first run) but never an example kept off the screen.
     coreAgents: [],
+    // trinity-enterprise#1416: this install's first seed ran under the version
+    // that seeds the core pair; only then does the Grid open on its new
+    // first-load arrangement (an existing install keeps the old placement).
+    freshInstall: false,
     install: null,        // a short mark of this install: "setup closed" is remembered against it
     overlayOpen: false,   // the setup overlay has the screen (set by FirstRunOverlay)
   }),
@@ -49,6 +53,7 @@ export const useFirstRunStore = defineStore('firstRun', {
         this.demoAgent = r.data?.demo_agent ?? null
         this.brainAgent = typeof r.data?.brain_agent === 'string' ? r.data.brain_agent : null
         this.coreAgents = Array.isArray(r.data?.core_agents) ? r.data.core_agents : []
+        this.freshInstall = r.data?.fresh_install === true
         this.install = r.data?.install ?? null
       } catch (e) {
         // Fail toward "not first run": a missed nudge is a non-event, whereas a

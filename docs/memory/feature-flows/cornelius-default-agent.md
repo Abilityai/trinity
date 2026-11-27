@@ -77,7 +77,7 @@ A second instance of the same seeder provisions `corbin` from `github:Abilityai/
 - **Organize**: `_organize_core_agents()` runs only on a pass that created one of them — `dept-headquarters` on both, `reports-to-corbin` on Cornelius, permission `corbin → cornelius`.
 - **Memory**: Cornelius keeps its template's 4g (`memory_ceiling="4g"`; one PDF intake peaked at 3.19 GB on a dev instance), the Chief of Staff is capped at `"2g"`; `crud._apply_memory_ceiling` only lowers a template's declaration. Limits are Docker caps, not reservations.
 - **Starter fleet**: no longer deployed unless `TRINITY_DEFAULT_SYSTEM_MANIFEST` is set (`bundled` or a path) — `no_default_manifest` skip, no flag set.
-- **Frontend**: `GET` first-run state adds `core_agents`; `utils/firstSession.js` never hides them, `utils/gridOrg.js::firstLoadLayout` arranges an unsaved Grid (`stores/fleetGrid.js::layoutIsAuto`), and `FleetGrid.vue` keeps it fitted until the first gesture.
+- **Frontend**: `GET` first-run state adds `core_agents` and `fresh_install` (the persisted verdict; only a fresh install gets the new Grid arrangement); `utils/firstSession.js` never hides them, `utils/gridOrg.js::firstLoadLayout` arranges an unsaved Grid (`stores/fleetGrid.js::layoutIsAuto`), and `FleetGrid.vue` keeps it fitted until the first gesture.
 
 ## Related Flows
 - [brain-orb.md](brain-orb.md) — the capability-gated Brain Orb page this agent lights up

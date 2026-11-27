@@ -6066,6 +6066,11 @@ class FirstRunState(BaseModel):
     # the start (the Company Brain and the Chief of Staff) — still "seeded" for
     # `first_run`, but never an example to hide. Present and visible ones only.
     core_agents: List[str] = []
+    # trinity-enterprise#1416: this install's first seed ran under the version
+    # that seeds the core pair (the persisted Chief of Staff verdict). Only then
+    # does the Grid open on the new first-load arrangement; an existing install
+    # with nothing saved keeps the old default placement.
+    fresh_install: bool = False
     # A short opaque mark of this install: the browser remembers "setup closed"
     # against it, so a fresh install at the same address offers setup again.
     install: Optional[str] = None

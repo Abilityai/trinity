@@ -36,6 +36,7 @@ from database import db
 from dependencies import principal_reach
 from models import User
 from services.cornelius_agent_service import CHIEF_OF_STAFF_AGENT_NAME, CORNELIUS_AGENT_NAME
+from services.system_seed_service import is_fresh_install
 from services.system_seed_service import seeded_agent_names as manifest_seeded_agent_names
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,8 @@ def get_first_run_state(current_user: User) -> dict:
             # assistant puts it on Claude together with the person's own agent.
             "brain_agent": CORNELIUS_AGENT_NAME if CORNELIUS_AGENT_NAME in seeded_present else None,
             "core_agents": [n for n in CORE_AGENTS if n in seeded_present],
+            # ent#1416: the Grid's new first-load arrangement is for these only.
+            "fresh_install": is_fresh_install(),
             "install": _install_marker(),
         }
     except Exception:  # pragma: no cover - the surface is a nudge, never a gate
@@ -145,4 +148,5 @@ def get_first_run_state(current_user: User) -> dict:
             "own_agent_count": 0,
             "demo_agent": None,
             "core_agents": [],
+            "fresh_install": False,
         }

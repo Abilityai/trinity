@@ -195,6 +195,7 @@ def test_a_db_failure_reads_as_not_first_run(monkeypatch, admin_user):
     state = onboarding_service.get_first_run_state(admin_user)
     assert state == {
         "first_run": False, "seeded_agents": [], "own_agent_count": 0, "demo_agent": None, "core_agents": [],
+        "fresh_install": False,  # ent#1416
     }
 
 

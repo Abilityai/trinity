@@ -108,9 +108,10 @@ explains the colors once — never repeated per tile.
 
 ## Layout model
 
-- **The automatic board (trinity-enterprise#1416)**: with nothing saved for
-  the user (no server record, no per-user cache), `fleetGrid.syncLayout(…,
-  arrange)` shows `utils/gridOrg.js::firstLoadLayout` — info tiles in one row
+- **The automatic board (trinity-enterprise#1416)**: on a **fresh install**
+  (first-run state `fresh_install`, the persisted `chief_of_staff_fresh`
+  verdict) with nothing saved for the user (no server record, no per-user
+  cache), `fleetGrid.syncLayout(…, arrange)` shows `utils/gridOrg.js::firstLoadLayout` — info tiles in one row
   directly above the agents (row −1), the core agents' department block first
   (the Chief of Staff with the Company Brain directly below, under
   `dept-headquarters`, so the `reports-to-corbin` line is one short straight
@@ -126,7 +127,12 @@ explains the colors once — never repeated per tile.
   first gesture (`_persist()`: drag, tidy, group, block move) saves the board,
   and from then on the saved layout wins and newcomers are placed by
   `normalizeLayout` as before. A record already on the server or in the
-  per-user cache is never re-arranged.
+  per-user cache is never re-arranged. An **existing** install with nothing
+  saved (a new teammate, a new browser) keeps the old `defaultLayout`
+  placement. FleetGrid reads the first-run state itself on mount; until it
+  lands an unsaved board is held (`arrange` returns `null`: nothing placed,
+  nothing saved), so the old default is never written over a fresh install
+  before it can be told apart.
 - Layout = per-user map `agent|widget:* → {c, r}`. **Since trinity-enterprise#413
   the record of truth is the SERVER** — `user_ui_preferences` key `grid_layout`
   (the Tiles ▾ override map is `grid_widgets`, the org Zones/Lines toggles

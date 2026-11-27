@@ -236,6 +236,21 @@ def _resolve_chief_of_staff_verdict(fresh: Optional[bool]) -> Optional[bool]:
         return None
 
 
+def is_fresh_install() -> bool:
+    """Was this install's first seed run under ent#1416 (the core pair)?
+
+    Read-only view of the persisted Chief of Staff verdict, for the first-run
+    state the browser reads: the Grid's new first-load arrangement is for these
+    installs only. Absent (not decided yet) or unreadable reads as False, the
+    old behaviour. Never raises.
+    """
+    try:
+        return db.get_setting_value(_CHIEF_OF_STAFF_VERDICT_KEY, None) == "true"
+    except Exception:
+        logger.debug("Fresh-install read failed (non-fatal)", exc_info=True)
+        return False
+
+
 def _acquire_pass_lock():
     """Take the #2215 pass lock via the shared ownership-checked primitive
     (#1920). Returns a held ``SingleFlightLock`` when this pass may run, or
@@ -867,13 +882,31 @@ def seeded_agent_names() -> set:
 
 
 def _names_from_seed_info() -> set:
-    """The agent names a completed default-system seed recorded. Never raises."""
+    """The agent names an earlier default-system seed created. Never raises.
+
+    The stored record (`_store_seed_info`) holds the system name and a COUNT of
+    created agents, never their names, so the names are derived from the
+    manifest that seeded them: the bundled one, when the recorded system is the
+    bundled manifest's system (every install seeded with the Acme fleet before
+    ent#1416). The names are `{system}-{short}` for every agent the manifest
+    declares, as the seeder's own existence backstop reads them, so a partly
+    seeded install keeps the agents it did get as examples. A record naming
+    another system (an operator manifest no longer named) derives nothing: its
+    agent list is not knowable from here.
+    """
     try:
+        if db.get_setting_value(_SEEDED_FLAG, "false") != "true":
+            return set()
         raw = db.get_setting_value(_SEED_INFO_KEY, None)
         info = json.loads(raw) if raw else {}
-        created = info.get("agents_created") if isinstance(info, dict) else None
-        return {n for n in (created or []) if isinstance(n, str) and n}
+        recorded = info.get("system") if isinstance(info, dict) else None
+        manifest_yaml, _source, error = system_seed_service._resolve_manifest(_BUNDLED_SENTINEL)
+        if error or not manifest_yaml:
+            return set()
+        system_name, short_names = system_seed_service._manifest_agent_names(manifest_yaml)
+        if not system_name or (recorded and recorded != system_name):
+            return set()
+        return {f"{system_name}-{short}" for short in short_names}
     except Exception:
         logger.debug("Seed-info name read failed (non-fatal)", exc_info=True)
         return set()
-

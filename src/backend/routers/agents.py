@@ -1,3 +1,4 @@
+# mcp: agents.ts (list_agents, get_agent, get_agent_info, create_agent, delete_agent, start_agent, stop_agent, deploy_local_agent); monitoring.ts and chat.ts cover the health/log/queue reads; the per-agent switches (label, mcp-exposed, circuit-breaker, operator-resume, voice-replies PUTs) are person-only grants, deliberately unexposed (Invariant #8); heartbeat and execution result are the agent runtime surface, not tools
 """
 Agent management routes for the Trinity backend.
 

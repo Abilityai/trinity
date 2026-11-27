@@ -2584,7 +2584,12 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
     arrow between them), other agents next to them, the system agent one column apart — and it is placed
     from the top and framed on the agents (tiles wider than them run on to the right, so a small fleet
     stays readable with the assistant open) until the first pan/zoom, which saves
-    the board. A saved layout always wins.
+    the board. A saved layout always wins. This arrangement is for **fresh installs only** (first-run
+    state `fresh_install`, read from the persisted verdict); a person with no saved layout on an existing
+    install keeps the old default placement.
+  - **Upgrades keep their examples**: an install seeded with the starter fleet before this change keeps
+    those agents as examples. The stored seed record holds the system name and a count, so the names are
+    derived from the bundled manifest when the recorded system is its system.
 - **Flow**: `docs/memory/feature-flows/cornelius-default-agent.md` → Chief of Staff
 
 ### 5.23 Workspace — agents at the centre: the pinned Main chat, Reset, and files onto the conversation (trinity-enterprise#523, trinity-enterprise#524)
