@@ -100,6 +100,13 @@ class WorkspaceAsk(BaseModel):
     # addressee could already see that ask (`service._linked_request_id`).
     replaces: Optional[str] = None
     replaced_by: Optional[str] = None
+    # abilityai/trinity-enterprise#1367: an alert raised again — when the
+    # condition was FIRST raised and how many times (>= 2), the same two facts
+    # an operator reads, whoever the alert now reaches. They name no earlier
+    # ask (`replaces` keeps its own rule); `created_at` stays this copy's own
+    # filing time.
+    first_raised_at: Optional[str] = None
+    raise_count: Optional[int] = None
     # trinity-enterprise#901: which ending the agent authored — `replaced` |
     # `withdrawn` | None — derived once server-side from the raw row
     # (`ask_service.agent_ending_kind`), never inferred from `replaced_by`,

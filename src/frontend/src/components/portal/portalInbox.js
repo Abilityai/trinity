@@ -17,7 +17,7 @@ import {
   askThreadLink,
 } from './portalUtils'
 import { capCount } from '@/utils/tabTitle'
-import { queueTypeLabel } from '@/utils/operatorQueue'
+import { queueTypeLabel, queueWaitingSince } from '@/utils/operatorQueue'
 import { mentionTitle } from './portalMentions'
 
 export const INBOX_TABS = ['action', 'unread', 'all']
@@ -244,7 +244,9 @@ export function askUrgencyCompare(a, b, now = Date.now()) {
   if (ea !== null && ea !== eb) return ea - eb
   const pr = rankOf(a.priority) - rankOf(b.priority)
   if (pr) return pr
-  return ts(a.created_at) - ts(b.created_at) || String(a.id).localeCompare(String(b.id))
+  // trinity-enterprise#1367: oldest first reads the FIRST raise of an alert
+  // raised again; `askRecencyCompare` below keeps the latest (`created_at`).
+  return ts(queueWaitingSince(a)) - ts(queueWaitingSince(b)) || String(a.id).localeCompare(String(b.id))
 }
 
 // trinity-enterprise#856 (operator ruling 2026-10-09): Action opens NEWEST

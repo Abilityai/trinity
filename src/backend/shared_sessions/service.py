@@ -2655,7 +2655,13 @@ def on_ask_ending(event) -> None:
     every disposition, whether or not a wake runs (a stopped agent, an owner who
     switched the wake off, an expiry and an agent's own replace or withdraw all
     still leave the room showing how the ask ended). The ONE writer of ending
-    lines; the return turn never posts one. Best-effort per room."""
+    lines; the return turn never posts one. Best-effort per room.
+
+    A `quiet` ending (abilityai/trinity-enterprise#1367) posts nothing: the
+    agent raised a standing alert again in this same room for the same people,
+    and the room's line about it still stands."""
+    if getattr(event, "quiet", False):
+        return
     groups: dict[tuple[str, str], list[dict]] = {}
     for row in event.rows or ():
         room_id = ask_room_of(row)

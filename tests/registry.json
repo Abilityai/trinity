@@ -10061,6 +10061,29 @@
         "unit"
       ],
       "description": "POST /api/setup/admin-password with registration terms that carry usage_sharing_on_accept: true switches usage sharing on through set_consent (Settings reads it on, the first-run step's flag is on, a backfill share is scheduled, one telemetry_sharing_consent audit line naming via=registration_terms); never after a refusal on record (switched off, on-then-off, Don't ask again) or under the kill switch; an install already sharing is left alone; terms without the flag (or a non-True value), no provider and the instance-ID form are unchanged; a failing switch or audit never fails setup."
+    },
+    {
+      "file": "unit/test_ent1367_reraised_alert.py",
+      "feature": "trinity-enterprise#1367",
+      "added": "2026-11-26",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "database",
+        "unit"
+      ],
+      "description": "A re-raised alert keeps its age and its history: an agent's alert replacing its own pending alert carries first_raised_at and raise_count in the replace's transaction (both schema tracks; nothing on a rollback, a replay, a question or an approval); a chain raised before the columns is counted by a bounded walk of the replaces links that stops at another agent's row, a non-alert, a broken back-link, a deleted row and a loop; the queue list, the aging bound and the agent's pending line read the first raise while the cursor walk stays newest first on the latest; a repeat to the same people in the same room at no higher priority sends no new-ask trigger and posts no room line, and a higher priority, another person, another room or a changed title in a room announces as ever; machine keys and the Workspace projection carry both fields and the replaced ask stays unnamed to a viewer who could not see it. Real per-process SQLite, the real sink and the room's real ending observer. No Docker, no network."
+    },
+    {
+      "file": "../src/frontend/tests/unit/reraisedAlert.mount.spec.js",
+      "feature": "trinity-enterprise#1367",
+      "added": "2026-11-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "operator-queue"
+      ],
+      "description": "The raised line, mounted: 'raised N times · first raised 3d ago' on the Operating Room card for a pending alert raised more than once (a platform alert keeps its seen line), the Workspace Inbox row's own line under the badge row (never inside it, whatever badges the row carries, in the place of 'Replaces' and with no visible link; a row with no raise has no extra line), and the ask card's line beside 'Replaces'; the Operating Room order and the Inbox urgency order read the first raise, the Inbox newest-first order keeps the latest."
     }
   ]
 }

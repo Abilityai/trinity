@@ -898,6 +898,9 @@ CREATE TABLE operator_queue (
     -- #3247 (SQLite `operator_queue_replace` / Alembic `0097_operator_queue_replace`; nullable, no index):
     replaces TEXT,                      -- on the successor: the replaced predecessor (row uuid)
     replaced_by TEXT,                   -- on the predecessor: its successor (row uuid); both stamped in one transaction
+    -- trinity-enterprise#1367 (SQLite `operator_queue_raise_history` / Alembic `0127_operator_queue_raise_history`; nullable, no backfill, no index):
+    first_raised_at TEXT,               -- on an alert that replaced the agent's own pending alert: the FIRST raise in the chain (ISO-Z). Oldest-first orders and the aging bound read coalesce(first_raised_at, created_at); created_at stays this copy's filing time
+    raise_count INTEGER,                -- how many times that condition was raised (>= 2 when set); written with first_raised_at in the replace's transaction, never from the agent's input
     FOREIGN KEY (responded_by_id) REFERENCES users(id)
 );
 CREATE INDEX idx_operator_queue_agent ON operator_queue(agent_name);

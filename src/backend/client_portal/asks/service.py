@@ -305,6 +305,11 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
     project = _project_attachment(context)
     ended_at, ended_by = _ending_of(item, viewer_email)
     agent_ending = ask_service.agent_ending_kind(item) if ended_by == "agent" else None
+    # abilityai/trinity-enterprise#1367: the condition's history goes to whoever
+    # the alert reaches — a count and a date, the same two an operator reads.
+    # What it replaced stays behind `_linked_request_id`: an earlier copy this
+    # viewer could not see is counted, never named.
+    raised_before = isinstance(item.get("raise_count"), int)
     return WorkspaceAsk(
         id=item["id"],
         agent_name=item["agent_name"],
@@ -337,6 +342,8 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
             run_viewer=_platform_username(viewer_email) if is_platform else None),
         replaces=_linked_request_id(item, "replaces", viewer_email),
         replaced_by=_linked_request_id(item, "replaced_by", viewer_email),
+        first_raised_at=(item.get("first_raised_at") or None) if raised_before else None,
+        raise_count=item.get("raise_count") if raised_before else None,
         # trinity-enterprise#901: the agent's reason crosses for a WITHDRAW only.
         agent_ending=agent_ending,
         ending_reason=(item.get("disposition_reason") or None)

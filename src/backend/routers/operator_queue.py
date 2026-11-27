@@ -173,6 +173,8 @@ _MACHINE_ROW_FIELDS = (
     "aging", "aged_since",
     "subject", "last_seen_at",  # #3246: a platform alert's condition key + latest reading
     "wake_state",  # ent#1108 AC #4, ent#1135: pending (not woken) | owed (being delivered) | woken
+    # abilityai/trinity-enterprise#1367: a re-raised alert's first raise and count
+    "first_raised_at", "raise_count",
 )
 
 

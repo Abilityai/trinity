@@ -270,6 +270,10 @@ class EndingEvent:
     reason: Optional[str] = None     # the operator's cancel reason, or the agent's withdraw reason (ent#901) — DATA, never instructions
     batch_id: Optional[str] = None   # bulk cancel only
     actor_user_id: Optional[str] = None  # the person's `users` id; None for a Workspace client (ent#1225)
+    # abilityai/trinity-enterprise#1367: the ending of an alert its agent raised
+    # again, where the successor reaches the same people in the same room at no
+    # higher priority. An observer that TELLS people about endings skips it.
+    quiet: bool = False
 
 
 @dataclass
@@ -1709,6 +1713,11 @@ def raise_ask(
         # about it (its flood alarm above all).
         exclude_request_id_prefixes=oqs.reserved_id_prefixes(),
         replaces=target["id"] if target else None,
+        # abilityai/trinity-enterprise#1367: an alert replacing the agent's own
+        # pending alert is the same condition raised again — the create carries
+        # its first raise and a count (and re-checks both kinds under its lock).
+        carry_raise_history=(raised_by == "agent" and norm["type"] == "alert"
+                             and bool(target) and target.get("type") == "alert"),
         # T8 (#3247): an AGENT's approval with a non-empty proposal only. A
         # question or an alert is never guarded; a missing or empty proposal is
         # not a proposal. A gate raise is never refused by it and never counted
@@ -1747,13 +1756,15 @@ def raise_ask(
     row = out["row"]
     if out["outcome"] == "replayed":   # a concurrent call with the same id won
         return _replay(row, norm, oqs, raised_by)
-    if room_id:
+    replaced = out.get("predecessor") if target else None
+    # abilityai/trinity-enterprise#1367: a repeat does not notify again.
+    quiet = _quiet_repeat(row, replaced)
+    if room_id and not quiet:
         # ent#1135: the room where the agent asked hears that it is waiting —
         # only now, so a refused ask leaves no trace there. Never raises.
         from shared_sessions import service as rooms
 
         rooms.post_ask_raised_line(room_id, agent_name, row)
-    replaced = out.get("predecessor") if target else None
 
     audit = [{
         "event_action": "raised",
@@ -1777,11 +1788,17 @@ def raise_ask(
             "type": norm["type"],
             "to_role": to_role,
             **({"replaces": replaced["id"]} if replaced else {}),
+            # abilityai/trinity-enterprise#1367: the record of a repeat —
+            # which raise this is and when the condition was first raised.
+            **({"raise_count": row["raise_count"], "first_raised_at": row.get("first_raised_at")}
+               if replaced and isinstance(row.get("raise_count"), int) else {}),
             **_acted_by(actor_user),
         },
     }]
-    trigger = _broadcast_payload({"type": "operator_queue_new",
-                                  "data": {"id": row["id"], "agent_name": agent_name}})
+    # A quiet repeat sends no "new ask" trigger: the predecessor's ending
+    # trigger below is the one that makes an open page swap the row.
+    trigger = None if quiet else _broadcast_payload(
+        {"type": "operator_queue_new", "data": {"id": row["id"], "agent_name": agent_name}})
     try:
         operator_resume_service.spawn_on_loop(lambda: _announce(audit, trigger))
     except Exception:  # noqa: BLE001 — the ask is stored; it must stand
@@ -1809,10 +1826,52 @@ def raise_ask(
         }]
         ending_trigger = _broadcast_payload({"type": "operator_queue_cancelled",
                                              "data": {"id": replaced["id"], "agent_name": agent_name}})
-        _ended(EndingEvent(CANCELLED, (replaced,), None, reason=REPLACED), ending_audit, ending_trigger)
+        _ended(EndingEvent(CANCELLED, (replaced,), None, reason=REPLACED, quiet=quiet),
+               ending_audit, ending_trigger)
     return _receipt(row, status="created", resolved=resolved,
                     supersedes_request_id=norm["supersedes_expired"],
                     replaces_request_id=target["request_id"] if target else None)
+
+
+def _audience_of(row: Mapping[str, Any]) -> tuple:
+    """Who an ask reaches and where it was raised: its role, its single
+    addressee, the people it was delivered to and its room."""
+    from services import operator_queue_service as oqs
+
+    context = row.get("context") if isinstance(row.get("context"), dict) else {}
+    return (
+        row.get("to_role") or None,
+        (row.get("addressed_to_email") or "").strip().lower() or None,
+        frozenset(p.lower() for p in _resolved_people(row)),
+        context.get(oqs._WORKSPACE_ROOM_KEY) or None,
+    )
+
+
+def _quiet_repeat(row: Mapping[str, Any], predecessor: Optional[Mapping[str, Any]]) -> bool:
+    """Is this raise a repeat nobody needs telling about
+    (abilityai/trinity-enterprise#1367)? Only when ALL hold: the create carried
+    the history (an alert replaced the agent's own pending alert), the new
+    priority does not rank above the old one (`platform_alerts.priority_rank`,
+    the ladder a platform alert re-files on), and it reaches the same people in
+    the same room — a person or a room that never heard the first raise is
+    always told. A room's line QUOTES the title, so in a room the title must
+    be unchanged too: a line naming an ask that no longer exists must not be
+    left standing. Anything else announces as every raise does."""
+    if not predecessor or not isinstance(row.get("raise_count"), int):
+        return False
+    from services.platform_alerts import priority_rank
+
+    if priority_rank(row.get("priority")) > priority_rank(predecessor.get("priority")):
+        return False
+    audience = _audience_of(row)
+    if audience != _audience_of(predecessor):
+        return False
+    in_a_room = audience[3] is not None
+    return not in_a_room or _same_title(row, predecessor)
+
+
+def _same_title(row: Mapping[str, Any], other: Mapping[str, Any]) -> bool:
+    return " ".join(str(row.get("title") or "").split()) == " ".join(str(other.get("title") or "").split())
 
 
 def _platform_turn(agent_name: str, execution_id: Optional[str]) -> Optional[str]:

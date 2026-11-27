@@ -179,12 +179,14 @@
                   :title="absolute(it.ask.expires_at)"
                   data-testid="inbox-row-badge-expiry"
                 >{{ expiry(it).label }}</BaseBadge>
-                <!-- #3247: the replacement names the ask it replaced. -->
+                <!-- #3247: the replacement names the ask it replaced — unless
+                     it is an alert raised again, whose own line below says
+                     what differs about it (trinity-enterprise#1367). -->
                 <BaseBadge
-                  v-if="workspaceReplacesText(it.ask)"
+                  v-if="replacesBadge(it)"
                   variant="neutral"
                   :data-testid="`inbox-row-replaces-${it.key}`"
-                >{{ workspaceReplacesText(it.ask) }}</BaseBadge>
+                >{{ replacesBadge(it) }}</BaseBadge>
                 <BaseBadge
                   v-if="pendingSaysNothing(it)"
                   variant="neutral"
@@ -198,6 +200,19 @@
                 :data-testid="`inbox-row-ended-${it.key}`"
               >{{ askStatusLabel(it) }}</BaseBadge>
             </span>
+            <!-- trinity-enterprise#1367: an alert raised again says how often
+                 and since when on its OWN line — never a badge in the wrapping
+                 row above, where a priority and an expiry badge beside it
+                 pushed it to a second line and the row grew. A re-raised row
+                 is one height whatever badges it carries; a row with no raise
+                 has no such line. -->
+            <span
+              v-if="raised(it)"
+              class="mt-1 block text-[12.5px] truncate tabular-nums"
+              :class="meta(it)"
+              :title="`First raised ${absolute(it.ask.first_raised_at)}`"
+              :data-testid="`inbox-row-raised-${it.key}`"
+            >{{ raised(it) }}</span>
           </span>
         </button>
         </div>
@@ -226,7 +241,7 @@ import { relativeTime } from './portalUtils'
 import { newLabel, isChatItem, roomAgentsLabel } from './portalInbox'
 import { mentionWhere } from './portalMentions'
 import { priorityBadge, expiresSoonLabel, needsExpiryTick, nextExpiryEntry, askKindIcon } from './portalAskUrgency'
-import { queueEnding, queueTypeLabel, workspaceEndingText, workspaceReplacesText } from '@/utils/operatorQueue'
+import { queueEnding, queueTypeLabel, workspaceEndingText, workspaceRaisedText, workspaceReplacesText } from '@/utils/operatorQueue'
 // trinity#3524: an answered approval's verdict on its row.
 import { workspaceOwnAnswer } from '@/utils/operatorQueue'
 import { formatLocalDateTime } from '@/utils/timestamps'
@@ -302,8 +317,11 @@ const expiry = (it) => expiresSoonLabel(it.ask && it.ask.expires_at, now.value)
 // #4229: a pending ask with no priority / expiry / replaces badge would leave
 // the badge line empty, and the ended badge then grows the row on answer. Such
 // a row carries Unanswered instead — one badge in every state.
+const raised = (it) => (it.type === 'ask' ? workspaceRaisedText(it.ask, now.value) : '')
+// The "Replaces …" badge; an alert raised again carries its raised line instead.
+const replacesBadge = (it) => (raised(it) ? '' : workspaceReplacesText(it.ask))
 const pendingSaysNothing = (it) => it.type === 'ask' && it.status === 'pending'
-  && !priorityBadge(it.ask && it.ask.priority) && !expiry(it) && !workspaceReplacesText(it.ask)
+  && !priorityBadge(it.ask && it.ask.priority) && !expiry(it) && !replacesBadge(it)
 const kindLabel = (it) => queueTypeLabel(it.ask && it.ask.kind) || 'Ask'
 
 // trinity-enterprise#901: an ended ask the agent withdrew, and why.

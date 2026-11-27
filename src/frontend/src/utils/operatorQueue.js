@@ -574,11 +574,47 @@ function relativeAgo(iso, now) {
  * ended row, a row seen once, and anything that is not a platform alert.
  */
 export function queueSeenLine(item, now = Date.now()) {
-  if (!item || item.status !== 'pending' || !isPlatformAlert(item)) return ''
+  if (!item || item.status !== 'pending') return ''
+  // trinity-enterprise#1367: an agent's alert raised again says so in the same
+  // slot. Read first: the count is a platform-written column, where
+  // `context.seen_count` on an agent's row is whatever the agent wrote.
+  const raised = queueRaisedLine(item, now)
+  if (raised) return raised
+  if (!isPlatformAlert(item)) return ''
   const n = Number(item.context && item.context.seen_count)
   if (!Number.isInteger(n) || n < 2) return ''
   const ago = item.last_seen_at ? relativeAgo(item.last_seen_at, now) : null
   return ago ? `seen ${n} times · last seen ${ago}` : `seen ${n} times`
+}
+
+/**
+ * trinity-enterprise#1367 — an agent's alert that replaced its own pending
+ * alert is the same condition raised again; the server carries the first raise
+ * and a count on the new row. "raised N times · first raised 3d ago" on a
+ * pending row raised more than once, else `''`. Reads an operator-queue row and
+ * a Workspace ask alike (both carry `raise_count` / `first_raised_at`).
+ */
+export function queueRaisedLine(item, now = Date.now()) {
+  if (!item || item.status !== 'pending') return ''
+  const n = Number(item.raise_count)
+  if (!Number.isInteger(n) || n < 2) return ''
+  const ago = item.first_raised_at ? relativeAgo(item.first_raised_at, now) : null
+  return ago ? `raised ${n} times · first raised ${ago}` : `raised ${n} times`
+}
+
+/** The Workspace's form of the line: it stands alone in a badge or on its own
+ *  line, so it starts with a capital. */
+export function workspaceRaisedText(ask, now = Date.now()) {
+  const line = queueRaisedLine(ask, now)
+  return line ? line[0].toUpperCase() + line.slice(1) : ''
+}
+
+/** trinity-enterprise#1367 — what a pending row has waited since: the first
+ *  raise of a re-raised alert, else its own filing time. Every OLDEST-first
+ *  order sorts on this; a newest-first order and the small time label keep
+ *  `created_at`, the latest raise. */
+export function queueWaitingSince(item) {
+  return (item && (item.first_raised_at || item.created_at)) || ''
 }
 
 /** What the resolved feed sorts by (#627 AC6): when the item ended; a legacy

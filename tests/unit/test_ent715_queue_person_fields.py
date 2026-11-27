@@ -77,6 +77,7 @@ MACHINE_ROW_KEYS = frozenset({
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
     "replaces", "replaced_by",  # #3247
     "wake_state",  # abilityai/trinity-enterprise#1108 AC #4 — pending (agent not yet woken) | woken | None
+    "first_raised_at", "raise_count",  # abilityai/trinity-enterprise#1367 — a re-raised alert's history
     "aging", "aged_since",
     "subject", "last_seen_at",
 })

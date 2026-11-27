@@ -565,6 +565,35 @@ describe("#3247 ask_operator replaces", () => {
 });
 
 // ---------------------------------------------------------------------------
+// trinity-enterprise#1367 — a re-raised alert keeps its age: the two queue reads
+// name the fields a machine key now gets, and the replaces parameter tells the
+// agent what replacing its own pending alert means.
+// ---------------------------------------------------------------------------
+
+describe("trinity-enterprise#1367 a re-raised alert's history", () => {
+  const tools = createOperatorQueueTools({} as unknown as TrinityClient, false);
+
+  it("both queue reads name first_raised_at and raise_count, inside the client's cap", () => {
+    for (const t of [tools.listOperatorQueue, tools.getOperatorQueueItem]) {
+      assert.ok(t.description.includes("first_raised_at"), t.name);
+      assert.ok(t.description.includes("raise_count"), t.name);
+      assert.ok(t.description.length <= 2048, `${t.name} description is ${t.description.length} characters`);
+    }
+  });
+
+  it("the replaces parameter says a repeated alert keeps its age and stays quiet", () => {
+    const param = (tools.askOperator.parameters as any).shape.replaces.description as string;
+    assert.ok(param.includes("first raised"));
+    assert.ok(param.includes("unless you raise its priority"));
+    // a replace is trusted as the same condition, so the text must say what a
+    // different one is: a new alert, never a replace
+    assert.ok(param.includes("a different condition is a new alert, raised without replaces"));
+    // the rule lives in the parameter: the tool description is at its cap
+    assert.ok(tools.askOperator.description.length <= 1800);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // trinity-enterprise#901 — withdraw_ask: an agent ends one of its OWN pending
 // asks with a reason and no successor. Self-acting like get_my_ask: the agent
 // comes from the key, only {reason} travels, and a refusal comes back as its

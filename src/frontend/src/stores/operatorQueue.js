@@ -23,6 +23,7 @@ import {
   respondRefusedAsDiverged,
   respondRefusedAsNotAddressee,
   queueEndingSortTime,
+  queueWaitingSince,
   bulkCancelBatches,
 } from '../utils/operatorQueue'
 import { readQueueSnapshot, pendingCountOf } from '../utils/operatorQueueRead'
@@ -104,7 +105,8 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
       const pa = priorityOrder[a.priority] ?? 4
       const pb = priorityOrder[b.priority] ?? 4
       if (pa !== pb) return pa - pb
-      return new Date(a.created_at) - new Date(b.created_at)
+      // trinity-enterprise#1367: an alert raised again has waited since its first raise
+      return new Date(queueWaitingSince(a)) - new Date(queueWaitingSince(b))
     })
     return result
   })
