@@ -26,6 +26,8 @@ from dependencies import (
     is_fleet_admin,
     resolve_source_agent,
     ops_write_route,
+    acting_turn_reach,
+    row_is_acting_turns,
     row_is_viewers,
     viewer_row_scope,
 )
@@ -1334,11 +1336,16 @@ async def stream_execution_log(
     # check precedes the stream, so nothing of another person's turn is read.
     scope = viewer_row_scope(current_user, name)
     if scope is not None:
+        # #4173: an agent key acting in a shared person's or a visitor's turn
+        # also streams that turn's own row and the runs it started. Checked
+        # once, when the stream opens.
+        reach = acting_turn_reach(current_user, scope)
         _row = db.get_execution(execution_id)
         if (
             not _row
             or getattr(_row, "agent_name", None) != name
-            or not row_is_viewers(scope, getattr(_row, "source_user_id", None))
+            or not (row_is_viewers(scope, getattr(_row, "source_user_id", None))
+                    or row_is_acting_turns(reach, _row))
         ):
             raise HTTPException(status_code=404, detail="Execution not found")
 

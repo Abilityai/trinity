@@ -181,7 +181,8 @@ export function createExecutionTools(
         "(its trigger, pre/post tokens and duration), not a degraded agent. " +
         "`restricted_turn` is present when the run was held to a shared person's access by the schedule " +
         "that started it (no shell commands, no tools the owner added). " +
-        NARROWED_DESCRIPTION + " A run outside that view answers `error: \"Execution not found\"` with `narrowed`. " +
+        NARROWED_DESCRIPTION + " A run outside that view answers `error: \"Execution not found\"` with `narrowed`; " +
+        "your own turn's run and a run that turn started stay readable. " +
         "Access control: agents can only view executions on self or permitted agents.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent that ran the execution"),
@@ -276,7 +277,8 @@ export function createExecutionTools(
         "\n\nAccess control: agents can only read batches on self or permitted agents. " +
         "An unknown fan_out_id, one belonging to another agent, and a malformed one are " +
         "the same 'not found'. " + NARROWED_DESCRIPTION +
-        " A batch outside that view answers `error: \"Fan-out not found\"` with `narrowed`.",
+        " A batch outside that view answers `error: \"Fan-out not found\"` with `narrowed`; " +
+        "a batch your own turn started stays readable.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent that ran the fan-out"),
         fan_out_id: z

@@ -3392,6 +3392,9 @@ def acting_turn_user_id(current_user: User) -> Optional[int]:
     Fails closed: a ledger that cannot be read returns `NO_ROWS_USER_ID`. The
     turn is the KEY's agent's, whatever agent the route names.
 
+    This function only narrows. The one read the header opens is by id and sits
+    beside it: `acting_turn_reach` (#4173).
+
     A narrowed answer is noted for the response (`X-Trinity-Read-Narrowed`,
     trinity-enterprise#978): here, where the view is decided and before any row
     is read, so every reader that narrows through this function is marked and
@@ -3649,6 +3652,111 @@ def row_is_viewers(scope_user_id: Optional[int], source_user_id) -> bool:
         return source_user_id is not None and int(source_user_id) == scope_user_id
     except (TypeError, ValueError):
         return False
+
+
+def acting_turn_reach(
+    current_user: User, scope: Optional[int]
+) -> Optional[Tuple[str, str, str]]:
+    """`(the key's agent, the acting turn's id, its link)` for an agent key
+    acting in a RUNNING share-tier turn of its own agent, else None (#4173).
+
+    While an agent runs a turn for a shared person or a visitor its key reads as
+    that person (`viewer_row_scope`), which left the turn unable to read its own
+    row or a run it had just started: a visitor has no rows, a Workspace or room
+    turn's row carries an email and no user id, and a callee the person cannot
+    open shows none (trinity-enterprise#1148). So a by-id reader also lets
+    through a row `row_is_acting_turns` matches against this answer: the turn's
+    own row, and a run the key's agent dispatched from this turn. Operator
+    ruling 2026-11-23: the agent's own reach, by id only; lists stay narrowed.
+    A turn can therefore read the full transcript of a run it started on an
+    agent its person cannot open. That is the ruling, not an oversight.
+
+    This is the one place the turn header opens something. The VIEW
+    (`acting_turn_user_id`) stays ledger-first and only ever narrows; here the
+    id is accepted when, and only when, the platform's own rows say it is a
+    share-tier turn RUNNING on the key's agent:
+
+      * an owner-tier turn's id opens nothing: a share turn that learnt it
+        would read the owner's work. So the owner's own concurrent run stays
+        narrowed while a share turn runs;
+      * a finished, unknown or foreign id, `manual` and no header open nothing
+        (`continuation_origin`, the rule the dispatch link is written by);
+      * the link is what `continuation_origin` records on a run this turn
+        dispatches: the turn itself, or for a continuation (a wake) the root
+        it continues, so a wake reads the runs of the turn it stands as. That
+        root must be a row of this agent that itself rates `share`. A
+        continuation whose root cannot be read (pruned, another agent's, or
+        `NO_SINGLE_ORIGIN`, one string shared by unrelated turns) opens
+        nothing: the platform rates it `share` as its fail-closed answer,
+        which says nothing about whose work it continues;
+      * between two share-tier turns running at once the bound is the id
+        itself. A turn's MCP calls carry its own id; naming another turn takes
+        a raw request with the agent's key, which is what the shell gives, and
+        the shell already reaches everything the agent can (security.md §5g).
+
+    Decided BEFORE the row is read, like the scope (trinity-enterprise#978):
+    every lookup here keys on the header, so a row that exists and one that
+    does not cost the same. `scope is None` is the full view, where
+    `row_is_viewers` already passes every row, so nothing is looked up. Fails
+    closed. Only the by-id readers call it
+    (`tests/unit/test_4173_turn_reads_own_runs.py` fails a fifth caller)."""
+    if scope is None:
+        return None
+    agent = getattr(current_user, "agent_name", None)
+    if getattr(current_user, "mcp_scope", None) != "agent" or not (isinstance(agent, str) and agent):
+        return None
+    run = getattr(current_user, "_acting_execution_id", None)
+    if not run or run == _MANUAL_EXECUTION_ID:
+        return None
+    from services import turn_tier_service
+    try:
+        link = turn_tier_service.continuation_origin(db, agent, run)
+        if not link:
+            return None
+        acting = turn_tier_service.acting_turn(db, current_user)
+        if acting is None or acting[0] != turn_tier_service.SHARE:
+            return None
+        if link != run:
+            # A continuation. `share` is also what one rates when its turn
+            # could not be read, so the turn it names is read and rated here:
+            # a missing row or another agent's rates `unknown`.
+            root = db.get_turn_attribution(link)
+            if turn_tier_service.turn_tier(db, agent, execution=root) != turn_tier_service.SHARE:
+                return None
+    except Exception:  # noqa: BLE001 — fail closed: an unreadable answer opens nothing
+        logger.warning("[#4173] acting-turn reach lookup failed", exc_info=True)
+        return None
+    return agent, run, link
+
+
+def row_is_acting_turns(reach: Optional[Tuple[str, str, str]], row) -> bool:
+    """Whether `row` is the acting turn's own row, or a run the key's agent
+    dispatched from it, by `acting_turn_reach`'s answer (#4173). No lookup: the
+    reach was decided before the row was read. Both halves of the second rule
+    are needed: wake and answered-ask rows copy the link and name no agent. A
+    link that is not a non-empty string matches nothing, so a row with no link
+    is never "started by" a turn with none.
+
+    A read this grants is logged: it may be the transcript of a run on an
+    agent the turn's person cannot open."""
+    if reach is None or row is None:
+        return False
+    agent, turn, link = reach
+    row_id = getattr(row, "id", None)
+    own = row_id == turn
+    started = bool(
+        isinstance(link, str) and link
+        and getattr(row, "continues_execution_id", None) == link
+        and getattr(row, "source_agent_name", None) == agent
+    )
+    if not (own or started):
+        return False
+    logger.info(
+        "[#4173] by-id read for the acting turn: agent=%s turn=%s row=%s on=%s (%s)",
+        agent, turn, row_id, getattr(row, "agent_name", None),
+        "its own row" if own else "a run it started",
+    )
+    return True
 
 
 def assert_owns_or_admin(current_user: User, owner_id: int, *, detail: str = "Not authorized") -> None:

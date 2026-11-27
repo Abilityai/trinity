@@ -3,7 +3,7 @@
 import logging
 from dataclasses import asdict
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 from sqlalchemy import select, insert, update, and_, func, or_
 
@@ -826,6 +826,7 @@ class ScheduleExecutionsMixin:
     def get_fan_out_executions(
         self, agent_name: str, fan_out_id: str, limit: int = 200,
         *, source_user_id: Optional[int] = None,
+        started_by: Optional[Tuple[str, str]] = None,
     ) -> List[dict]:
         """Every execution row of one fan-out batch, oldest first (#2670).
 
@@ -869,7 +870,17 @@ class ScheduleExecutionsMixin:
         # trinity-enterprise#875: a share holder reads back only the rows they
         # dispatched (in the WHERE; the platform's own callers pass nothing).
         if source_user_id is not None:
-            stmt = stmt.where(schedule_executions.c.source_user_id == source_user_id)
+            mine = schedule_executions.c.source_user_id == source_user_id
+            # #4173: or the legs one turn started, `started_by` = (the
+            # dispatching agent, the link each leg records). It only widens a
+            # narrowed read, and a missing link never means "link IS NULL".
+            caller, link = started_by or (None, None)
+            if isinstance(caller, str) and caller and isinstance(link, str) and link:
+                mine = or_(mine, and_(
+                    schedule_executions.c.continues_execution_id == link,
+                    schedule_executions.c.source_agent_name == caller,
+                ))
+            stmt = stmt.where(mine)
         with get_engine().connect() as conn:
             rows = []
             for row in conn.execute(stmt).mappings():

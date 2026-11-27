@@ -2157,10 +2157,11 @@ class DatabaseManager:
         return self._schedule_ops.get_execution_failure_stamp(execution_id)
 
     def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200, *,
-                               source_user_id=None):
-        """Every execution row of one fan-out batch (#2670)."""
+                               source_user_id=None, started_by=None):
+        """Every execution row of one fan-out batch (#2670). `started_by`
+        (#4173) adds the legs one turn started to a narrowed read."""
         return self._schedule_ops.get_fan_out_executions(
-            agent_name, fan_out_id, limit, source_user_id=source_user_id)
+            agent_name, fan_out_id, limit, source_user_id=source_user_id, started_by=started_by)
 
     def get_all_agents_execution_stats(self, hours: int = 24):
         """Get execution statistics for all agents."""

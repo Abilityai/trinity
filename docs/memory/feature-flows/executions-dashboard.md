@@ -148,6 +148,8 @@ guarded by `!loading.value` to prevent concurrent fetches on burst events.
 
 **An agent key narrowed by a running turn is told so (trinity-enterprise#978).** An agent's key is narrowed the same way while a shared person's or a visitor's turn runs on its agent, the owner's own concurrent and scheduled runs included. Every response computed under that view carries `X-Trinity-Read-Narrowed` (`turn_person`, `running_turn` or `unverified`), on a full list, an empty list, a detail read and a 404 alike, and the MCP read tools show it as `narrowed: {code, message}`. The dashboard never shows it: a signed-in person is not narrowed by a running turn.
 
+**A turn still reads itself and what it started (#4173).** An agent's key acting in a running turn for a shared person or a visitor reads by id that turn's own execution and the runs it started (detail, log, live stream, the fan-out batch), whatever the narrowed view shows. `dependencies.acting_turn_reach` decides it before the row is read; `row_is_acting_turns` compares the row's `source_agent_name` and `continues_execution_id` with the caller's agent and the turn's link. A wake reads the runs of the turn it continues. The lists stay narrowed, `terminate` keeps its rule, and a granted read keeps the `X-Trinity-Read-Narrowed` header. See [security.md §5d](../architecture/security.md).
+
 ## Models
 
 **`FleetExecutionSummary`** (`models.py`): id, schedule_id, agent_name, status,

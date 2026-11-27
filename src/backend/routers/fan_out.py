@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import JSONResponse
 
 from dependencies import get_current_user, get_authorized_agent, resolve_source_agent, viewer_row_scope
+from dependencies import acting_turn_reach  # #4173
 from dependencies import check_requested_project  # ent#1105
 from database import db
 from services import turn_tier_service  # ent#926: a dispatched turn is no higher than its parent
@@ -278,8 +279,18 @@ async def get_fan_out_status(
     # trinity-enterprise#875: a share holder reads back only the batch rows they
     # dispatched (filtered in SQL); a batch with none of theirs is the uniform 404.
     scope = viewer_row_scope(current_user, name)
-    rows = (db.get_fan_out_executions(name, fan_out_id) if scope is None
-            else db.get_fan_out_executions(name, fan_out_id, source_user_id=scope))
+    # #4173: an agent key acting in a shared person's or a visitor's turn also
+    # reads the legs that turn started (the caller and the link every leg
+    # records at dispatch), in the same WHERE. The keyword is passed only when
+    # there is a reach: every other caller's query is the old one.
+    reach = acting_turn_reach(current_user, scope)
+    if scope is None:
+        rows = db.get_fan_out_executions(name, fan_out_id)
+    else:
+        narrowed = {"source_user_id": scope}
+        if reach is not None:
+            narrowed["started_by"] = (reach[0], reach[2])
+        rows = db.get_fan_out_executions(name, fan_out_id, **narrowed)
     if not rows:
         raise HTTPException(status_code=404, detail="Fan-out not found")
 

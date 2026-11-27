@@ -32,6 +32,7 @@ from models import (
     WebhookStatusResponse,
 )
 from dependencies import (
+    acting_turn_reach,
     acting_turn_user_id,
     agent_may_reach,
     agent_principal_name,
@@ -44,6 +45,7 @@ from dependencies import (
     VIEWER_KEY,
     VIEWER_OWNER,
     VIEWER_SHARE,
+    row_is_acting_turns,
     row_is_viewers,
     viewer_row_scope,
     get_current_user,
@@ -1366,13 +1368,18 @@ async def get_execution(
     # id that does not exist and a row outside the view cost the same lookups
     # and carry the same narrowed-read marker.
     scope = viewer_row_scope(current_user, name)
+    # #4173: an agent key acting in a shared person's or a visitor's turn also
+    # reads that turn's own row and the runs it started. Decided here, before
+    # the row, for the same reason as the scope.
+    reach = acting_turn_reach(current_user, scope)
     execution = db.get_execution(execution_id)
     if (
         not execution
         or execution.agent_name != name
         # ent#875: a row that is not the share holder's answers the same 404 as
         # an id that does not exist, so it cannot be told apart from one.
-        or not row_is_viewers(scope, execution.source_user_id)
+        or not (row_is_viewers(scope, execution.source_user_id)
+                or row_is_acting_turns(reach, execution))
     ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1403,11 +1410,13 @@ async def get_execution_log(
     This includes all tool calls, thinking, and responses.
     """
     scope = viewer_row_scope(current_user, name)  # before the row: see get_execution
+    reach = acting_turn_reach(current_user, scope)  # #4173, also before the row
     execution = db.get_execution(execution_id)
     if (
         not execution
         or execution.agent_name != name
-        or not row_is_viewers(scope, execution.source_user_id)
+        or not (row_is_viewers(scope, execution.source_user_id)
+                or row_is_acting_turns(reach, execution))
     ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
