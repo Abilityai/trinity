@@ -2001,12 +2001,16 @@ watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
   // ent#551: unless the "change" is the call's own new thread being adopted —
   // `startVoiceCall` creates the thread and adopts it BEFORE the call starts,
   // and the shell's route replace lands here a moment later with that same id.
+  // #4456: words parked behind a turn that has not settled were for the agent and
+  // thread being left, and the call need not still be on for them to be waiting.
+  // Dropped before anything is awaited: the turn can settle while the call winds down.
+  if (sid !== currentSessionId.value || props.agent.name !== oldName) dropSpokenQueue()
   if (threadChangeEndsCall({
     callActive: anyCallActive.value,
     agentChanged: props.agent.name !== oldName,
     newSessionId: sid,
     boundSessionId: (directCallActive.value ? direct.portalSessionId.value : voice.portalSessionId.value) || currentSessionId.value,
-  })) await endVoiceCall()
+  })) await endVoiceCall({ flush: false })   // #4456: words still collected were for the thread being left
   currentSessionId.value = sid
   resetTypeahead()
   // #2624: the outgoing thread's element is about to be replaced, so re-arm
@@ -3269,7 +3273,8 @@ watch(() => props.agent?.name, () => {
   // ent#534: a call belongs to the agent it was started with — carrying an
   // open microphone across a switch would send the next utterance to someone
   // the user never chose to talk to.
-  if (anyCallActive.value) void endVoiceCall()
+  // #4456: and words still collected are dropped, not sent to the agent switched to.
+  if (anyCallActive.value) void endVoiceCall({ flush: false })
   stopSpeaking(); voiceError.value = ''; voiceMode.value = loadVoiceMode()
 })
 const speaking = ref(false)
@@ -3519,18 +3524,26 @@ const voiceCallActive = computed(() => voice.isActive.value)
 // the voice model owns the thread. A Direct call leaves the composer live: what it
 // shares with Live is only what `anyCallActive` guards.
 let spokenQueue = ''
+// #4456: the call was ended with words still to send, behind a turn that had not settled.
+// They were said, so they go once it has, call or no call.
+let sendQueueAfterCall = false
+// The queue belongs to the agent and thread it was spoken in. Stop takes it back; so does
+// leaving either, whether or not the call is still on.
+function dropSpokenQueue() { spokenQueue = ''; sendQueueAfterCall = false }
 function sendSpoken(text) {
-  if (sending.value) { spokenQueue = spokenQueue ? `${spokenQueue} ${text}` : text; return }
+  if (sending.value) { spokenQueue = spokenQueue ? `${spokenQueue} ${text}` : text; return 'queued' }
   void submitUserText(text, { spoken: true, tags: [] }).then((res) => {
+    if (res && !res.ok) direct.forgetSent()
     if (res && !res.ok && !res.cancelled) direct.notice.value = "That didn't send. It's marked in the chat."
   })
+  return 'sent'
 }
 const direct = useDirectVoiceSession({
   onTranscript: sendSpoken,
   onBargeIn: ({ executionId } = {}) => stopCallTurn(executionId),
   // ent#1087: a Stop is not more words. Whatever was waiting to be sent after the turn
   // stays unsent, or the cancel would land and the queue would start the next turn.
-  onStop: () => { spokenQueue = '' },
+  onStop: dropSpokenQueue,
   // A spoken turn still being dispatched is something to stop, before its id is known.
   isBusy: () => sending.value,
   onAnswer: answerAskByVoice,
@@ -3551,7 +3564,8 @@ watch(sending, (isSending) => {
   if (isSending || !spokenQueue) return
   const text = spokenQueue
   spokenQueue = ''
-  if (directCallActive.value) sendSpoken(text)
+  if (directCallActive.value || sendQueueAfterCall) sendSpoken(text)
+  sendQueueAfterCall = false
 })
 // Answered as the person, on the same route their click uses. The socket never decides.
 async function answerAskByVoice(ask, answer) {
@@ -3610,7 +3624,7 @@ const callUi = computed(() => callButtons({
 }))
 watch(directCallActive, async (on, was) => {
   if (!was || on) return
-  spokenQueue = ''
+  if (!sendQueueAfterCall) spokenQueue = ''
   voiceEndNotice.value = endedNotice({ reason: direct.endReason.value, message: direct.endMessage.value })
   if (direct.error.value && !voiceEndNotice.value) voiceError.value = direct.error.value
   const sid = currentSessionId.value
@@ -3764,8 +3778,13 @@ async function startVoiceCall(mode = 'live') {
   }
 }
 
-async function endVoiceCall() {
-  if (directCallActive.value) { await direct.stop(); return }
+async function endVoiceCall({ flush = true } = {}) {
+  if (directCallActive.value) {
+    sendQueueAfterCall = flush
+    await direct.stop({ flush })
+    if (!spokenQueue) sendQueueAfterCall = false
+    return
+  }
   if (!voiceCallActive.value) return
   await voice.stop()
 }

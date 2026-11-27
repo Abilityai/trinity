@@ -4,12 +4,12 @@
  * The rules, the endpointer, the fold, the composable's protocol, the two call buttons,
  * and the mounted call bars.
  */
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import {
   answersAsk, callButtons, cardOutcome, classifyAnswer, directBarsState, directDetail, directStateText, isDirectCallId,
-  isEcho, looksUnfinished, optionForAnswer,
+  GRACE_MS, HOLD_UNFINISHED_MS, isEcho, looksUnfinished, optionForAnswer,
 } from '../../src/components/portal/portalDirectCall'
 import { groupVoiceBlocks, voiceTaskCaption } from '../../src/components/portal/portalVoiceMode'
 import { createEndpointer, samplesToPcm16Base64, VAD } from '../../src/utils/voiceEndpointing'
@@ -180,6 +180,7 @@ describe('the endpointer', () => {
 })
 
 describe('the call protocol', () => {
+  afterEach(() => vi.useRealTimers())
   function session(overrides = {}) {
     setActivePinia(createPinia())
     const hooks = { onTranscript: vi.fn(), onBargeIn: vi.fn(), onAnswer: vi.fn(), ...overrides }
@@ -187,9 +188,15 @@ describe('the call protocol', () => {
   }
   const hear = (call, seq, text) => call._handleFrame({ type: 'transcript_live', seq, text })
 
-  it('hands a finished sentence to the conversation and starts nothing itself', () => {
+  // #4456: nothing is sent the moment it is heard. Words wait out a quiet period first;
+  // `directCallPauseCoalesce.spec.js` pins the rules, these pin the protocol around them.
+  it('hands a finished sentence to the conversation after the quiet period, and starts nothing itself', () => {
+    vi.useFakeTimers()
     const { hooks, call } = session()
     hear(call, 1, 'What time is it?')
+    vi.advanceTimersByTime(GRACE_MS - 1)
+    expect(hooks.onTranscript).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
     expect(hooks.onTranscript).toHaveBeenCalledWith('What time is it?')
     expect(hooks.onAnswer).not.toHaveBeenCalled()
   })
@@ -197,25 +204,33 @@ describe('the call protocol', () => {
     vi.useFakeTimers()
     const { hooks, call } = session()
     hear(call, 1, 'send it to')
+    vi.advanceTimersByTime(GRACE_MS)
     expect(hooks.onTranscript).not.toHaveBeenCalled()
     hear(call, 2, 'Alice.')
+    vi.advanceTimersByTime(GRACE_MS)
     expect(hooks.onTranscript).toHaveBeenCalledWith('send it to Alice.')
     hear(call, 3, 'and then')
-    vi.advanceTimersByTime(3000)
+    vi.advanceTimersByTime(HOLD_UNFINISHED_MS - 1)
+    expect(hooks.onTranscript).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(1)
     expect(hooks.onTranscript).toHaveBeenLastCalledWith('and then')
-    vi.useRealTimers()
   })
-  it('stops the running turn when talked over', () => {
+  it('stops the running turn when talked over, at once, and sends the words after the quiet period', () => {
+    vi.useFakeTimers()
     const { hooks, call } = session()
     call._handleFrame({ type: 'speak_state', state: 'thinking', execution_id: 'e1' })
     hear(call, 1, 'Actually, stop.')
     expect(hooks.onBargeIn).toHaveBeenCalledTimes(1)
+    expect(hooks.onTranscript).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(GRACE_MS)
     expect(hooks.onTranscript).toHaveBeenCalledWith('Actually, stop.')
   })
   it('does not count a yes before the prompt has played', () => {
+    vi.useFakeTimers()
     const { hooks, call } = session()
     call.promptAsk(APPROVAL)
     hear(call, 1, 'Yes.')
+    vi.advanceTimersByTime(GRACE_MS)
     expect(hooks.onAnswer).not.toHaveBeenCalled()
     expect(hooks.onTranscript).toHaveBeenCalledWith('Yes.')
   })

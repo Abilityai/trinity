@@ -25,6 +25,15 @@ vi.mock('axios', () => {
   }
 })
 
+// #4456: spoken words are collected and sent after a quiet period. Its length is pinned
+// in `directCallPauseCoalesce.spec.js`; here it is zero, so each `say` is a whole turn
+// and this file keeps its real clock (the 50 ms poll, the approval gap).
+const hold = vi.hoisted(() => ({ ms: 0 }))
+vi.mock('@/components/portal/portalDirectCall', async (original) => ({
+  ...(await original()),
+  holdDelay: () => hold.ms,
+}))
+
 const player = vi.hoisted(() => ({ playing: false, last: null }))
 vi.mock('@/utils/audio', () => ({
   startMicCapture: vi.fn(async () => ({ stop: vi.fn() })),
@@ -83,6 +92,7 @@ let wrapper
 beforeEach(async () => {
   document.body.innerHTML = ''
   player.playing = false
+  hold.ms = 0
   setActivePinia(createPinia())
   store = useClientPortalStore()
   vi.spyOn(store, 'isPlatformSession', 'get').mockReturnValue(true)
@@ -124,6 +134,9 @@ async function startCall() {
 }
 const say = async (socket, seq, text) => {
   socket.push({ type: 'transcript_live', seq, text })
+  await flushPromises()
+  // The (zero-length) quiet period is still a timer.
+  await wait(0)
   await flushPromises()
 }
 const composer = () => wrapper.get('textarea')
@@ -232,6 +245,8 @@ describe('a Direct call in the conversation', () => {
   })
 
   it('talking over a running turn stops it, sends the new words, and leaves the composer empty', async () => {
+    let finish
+    store.streamPortalExecution = vi.fn(() => new Promise((resolve) => { finish = resolve }))
     const socket = await startCall()
     await say(socket, 1, 'Start the long job.')
     socket.push({ type: 'speak_state', state: 'thinking', execution_id: 'e1' })
@@ -239,6 +254,13 @@ describe('a Direct call in the conversation', () => {
     expect(store.cancelPortalTurn).toHaveBeenCalledWith('scout', 'e1')
     expect(socket.of('interrupt')).toHaveLength(1)
     expect(composer().element.value).toBe('')
+    // The cancelled turn settles; what was said goes out as the next one. #4456: the
+    // agent had said nothing yet, so that turn carries the first words too.
+    store.fetchHistory = vi.fn(async () => ({ sessionId: SID, messages: [], lastTurnOutcome: { category: 'cancelled', execution_id: 'e1' } }))
+    finish()
+    for (let i = 0; i < 20; i++) { await flushPromises(); await wait(5) }
+    expect(store.startPortalChat).toHaveBeenCalledTimes(2)
+    expect(store.startPortalChat.mock.calls[1][1]).toBe('Start the long job. Actually, stop.')
   })
 
   it('Escape ends the call and sends the end frame', async () => {
@@ -360,6 +382,70 @@ describe('stopping the agent on a Direct call', () => {
     expect(player.last.pause).toHaveBeenCalled()
   })
 
+  it('words still collected when the person switches agent are not sent to the new one (#4456)', async () => {
+    hold.ms = 60
+    const socket = await startCall()
+    socket.push({ type: 'transcript_live', seq: 1, text: 'Delete the draft.' })
+    await flushPromises()
+    await wrapper.setProps({ agent: { name: 'scribe', playbooks: [], pulls_turns: false }, sessionId: null })
+    await flushPromises()
+    await wait(150)
+    await flushPromises()
+    expect(socket.of('end').length).toBeGreaterThan(0)      // the call ended
+    expect(store.startPortalChat).not.toHaveBeenCalled()
+  })
+
+  it('ending the call by its button sends what was collected (#4456)', async () => {
+    hold.ms = 5000
+    const socket = await startCall()
+    socket.push({ type: 'transcript_live', seq: 1, text: 'Delete the draft.' })
+    await flushPromises()
+    await wrapper.get('[data-testid="direct-call-end"]').trigger('click')
+    await flushPromises()
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+    expect(store.startPortalChat.mock.calls[0][1]).toBe('Delete the draft.')
+  })
+
+  it('ending the call with words still behind a settling turn sends them once it has settled (#4456)', async () => {
+    let finish
+    store.streamPortalExecution = vi.fn(() => new Promise((resolve) => { finish = resolve }))
+    const socket = await startCall()
+    await say(socket, 1, 'Start the long job.')
+    socket.push({ type: 'speak_state', state: 'thinking', execution_id: 'e1' })
+    hold.ms = 5000
+    socket.push({ type: 'transcript_live', seq: 2, text: 'Actually, list the files.' })   // talks over it
+    await flushPromises()
+    await wrapper.get('[data-testid="direct-call-end"]').trigger('click')                  // …and ends the call
+    await flushPromises()
+    socket.push({ type: 'saved', rows: 0 })
+    await flushPromises()
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+    store.fetchHistory = vi.fn(async () => ({ sessionId: SID, messages: [], lastTurnOutcome: { category: 'cancelled', execution_id: 'e1' } }))
+    finish()
+    for (let i = 0; i < 20; i++) { await flushPromises(); await wait(5) }
+    expect(store.startPortalChat).toHaveBeenCalledTimes(2)
+    expect(store.startPortalChat.mock.calls[1][1]).toBe('Start the long job. Actually, list the files.')
+  })
+
+  it('speaking again after a pause puts the call back on "Listening" (#4456)', async () => {
+    // The real endpointer, fed through the mic hand-off: a phrase, the silence that ends
+    // it ("Got it"), then a new onset. Without the onset wired through, the strip keeps
+    // saying "Got it" while the person is talking.
+    const { startMicCapture } = await import('@/utils/audio')
+    const socket = await startCall()
+    const onMic = startMicCapture.mock.calls.at(-1)[0]
+    const frames = (level, n) => { for (let i = 0; i < n; i++) onMic(null, new Float32Array(320).fill(level)) }
+    const state = () => wrapper.get('[data-testid="direct-call-stage"] [role="status"]').text()
+    frames(0.2, 40)
+    frames(0.0001, 50)
+    await flushPromises()
+    expect(socket.of('utterance')).toHaveLength(1)
+    expect(state()).toBe('Got it')
+    frames(0.2, 20)
+    await flushPromises()
+    expect(state()).toBe('Listening')
+  })
+
   it('the Stop button is there with its reason when there is nothing to stop', async () => {
     await startCall()
     expect(stopButton().attributes('disabled')).toBeDefined()
@@ -467,5 +553,184 @@ describe('stopping the agent on a Direct call', () => {
     await stopButton().trigger('click')
     await flushPromises()
     expect(store.cancelPortalTurn).toHaveBeenCalledWith('scout', 'approved-run')
+  })
+})
+
+// #4456 (merge-train review, 2026-11-24): words parked behind a turn that has not settled
+// belong to the agent and thread they were spoken in. Leaving either drops them, whether
+// or not the call is still on.
+describe('words waiting behind a settling turn stay with where they were spoken (#4456)', () => {
+  const SCRIBE = { name: 'scribe', playbooks: [], pulls_turns: false }
+  const CANCELLED = { sessionId: SID, messages: [], lastTurnOutcome: { category: 'cancelled', execution_id: 'e1' } }
+  let finish
+  const settled = async () => {
+    store.fetchHistory = vi.fn(async () => CANCELLED)
+    finish()
+    for (let i = 0; i < 20; i++) { await flushPromises(); await wait(5) }
+  }
+  // A turn is running, the person talks over it, and those words are queued behind it.
+  async function wordsQueuedBehindTheTurn() {
+    store.streamPortalExecution = vi.fn(() => new Promise((resolve) => { finish = resolve }))
+    const socket = await startCall()
+    await say(socket, 1, 'Start the long job.')
+    socket.push({ type: 'speak_state', state: 'thinking', execution_id: 'e1' })
+    await say(socket, 2, 'Actually, delete the draft.')
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+    return socket
+  }
+  async function endTheCall(socket) {
+    await wrapper.get('[data-testid="direct-call-end"]').trigger('click')
+    await flushPromises()
+    socket.push({ type: 'saved', rows: 0 })
+    await flushPromises()
+  }
+
+  it('End call, then another agent before the turn settles: nothing is sent to that agent', async () => {
+    const socket = await wordsQueuedBehindTheTurn()
+    await endTheCall(socket)
+    await wrapper.setProps({ agent: SCRIBE, sessionId: null })
+    await flushPromises()
+    await settled()
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+    expect(store.startPortalChat.mock.calls.map((c) => c[0])).toEqual(['scout'])
+  })
+
+  it('End call, then another thread of the same agent: nothing is sent to that thread', async () => {
+    const socket = await wordsQueuedBehindTheTurn()
+    await endTheCall(socket)
+    await wrapper.setProps({ agent: AGENT, sessionId: 's2' })
+    await flushPromises()
+    await settled()
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+  })
+
+  it('another agent while the call is still on, and the turn settles as the call winds down: nothing is sent', async () => {
+    const socket = await wordsQueuedBehindTheTurn()
+    await wrapper.setProps({ agent: SCRIBE, sessionId: null })
+    await flushPromises()
+    // The call has been told to end and has not yet been confirmed saved.
+    expect(socket.of('end').length).toBeGreaterThan(0)
+    await settled()
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+  })
+
+  it('words dropped that way do not leave the next call sending after the server ends it', async () => {
+    // End armed "send these after the call"; leaving dropped the words, and must drop that too.
+    const first = await wordsQueuedBehindTheTurn()
+    await endTheCall(first)
+    await wrapper.setProps({ agent: AGENT, sessionId: 's2' })
+    await flushPromises()
+    await settled()
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+    // A second call, in the thread now open, with words queued behind its own turn.
+    store.fetchHistory = vi.fn(async () => ({ sessionId: 's2', messages: [], lastTurnOutcome: null }))
+    store.startPortalChat = vi.fn(async () => ({ execution_id: 'e2', session_id: 's2' }))
+    const second = await startCall()
+    expect(second).not.toBe(first)
+    await say(second, 1, 'Summarise the report.')
+    second.push({ type: 'speak_state', state: 'thinking', execution_id: 'e2' })
+    await say(second, 2, 'And email it to everyone.')
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+    second.onclose()                                    // the server ends the call
+    await flushPromises()
+    store.fetchHistory = vi.fn(async () => ({ sessionId: 's2', messages: [], lastTurnOutcome: { category: 'cancelled', execution_id: 'e2' } }))
+    finish()
+    for (let i = 0; i < 20; i++) { await flushPromises(); await wait(5) }
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+  })
+
+  it('staying put still sends them once the turn has settled', async () => {
+    const socket = await wordsQueuedBehindTheTurn()
+    await endTheCall(socket)
+    await settled()
+    expect(store.startPortalChat).toHaveBeenCalledTimes(2)
+    expect(store.startPortalChat.mock.calls[1].slice(0, 2)).toEqual(['scout', 'Start the long job. Actually, delete the draft.'])
+  })
+})
+
+// #4456 (merge-train review): the lines that join the call to the conversation, each
+// driven through the mounted component so that removing one turns a test red.
+describe('the call and the conversation, joined (#4456)', () => {
+  it('words the conversation queued are not carried again by the next thing said', async () => {
+    // `sendSpoken` answers "queued": the call then forgets them as a turn to supersede.
+    let finish
+    store.streamPortalExecution = vi.fn(() => new Promise((resolve) => { finish = resolve }))
+    const socket = await startCall()
+    await say(socket, 1, 'Start the long job.')
+    socket.push({ type: 'speak_state', state: 'thinking', execution_id: 'e1' })
+    await say(socket, 2, 'Actually, wait.')
+    await say(socket, 3, 'List the files instead.')
+    store.fetchHistory = vi.fn(async () => ({ sessionId: SID, messages: [], lastTurnOutcome: { category: 'cancelled', execution_id: 'e1' } }))
+    finish()
+    for (let i = 0; i < 20; i++) { await flushPromises(); await wait(5) }
+    expect(store.startPortalChat).toHaveBeenCalledTimes(2)
+    expect(store.startPortalChat.mock.calls[1][1]).toBe('Start the long job. Actually, wait. List the files instead.')
+  })
+
+  it('noise after a phrase does not strand the words already collected', async () => {
+    // The endpointer reports the noise as discarded, and that is what re-arms the send.
+    const { startMicCapture } = await import('@/utils/audio')
+    hold.ms = 40
+    const socket = await startCall()
+    const onMic = startMicCapture.mock.calls.at(-1)[0]
+    const frames = (level, n) => { for (let i = 0; i < n; i++) onMic(null, new Float32Array(320).fill(level)) }
+    socket.push({ type: 'transcript_live', seq: 1, text: 'Delete the draft.' })
+    await flushPromises()
+    frames(0.2, 12)        // an onset: the pending send is cancelled while they "speak"
+    frames(0.0001, 60)     // …too short to be speech, then silence: discarded
+    await flushPromises()
+    expect(socket.of('utterance')).toHaveLength(0)
+    await wait(80)
+    await flushPromises()
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+    expect(store.startPortalChat.mock.calls[0][1]).toBe('Delete the draft.')
+  })
+
+  it('a long, silent turn is still the first half of the sentence the person carries on with', async () => {
+    // `speak()` marks the sent words as a started turn, so they do not lapse as a send
+    // that never became one.
+    let finish
+    store.streamPortalExecution = vi.fn(() => new Promise((resolve) => { finish = resolve }))
+    const socket = await startCall()
+    await say(socket, 1, 'Start the long job.')
+    expect(socket.of('speak')).toHaveLength(1)
+    const real = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => real + 60_000)
+    await say(socket, 2, 'And list the files.')
+    clock.mockRestore()
+    store.fetchHistory = vi.fn(async () => ({ sessionId: SID, messages: [], lastTurnOutcome: { category: 'cancelled', execution_id: 'e1' } }))
+    finish()
+    for (let i = 0; i < 20; i++) { await flushPromises(); await wait(5) }
+    expect(store.startPortalChat).toHaveBeenCalledTimes(2)
+    expect(store.startPortalChat.mock.calls[1][1]).toBe('Start the long job. And list the files.')
+  })
+
+  it('words that failed to send are not carried into a turn typed afterwards', async () => {
+    // The conversation tells the call the dispatch failed (`forgetSent`).
+    store.startPortalChat = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('offline'), { response: { status: 503, data: {} } }))
+      .mockImplementationOnce(() => new Promise(() => {}))        // the typed turn, still dispatching
+    const socket = await startCall()
+    await say(socket, 1, 'Delete the draft.')
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+    await composer().setValue('typed instead')
+    await composer().trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(store.startPortalChat).toHaveBeenCalledTimes(2)
+    await say(socket, 2, 'And the appendix.')
+    // Not a continuation of the failed words, so nothing of the typed turn is stopped.
+    expect(socket.of('interrupt')).toHaveLength(0)
+  })
+
+  it('leaving the page mid-call sends nothing that was still collected', async () => {
+    hold.ms = 5000
+    const socket = await startCall()
+    socket.push({ type: 'transcript_live', seq: 1, text: 'Delete the draft.' })
+    await flushPromises()
+    wrapper.unmount()
+    wrapper = null
+    await flushPromises()
+    expect(socket.of('end')).toHaveLength(1)
+    expect(store.startPortalChat).not.toHaveBeenCalled()
   })
 })

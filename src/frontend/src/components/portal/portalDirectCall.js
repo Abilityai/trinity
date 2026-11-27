@@ -6,6 +6,15 @@ import { VOICE_UNAVAILABLE_FALLBACK } from './portalVoiceMode'
 
 export const DIRECT_PREFIX = 'vd_'
 export const HOLD_UNFINISHED_MS = 3000
+// #4456: what the person says is collected and sent as ONE turn once they have been quiet
+// for this long, measured from the end of their last utterance (transcription runs inside
+// it). A pause mid-thought is then just a pause: without it every pause sent its own turn
+// and the next phrase cancelled the turn the previous one had started. A sentence that
+// looks unfinished waits the longer `HOLD_UNFINISHED_MS`. The price is this much before
+// every spoken reply, less the time transcription takes anyway.
+export const GRACE_MS = 1500
+// A transcript that never arrives must not strand the words already collected.
+export const HOLD_LOST_MS = 10000
 // A yes that starts sooner than this after the prompt ended overlapped it.
 export const APPROVAL_GAP_MS = 300
 
@@ -56,6 +65,31 @@ const STOP = new Set(['stop', 'wait', 'hold on', 'hang on', 'ok stop', 'okay sto
 
 export function isStopUtterance(text) {
   return STOP.has(normalize(text))
+}
+
+// #4456: said while words are collected and nothing is running. "Never mind" takes the
+// sentence back; "hold on" asks for a moment, so the sentence waits longer and the filler
+// is not sent as part of it. Anything else in STOP is about the agent's voice, and with
+// nothing playing it is just words.
+const TAKE_BACK = new Set(['never mind', 'nevermind', 'cancel', 'stop', 'ok stop', 'okay stop',
+  'stop please', 'please stop', 'stop stop'])
+const ONE_MOMENT = new Set(['wait', 'hold on', 'hang on', 'ok wait', 'wait wait', 'one sec',
+  'one second', 'pause'])
+
+export function heldWord(text) {
+  const t = normalize(text)
+  return TAKE_BACK.has(t) ? 'drop' : ONE_MOMENT.has(t) ? 'wait' : null
+}
+
+// Fragments in the order they were SPOKEN. Each utterance is transcribed on its own, so a
+// short second fragment can come back before a long first one.
+export function joinHeld(parts = []) {
+  return [...parts].sort((a, b) => a.seq - b.seq).map((p) => String(p.text || '').trim())
+    .filter(Boolean).join(' ')
+}
+
+export function holdDelay(text, { long = false } = {}) {
+  return long || looksUnfinished(text) ? HOLD_UNFINISHED_MS : GRACE_MS
 }
 
 // A sentence the agent itself just said, heard back word for word.

@@ -33,9 +33,43 @@ browser send() ─▶ POST …/chat/stream {voice_call_id: vd_…} ◀──┘ 
 3. **Hearing.** `DirectBridge.hear`: size cap, strict base64, 30/min per person, provider STT,
    `transcript_live{seq,text,stt_ms}`. Silence is `not_heard{empty}`; an STT failure says
    "I didn't catch that." Nothing is started.
-4. **The turn.** The browser holds an unfinished sentence up to 3 s
-   (`portalDirectCall.looksUnfinished`), then calls `submitUserText(text, {spoken:true})` —
-   the composer's draft is untouched. `deliver` adds `voiceCallId` for any turn during the call,
+4. **The turn.** A pause is not the end of a turn (#4456). Transcripts are collected as
+   `{seq, text}` and sent as ONE turn (`submitUserText(text, {spoken:true})`, joined in spoken
+   order by `portalDirectCall.joinHeld`, since each utterance is transcribed on its own and
+   can come back out of order) once the person has been quiet for `GRACE_MS` (1.5 s), or
+   `HOLD_UNFINISHED_MS` (3 s) when `looksUnfinished`. The quiet period is counted from the END
+   of the last utterance, so transcription runs inside it. `useDirectVoiceSession.armHold` is
+   the one place the send is scheduled:
+   - nothing is sent while the person is speaking (the endpointer's onset cancels the pending
+     send; `onUtterance` / `onDiscard` / mute end the speech) or while any transcript is still
+     on its way; `HOLD_LOST_MS` (10 s) covers a transcript that never arrives;
+   - noise (`onDiscard`) and `not_heard` resume the wait where it was, they do not restart it;
+   - a yes/no that answers a waiting approval and a stop word are NOT delayed;
+   - with words collected and nothing running, `heldWord` reads "never mind" / "cancel" /
+     "stop" as taking them back (nothing sent, no "Stopped.") and "wait" / "hold on" /
+     "one sec" as asking for a moment (the filler is not sent, the wait becomes the long one);
+   - a continuation that arrives after the words were sent but BEFORE the agent answered —
+     no `audio` frame and no tool `activity` yet — stops that turn and sends both halves again
+     as one (`lastSent`; dropped on `speak_state idle`, on a stop, when the dispatch fails,
+     and after 15 s if its turn never started). The chat then shows the first half twice:
+     once as the cancelled message, once inside the merged one. After a tool has started the
+     new words go alone, so an action is not run twice. Words parked in the conversation's
+     `spokenQueue` behind a settling turn are joined there instead;
+   - the status goes back to `listening` at an onset, so "Got it" is never shown while the
+     person is talking;
+   - ending the call sends what was collected (after the turn in front of it has settled,
+     if there is one), except when it ends because the person left for another agent or
+     thread (`stop({flush:false})`): those words go nowhere. The same holds for words
+     already parked in `spokenQueue` behind a settling turn: they belong to the agent and
+     thread they were spoken in, so the thread watcher drops them (`dropSpokenQueue`) on
+     any agent or thread change, before it awaits the call's end and whether or not a call
+     is still on. Adopting the conversation's own new thread is not a change. An utterance
+     still being transcribed when End is pressed is lost: `handleTranscript` ignores a
+     transcript that arrives after the call ended.
+
+   `VAD.endMs` stays 850 ms: the quiet period covers a mid-sentence pause, and a longer
+   endpoint would also delay yes/no and stop words. The cost is up to `GRACE_MS` before every
+   spoken reply, less the time transcription takes anyway. The composer's draft is untouched. `deliver` adds `voiceCallId` for any turn during the call,
    typed or spoken. The route validates it with `turn_may_join_call`; `portal_chat` writes both
    rows with the id and adds `DIRECT_CALL_ETIQUETTE` to the system prompt.
 5. **Speaking.** `speak{execution_id}` → `execution_belongs_to_caller` → `speak_execution`:
