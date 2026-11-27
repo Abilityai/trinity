@@ -436,6 +436,7 @@ async def set_admin_password(
     # place and writes nothing. Inert with no provider, and never on the
     # instance-ID form (a self-installed path).
     registration_version = None
+    registration_terms = None
     if (
         claim_mode
         and setup_registration.provider() is not None
@@ -444,9 +445,10 @@ async def set_admin_password(
         # A provider that could not say whether it applies refuses here
         # (retryable 503) rather than letting setup past the terms.
         try:
-            registration_version = await setup_registration.check_accepted_if_applies(
+            registration_terms = await setup_registration.accepted_terms_if_applies(
                 data.registration_terms_version
             )
+            registration_version = registration_terms["version"] if registration_terms else None
         except setup_registration.RegistrationTermsError as e:
             raise HTTPException(status_code=e.status_code, detail=e.detail()) from None
 
@@ -539,6 +541,25 @@ async def set_admin_password(
                 )
         except Exception as e:  # noqa: BLE001
             logger.warning("Setup could not record the admin's terms acceptance: %s",
+                           type(e).__name__)
+
+    # trinity-enterprise#1403: registration terms whose text says accepting
+    # them switches usage sharing on do so, through the platform's own switch
+    # (kill switch, an earlier refusal and an install already sharing are all
+    # respected there; audit-logged; off again in Settings → Usage sharing).
+    # Terms that do not say so, no provider, and the instance-ID form leave
+    # sharing as it was. Never fails setup.
+    if registration_terms is not None and registration_terms.get("usage_sharing_on_accept") is True:
+        try:
+            from services import telemetry_sharing_service
+            admin_row = db.get_user_by_username(admin_username()) or {}
+            await telemetry_sharing_service.switch_on_with_terms(
+                SimpleNamespace(id=admin_row.get("id"), email=admin_row.get("email"),
+                                username=admin_username(), role="admin"),
+                via="registration_terms",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Setup could not switch usage sharing on with the terms: %s",
                            type(e).__name__)
 
     # Mark setup as completed.

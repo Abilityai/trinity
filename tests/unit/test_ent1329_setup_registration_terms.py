@@ -214,7 +214,9 @@ def test_status_answer_is_unchanged_with_a_provider(env):
 def test_terms_route_answers_the_provider_terms(env):
     env(provider=FakeProvider())
     assert _get_terms() == {"version": V1, "title": "Registration terms",
-                            "text": "You agree to ...", "url": "https://example.com/terms"}
+                            "text": "You agree to ...", "url": "https://example.com/terms",
+                            # ent#1403: absent in the provider's answer reads False.
+                            "usage_sharing_on_accept": False}
 
 
 def test_terms_route_is_cached_for_60_seconds(env, monkeypatch):

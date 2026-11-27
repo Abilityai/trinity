@@ -13,7 +13,11 @@ Protocol (what a provider implements)::
         async def current_terms(self) -> dict:
             # {"version": str (non-empty, <= 100 chars),
             #  "title": str | None (<= 200), "text": str | None (<= 200 000),
-            #  "url": str | None (<= 2 000)}
+            #  "url": str | None (<= 2 000),
+            #  "usage_sharing_on_accept": bool (OPTIONAL)}
+            # ``usage_sharing_on_accept`` is True only when the text of this
+            # version says accepting it switches usage sharing on
+            # (trinity-enterprise#1403); anything but ``True`` reads False.
             # Raise any exception when the terms cannot be read right now;
             # setup then refuses with the retryable
             # ``registration_terms_unavailable`` and never completes.
@@ -206,6 +210,9 @@ def _validate(raw: Any) -> dict:
         "title": _opt(raw.get("title"), TITLE_MAX_CHARS),
         "text": _opt(raw.get("text"), TEXT_MAX_CHARS),
         "url": _opt(raw.get("url"), URL_MAX_CHARS),
+        # Only a literal True: a malformed flag never switches sharing on and
+        # never makes the terms unavailable (trinity-enterprise#1403).
+        "usage_sharing_on_accept": raw.get("usage_sharing_on_accept") is True,
     }
 
 
@@ -254,7 +261,15 @@ async def check_accepted(given_version: Optional[str]) -> str:
     503 ``registration_terms_unavailable`` (retryable), 400
     ``registration_terms_required`` or 409 ``registration_terms_changed``,
     each carrying the current version where known."""
-    current = (await current_terms(fresh=True))["version"]
+    return (await accepted_terms(given_version))["version"]
+
+
+async def accepted_terms(given_version: Optional[str]) -> dict:
+    """``check_accepted``, answering the whole accepted document (version,
+    text, and whether accepting it switches usage sharing on) so the caller
+    acts on the terms actually accepted, read fresh at submit."""
+    terms = await current_terms(fresh=True)
+    current = terms["version"]
     given = (given_version or "").strip()
     if not given:
         raise RegistrationTermsError(
@@ -263,7 +278,7 @@ async def check_accepted(given_version: Optional[str]) -> str:
         raise RegistrationTermsError(
             409, CHANGED, "The registration terms have changed. Read the current version and accept it.",
             version=current)
-    return current
+    return terms
 
 
 async def check_accepted_if_applies(given_version: Optional[str]) -> Optional[str]:
@@ -271,12 +286,19 @@ async def check_accepted_if_applies(given_version: Optional[str]) -> Optional[st
     accepted version when one applies (``check_accepted``); and the retryable
     503 ``registration_terms_unavailable`` when ``applies()`` could not answer
     — nothing is taken or written on a refusal."""
+    terms = await accepted_terms_if_applies(given_version)
+    return None if terms is None else terms["version"]
+
+
+async def accepted_terms_if_applies(given_version: Optional[str]) -> Optional[dict]:
+    """``check_accepted_if_applies``, answering the accepted document
+    (``accepted_terms``) instead of its version alone."""
     state = applies_state()
     if state == DOES_NOT_APPLY:
         return None
     if state == UNKNOWN:
         raise _unavailable()
-    return await check_accepted(given_version)
+    return await accepted_terms(given_version)
 
 
 def record_acceptance(version: str, ip: Optional[str], *, now: Optional[str] = None) -> dict:
