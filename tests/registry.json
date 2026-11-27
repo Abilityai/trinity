@@ -10061,6 +10061,16 @@
         "unit"
       ],
       "description": "POST /api/setup/admin-password with registration terms that carry usage_sharing_on_accept: true switches usage sharing on through set_consent (Settings reads it on, the first-run step's flag is on, a backfill share is scheduled, one telemetry_sharing_consent audit line naming via=registration_terms); never after a refusal on record (switched off, on-then-off, Don't ask again) or under the kill switch; an install already sharing is left alone; terms without the flag (or a non-True value), no provider and the instance-ID form are unchanged; a failing switch or audit never fails setup."
+    },
+    {
+      "file": "unit/test_ent1416_core_agents_seed.py",
+      "feature": "trinity-enterprise#1416",
+      "added": "2026-11-27",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "A fresh install seeds the Company Brain (cornelius) and the Chief of Staff (corbin, github:Abilityai/corbin, pull-only, 2g ceiling) through the real seeders and first-run orchestrator, groups them (dept-headquarters, reports-to-corbin) and grants corbin -> cornelius on the creating pass only; no Acme fleet unless TRINITY_DEFAULT_SYSTEM_MANIFEST names one; a Chief of Staff miss leaves the Brain, alerts, and retries once without duplicating; an install seeded under an earlier version gets no new agent; the create path caps memory before staging; first-run state names core_agents."
     }
   ]
 }

@@ -145,6 +145,7 @@ def test_system_seed_looks_up_the_configured_admin(monkeypatch):
     monkeypatch.setattr(sss.db, "get_user_by_username", users)
     monkeypatch.setattr(sss, "docker_client", object())
     monkeypatch.setattr(sss, "get_breaker_redis", lambda: None)
+    monkeypatch.setenv(sss.MANIFEST_ENV_VAR, "bundled")  # ent#1416: named, or nothing is seeded
     # Stop right after the owner check: an unresolvable manifest is the next step.
     monkeypatch.setattr(
         sss.system_seed_service, "_resolve_manifest", lambda override: (None, "test", None),
@@ -180,6 +181,14 @@ def _orchestrate(monkeypatch, settings, users, agents):
         cas.cornelius_agent_service, "_provision",
         AsyncMock(side_effect=lambda *a, **k: provisioned.append("cornelius")),
     )
+    # ent#1416: the Chief of Staff follows the same verdict.
+    monkeypatch.setattr(
+        cas.chief_of_staff_agent_service, "_provision",
+        AsyncMock(side_effect=lambda *a, **k: provisioned.append("chief")),
+    )
+    monkeypatch.setattr(sss, "_organize_core_agents", lambda *r: None)
+    monkeypatch.setattr(sss, "_notify_chief_of_staff_failure", lambda m: None)
+    monkeypatch.setenv(sss.MANIFEST_ENV_VAR, "bundled")
 
     def _manifest(override):
         provisioned.append("system")
@@ -220,6 +229,7 @@ def test_a_stored_fresh_verdict_with_no_agents_still_seeds(monkeypatch):
     provisioned = _orchestrate(monkeypatch, settings, _Users(), agents=0)
 
     assert "cornelius" in provisioned and "system" in provisioned
+    assert "chief" in provisioned
     assert settings.store["first_run_fresh"] == "true"
 
 

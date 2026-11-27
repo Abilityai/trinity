@@ -416,7 +416,8 @@ export const useAssistantStore = defineStore('assistant', {
      * shows them or tells the assistant.
      */
     outOfSight(fleet = this.fleet) {
-      const examples = examplesOutOfSight(this.status, fleet, useFirstRunStore().seededAgents || [], examplesShownOnRequest())
+      const firstRun = useFirstRunStore()
+      const examples = examplesOutOfSight(this.status, fleet, firstRun.seededAgents || [], examplesShownOnRequest(), firstRun.coreAgents || [])
       return new Set([...examples, ...this.systemAgents])
     },
 

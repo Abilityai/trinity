@@ -128,7 +128,8 @@ def env(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(sss, "docker_client", object())          # Docker available
     monkeypatch.setattr(sss, "get_breaker_redis", lambda: None)  # lock fail-open
-    monkeypatch.delenv(sss.MANIFEST_ENV_VAR, raising=False)
+    # trinity-enterprise#1416: the bundled fleet is seeded only when named.
+    monkeypatch.setenv(sss.MANIFEST_ENV_VAR, "bundled")
 
     bundled = tmp_path / "default-system.yaml"
     bundled.write_text(TEST_MANIFEST, encoding="utf-8")
@@ -330,13 +331,16 @@ def test_unreadable_override_fails_loudly_and_never_falls_back(env, tmp_path):
     assert _alarm_subject(env.observe) == ("trinity-system", "system_seed", "override-unreadable")
 
 
-def test_empty_env_means_bundled(env):
-    """Compose `${VAR:-}` arrives set-but-empty (#1076 class) — must resolve
-    to the bundled manifest, not a path or a sentinel."""
+def test_empty_env_means_no_default_fleet(env):
+    """Compose `${VAR:-}` arrives set-but-empty (#1076 class). Since
+    trinity-enterprise#1416 that means no fleet is deployed (a fresh install
+    comes with the Brain and the Chief of Staff instead) — and, like a disable
+    sentinel, the flag is not burned, so naming a manifest later still seeds."""
     env.monkeypatch.setenv(sss.MANIFEST_ENV_VAR, "  ")
     result = _run()
-    env.deploy.assert_awaited_once()
-    assert result["action"] == "created"
+    env.deploy.assert_not_awaited()
+    assert result["action"] == "no_default_manifest"
+    assert env.settings.get(sss._SEEDED_FLAG) is None
 
 
 def test_missing_bundled_manifest_skips_without_flag(env):
@@ -551,6 +555,13 @@ def orch(env):
         sss.cornelius_agent_service, "ensure_seeded", fake_cornelius
     )
     env.monkeypatch.setattr(svc, "ensure_seeded", fake_fleet)
+
+    async def fake_chief(fresh=None):
+        return {}
+
+    # ent#1416: the Chief of Staff seeder runs between the two; stubbed here,
+    # driven for real in test_ent1416_core_agents_seed.py.
+    env.monkeypatch.setattr(sss.chief_of_staff_agent_service, "ensure_seeded", fake_chief)
     # ent#582: a "created" pass re-runs the first-credential connect, which reads
     # the real DB, Docker and Redis. Pinned in test_ent582_platform_keys.py.
     env.monkeypatch.setattr(sss, "_connect_seeded_agents", lambda *results: None)
@@ -582,7 +593,7 @@ def test_orchestrator_hands_both_results_to_the_credential_connect(orch):
 
     result = asyncio.run(ensure_first_run_seeded())
 
-    assert seen == [({}, {"action": "created"})]
+    assert seen == [({}, {}, {"action": "created"})]
     assert result == {"action": "created"}
 
 

@@ -558,3 +558,92 @@ export function newcomerOrigin(name, layout, agents, meta) {
 /* GAP re-export so the chrome-budget unit test pins the contract in one
    place: ZONE_CHROME must fit inside the lattice gaps. */
 export { GAP_X, GAP_Y }
+
+/**
+ * The Grid on first load, before anyone has arranged it (trinity-enterprise#1416).
+ *
+ * A pure function of the roster, recomputed on every reconcile until the person
+ * makes a gesture (drag, tidy, group) — from then on their saved layout wins
+ * and newcomers are placed beside it as before. Shape:
+ *
+ *   row -1   info tiles, left to right in one row (directly above the agents —
+ *            no empty band between them, which is what left a large gap before)
+ *   row  0+  the person's agents in department blocks, packed left to right:
+ *              1. the block holding the core agents (`core`, in that order —
+ *                 the Chief of Staff, then the Company Brain), which share one
+ *                 named group and so sit side by side;
+ *              2. other named departments, largest first;
+ *              3. agents in no department (e.g. one built in the first session)
+ *                 — so a new agent lands next to the core pair, never on top of
+ *                 it and never off screen;
+ *            then one empty column, then the system agent(s): set apart.
+ *
+ * A core agent whose department tag has not arrived yet is still placed in the
+ * first block, so the pair does not jump when the tags land a poll later.
+ * Blocks wrap onto a new band past MAX_COLS like `arrangeByDept`.
+ */
+export function firstLoadLayout(agents, widgetKeys = [], meta = null, core = []) {
+  const m = meta || orgMeta(agents)
+  const coreNames = (core || []).filter((n) => agents.some((a) => a.name === n && !a.is_system))
+  const CORE_GROUP = '\u0000core'
+  let coreDept = null
+  for (const n of coreNames) {
+    const d = deptOf(agents.find((a) => a.name === n), m)
+    if (d) { coreDept = d; break }
+  }
+  const groups = new Map()
+  for (const a of agents) {
+    if (a.is_system) continue
+    let g = deptOf(a, m) || ''
+    if (coreNames.includes(a.name) && (!g || g === coreDept)) g = CORE_GROUP
+    else if (coreDept && g === coreDept) g = CORE_GROUP
+    if (!groups.has(g)) groups.set(g, [])
+    groups.get(g).push(a.name)
+  }
+  const rank = (n) => {
+    const i = coreNames.indexOf(n)
+    return i === -1 ? coreNames.length : i
+  }
+  for (const list of groups.values()) list.sort((x, y) => rank(x) - rank(y) || x.localeCompare(y))
+  const order = [...groups.entries()].sort((x, y) => {
+    if (x[0] === CORE_GROUP) return -1
+    if (y[0] === CORE_GROUP) return 1
+    if (!x[0]) return 1
+    if (!y[0]) return -1
+    return y[1].length - x[1].length || x[0].localeCompare(y[0])
+  })
+
+  const MAX_COLS = 8
+  const out = {}
+  let blockC = 0
+  let blockR = 0
+  let bandRows = 0
+  for (const [, names] of order) {
+    const cols = blockCols(names.length)
+    const rows = Math.ceil(names.length / cols)
+    if (blockC > 0 && blockC + cols > MAX_COLS) {
+      blockC = 0
+      blockR += bandRows
+      bandRows = 0
+    }
+    names.forEach((n, i) => {
+      out[n] = { c: blockC + (i % cols), r: blockR + Math.floor(i / cols) }
+    })
+    blockC += cols
+    bandRows = Math.max(bandRows, rows)
+  }
+
+  const system = agents.filter((a) => a.is_system).map((a) => a.name).sort()
+  if (system.length) {
+    let c = blockC > 0 ? blockC + 1 : 0
+    let r = blockR
+    if (c + system.length > MAX_COLS && blockC > 0) {
+      c = 0
+      r = blockR + Math.max(bandRows, 1)
+    }
+    system.forEach((n, i) => { out[n] = { c: c + i, r } })
+  }
+
+  ;(widgetKeys || []).forEach((k, i) => { out[k] = { c: i, r: -1 } })
+  return out
+}

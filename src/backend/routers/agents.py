@@ -118,6 +118,7 @@ async def create_agent_internal(
     skip_name_sanitization: bool = False,
     adopt_existing_workspace: bool = False,
     allow_unforked_pull_only: bool = False,
+    memory_ceiling: Optional[str] = None,
 ) -> AgentStatus:
     """
     Internal function to create an agent.
@@ -132,6 +133,7 @@ async def create_agent_internal(
         ws_manager=manager,
         adopt_existing_workspace=adopt_existing_workspace,
         allow_unforked_pull_only=allow_unforked_pull_only,
+        memory_ceiling=memory_ceiling,
     )
 
 

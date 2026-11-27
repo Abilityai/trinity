@@ -28,6 +28,10 @@ export const useFirstRunStore = defineStore('firstRun', {
     seededAgents: [],
     ownAgentCount: 0,
     demoAgent: null,
+    // trinity-enterprise#1416: the seeded agents that are the person's team from
+    // the start (the Company Brain and the Chief of Staff). Still "seeded" (they
+    // do not end the first run) but never an example kept off the screen.
+    coreAgents: [],
     install: null,        // a short mark of this install: "setup closed" is remembered against it
     overlayOpen: false,   // the setup overlay has the screen (set by FirstRunOverlay)
   }),
@@ -42,6 +46,7 @@ export const useFirstRunStore = defineStore('firstRun', {
         this.seededAgents = Array.isArray(r.data?.seeded_agents) ? r.data.seeded_agents : []
         this.ownAgentCount = r.data?.own_agent_count ?? 0
         this.demoAgent = r.data?.demo_agent ?? null
+        this.coreAgents = Array.isArray(r.data?.core_agents) ? r.data.core_agents : []
         this.install = r.data?.install ?? null
       } catch (e) {
         // Fail toward "not first run": a missed nudge is a non-event, whereas a

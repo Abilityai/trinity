@@ -375,7 +375,8 @@ import {
   widgetById,
   widgetIdFromKey,
 } from '@/utils/gridWidgets'
-import { zoneAt } from '@/utils/gridOrg'
+import { zoneAt, firstLoadLayout, orgMeta } from '@/utils/gridOrg'
+import { useFirstRunStore } from '@/stores/firstRun'
 import { useOrgOverlay } from '@/composables/useOrgOverlay'
 
 /**
@@ -425,7 +426,12 @@ const canvasStyle = computed(() => ({
   backgroundPosition: `${vtx.value}px ${vty.value}px`,
 }))
 
+// trinity-enterprise#1416: the person moved the view themselves (zoom or pan);
+// the automatic board then stops re-fitting under them.
+let viewTouched = false
+
 function zoomAt(px, py, nz) {
+  viewTouched = true
   nz = Math.max(Z_MIN, Math.min(Z_MAX, nz))
   const wx = (px - vtx.value) / vz.value
   const wy = (py - vty.value) / vz.value
@@ -507,11 +513,31 @@ function isCellBlocked(c, r) {
   return !!zoneAt(zones.value, x + CELL_W / 2, y + CELL_H / 2)
 }
 
+// trinity-enterprise#1416: the board nobody has arranged yet. Arranged from the
+// roster WITHOUT the type-to-filter (typing must not reshuffle it); the core
+// agents (the Chief of Staff and the Company Brain) lead, side by side.
+const firstRunStore = useFirstRunStore()
+function arrangeFirstLoad(widgetKeys) {
+  const roster = unfilteredAgents.value
+  return firstLoadLayout(roster, widgetKeys, orgMeta(roster), firstRunStore.coreAgents || [])
+}
+
 function syncLayoutFromAgents() {
   const names = props.agents.map((a) => a.name)
   const systemNames = new Set(props.agents.filter((a) => a.is_system).map((a) => a.name))
-  gridStore.syncLayout(names, systemNames, newcomerOriginFor, isCellBlocked)
+  gridStore.syncLayout(names, systemNames, newcomerOriginFor, isCellBlocked, arrangeFirstLoad)
 }
+
+// While the board is automatic, its shape also follows the org tags (a
+// department or line that lands a poll after the agent) and the core-agent
+// list (read after first paint).
+watch(
+  () => gridStore.layoutIsAuto && [
+    unfilteredAgents.value.map((a) => `${a.name}:${(a.tags || []).join(',')}`).join('|'),
+    (firstRunStore.coreAgents || []).join(','),
+  ].join('#'),
+  (key) => { if (key) syncLayoutFromAgents() }
+)
 
 // Toggling a tile on/off re-runs the reconcile so it is seeded (or dropped)
 // immediately rather than on the next roster change.
@@ -1000,6 +1026,7 @@ function onCanvasDragStart(e) {
 
 function onCanvasPointerMove(e) {
   if (!isPanning.value || e.pointerId !== panPointerId) return
+  viewTouched = true
   vtx.value = panTX + (e.clientX - panSX)
   vty.value = panTY + (e.clientY - panSY)
 }
@@ -1055,7 +1082,16 @@ function measureCanvas() {
   if (!canvasEl.value) return
   canvasW.value = canvasEl.value.clientWidth
   canvasH.value = canvasEl.value.clientHeight
+  fitIfAutomatic()
 }
+
+// trinity-enterprise#1416: an automatic board stays fitted to the window — as
+// agents arrive, and when the assistant panel opens or closes — until the
+// person pans or zooms. A saved layout is never re-fitted here.
+function fitIfAutomatic() {
+  if (gridStore.layoutIsAuto && !viewTouched) fitView()
+}
+watch(() => gridStore.layout, () => nextTick(fitIfAutomatic))
 
 onMounted(() => {
   gridStore.startPolling()

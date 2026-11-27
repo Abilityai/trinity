@@ -152,6 +152,10 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
   // lingers harmlessly in the record until Reset — accepted, the value is
   // size-capped server-side).
   const layout = ref({})
+  // trinity-enterprise#1416: true while the board shows the automatic
+  // first-load arrangement (nothing saved yet). FleetGrid keeps it fitted to
+  // the window until the person pans or zooms.
+  const layoutIsAuto = ref(false)
   let _savedRaw = null // lazily loaded full persisted map
   let _savedRawFromLegacy = false
 
@@ -227,6 +231,7 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
   )
 
   function _persist(origin = 'gesture') {
+    layoutIsAuto.value = false
     _savedRaw = { ..._loadSavedRaw(), ...layout.value }
     _savedRawFromLegacy = false
     _writeScoped(LAYOUT_KEY, _savedRaw)
@@ -375,9 +380,21 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     agentNames,
     systemNames = new Set(),
     originFor = null,
-    isCellBlocked = null
+    isCellBlocked = null,
+    arrange = null
   ) {
     const widgetKeys = activeWidgetKeys.value
+    // trinity-enterprise#1416: with nothing saved, the board is AUTOMATIC — the
+    // caller's arrangement (a pure function of the roster) is recomputed on
+    // every reconcile and nothing is persisted, so a reconcile can never pass
+    // for a person's layout. The first gesture (`_persist()`) saves the board,
+    // and from then on the saved layout always wins.
+    if (arrange && Object.keys(_loadSavedRaw()).length === 0) {
+      layout.value = arrange(widgetKeys)
+      layoutIsAuto.value = true
+      return
+    }
+    layoutIsAuto.value = false
     let saved = { ..._loadSavedRaw(), ...layout.value }
     if (Object.keys(saved).length === 0) {
       saved = defaultLayout(agentNames, systemNames)
@@ -856,6 +873,7 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
 
   return {
     layout,
+    layoutIsAuto,
     layoutSource,
     layoutGeneration,
     loadPreferences,
