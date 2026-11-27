@@ -10051,6 +10051,16 @@
         "security"
       ],
       "description": "trinity-enterprise#978 items 2-5. (2) Gemini CLI, Codex and Claude Code answer a turn check that could not ask the platform with a 502 typed turn_check_unavailable, never a 503; the async record names it (its own terminal_reason, not empty_result; trinity#4778) and the pull record carries it; the code is in the execution vocabulary and the pull taxonomy; no subscription walk reads it, on the sync push, /chat (answered 502) or the pull sink, and an older image's 503 with the agent's sentence is recognised (anchored marker, pinned against the producer, mirrored in the scheduler classifier); the Workspace says send it again (agent_unavailable, retryable, fixed words). (3) TURN_REFUSED only from a typed turn_refused body on both paths; a bare 403 is not one. (4) visitor_shell is off and logged when the setting cannot be read (read error, broken JSON through get_guardrails_config(strict=True), a non-object, a non-boolean), through the real database facade; a missing setting keeps the default. (5) CLAUDE.md, CLAUDE.local.md, AGENTS.md and GEMINI.md at any depth are instructions: owner tier to write or delete, flagged for the share tier, instructions.manage for an agent key; template.yaml and lookalikes stay ordinary."
+    },
+    {
+      "file": "unit/test_ent1403_sharing_on_at_registration.py",
+      "feature": "trinity-enterprise#1403",
+      "added": "2026-11-27",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "POST /api/setup/admin-password with registration terms that carry usage_sharing_on_accept: true switches usage sharing on through set_consent (Settings reads it on, the first-run step's flag is on, a backfill share is scheduled, one telemetry_sharing_consent audit line naming via=registration_terms); never after a refusal on record (switched off, on-then-off, Don't ask again) or under the kill switch; an install already sharing is left alone; terms without the flag (or a non-True value), no provider and the instance-ID form are unchanged; a failing switch or audit never fails setup."
     }
   ]
 }

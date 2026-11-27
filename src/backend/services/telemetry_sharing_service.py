@@ -333,6 +333,64 @@ def is_hard_disabled() -> bool:
     return not TELEMETRY_SHARING_ENABLED
 
 
+def _switch_on_with_terms_sync() -> tuple:
+    """The decision and the write behind ``switch_on_with_terms``, run in a
+    worker thread: ``("off", None)`` (kill switch or a refusal on record),
+    ``("already_on", None)``, or ``("switched", <set_consent status>)``."""
+    if is_hard_disabled():
+        return "off", None
+    if is_consent_enabled():
+        return "already_on", None
+    if has_opted_out():
+        return "off", None
+    return "switched", set_consent(True)
+
+
+async def switch_on_with_terms(actor_user: Any, *, via: str) -> bool:
+    """Switch sharing on because the person just accepted terms that say
+    accepting them does (abilityai/trinity-enterprise#1403).
+
+    Only for an operator who never chose (``has_opted_out``, ent#1397): the
+    kill switch wins, an install already sharing is left as it is, and a
+    refusal on record (switched off, "Don't ask again") is never overridden.
+    Otherwise this is the Settings switch turned on: ``set_consent(True)``, the
+    same ``telemetry_sharing_consent`` audit line (plus ``via``, the door), and
+    the consent-time backfill share. Returns whether sharing is on afterwards.
+    Never raises: a caller completing setup must not fail on it."""
+    try:
+        # The consent reads and the write are sync db calls: off the loop (#4674).
+        outcome, status = await asyncio.to_thread(_switch_on_with_terms_sync)
+    except Exception:  # noqa: BLE001 - never fail the caller's acceptance
+        logger.warning("[telemetry-share] could not switch sharing on with the terms (%s)", via,
+                       exc_info=True)
+        return False
+    if outcome != "switched":
+        return outcome == "already_on"
+    try:
+        from services.platform_audit_service import AuditEventType, platform_audit_service
+
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="telemetry_sharing_consent",
+            source="api",
+            actor_user=actor_user,
+            # As the Settings route: the share id never enters the audit row.
+            details={
+                "enabled": True,
+                "via": via,
+                "backfill_days": status.get("backfill_days"),
+                "sharing_id_rotated": bool(status.get("sharing_id_rotated")),
+            },
+        )
+    except Exception:  # noqa: BLE001 - audit is best-effort, as on the Settings route
+        logger.debug("[telemetry-share] audit log failed", exc_info=True)
+    try:
+        spawn_share(backfill=True)
+    except Exception:  # noqa: BLE001 - the heartbeat sends it on its next tick
+        logger.debug("[telemetry-share] backfill share not scheduled", exc_info=True)
+    return True
+
+
 def _read(key: str, default=None):
     """Fenced settings read — a raise degrades to ``default``."""
     try:

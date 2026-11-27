@@ -5,8 +5,9 @@
       <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
         Optionally share <span class="font-medium">anonymous, aggregate</span> usage
         so we can see whether the platform works outside our own instance, and so you
-        can see how your setup compares to the fleet. Off by default, reversible any
-        time — nothing is shared until you turn this on. (ent#12, ent#437)
+        can see how your setup compares to the fleet. Nothing is shared unless you
+        turn it on here, or accept terms at setup that say accepting them switches it
+        on; you can switch it off here any time. (ent#12, ent#437, ent#1403)
       </p>
     </div>
 
