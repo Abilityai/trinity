@@ -181,7 +181,8 @@ const askOperatorParameters = z.object({
         "Refused when it already ended (409 replaces_ended, with its ask_status and disposition: a person's answer stands — read it with get_my_ask) or is not your own pending ask (422 invalid_replaces). " +
         "Repeating a pending ask's proposal without naming it here is refused with 409 already_pending, which names that ask's request_id. " +
         "A retry of THIS request_id replays the first receipt and does not replace again. After an expiry use supersedes_expired, not this. " +
-        "An alert that replaces your own pending alert is the same condition raised again: it keeps the date it was first raised and counts the raise, and nobody is notified again unless you raise its priority or it reaches different people.",
+        "An alert that replaces your own pending alert is the same condition raised again: it keeps the date it was first raised and counts the raise, and nobody is notified again unless you raise its priority or it reaches different people. " +
+        "So replace an alert only with the same condition: a different condition is a new alert, raised without replaces, which gets its own age and is announced.",
     ),
 });
 

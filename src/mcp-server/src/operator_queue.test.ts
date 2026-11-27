@@ -585,6 +585,9 @@ describe("trinity-enterprise#1367 a re-raised alert's history", () => {
     const param = (tools.askOperator.parameters as any).shape.replaces.description as string;
     assert.ok(param.includes("first raised"));
     assert.ok(param.includes("unless you raise its priority"));
+    // a replace is trusted as the same condition, so the text must say what a
+    // different one is: a new alert, never a replace
+    assert.ok(param.includes("a different condition is a new alert, raised without replaces"));
     // the rule lives in the parameter: the tool description is at its cap
     assert.ok(tools.askOperator.description.length <= 1800);
   });
