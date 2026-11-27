@@ -1343,9 +1343,10 @@ class TestTheLeaderIsBounded:
     def test_the_declared_leader_deadline_matches_the_real_child_budget(self):
         """AST guard so the documented arithmetic cannot silently drift.
 
-        `_compute_git_status`'s own `run_registered` timeouts sum to 90s
+        `_compute_git_status`'s own `run_registered` timeouts sum to 100s
         (10 rev-parse + 10 status + 10 log + 30 fetch + 10 merge-base + 10 log
-        + 10 remote get-url), which is what the leader deadline is set to. Adding
+        + 10 incoming-files diff (trinity-enterprise#1414) + 10 remote
+        get-url), which is what the leader deadline is set to. Adding
         a child — or widening one — without revisiting the deadline fails here
         rather than showing up as an unexplained 504 in production. The helpers
         it calls add a further ~40s on top, which is precisely why the deadline
