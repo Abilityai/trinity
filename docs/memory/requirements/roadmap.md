@@ -73,6 +73,16 @@
 - **Gating**: OSS-core, un-gated — this is the open install's front door.
 - **Superseded as a surface (ent#581)**: the card is absorbed into the first-run overlay's `agent` step (§16.5.1b). The predicate, the endpoint and `stores/firstRun.js` survive; the card, its dismissal getter and the "two surfaces never stack" rule do not — there is one surface now.
 
+#### 16.5.1c The Company Brain After the First Result (trinity-enterprise#1409, epic ent#1407)
+- **Status**: 🚧 In progress
+- **Problem**: the seeded Cornelius was treated as an example — kept off the first screen with the acme agents — and nothing ran its setup or told the person it exists. Operator ruling 2026-11-27: it is part of the product.
+- **Never an example**: `utils/firstSession.js::examplesToHide` / `examplesOutOfSight` take the brain's name (`brain_agent` from `GET /api/onboarding/first-run`, ent#1408) and never return it, so the Grid and the assistant panel always show it. It still is not the person's own agent, so first-session detection is unchanged. (ent#1416 generalises the parameter to a list of core agents.)
+- **State** (`GET /api/onboarding/brain` → `onboarding_service.get_brain_state`): `absent` / `not_set_up` / `ready` with a note count / `unknown`, read from the agent's own files; an unreadable agent is `unknown`, never "not set up". Person-only route.
+- **Offer**: one assistant card after the first result, never before (`stores/assistant.js::offerBrain`, called from `followRun` on the run that marked the first result). The title is a team list (`utils/companyBrain.js::teamLabel`, "Already on your team: Cornelius, your company brain"), so another core agent joins the same card. Any answer is kept per browser (`trinity-assistant-brain-offer`): a "Not now" does not come back. `absent` offers nothing.
+- **Setup**: accepting posts `/first-run --empty` as an async task on the brain (no command typed), follows the execution with the standard progress, then reads the state again: ready → the note count and where documents go, in the Workspace's own words; failed → the agent's own error.
+- **Gating**: OSS-core, un-gated — the endpoint and the Grid rule are the open install's; the card renders only where the assistant panel does.
+- **Tests**: `tests/unit/test_ent1409_brain_state.py` (incl. the shipped agent-server files router over the template's `Brain/` layout), `src/frontend/tests/unit/assistantCompanyBrain1409.mount.spec.js`, `dashboardHidesExamples.mount.spec.js`. Journey J25 (skeleton).
+
 #### 16.5.1b First-Run Overlay (trinity-enterprise#581, epic ent#54)
 - **Status**: 🚧 In progress
 - **Problem**: five first-run surfaces from five issues (hardening guide #2380, front desk ent#319, activation checklist ent#238, finish-setup card #2381/ent#437, onboarding wizard ent#52) rendered inline in the Dashboard flow. #2380 stopped them stacking, but each still reflowed the page and dismissing one revealed the next — four dismissals deep on a fresh droplet.

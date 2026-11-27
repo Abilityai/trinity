@@ -117,6 +117,25 @@ days, not a gate). `hardeningGuide.js` and `telemetryConsent.js` survive — the
 copy is what the `secure` and `sharing` steps speak. The Dashboard empty-state
 "Get started" now opens the chassis `CreateAgentModal` directly.
 
+## The company brain after the first result (ent#1409)
+
+Not a step of the overlay: it comes later, in the assistant panel.
+
+```
+Dashboard ── examplesToHide(status, seeded, own, shown, brain_agent) ──► Grid shows Cornelius, hides the other examples
+assistant.followRun ── first result marked ──► offerBrain()
+    GET /api/onboarding/brain ─► onboarding_service.get_brain_state
+        agent door: GET /api/files/download?path=~/.trinity-bootstrap.done   (200 ready · 404 not_set_up)
+                    GET /api/files?path=~/Brain                           (notes, scaffold excluded)
+    absent → nothing · else one card "Already on your team: Cornelius, your company brain"
+"Set it up" ── POST /api/agents/cornelius/task {message: "/first-run --empty", async_mode: true}
+    followBrain: GET .../executions/{id} until it ends ─► GET /api/onboarding/brain again
+    ready → "Cornelius is ready, with N notes." + where documents go · failed → the agent's error
+```
+
+Every turn the panel sends carries `context.brain` (`{agent, state, notes}`) when the
+brain is offerable; the plain lines the page sends after the card say the same thing.
+
 ## Tests
 
 - `src/frontend/tests/unit/firstRunSteps.spec.js` — registry, visibility gating,
