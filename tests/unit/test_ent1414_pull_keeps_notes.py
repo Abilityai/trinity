@@ -218,3 +218,179 @@ class TestStatusSaysWhatAnUpdateWillTouch:
         payload = git_router._compute_git_status(agent)
         assert payload["incoming_files"] == []
         assert payload["incoming_overlap"] == []
+
+
+# ---------------------------------------------------------------------------
+# Fix round after validation mLSYado3prqY_-TxTudacA (PR #4821)
+# ---------------------------------------------------------------------------
+
+
+def _refused(result):
+    assert isinstance(result, JSONResponse), f"expected a 409, got {result!r}"
+    assert result.status_code == 409, result.body.decode()
+    import json
+    return json.loads(result.body.decode())["detail"]
+
+
+def _stash_entries(repo):
+    return [line for line in _out(repo, "stash", "list").splitlines() if line]
+
+
+def _intercept(monkeypatch, match, replacement):
+    """Route `run_registered` calls whose argv contains every token in `match`
+    to `replacement(cmd, real, **kw)`; everything else runs for real."""
+    real = git_router.run_registered
+
+    def spy(cmd, *a, **kw):
+        if all(tok in cmd for tok in match):
+            return replacement(cmd, real, *a, **kw)
+        return real(cmd, *a, **kw)
+
+    monkeypatch.setattr(git_router, "run_registered", spy)
+
+
+def _failed(cmd, real, *a, **kw):
+    return subprocess.CompletedProcess(cmd, 1, "", "fatal: simulated failure")
+
+
+class TestAFileThePersonDeletedThatTheUpdateChanged:
+    """The `kept` rebind: `_keep_stashed_version` returns None for a deleted
+    path (it has no stashed side), and the fall-through concatenated `None`."""
+
+    def _setup(self, brain):
+        agent, template = brain
+        _publish(template, {"config.md": CONFIG_V1 + "template line\n"})
+        (agent / "config.md").unlink()
+        return agent, _out(agent, "rev-parse", "HEAD")
+
+    def test_safe_to_reset_undoes_and_names_the_file(self, brain, monkeypatch):
+        agent, before = self._setup(brain)
+        monkeypatch.setattr(git_router, "_safe_to_reset", lambda: True)
+
+        detail = _refused(_pull())
+
+        assert "config.md" in detail, detail
+        assert detail.endswith("Nothing was changed."), detail
+        assert ". Nothing was changed." in detail, f"missing full stop: {detail}"
+        assert _out(agent, "rev-parse", "HEAD") == before
+        assert not (agent / "config.md").exists(), "the person's deletion is put back"
+        assert _stash_entries(agent) == []
+
+    def test_execution_running_leaves_the_tree_and_names_the_stash(self, brain, monkeypatch):
+        agent, _ = self._setup(brain)
+        monkeypatch.setattr(git_router, "_safe_to_reset", lambda: False)
+
+        detail = _refused(_pull())
+
+        assert "config.md" in detail, detail
+        assert "git stash" in detail, f"a stash that stays must be named: {detail}"
+        assert "Nothing was changed" not in detail
+        assert len(_stash_entries(agent)) == 1
+
+    def test_undo_failed_names_the_stash(self, brain, monkeypatch):
+        agent, _ = self._setup(brain)
+        monkeypatch.setattr(git_router, "_safe_to_reset", lambda: True)
+        _intercept(monkeypatch, ("reset", "--hard"), _failed)
+
+        detail = _refused(_pull())
+
+        assert "could not be undone" in detail, detail
+        assert "git stash" in detail, detail
+        assert "Nothing was changed" not in detail
+        assert len(_stash_entries(agent)) == 1
+
+    def test_put_back_failed_after_undo_names_the_stash(self, brain, monkeypatch):
+        agent, before = self._setup(brain)
+        monkeypatch.setattr(git_router, "_safe_to_reset", lambda: True)
+        real = git_router.run_registered
+        pops = []
+
+        def spy(cmd, *a, **kw):
+            if "stash" in cmd and "pop" in cmd:
+                pops.append(cmd)
+                if len(pops) == 2:  # the put-back after the undo
+                    return subprocess.CompletedProcess(cmd, 1, "", "fatal: simulated")
+            return real(cmd, *a, **kw)
+
+        monkeypatch.setattr(git_router, "run_registered", spy)
+
+        detail = _refused(_pull())
+
+        assert len(pops) == 2
+        assert "git stash" in detail, detail
+        assert "Nothing was changed" not in detail, detail
+        assert _out(agent, "rev-parse", "HEAD") == before
+        assert len(_stash_entries(agent)) == 1
+
+    def test_a_failed_stash_drop_is_not_reported_as_kept(self, brain, monkeypatch):
+        """Same-lines conflict, but the spent stash cannot be dropped: the pull
+        is undone instead of claiming the edits were folded in."""
+        agent, template = brain
+        before = _out(agent, "rev-parse", "HEAD")
+        _publish(template, {"CHANGELOG.md": CHANGELOG_V1.replace("- seeded", "- v2")})
+        mine = CHANGELOG_V1.replace("- seeded", "- mine")
+        (agent / "CHANGELOG.md").write_text(mine)
+        monkeypatch.setattr(git_router, "_safe_to_reset", lambda: True)
+        _intercept(monkeypatch, ("stash", "drop"), _failed)
+
+        detail = _refused(_pull())
+
+        assert "CHANGELOG.md" in detail
+        assert _out(agent, "rev-parse", "HEAD") == before
+        assert (agent / "CHANGELOG.md").read_text() == mine
+        assert _stash_entries(agent) == []
+
+
+class TestATimeoutMidRebase:
+    """A local commit ahead of origin + a pull killed part-way through its
+    rebase: the rebase is aborted like a merge, and the reply never claims
+    "Nothing was changed" while one is still in progress."""
+
+    def _setup(self, brain, monkeypatch):
+        agent, template = brain
+        _publish(template, {"playbook.md": "template v2\n"})
+        (agent / "playbook.md").write_text("my committed playbook\n")
+        _git(agent, "commit", "-qam", "local")
+        before = _out(agent, "rev-parse", "HEAD")
+
+        def stuck_rebase(cmd, real, *a, **kw):
+            real(["git", "fetch", "-q", "origin"], cwd=kw["cwd"], timeout=20)
+            stopped = real(["git", "rebase", "origin/main"], cwd=kw["cwd"], timeout=20)
+            assert stopped.returncode != 0, "harness: the rebase should stop on a conflict"
+            raise subprocess.TimeoutExpired(cmd, 60)
+
+        _intercept(monkeypatch, ("pull", "--rebase"), stuck_rebase)
+        return agent, before
+
+    def test_the_rebase_is_aborted_and_the_branch_restored(self, brain, monkeypatch):
+        agent, before = self._setup(brain, monkeypatch)
+
+        detail = _refused(_pull())
+
+        assert not git_router._rebase_in_progress(agent), "the rebase was left in progress"
+        assert _out(agent, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+        assert _out(agent, "rev-parse", "HEAD") == before
+        assert "git pull timed out" in detail, detail
+        assert detail.endswith("Nothing was changed."), detail
+
+    def test_never_nothing_changed_while_a_rebase_is_in_progress(self, brain, monkeypatch):
+        agent, _ = self._setup(brain, monkeypatch)
+        real = git_router.run_registered
+
+        def spy(cmd, *a, **kw):
+            if "pull" in cmd and "--rebase" in cmd:
+                real(["git", "fetch", "-q", "origin"], cwd=kw["cwd"], timeout=20)
+                real(["git", "rebase", "origin/main"], cwd=kw["cwd"], timeout=20)
+                raise subprocess.TimeoutExpired(cmd, 60)
+            if "rebase" in cmd and "--abort" in cmd:
+                return subprocess.CompletedProcess(cmd, 1, "", "fatal: simulated")
+            return real(cmd, *a, **kw)
+
+        monkeypatch.setattr(git_router, "run_registered", spy)
+        monkeypatch.setattr(git_router, "_safe_to_reset", lambda: False)
+
+        detail = _refused(_pull())
+
+        assert git_router._rebase_in_progress(agent)
+        assert "Nothing was changed" not in detail, detail
+        assert "rebase" in detail, f"the half-done rebase must be named: {detail}"

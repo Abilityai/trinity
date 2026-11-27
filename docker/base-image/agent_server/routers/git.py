@@ -1214,8 +1214,11 @@ def _keep_stashed_version(home_dir: Path) -> Optional[List[str]]:
             return None
     if git("reset", "-q").returncode != 0 or _unmerged_paths(home_dir):
         return None
-    # The tree now holds everything the stash held; the entry is spent.
-    git("stash", "drop")
+    # The tree now holds everything the stash held; the entry is spent. A drop
+    # that fails leaves it listed, so this is not reported as settled — the
+    # caller undoes the pull and re-applies the stash on its own base instead.
+    if git("stash", "drop").returncode != 0:
+        return None
     return sorted(conflicted)
 
 
@@ -1242,7 +1245,7 @@ def _with_stash(home_dir: Path, branch: str, step,
     def git(*args, timeout=60):
         return run_registered(["git", *args], cwd=str(home_dir), timeout=timeout)
 
-    kept = "; local edits are kept in `git stash`"
+    stash_note = "; local edits are kept in `git stash`"
     pre_head = git("rev-parse", "HEAD", timeout=10).stdout.strip()
     dirty = git("status", "--porcelain", "--untracked-files=no", timeout=10).stdout.strip()
     stashed = False
@@ -1258,7 +1261,7 @@ def _with_stash(home_dir: Path, branch: str, step,
             # Nothing moved (the step aborted itself): put the edits back.
             if stashed and git("stash", "pop", timeout=30).returncode == 0:
                 stashed = False
-            return err + (kept if stashed else "")
+            return err + (stash_note if stashed else "")
         if not stashed:
             return None
         if git("stash", "pop", timeout=30).returncode == 0:
@@ -1270,33 +1273,41 @@ def _with_stash(home_dir: Path, branch: str, step,
         # (stage 3 of the stash re-apply) is written back and the file is
         # named to the caller. Nothing they wrote is lost; the update's version
         # of that file stays readable in `origin/<branch>`.
+        # The paths the re-apply could not settle, captured before any undo
+        # clears them, so whichever reply follows names them.
+        clash = _unmerged_paths(home_dir)
         if keep_local is not None:
-            kept = _keep_stashed_version(home_dir)
-            if kept is not None:
+            kept_paths = _keep_stashed_version(home_dir)
+            if kept_paths is not None:
                 stashed = False
-                keep_local.extend(kept)
+                keep_local.extend(kept_paths)
                 return None
+            # Unsettled (a file the person deleted has no stashed side, or the
+            # spent stash could not be dropped): fall through to the undo.
+        conflict = f"local edits conflict with incoming changes on {branch}"
+        # The manual Pull names the files to the person; the pull cycle's
+        # recorded error string stays as it was (trinity-enterprise#703).
+        if clash and keep_local is not None:
+            conflict += f" ({', '.join(clash[:5])})"
         # The edits collide with what came in. Undo the pull — the stash is
         # still there — and re-apply on the base it was taken from. Unless an
         # execution started meanwhile: then a reset would discard what it
         # wrote, so the tree is left as it is (its conflict markers make the
         # push cycle and the next pull refuse until a person resolves them).
         if not _safe_to_reset():
-            return (f"local edits conflict with incoming changes on {branch}; an "
-                    f"execution started meanwhile, so the tree was left as it is — "
-                    f"resolve the conflicts" + kept)
+            return (conflict + "; an execution started meanwhile, so the tree was "
+                    "left as it is — resolve the conflicts" + stash_note)
         reset = git("reset", "--hard", pre_head, timeout=30)
         if reset.returncode != 0:
-            return (f"local edits conflict with incoming changes on {branch} and the "
-                    f"pull could not be undone ({_summarize_git_error(reset.stderr or reset.stdout or 'reset failed')})"
-                    + kept)
+            return (conflict + " and the pull could not be undone ("
+                    f"{_summarize_git_error(reset.stderr or reset.stdout or 'reset failed')})"
+                    + stash_note)
         if git("stash", "pop", timeout=30).returncode == 0:
             stashed = False
-            return f"local edits conflict with incoming changes on {branch}"
-        return f"local edits conflict with incoming changes on {branch}" + kept
+            return conflict
+        return conflict + stash_note
     except subprocess.TimeoutExpired as exc:
-        verb = (exc.cmd or ["git", "command"])[1:2] or ["command"]
-        err = f"git {verb[0]} timed out"
+        err = f"git {_git_verb(exc.cmd)} timed out"
         # Back to the pre-pull HEAD whether or not anything was stashed: a
         # killed merge can leave a half-updated tree or a MERGE_HEAD that the
         # next push cycle would commit as the agent's own work (PR #3021
@@ -1304,9 +1315,15 @@ def _with_stash(home_dir: Path, branch: str, step,
         try:
             if _merge_in_progress(home_dir):
                 git("merge", "--abort", timeout=30)
+            # A killed `pull --rebase` stops part-way with HEAD detached; abort
+            # it the same way (trinity-enterprise#1414 re-review).
+            if _rebase_in_progress(home_dir):
+                git("rebase", "--abort", timeout=30)
+                if _rebase_in_progress(home_dir):
+                    err += "; a rebase was left in progress (run `git rebase --abort`)"
             if not _safe_to_reset():
                 return (err + f"; an execution started meanwhile, so the tree was not "
-                        f"reset to {pre_head[:12]}" + (kept if stashed else ""))
+                        f"reset to {pre_head[:12]}" + (stash_note if stashed else ""))
             reset = git("reset", "--hard", pre_head, timeout=30)
             if reset.returncode != 0:
                 err += (f"; the tree could not be reset to {pre_head[:12]} ("
@@ -1315,7 +1332,24 @@ def _with_stash(home_dir: Path, branch: str, step,
                 stashed = False
         except subprocess.TimeoutExpired:
             err += f"; the tree could not be reset to {pre_head[:12]} (reset timed out)"
-        return err + (kept if stashed else "")
+        return err + (stash_note if stashed else "")
+
+
+def _git_verb(cmd) -> str:
+    """The git subcommand in an argv, skipping global options and their values
+    (`git -c maintenance.auto=false pull` → `pull`)."""
+    args = list(cmd or [])[1:] if not isinstance(cmd, str) else cmd.split()[1:]
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg in ("-c", "-C"):
+            skip = True
+            continue
+        if not arg.startswith("-"):
+            return arg
+    return "command"
 
 
 def _integrate_remote(home_dir: Path, branch: str, ahead: int) -> Optional[str]:
@@ -1955,12 +1989,14 @@ _STATUS_HOME_DIR = Path("/home/developer")
 _STATUS_FOLLOWER_WAIT_SECONDS = 35
 
 # #2742 — COMPUTATION bound, deliberately a different number and a different
-# kind of thing. The child timeouts sum to ~130-150 s nominal (see
+# kind of thing. The child timeouts sum to ~140-160 s nominal (see
 # `_compute_git_status`'s docstring for the arithmetic) before `run_registered`'s
 # post-killpg drain, and on this design a slow leader costs no follower threads
 # but DOES hold the in-flight slot — so every caller in that window 504s. Cap it
-# so a wedged leader releases the slot instead of monopolising it.
-_STATUS_LEADER_DEADLINE_SECONDS = 90
+# so a wedged leader releases the slot instead of monopolising it. 100 s = the
+# body's own child timeouts (90 s, plus 10 s for the incoming-files `git diff`
+# added by trinity-enterprise#1414); pinned by test_2742's AST guard.
+_STATUS_LEADER_DEADLINE_SECONDS = 100
 
 # #2742 — the single-flight slot, keyed by resolved home path.
 #
@@ -2016,10 +2052,11 @@ def _compute_git_status(home_dir: Path) -> Dict:
     **Child-timeout budget, written down because the arithmetic decides the
     caller-side bounds.** Sequential worst case:
     `rev-parse` 10 + `status` 10 + `log` 10 + `fetch` **30** + `merge-base` 10 +
-    `log`(ancestor) 10 + `remote get-url` 10 = 90, plus `_persist_last_remote_sha`
+    `log`(ancestor) 10 + `diff --name-only` (incoming files,
+    trinity-enterprise#1414) 10 + `remote get-url` 10 = 100, plus `_persist_last_remote_sha`
     10, `_get_pull_branch` 10 and `_dual_ahead_behind_payload` 10 (20 on any
     branch other than `main`, 30 when that branch has no upstream, #2105)
-    = **~130-150 s nominal**, before `run_registered`'s
+    = **~140-160 s nominal**, before `run_registered`'s
     post-`killpg` drain of up to 10 s per timing-out child. The flow doc's old
     "~30 s worst case" was wrong and is corrected there.
     """
@@ -2932,7 +2969,14 @@ async def pull_from_github(request: GitPullRequest = GitPullRequest()):
                 head_now = run_registered(
                     ["git", "rev-parse", "HEAD"], cwd=str(home_dir), timeout=10,
                 ).stdout.strip()
-                if head_now == pre_head and "git stash" not in err:
+                err = err.rstrip()
+                if not err.endswith((".", "!", "?")):
+                    err += "."
+                # Only true when HEAD is back where it was, no edits sit in the
+                # stash, and no rebase/merge was left half-done.
+                if (head_now == pre_head and "git stash" not in err
+                        and not _rebase_in_progress(home_dir)
+                        and not _merge_in_progress(home_dir)):
                     err += " Nothing was changed."
                 return _conflict_response(
                     status_code=409,

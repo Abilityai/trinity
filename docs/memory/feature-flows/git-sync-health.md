@@ -684,9 +684,10 @@ Two bounds, deliberately distinct. `_STATUS_FOLLOWER_WAIT_SECONDS = 35` is a
 **caller** bound, set at or just past the point every real client has already
 given up (poller 10 s, backend `git_service` 30 s) — a follower waiting longer
 can only produce work nobody awaits, and times out as `504`. The leader carries
-its own **computation** bound (`_STATUS_LEADER_DEADLINE_SECONDS = 90`) because
-the child timeouts sum to ~130–150 s nominal (10 `rev-parse` + 10 `status` + 10
-`log` + **30 `fetch`** + 10 `merge-base` + 10 `log` + 10 `remote get-url`, plus
+its own **computation** bound (`_STATUS_LEADER_DEADLINE_SECONDS = 100`, the sum of the body's own child
+timeouts) because the child timeouts sum to ~140–160 s nominal (10 `rev-parse` +
+10 `status` + 10 `log` + **30 `fetch`** + 10 `merge-base` + 10 `log` + 10
+`diff --name-only` for `incoming_files` (trinity-enterprise#1414) + 10 `remote get-url`, plus
 10 `_persist_last_remote_sha` + 10 `_get_pull_branch` + 10‥30
 `_dual_ahead_behind_payload` (#2105), before `run_registered`'s post-`killpg` drain), and
 a wedged leader would otherwise hold the in-flight slot for all of it.
