@@ -264,8 +264,12 @@ class TestChainRaisedBeforeTheColumns:
         assert (new["first_raised_at"], new["raise_count"]) == (rows[1]["created_at"], 3)
 
     def test_the_walk_is_bounded(self, real_db, monkeypatch):
-        import db.operator_queue as dbq
-        monkeypatch.setattr(dbq, "_RAISE_CHAIN_WALK_MAX", 2)
+        # Lower the cap in the dict the running method reads, not on
+        # `sys.modules["db.operator_queue"]`: in a full-suite run a sibling test
+        # can leave a stand-in there that re-exports the real class, and a patch
+        # on the stand-in never reaches the walk.
+        walk_globals = type(real_db._operator_queue_ops)._raise_history.__globals__
+        monkeypatch.setitem(walk_globals, "_RAISE_CHAIN_WALK_MAX", 2)
         agent = f"{self.AGENT}-cap"
         rows = self._legacy_chain(real_db, agent, 6)
         new = _row(real_db, agent, "c-new", replaces=rows[-1]["id"])
