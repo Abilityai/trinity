@@ -13,6 +13,11 @@
  * `narrowed: {code, message}` when the answer was narrowed, nothing otherwise
  * (absent, never a null placeholder).
  *
+ * One thing stays readable by id inside such a view (#4173): the run of the
+ * turn the call is part of, and a run that turn started. The backend decides
+ * it from the turn id `turnFetch` sends; such an answer still carries the
+ * marker, because the view it was read under is still narrowed.
+ *
  * The backend sends codes only (`turn_tier_service.READ_NARROWED_CODES`); the
  * wording lives here. `tests/unit/test_ent978_narrowed_read_marker.py` fails
  * when a backend code has no entry below.
@@ -22,7 +27,8 @@ import { currentReadNarrowing } from "./turn-context.js";
 export const READ_NARROWED_MESSAGES: Record<string, string> = {
   turn_person:
     "This answer is narrowed to the person this turn is for: it shows at most the runs that " +
-    "person started. Other runs are left out, and read as not found by id.",
+    "person started. Other runs are left out, and read as not found by id. This turn's own run " +
+    "and the runs it started stay readable by id.",
   running_turn:
     "This answer is narrowed because a turn for a shared person or a visitor is running on this " +
     "agent: it shows at most that person's runs (none for a visitor). Other runs are left out, " +

@@ -11,6 +11,8 @@ agent: the hook identifies the turn by `TRINITY_EXECUTION_ID` in the claude
 process's launch environment, which the agent cannot change once it is running.
 The agent key's own reads start from the ledger instead (`running_share_people`,
 trinity-enterprise#875), so a header it omits or forges can only narrow them.
+One read is decided from the header, by id only: the acting turn's own row and
+the runs it started (`dependencies.acting_turn_reach`, #4173).
 
   owner    the person is the agent's owner or an admin, or the turn was started
            by something set up at owner tier (a schedule rates as its creator)

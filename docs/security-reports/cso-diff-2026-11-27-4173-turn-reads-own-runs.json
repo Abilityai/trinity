@@ -1,0 +1,156 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-27",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/4173-turn-own-runs-read",
+  "merge_base": "ea04de240",
+  "issue": "abilityai/trinity#4173",
+  "counts_as_full_run": false,
+  "docker_available": false,
+  "docker_note": "Diff run: no image, compose, dependency or workflow file changed, so no Docker pass was needed.",
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    9,
+    10,
+    12,
+    13,
+    14
+  ],
+  "phases_skipped_no_overlap": [
+    3,
+    4,
+    5,
+    6,
+    8,
+    11
+  ],
+  "stack_cve_quicklist": [
+    {
+      "component": "Starlette (BadHost)",
+      "verdict": "not reachable in the diff",
+      "why": "No added line reads request.url.path; the new helper reads the principal and execution rows only."
+    },
+    {
+      "component": "all other rows",
+      "verdict": "not in the diff",
+      "why": "No dependency, image or lockfile changed."
+    }
+  ],
+  "attack_surface": {
+    "new_public_endpoints": 0,
+    "new_authenticated_endpoints": 0,
+    "changed_authenticated_endpoints": 4,
+    "changed": [
+      "GET /api/agents/{name}/executions/{id}: also answers for the acting turn's own row and the runs it started",
+      "GET /api/agents/{name}/executions/{id}/log: the same",
+      "GET /api/agents/{name}/executions/{id}/stream: the same, checked once when the stream opens",
+      "GET /api/agents/{name}/fan-out/{fan_out_id}: also returns the legs the acting turn started"
+    ],
+    "new_agent_context_ingress": "None. A callee's result reaches the caller's context through a read the caller already made by id; the MCP `narrowed` text is fixed platform wording."
+  },
+  "accepted_by_ruling": [
+    "A share-tier turn reads the full transcript of a run it started, also on an agent its person cannot open.",
+    "A process that can set the turn header itself (a turn with the shell) can name a sibling running share-tier turn of the same agent, or that turn's running wake, and read its row and runs."
+  ],
+  "findings": [
+    {
+      "id": 1,
+      "severity": "LOW",
+      "confidence": 6,
+      "status": "VERIFIED",
+      "evidence": "HYPOTHESIS",
+      "state": "fixed on branch",
+      "category": "fail-closed-default-as-evidence",
+      "owasp_2025": "A10",
+      "asi": "ASI03",
+      "llm": null,
+      "phase": 9,
+      "file": "src/backend/dependencies.py",
+      "title": "A continuation rated `share` by failing closed was accepted as a share-tier turn",
+      "exploit": "A wake of the owner's turn is running. The read of the turn it continues fails at the moment the wake is rated, so it rates share. A request naming the wake then reads the wake's row and the owner turn's runs by id.",
+      "fix": "A continuation opens something only when the turn it names is read and itself rates share; one that cannot be read opens nothing.",
+      "regression_test": "tests/unit/test_4173_turn_reads_own_runs.py::test_a_wake_of_the_owners_turn_opens_nothing_even_if_it_rates_share"
+    },
+    {
+      "id": 2,
+      "severity": "LOW",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "state": "fixed on branch",
+      "category": "guard-untested",
+      "owasp_2025": "A01",
+      "asi": "ASI03",
+      "llm": null,
+      "phase": 9,
+      "file": "src/backend/dependencies.py",
+      "title": "The no-link guard in the row match was not executed by any test",
+      "exploit": "With the guard deleted, a reach with no link matches every unlinked row the agent dispatched (None == None).",
+      "fix": "A direct test of the match with a None and an empty link against an unlinked row.",
+      "regression_test": "tests/unit/test_4173_turn_reads_own_runs.py::test_a_reach_with_no_link_never_matches_a_row_with_no_link"
+    },
+    {
+      "id": 3,
+      "severity": "LOW",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "state": "fixed on branch",
+      "category": "guard-untested",
+      "owasp_2025": "A01",
+      "asi": "ASI03",
+      "llm": null,
+      "phase": 9,
+      "file": "src/backend/db/schedules/executions.py",
+      "title": "The fan-out SQL arm's caller guard was not executed by any test",
+      "exploit": "With the guard deleted, a missing caller renders `source_agent_name IS NULL` and matches rows that copy the link and name no agent.",
+      "fix": "The database test passes a None and an empty caller against legs with no source agent.",
+      "regression_test": "tests/unit/test_4173_turn_reads_own_runs.py::test_the_fan_out_arm_needs_a_scope_and_a_link"
+    }
+  ],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "Guards that import the assembled app (runtime route census, ops-write sweep, human-only refusal audit) could not run on the audit host: a Python package is missing there, at the merge-base too. The diff adds no route. CI runs them.",
+    "src/mcp-server/src/tool-visibility.test.ts fails on the audit host with or without this change (same counts with the two changed MCP files restored to the merge-base).",
+    "An optional private module is not mounted in this checkout; any reader of executions it adds was not read.",
+    "No dependency scanner ran, because no dependency changed."
+  ],
+  "supply_chain_summary": {
+    "scanner": "none (no dependency, lockfile, image or workflow change in the diff)"
+  },
+  "checks": {
+    "secrets": "No known-prefix hit in added lines; no .env tracked.",
+    "enterprise_docs_guard": "No hit on added doc lines.",
+    "hidden_characters": "None in any changed file.",
+    "guards": "324 guard files and the neighbouring suites at the final code: the only red ids are in 12 files that import the assembled app or need packages missing on the audit host, with the same counts as on the merge-base.",
+    "failure_direction": "Stated in the helper: any lookup error returns no reach; nothing is looked up for the full view or for a principal that is not an agent key.",
+    "logging": "One info line per granted read: agent, turn id, row id, the row's agent. No credential, no message text.",
+    "mutation_proof": "23 single-line breaks each turned a named test red; files restored from copies."
+  },
+  "filter_stats": {
+    "candidates": 8,
+    "reported": 3,
+    "dropped": 5,
+    "dropped_reasons": [
+      "accepted by ruling: the sibling share-tier turn read by a process with the shell",
+      "accepted by ruling: the transcript of a run on an agent the person cannot open",
+      "redundant defensive checks whose deletion changes no behaviour (the callee functions repeat them)",
+      "narrower than the rule, not wider: a fan-out leg that is the acting turn is not listed in its own batch",
+      "functional, not security: the lost-receipt recovery through the narrowed list finds nothing in a visitor's turn"
+    ]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 3,
+    "open": 0,
+    "fixed_on_branch": 3
+  },
+  "verifier": "An independent fresh-context reviewer read the uncommitted diff with the rule and no conclusions, and produced findings 1 to 3. Two more independent reviewers read the plan before any code was written.",
+  "trend": "Diff run: no trend."
+}

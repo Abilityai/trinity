@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4173_turn_reads_own_runs.py",
+      "feature": "#4173",
+      "added": "2026-11-27",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "#4173: through the real schedules, chat and fan-out routers, the real get_current_user, a real agent key and real execution rows on SQLite: an agent key acting in a running turn for a visitor, a shared person, a Workspace or a room participant reads by id that turn's own row and the runs it started (detail, log, the stream fence, the fan-out batch), also on an agent the person cannot open, and a wake reads the runs of the turn it continues; an owner turn's id, a finished, foreign or missing id, the link without the source agent, another running share turn's runs, a continuation with NO_SINGLE_ORIGIN or an unfollowable root, and a wake of the owner's turn that rates share only by failing closed, open nothing; lists and terminate keep their rule; a granted read keeps the narrowed-read marker and is logged; a hidden row, a near-miss and a missing id answer the same status, body, headers and query count; the fan-out SQL arm needs a scope and a link, through the database facade; an AST guard holds the callers to the four by-id readers."
+    },
+    {
       "file": "unit/test_ent978_narrowed_read_marker.py",
       "feature": "trinity-enterprise#978",
       "added": "2026-11-24",
