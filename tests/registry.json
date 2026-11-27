@@ -10160,6 +10160,27 @@
         "unit"
       ],
       "description": "trinity-enterprise#1414: on real repos through the real pull route, a clean Pull on a workspace with uncommitted edits and untracked notes takes the template update and keeps every edit (merged on other lines; the person's whole file kept and named when both changed the same lines, including a file the update deleted); an update that would overwrite a person's file is refused naming it with nothing changed; git status reports incoming_files and incoming_overlap."
+    },
+    {
+      "file": "../src/frontend/tests/unit/networkSocketOpenResync1416.spec.js",
+      "feature": "trinity-enterprise#1416",
+      "added": "2026-11-27",
+      "categories": [
+        "unit",
+        "frontend",
+        "websocket"
+      ],
+      "description": "Network store: a socket opened with no replay cursor re-reads the agent list once, so a tag edited between the mount read and the socket opening is not lost; a reconnect carrying last-event-id does not re-read."
+    },
+    {
+      "file": "../src/frontend/tests/unit/firstRunInstallKind1416.spec.js",
+      "feature": "trinity-enterprise#1416",
+      "added": "2026-11-27",
+      "categories": [
+        "unit",
+        "frontend"
+      ],
+      "description": "First-run store: a forced re-read answering fresh_install null keeps a known install kind; a re-read that knows it still updates it."
     }
   ]
 }

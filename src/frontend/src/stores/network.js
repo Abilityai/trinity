@@ -241,7 +241,12 @@ export const useNetworkStore = defineStore('network', () => {
     if (arrivals.value.includes(name)) arrivals.value = arrivals.value.filter((n) => n !== name)
   }
 
+  // ent#1416: a list read has been issued, so a socket opening later may have
+  // missed changes made after it (see connectWebSocket's resync on open).
+  let agentsListRead = false
+
   async function fetchAgents() {
+    agentsListRead = true
     loading.value = true
     loadError.value = false
     try {
@@ -723,6 +728,10 @@ export const useNetworkStore = defineStore('network', () => {
     if (gen !== socketGeneration) return
 
     let wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?ticket=${encodeURIComponent(ticket)}`
+    // ent#1416: a socket opened without a replay cursor cannot be sent what was
+    // broadcast before it subscribed (a tag edit right after page load), so it
+    // re-reads the list once it opens — when a list was already read.
+    const resyncOnOpen = !lastEventId.value
     if (lastEventId.value) {
       wsUrl += `&last-event-id=${encodeURIComponent(lastEventId.value)}`
     }
@@ -738,6 +747,9 @@ export const useNetworkStore = defineStore('network', () => {
         if (websocket.value !== socket) return
         console.log('[Collaboration] WebSocket connected')
         isConnected.value = true
+        if (resyncOnOpen && agentsListRead) {
+          try { fetchAgents() } catch (_) {}
+        }
 
         // Start heartbeat to keep connection alive (prevents idle timeout)
         startWebSocketHeartbeat()

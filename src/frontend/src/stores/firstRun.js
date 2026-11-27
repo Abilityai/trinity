@@ -63,8 +63,10 @@ export const useFirstRunStore = defineStore('firstRun', {
         this.demoAgent = r.data?.demo_agent ?? null
         this.brainAgent = typeof r.data?.brain_agent === 'string' ? r.data.brain_agent : null
         this.coreAgents = Array.isArray(r.data?.core_agents) ? r.data.core_agents : []
+        // A known kind is never reset by a re-read that does not know it
+        // (null): only a true/false answer is applied.
         const fresh = r.data?.fresh_install
-        this.freshInstall = fresh === true || fresh === false ? fresh : null
+        if (fresh === true || fresh === false) this.freshInstall = fresh
         this.install = r.data?.install ?? null
       } catch (e) {
         // Fail toward "not first run": a missed nudge is a non-event, whereas a

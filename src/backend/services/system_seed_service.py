@@ -46,6 +46,7 @@ multi-agent shape opens):
     condition over ends its row as the platform (#3254).
   * **Fail-open**: never raises, never blocks boot or setup completion.
 """
+import asyncio
 import hashlib
 import json
 import logging
@@ -349,8 +350,9 @@ async def ensure_first_run_seeded() -> dict:
     try:
         fresh = _resolve_first_run_verdict()
         # ent#1416: decided before Cornelius runs, so this pass's own Cornelius
-        # can never make a fresh install read as an established one.
-        chief_fresh = _resolve_chief_of_staff_verdict(fresh)
+        # can never make a fresh install read as an established one. Sync db
+        # reads/writes, so off the event loop (#4674).
+        chief_fresh = await asyncio.to_thread(_resolve_chief_of_staff_verdict, fresh)
         cornelius_result = None
         try:
             cornelius_result = await cornelius_agent_service.ensure_seeded(fresh=fresh)
@@ -369,7 +371,7 @@ async def ensure_first_run_seeded() -> dict:
         ):
             SystemSeedService._clear_operator_alarms("cornelius-failed")
         chief_result = await _seed_chief_of_staff(chief_fresh)
-        _organize_core_agents(cornelius_result, chief_result)
+        await asyncio.to_thread(_organize_core_agents, cornelius_result, chief_result)
         try:
             result = await system_seed_service.ensure_seeded(fresh=fresh)
         except Exception as e:  # belt: keeps the entry point's never-raises contract
