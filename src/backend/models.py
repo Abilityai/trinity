@@ -571,6 +571,13 @@ class ChatMessageRequest(BaseModel):
     # ent#1105: an edition may attribute this execution to a project. Checked
     # before the row exists; refused 422 project_attribution_unavailable in OSS.
     project_id: Optional[str] = Field(None, min_length=1, max_length=64)
+    # #4538: the caller's own word on its wake, read only for an agent's call.
+    # `wake: false` declines the turn started on the caller when this run ends;
+    # `true` or absent keep the default (it never forces a wake the owner
+    # switched off). `caller_wait_ms` is how long the caller waits for the
+    # reply: a run that ends inside it was answered inline and wakes nobody.
+    wake: Optional[bool] = None
+    caller_wait_ms: Optional[int] = Field(None, ge=1, le=86_400_000)
 
 
 class ReportBackRequest(BaseModel):
@@ -617,6 +624,11 @@ class ParallelTaskRequest(BaseModel):
     # ent#1105: an edition may attribute this execution to a project. Checked
     # before the row exists; refused 422 project_attribution_unavailable in OSS.
     project_id: Optional[str] = Field(None, min_length=1, max_length=64)
+    # #4538: as on ChatMessageRequest. `wake: false` works on a sync and an
+    # async call; `caller_wait_ms` is read on a sync call only (an async call
+    # answers with a receipt, never inline).
+    wake: Optional[bool] = None
+    caller_wait_ms: Optional[int] = Field(None, ge=1, le=86_400_000)
 
 
 # ============================================================================
@@ -2856,6 +2868,7 @@ _PULL_ERROR_CODES = frozenset({
     "circuit_open", "reconciled", "lease_expired", "oom", "max_turns",
     "model_unsupported",  # #3012 — the agent's model-rejection 400
     "turn_refused",  # ent#926 — a runtime that cannot scope the turn refused it
+    "turn_check_unavailable",  # ent#978 — the agent could not ask whose turn it is
 })
 # reply.status value set (MESSAGE_ENVELOPE_SCHEMA §2.4/§4; `cancelled` per the
 # live #1083 3-way map — OPEN-1).
@@ -3967,6 +3980,16 @@ class InternalTaskExecutionRequest(BaseModel):
     deliver_to_workspace_email: Optional[str] = None
 
 
+class ScheduleEmailMeRequest(BaseModel):
+    """ent#1391: mail each run of this schedule to me (the caller), or stop. No address: it is the caller's own."""
+    enabled: bool = True
+
+
+class InternalScheduleRetryDroppedRequest(BaseModel):
+    """ent#1391: the scheduler dropped a pending retry of this failed attempt."""
+    execution_id: str
+
+
 class InternalPreCheckRequest(BaseModel):
     """The schedule a pre-check is gating (#3966). Every field is optional: a
     bodyless request (an older scheduler) runs the hook exactly as before."""
@@ -4833,6 +4856,16 @@ class ScheduleResponse(BaseModel):
     # it the field is silently dropped from every response — `ScheduleResponse`
     # is built with `**schedule.model_dump()`, and pydantic ignores extra keys.
     deliver_to_workspace_email: Optional[str] = None
+    # ent#1391: whether each run's result is mailed, and whether to THIS caller.
+    # Never the address: a person the agent is shared with must not read the
+    # owner's email off a schedule read, and the caller's own needs no echo.
+    # Set only through POST .../schedules/{id}/email-me, by the person it mails.
+    email_results: bool = False
+    email_results_to_me: bool = False
+    # Why the last result mail did not go (NULL after one that went), for the
+    # schedule card: a dropped mail is never silent.
+    email_results_error: Optional[str] = None
+    email_results_error_at: Optional[str] = None
     # ent#875: whether THIS caller may mint, rotate, revoke or read the schedule's
     # webhook (its creator, the agent owner, an admin). Computed server-side by
     # both checks the webhook routes enforce — the principal rule (a person, or an

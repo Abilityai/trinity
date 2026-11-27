@@ -384,6 +384,9 @@ export interface ScheduleExecution {
   // #2958: JSON array of auto-compaction events ({trigger, pre_tokens,
   // post_tokens, duration_ms, timestamp}); null when the turn did not compact.
   compact_metadata?: string | null;
+  // #4281: JSON object; `restricted_turn` is set on a run held to a shared
+  // person's access by the schedule that started it.
+  turn_integrity?: string | null;
   source_agent_name?: string;
   source_user_email?: string;
   // AUDIT-001: MCP key origin tracking — used by #914 chat-timeout

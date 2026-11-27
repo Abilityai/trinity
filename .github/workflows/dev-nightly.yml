@@ -104,7 +104,13 @@ jobs:
   integration:
     name: live integration (dev)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # At 45 the job was cancelled on 5 of 10 nights, and a cancelled job writes
+    # no JUnit, so those nights had no failure list to read (#4620). The nights
+    # that finished took 39.5 to 44.8 minutes (the suite alone 37.5), and the 52
+    # tests that used to fail at setup now run: about 46. Times the 1.94 runner
+    # variance measured on this repo (#2462) is 90. A suite that outgrows this
+    # is to be split across jobs, not given more time.
+    timeout-minutes: 90
     permissions:
       contents: read
     steps:

@@ -1355,7 +1355,9 @@ export class TrinityClient {
     idempotencyKey?: string,
     turn?: string,
     /** ent#1105: the project to attribute the execution to; sent only when set. */
-    projectId?: string
+    projectId?: string,
+    /** #4538: `wake: false` declines the caller's wake for this run; sent only then. */
+    options?: { wake?: boolean }
   ): Promise<
     | Replayable<ChatResponse>
     | { error: string; queue_status: "busy" | "queue_full"; retry_after: number; agent: string; details?: Record<string, unknown> }
@@ -1427,7 +1429,14 @@ export class TrinityClient {
       response = await turnFetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/chat`, {
         method: "POST",
         headers,
-        body: JSON.stringify(projectId ? { message, project_id: projectId } : { message }),
+        body: JSON.stringify({
+          message,
+          ...(projectId ? { project_id: projectId } : {}),
+          // #4538: how long this server holds the call open. A run that ends
+          // inside it was answered inline, so the backend wakes nobody for it.
+          caller_wait_ms: timeoutMs,
+          ...(options?.wake === false ? { wake: false } : {}),
+        }),
         signal: controller.signal,
       });
     } catch (err) {
@@ -1661,6 +1670,8 @@ export class TrinityClient {
       parent_execution_id?: string;
       // ent#1105: the project to attribute the execution to; sent only when set.
       project_id?: string;
+      // #4538: `false` declines the caller's wake for this run; sent only then.
+      wake?: boolean;
     },
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
@@ -1728,6 +1739,7 @@ export class TrinityClient {
       chat_session_id: options?.chat_session_id,
       parent_execution_id: options?.parent_execution_id,   // ent#224
       ...(options?.project_id ? { project_id: options.project_id } : {}),  // ent#1105
+      ...(options?.wake === false ? { wake: false } : {}),  // #4538
     };
 
     // #2661: sync mode is bounded by the MCP-server ceiling, not the platform
@@ -1760,7 +1772,9 @@ export class TrinityClient {
       response = await turnFetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/task`, {
         method: "POST",
         headers,
-        body: JSON.stringify(body),
+        // #4538: a sync call says how long this server waits for the reply (an
+        // async one is answered with a receipt and declares no wait).
+        body: JSON.stringify(options?.async_mode ? body : { ...body, caller_wait_ms: timeoutMs }),
         signal: controller.signal,
       });
     } catch (err) {

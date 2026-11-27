@@ -1272,6 +1272,10 @@ async def get_agent_running_executions(
 
     Returns execution IDs, start times, and metadata for running processes.
     """
+    # trinity-enterprise#978: the view is decided before the container is looked
+    # at, so an answer that never reaches the agent (no container, stopped,
+    # unreachable) carries the narrowed-read marker like any other.
+    scope = viewer_row_scope(current_user, name)
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -1291,7 +1295,6 @@ async def get_agent_running_executions(
 
     # ent#875: a share holder sees only the turns they started. An entry with no
     # row of this agent's (or no id) is dropped, never passed through.
-    scope = viewer_row_scope(current_user, name)
     if scope is not None and isinstance(data, dict):
         kept = []
         for entry in data.get("executions") or []:

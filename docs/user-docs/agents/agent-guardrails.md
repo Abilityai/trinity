@@ -140,7 +140,7 @@ Under **Settings › Guardrails › Bounds › Manage rules**, the **Channel and
 - **On** (the default, so channel agents keep working as before): those conversations can use the shell, schedule standing work, and a Gemini or Codex agent answers them. The shell reaches everything the agent can, so turn this off if those visitors should not.
 - **Off**: they get answers without running commands. On a Gemini or Codex agent, a visitor's message is refused; a public-link visitor sees *This agent isn't taking conversations from public links right now. Please contact its owner.*
 
-The switch saves as soon as you change it and applies to the next message, with no restart. People you share the agent with never get the shell, whatever this switch says.
+The switch saves as soon as you change it and applies to the next message, with no restart. People you share the agent with never get the shell, whatever this switch says. If Trinity cannot read the agent's guardrail settings (for example, the stored settings are damaged), it treats the switch as **off** for that message and records a warning in the backend log (`visitor_shell_unreadable`).
 
 ## Per-Agent Configuration
 

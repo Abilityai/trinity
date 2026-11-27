@@ -61,6 +61,9 @@ const MALFORMED_HEADER = "x".repeat(200);
 /** What a model copies out of a template instead of its own id. */
 const PLACEHOLDER_ID = "<your execution_id>";
 
+/** #4538: every sync dispatch declares how long this server waits for the reply. */
+const CALLER_WAIT_MS = Number(process.env.MCP_CHAT_TIMEOUT_MS || 25000);
+
 const FIELDS = ["report_back", "report_back_reason", "report_back_note"] as const;
 
 /** `chat504`: the backend's own wait ran out (#3127 pull pilot) — a 504, then the
@@ -417,7 +420,7 @@ describe("#3232 parent_execution_id leaves the MCP server (real transport)", () 
     assertNoFields(syncPar.out, "sync parallel, not armed");
     const seq = await off.call("chat_with_agent", { agent_name: TARGET, message: "t5" }, HEADER);
     assert.equal(seq.rec?.route, "chat");
-    assert.deepEqual(seq.rec?.body, { message: "t5" });
+    assert.deepEqual(seq.rec?.body, { message: "t5", caller_wait_ms: CALLER_WAIT_MS });
     assertNoFields(seq.out, "sequential inline reply, default-armed (#3295: today's result, byte-identical)");
     assert.deepEqual(seq.arms, [], "an inline reply is never armed");
   });
@@ -470,7 +473,7 @@ describe("#3232 parent_execution_id leaves the MCP server (real transport)", () 
   it("T6: the sequential /chat BODY never carries a parent (typed or not); the same call parallel does", async () => {
     const seq = await off.call("chat_with_agent", { agent_name: TARGET, message: "t6", execution_id: TYPED }, HEADER);
     assert.equal(seq.rec?.route, "chat");
-    assert.deepEqual(seq.rec?.body, { message: "t6" });
+    assert.deepEqual(seq.rec?.body, { message: "t6", caller_wait_ms: CALLER_WAIT_MS });
     assert.deepEqual(seq.arms, []);
     const par = await off.call("chat_with_agent", { agent_name: TARGET, message: "t6", ...PA, execution_id: TYPED }, HEADER);
     assert.equal(parentOf(par), HEADER);
@@ -699,7 +702,7 @@ describe("#3295 a sequential /chat call that ends in a receipt is armed to repor
       const r = await off.call(tool, args, HEADER);
       assert.equal(r.out.status, "queued_timeout", tool);
       assert.equal(r.rec?.route, "chat", tool);
-      assert.deepEqual(r.rec?.body, { message: "t21" }, `${tool}: the body still carries nothing`);
+      assert.deepEqual(r.rec?.body, { message: "t21", caller_wait_ms: CALLER_WAIT_MS }, `${tool}: the body still carries no parent`);
       assert.equal(r.arms.length, 1, tool);
       assert.equal(r.arms[0].agent, agent, tool);
       assert.equal(r.arms[0].executionId, "exec-child-replay", tool);

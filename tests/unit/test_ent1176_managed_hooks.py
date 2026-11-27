@@ -277,7 +277,9 @@ def test_no_answer_from_the_platform_is_a_502_never_a_503(home, monkeypatch):
     with pytest.raises(HTTPException) as exc:
         _require()
     assert exc.value.status_code == 502
-    assert exc.value.detail == {"message": turn_scope.COULD_NOT_CHECK.format(runtime="Claude Code")}
+    # Typed since trinity-enterprise#978, like the other runtimes' answer.
+    assert exc.value.detail == {"message": turn_scope.COULD_NOT_CHECK.format(runtime="Claude Code"),
+                                "error_code": "turn_check_unavailable"}
 
 
 def test_a_schedule_run_gets_its_own_words_and_no_take_over_remedy(home, monkeypatch):
@@ -395,11 +397,12 @@ def test_an_mcp_chat_by_a_shared_person_is_refused_on_both_routes(home, monkeypa
 
 def test_the_async_and_pull_terminals_type_the_refusal():
     refused = HTTPException(403, {"message": managed_hooks.REFUSED, "error_code": "turn_refused"})
-    unreachable = HTTPException(502, {"message": turn_scope.COULD_NOT_CHECK.format(runtime="Claude Code")})
+    unreachable = HTTPException(502, turn_scope.could_not_check("Claude Code"))
     assert result_callback._envelope_from_http_exception(refused)["error_code"] == "turn_refused"
     assert pull_worker._failed_result_body_from_http("t", refused)["error_code"] == "turn_refused"
-    assert result_callback._envelope_from_http_exception(unreachable)["error_code"] != "auth"
-    assert pull_worker._failed_result_body_from_http("t", unreachable)["error_code"] == "agent_error"
+    # trinity-enterprise#978: typed, and named on both terminals.
+    assert result_callback._envelope_from_http_exception(unreachable)["error_code"] == "turn_check_unavailable"
+    assert pull_worker._failed_result_body_from_http("t", unreachable)["error_code"] == "turn_check_unavailable"
 
 
 # ---------------------------------------------------------------------------

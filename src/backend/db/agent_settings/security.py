@@ -130,8 +130,14 @@ class SecurityMixin:
     # Guardrails (GUARD-001)
     # =========================================================================
 
-    def get_guardrails_config(self, agent_name: str) -> dict:
-        """Return per-agent guardrails overrides, or {} if none set."""
+    def get_guardrails_config(self, agent_name: str, strict: bool = False) -> dict:
+        """Return per-agent guardrails overrides, or {} if none set.
+
+        A stored value that is not valid JSON reads as {} — unless ``strict``,
+        when it raises ``json.JSONDecodeError`` (a ``ValueError``) so a caller
+        that must fail closed can tell "unreadable" from "not set"
+        (``turn_tier_service.visitor_shell_allowed``, trinity-enterprise#978).
+        """
         stmt = select(agent_ownership.c.guardrails_config).where(
             and_(
                 agent_ownership.c.agent_name == agent_name,
@@ -144,6 +150,8 @@ class SecurityMixin:
                 try:
                     return json.loads(row["guardrails_config"])
                 except json.JSONDecodeError:
+                    if strict:
+                        raise
                     return {}
             return {}
 

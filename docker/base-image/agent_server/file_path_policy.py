@@ -116,12 +116,19 @@ SYSTEM_PATTERNS = (
     "/etc/*",
     "/sys/*",
 )
-# The agent's standing instructions, per runtime (ent#164, ent#820). Only the
-# agent's own top-level files count: a `docs/CLAUDE.md` is an ordinary file.
-# `template.yaml` joins them (ent#1006): its `metrics:` block is what the UI
-# declaration form edits, so it takes the same owner tier as CLAUDE.md and the
-# generic Files write is not a back door around the form's gate.
-INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md", "template.yaml")
+# The agent's standing instructions, per runtime (ent#164, ent#820). A file with
+# one of these names is instructions at ANY depth (ruling 2026-11-25,
+# trinity-enterprise#978): Claude Code loads a nested `CLAUDE.md` when a turn
+# works in that folder, and Gemini CLI and Codex read theirs the same way, so a
+# `docs/CLAUDE.md` a shared person wrote would steer a later owner turn there.
+# Exact names: the container's filesystem is case-sensitive and the runtimes
+# load exactly these.
+INSTRUCTION_FILE_NAMES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md")
+# `template.yaml` joins them at the top level only (ent#1006): its `metrics:`
+# block is what the UI declaration form edits, so it takes the same owner tier
+# as CLAUDE.md and the generic Files write is not a back door around the form's
+# gate. No runtime reads a nested one.
+INSTRUCTION_FILES = INSTRUCTION_FILE_NAMES + ("template.yaml",)
 INSTRUCTION_DIRS = (".claude",)
 INSTRUCTION_NESTED_FILES = (".gemini/GEMINI.md",)
 SKILLS_DIR = ".claude/skills"
@@ -297,6 +304,7 @@ def classes(path: str, home: str = HOME, *, include_ancestors: bool = False) -> 
         found.add(HIDDEN)
     instruction_roots = INSTRUCTION_FILES + INSTRUCTION_NESTED_FILES
     if (rel in instruction_roots
+            or posixpath.basename(rel) in INSTRUCTION_FILE_NAMES
             or any(_under(rel, d) and not _under(rel, SKILLS_DIR) for d in INSTRUCTION_DIRS)):
         found.add(INSTRUCTIONS)
     if _under(rel, SKILLS_DIR):

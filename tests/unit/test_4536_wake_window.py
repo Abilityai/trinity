@@ -113,6 +113,7 @@ def world(db_backend, monkeypatch):
     monkeypatch.setattr(_WAKE, "_caller_subscribes_to", lambda *a: False)
     monkeypatch.setattr(_WAKE, "_spawn_followon", lambda coro: spawned.append(coro), raising=False)
     monkeypatch.setattr(_WAKE, "_has_free_slot", _free_slot, raising=False)   # #4733
+    monkeypatch.setattr(_WAKE, "_slot_freed", _free_slot, raising=False)      # #4538
     redis = fakeredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(_WAKE, "_wake_budget_redis", lambda: redis)
     return SimpleNamespace(wakes=wakes, spawned=spawned, audits=audits, gate=gate, held=held,

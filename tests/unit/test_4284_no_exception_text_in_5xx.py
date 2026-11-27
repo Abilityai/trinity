@@ -1483,7 +1483,7 @@ _ALLOWED: Tuple[_Allowed, ...] = (
     ),
     _Allowed(
         _BE + "services/chat_execution_service.py", "_apply_sub003_autoswitch",
-        "ChatDispatchError", frozenset({"agent_status_code", "error_msg"}),
+        "ChatDispatchError", frozenset({"agent_status_code", "error_msg", "response"}),
         "The sync chat failure: `error_msg` is `_parse_agent_http_error`'s, the "
         "agent's own error detail from its answer (credential-scrubbed, ent#279, and "
         "capped) or `HTTP error: <class>`, never httpx's text. It is the turn's "
@@ -1491,8 +1491,12 @@ _ALLOWED: Tuple[_Allowed, ...] = (
         "consumers read it (#2889). The agent server's chat and task 5xx are "
         "platform text, which this guard checks in that tree; an agent still on a "
         "base image from before #4293 answers `Execution error: <exception text>` "
-        "here until it is recreated (named in #4284's PR).",
-        count=5,
+        "here until it is recreated (named in #4284's PR). `response` (trinity-"
+        "enterprise#978) is the agent's answer, read only for its typed "
+        "`error_code`; it is never rendered. The sixth site, the 502 for a turn "
+        "check that could not ask the platform, answers fixed words; only its "
+        "`X-Trinity-Error-Code` header (an enum value) is derived from the answer.",
+        count=6,
     ),
     _Allowed(
         _BE + "services/chat_execution_service.py", "_finalize_budget_exhausted",

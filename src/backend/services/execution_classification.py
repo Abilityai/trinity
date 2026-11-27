@@ -160,6 +160,28 @@ def is_turn_refusal(response) -> bool:
     return getattr(response, "status_code", None) == 403 and _typed_error_code(response) == "turn_refused"
 
 
+TURN_CHECK_UNAVAILABLE_CODE = "turn_check_unavailable"
+
+
+def is_turn_check_unavailable_response(response) -> bool:
+    """The agent could not ask the platform whose turn this is, so the turn did
+    not start (trinity-enterprise#978). A current image answers 502 typed
+    `error_code: "turn_check_unavailable"`; an older one answered 503 (and
+    #4743's Claude check 502) with the agent's sentence and no code, which is
+    recognised by `failure_classifier.is_turn_check_unavailable`. No credential
+    changes it, so no subscription logic may act on it. Never raises."""
+    if response is None:
+        return False
+    if _typed_error_code(response) == TURN_CHECK_UNAVAILABLE_CODE:
+        return True
+    if getattr(response, "status_code", None) not in (502, 503):
+        return False
+    from services.failure_classifier import is_turn_check_unavailable
+
+    error_msg, _, _ = _extract_agent_error(response, "")
+    return is_turn_check_unavailable(error_msg)
+
+
 def _extract_agent_error(
     response: Optional[httpx.Response], fallback: str
 ) -> tuple[str, dict, Any]:
@@ -207,6 +229,8 @@ def classify_switch_failure(response: httpx.Response) -> Optional[str]:
     true (not just 429/503 by status code):
 
         model rejection (#3012)      -> None, whatever the status
+        turn refusal (ent#1176)      -> None (typed 403)
+        turn check unavailable       -> None (typed 502, or an older image's 503; ent#978)
         container fault (#3470)      -> None, whatever the status
         turn limit (#3984)           -> None, whatever the status
         prompt too long (#3849)      -> None, whatever the status
@@ -236,6 +260,11 @@ def classify_switch_failure(response: httpx.Response) -> Optional[str]:
     # every subscription and the key. Read from the typed body only: a bare 403
     # stays auth.
     if is_turn_refusal(response):
+        return None
+    # trinity-enterprise#978: the agent could not ask the platform whose turn it
+    # is. An older image answers it 503, which the status rule below reads as
+    # auth and walks every subscription on a platform blip.
+    if is_turn_check_unavailable_response(response):
         return None
     if code >= 400:
         error_msg, _, _ = _extract_agent_error(response, "")

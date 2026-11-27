@@ -643,6 +643,12 @@ def test_disconnect_does_not_cancel_the_handler():
     async def _b(request: Request, call_next):
         return await call_next(request)
 
+    # trinity-enterprise#978: main.py's narrowed-read marker. Pure ASGI that
+    # wraps `send` only and never `receive`, so it adds no cancellation either.
+    from utils.read_narrowing import ReadNarrowedMiddleware
+
+    app.add_middleware(ReadNarrowedMiddleware)
+
     # trinity-enterprise#873: main.py's client-address resolver, outermost
     # but for the Host guard. Pure ASGI that never wraps `receive`, so a client
     # disconnect must still not reach the handler as a cancellation.
@@ -684,8 +690,9 @@ def test_main_registers_only_the_checked_http_middleware():
     there must be re-checked against client disconnects."""
     src = (Path(_BACKEND_STR) / "main.py").read_text()
     assert src.count('@app.middleware("http")') == 2
-    # CORSMiddleware, ClientAddressMiddleware (ent#873), HostHeaderGuard
-    assert src.count("app.add_middleware(") == 3
+    # CORSMiddleware, ReadNarrowedMiddleware (ent#978), ClientAddressMiddleware
+    # (ent#873), HostHeaderGuard
+    assert src.count("app.add_middleware(") == 4
 
 
 # ---------------------------------------------------------------------------
@@ -736,3 +743,72 @@ def test_adopting_a_row_the_pull_sink_finished_still_writes_the_reply(turn_env):
     env.run()
     msgs = [m for m in env.db.get_chat_messages(env.session.id) if m.role == "assistant"]
     assert [m.content for m in msgs] == ["hi back"]
+
+
+# ---------------------------------------------------------------------------
+# #4538: a pulled /chat ends through the terminal fan-out, so its caller can be
+# woken — the call's own word on that wake is kept for the row.
+# ---------------------------------------------------------------------------
+
+
+def _pulled(env, *, source="caller", **body):
+    from models import ChatMessageRequest
+
+    return asyncio.run(env.ce.run_chat_turn(
+        name=AGENT, request=ChatMessageRequest(message="hello", **body),
+        current_user=_user(), x_source_agent=source, triggered_by="agent",
+        task_execution_id=env.row.id, _chat_subscription_id=None,
+        chat_activity_id="act-chat", collaboration_activity_id="act-collab",
+        session=env.session, execution=SimpleNamespace(id="q1"), queue_result="queued",
+        is_queued=False, chat_timeout=900, idem="IDEM", capacity=None, chain_depth=2,
+    ))
+
+
+def _terms(env):
+    import services.caller_wake_service as wake
+
+    return wake._call_terms(AGENT, env.row.id)
+
+
+def test_a_pulled_turn_keeps_what_the_call_said_about_its_wake(turn_env):
+    from datetime import datetime, timedelta, timezone
+
+    import services.caller_wake_service as wake
+
+    _pulled(turn_env, wake=False, caller_wait_ms=25_000)
+    terms = _terms(turn_env)
+    assert terms["declined"] is True
+    left = wake._as_utc(terms["wait_until"]) - datetime.now(timezone.utc)
+    assert timedelta(seconds=20) < left <= timedelta(seconds=25)
+
+
+@pytest.mark.parametrize("source, body", [
+    ("caller", {}),                       # declares nothing: wakes as before
+    (None, {"wake": False}),              # a person's call: nobody to wake
+    (AGENT, {"wake": False}),             # the agent calling itself
+])
+def test_a_pulled_turn_keeps_no_terms_without_a_caller_or_a_word(turn_env, source, body):
+    _pulled(turn_env, source=source, **body)
+    assert _terms(turn_env) is None
+
+
+def test_a_pulled_turn_that_times_out_ends_the_callers_wait_and_says_declined(turn_env):
+    """The handler answers a receipt while the run goes on: the wait is over,
+    and a declined call's receipt still says so."""
+    from datetime import datetime, timezone
+
+    import services.caller_wake_service as wake
+    from services.chat_signals import ChatDispatchError
+
+    env = turn_env
+    _timed_out(env)
+    with pytest.raises(ChatDispatchError) as exc:
+        _pulled(env, caller_wait_ms=3_600_000)
+    assert exc.value.status_code == 504
+    assert wake._as_utc(_terms(env)["wait_until"]) <= datetime.now(timezone.utc)
+
+    env.idem.complete.reset_mock()
+    with pytest.raises(ChatDispatchError):
+        _pulled(env, wake=False)
+    (_, _eid, receipt), _ = env.idem.complete.call_args
+    assert receipt["wake_on_ending"] == {"effective": False, "source": "call"}

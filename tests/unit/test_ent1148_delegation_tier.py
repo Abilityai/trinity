@@ -74,7 +74,7 @@ class _Db:
     def get_schedule(self, sid):
         return self.schedules.get(sid)
 
-    def get_guardrails_config(self, agent):
+    def get_guardrails_config(self, agent, strict=False):
         return {}
 
     def get_running_turn_attribution(self, agent):

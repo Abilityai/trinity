@@ -58,9 +58,12 @@ def test_a_shared_or_unknown_turn_is_refused_with_a_named_reason(monkeypatch, ti
 
 
 def test_no_answer_refuses_rather_than_running(monkeypatch):
+    """502 and typed, never 503: every caller reads a 503 as an auth failure
+    (trinity-enterprise#978)."""
     with pytest.raises(HTTPException) as exc:
         _require(monkeypatch, "unreachable")
-    assert exc.value.status_code == 503
+    assert exc.value.status_code == 502
+    assert exc.value.detail["error_code"] == "turn_check_unavailable"
 
 
 def test_a_call_with_no_execution_id_is_no_platform_turn_and_asks_nobody(monkeypatch):

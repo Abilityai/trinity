@@ -13,23 +13,48 @@
  * `withAudit` (which wraps every registered tool) runs the tool inside this
  * store, and `TrinityClient` adds the header to every backend call made while
  * it runs. A new tool or client method is covered without remembering anything.
+ *
+ * The same door reads one thing back (trinity-enterprise#978): when the backend
+ * narrowed a read to the person of a running turn it marks the response with
+ * `X-Trinity-Read-Narrowed: <code>`, and `turnFetch` records the first such
+ * code for the tool call in progress. `read-narrowing.ts` turns it into the
+ * `narrowed` field a tool shows.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 
 // Same shape the client already validates for the header (#2392).
 const EXECUTION_ID_SHAPE = /^[A-Za-z0-9_-]{1,128}$/;
 
-const store = new AsyncLocalStorage<string | undefined>();
+/** One tool call: the turn it is part of, and what its backend calls reported. */
+interface ToolCallState {
+  turn?: string;
+  narrowed?: string;
+}
+
+const store = new AsyncLocalStorage<ToolCallState>();
 
 /** Run `fn` as part of the given turn; an id of the wrong shape counts as none. */
 export function runInTurn<R>(executionId: string | undefined, fn: () => R): R {
   const id = executionId && EXECUTION_ID_SHAPE.test(executionId) ? executionId : undefined;
-  return store.run(id, fn);
+  return store.run({ turn: id }, fn);
 }
 
 /** The turn the current tool call is part of, if any. */
 export function currentTurn(): string | undefined {
-  return store.getStore();
+  return store.getStore()?.turn;
+}
+
+const NARROWED_HEADER = "X-Trinity-Read-Narrowed";
+// The backend sends one of a few lowercase codes; anything else is not a code.
+const NARROWED_CODE_SHAPE = /^[a-z_]{1,64}$/;
+
+/**
+ * The narrowed-read code a backend call of the current tool call reported, if
+ * any. The first one sticks: one tool call acts for one principal, so every
+ * marked answer in it carries the same reason.
+ */
+export function currentReadNarrowing(): string | undefined {
+  return store.getStore()?.narrowed;
 }
 
 const TURN_HEADER = "X-Trinity-Execution-Id";
@@ -40,10 +65,19 @@ const TURN_HEADER = "X-Trinity-Execution-Id";
  * that called `fetch` directly sent no turn (fanOut did, until 2026-10-19), and
  * the backend reads a missing header as "no platform turn", which is open.
  */
-export function turnFetch(input: string | URL, init: RequestInit = {}): Promise<Response> {
-  const turn = currentTurn();
-  if (!turn) return fetch(input, init);
-  const headers = new Headers(init.headers);
-  if (!headers.has(TURN_HEADER)) headers.set(TURN_HEADER, turn);
-  return fetch(input, { ...init, headers });
+export async function turnFetch(input: string | URL, init: RequestInit = {}): Promise<Response> {
+  const state = store.getStore();
+  let request = init;
+  if (state?.turn) {
+    const headers = new Headers(init.headers);
+    if (!headers.has(TURN_HEADER)) headers.set(TURN_HEADER, state.turn);
+    request = { ...init, headers };
+  }
+  const response = await fetch(input, request);
+  // With or without a turn id: a session that sends none is narrowed the same way.
+  if (state && !state.narrowed) {
+    const code = response.headers?.get?.(NARROWED_HEADER);
+    if (code && NARROWED_CODE_SHAPE.test(code)) state.narrowed = code;
+  }
+  return response;
 }

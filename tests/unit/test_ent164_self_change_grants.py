@@ -161,6 +161,13 @@ def test_every_schedule_write_takes_the_schedules_fence_and_trigger_does_not():
         calls = _calls(table[key])
         assert "require_person" in calls, key
         assert "capability_fence_schedules_manage" not in calls, key
+    # trinity-enterprise#1391: turning result mail on or off is a schedule write,
+    # so it takes the fence; it also mails as the platform, so a person only.
+    person_and_fenced = [("/api/agents/{name}/schedules/{schedule_id}/email-me", "POST")]
+    for key in person_and_fenced:
+        calls = _calls(table[key])
+        assert "require_person" in calls, key
+        assert "capability_fence_schedules_manage" in calls, key
     # Derived from the router, not only the literal above (#3236 validation):
     # every schedule WRITE is either fenced, a webhook route or `trigger`, so a
     # write route added tomorrow without a gate fails here instead of staying green.
@@ -168,7 +175,7 @@ def test_every_schedule_write_takes_the_schedules_fence_and_trigger_does_not():
               and k[0].startswith("/api/agents/{name}/schedules")}
     assert writes == (set(fenced) | {k for k in webhooks if k[1] != "GET"}
                       | {("/api/agents/{name}/schedules/{schedule_id}/trigger", "POST")}
-                      | set(person_only))
+                      | set(person_only) | set(person_and_fenced))
 
 
 def test_every_reconfigure_route_admits_only_a_person_or_a_holder():
@@ -338,7 +345,8 @@ def test_spawning_a_ghost_needs_no_grant(held, audit):
     (".claude/agents/reviewer.md", False, True),
     (".claude/commands/x.md", False, True),
     (".claude/skills/x/SKILL.md", False, False),        # skills.manage alone (decided)
-    ("docs/CLAUDE.md", False, False),                    # only the agent's own top-level file
+    ("docs/CLAUDE.md", False, True),                     # any depth (trinity-enterprise#978)
+    ("docs/template.yaml", False, False),                # template.yaml: top level only
     ("notes.md", False, False),
     (".claude", True, True),                             # deleting .claude deletes instructions
     ("/home/developer", True, True),

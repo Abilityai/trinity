@@ -27,6 +27,7 @@ import type { McpAuthContext } from "../types.js";
 import { agentKeyToolAccess, HUMAN_ONLY_KEYS_NOT_SHOWN, humanOnlyToolAccess, projectToolAccess, resolveActingAgent } from "../access.js";
 import { deriveMcpIdempotencyKey } from "./chat.js";
 import { PersonProjectClient } from "./projects_person_client.js";
+import { NARROWED_DESCRIPTION, narrowedField } from "../read-narrowing.js";
 
 /**
  * The project tools cannot be driven by an admin's user key acting for an agent
@@ -800,7 +801,8 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "with get_execution_result. `totals` gives runs, fenced_runs, cost and the median queue age per " +
         "agent; when totals.scope is \"openable\" the cost covers only runs you can open. Filter by " +
         "since/until (ISO; default the last 30 days, at most 180), agent, status, task_id or source " +
-        "(chat, room, task, delegated, explicit, steward). Pass next_cursor back as cursor for the next page.",
+        "(chat, room, task, delegated, explicit, steward). Pass next_cursor back as cursor for the next page. " +
+        NARROWED_DESCRIPTION,
       parameters: z.object({
         agent_name: z.string().optional().describe(PROJECT_AGENT_NAME_DESCRIPTION),
         project_id: projectId,
@@ -822,7 +824,8 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       ) => {
         try {
           const { project_id, agent_name: _actAs, ...filters } = p;
-          return ok(await readerFor(context, p.agent_name).listProjectExecutions(project_id, filters, turnOf(context)));
+          const page = await readerFor(context, p.agent_name).listProjectExecutions(project_id, filters, turnOf(context));
+          return ok({ ...page, ...narrowedField() });
         } catch (e) {
           return fail(e);
         }

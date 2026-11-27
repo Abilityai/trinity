@@ -244,6 +244,7 @@ from .execution_classification import (  # noqa: F401
     _salvage_attempt_cost,
     classify_switch_failure,
     detect_unresolved_slash_command,
+    is_turn_check_unavailable_response,
     is_turn_refusal,
 )
 
@@ -3333,11 +3334,16 @@ class TaskExecutionService:
         # schedule's name, a creator's label) that `is_auth_failure` below
         # would read as an auth word. No credential changes a refusal.
         turn_refused = is_turn_refusal(getattr(e, "response", None))
+        # trinity-enterprise#978: the agent could not ask the platform whose
+        # turn it is (typed 502, or an older image's 503 that would read as
+        # auth below). No credential changes that either.
+        turn_unchecked = is_turn_check_unavailable_response(getattr(e, "response", None))
         if (
             not state.subscription_switch_attempted
             and not model_rejected
             and not credential_independent
             and not turn_refused
+            and not turn_unchecked
         ):
             try:
                 from services.subscription_auto_switch import (
@@ -3365,10 +3371,16 @@ class TaskExecutionService:
         if model_rejected:
             logger.warning(f"[TaskExecService] Model rejected on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.MODEL_UNSUPPORTED
-        elif agent_status_code == 403:
+        elif turn_refused:
             # ent#926: the agent refused the turn for who it is for (a runtime
             # that cannot scope it). A refusal, not an outage or an auth fault.
+            # Read from the typed body (ent#978 item 3): a bare 403 is not one.
             error_code = TaskExecutionErrorCode.TURN_REFUSED
+        elif turn_unchecked:
+            # ent#978: before the 503 → AUTH branch, which an older image's
+            # answer would otherwise take (and the AUTH breaker count).
+            logger.warning(f"[TaskExecService] Turn check unavailable on {agent_name}: {error_msg[:200]}")
+            error_code = TaskExecutionErrorCode.TURN_CHECK_UNAVAILABLE
         elif agent_status_code == 422 and is_turn_limit(error_msg):
             # #3988: the turn stopped at its cap. Coded so the caller is told to
             # raise the cap or split the task, not that the agent is down. The
@@ -3415,7 +3427,7 @@ class TaskExecutionService:
             execution_id=execution_id,
             status=TaskExecutionStatus.FAILED,
             error=f"{error_msg}{walk_trail}",
-            error_code=error_code,  # MODEL_UNSUPPORTED (#3012) / AUTH (503) / BILLING (429, #2638) / MAX_TURNS (422, #3988) / None
+            error_code=error_code,  # MODEL_UNSUPPORTED (#3012) / TURN_REFUSED / TURN_CHECK_UNAVAILABLE (ent#978) / AUTH (503) / BILLING (429, #2638) / MAX_TURNS (422, #3988) / None
             metadata=partial_metadata,
             # #1853: thread the agent's salvaged transcript + session id onto
             # the FAILED envelope so apply_result persists them (mirrors

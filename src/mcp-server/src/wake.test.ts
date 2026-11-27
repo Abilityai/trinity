@@ -14,6 +14,7 @@ import { describe, it } from "node:test";
 
 import {
   resolveWake,
+  wakeDeclinedByCall,
   wakePolicyFromAnswer,
   wakeReceiptFields,
   type WakeInput,
@@ -188,5 +189,47 @@ describe("ent#1102 the policy comes off a real backend receipt", () => {
   it("reads a flattened boolean too, so neither side can drift silently", () => {
     assert.equal(wakePolicyFromAnswer({ wake_on_ending: true }), true);
     assert.equal(wakePolicyFromAnswer({ wake_on_ending: false }), false);
+  });
+});
+
+/**
+ * #4538 — the caller's own decline is its own reason. `opted_out` already
+ * means the OWNER's switch is off, and the two tell the caller different
+ * things: after a decline it reads the result itself in this turn.
+ */
+describe("#4538 a call that declined its wake", () => {
+  const declinedReceipt = {
+    status: "accepted",
+    execution_id: "exec-1",
+    wake_on_ending: { effective: false, source: "call" },
+  };
+
+  it("reads the decline off the backend answer, and only from the `call` layer", () => {
+    assert.equal(wakeDeclinedByCall(declinedReceipt), true);
+    assert.equal(wakeDeclinedByCall({ wake_on_ending: { effective: false, source: "agent" } }), false);
+    assert.equal(wakeDeclinedByCall({ wake_on_ending: { effective: true, source: "call" } }), false);
+    assert.equal(wakeDeclinedByCall({ wake_on_ending: false }), false);
+    assert.equal(wakeDeclinedByCall({}), false);
+    assert.equal(wakeDeclinedByCall(undefined), false);
+  });
+
+  it("prints `caller_declined`, not the owner's `opted_out`", () => {
+    assert.deepEqual(
+      wakeReceiptFields({
+        ...dispatched,
+        policyEnabled: wakePolicyFromAnswer(declinedReceipt),
+        declined: wakeDeclinedByCall(declinedReceipt),
+      }),
+      { wake: "none", wake_reason: "caller_declined" },
+    );
+  });
+
+  it("still prefers what is knowable without the backend", () => {
+    const declined = { ...dispatched, declined: true };
+    assert.equal(resolveWake({ ...declined, hasCaller: false })?.wake_reason, "no_caller");
+    assert.equal(resolveWake({ ...declined, outcome: "busy" })?.wake_reason, "nothing_ran");
+    assert.equal(resolveWake({ ...declined, outcome: "inline" })?.wake_reason, "answered_inline");
+    assert.equal(resolveWake({ ...declined, isSelfTask: true })?.wake_reason, "self_task");
+    assert.equal(resolveWake({ ...declined, batch: true })?.wake_reason, "fan_out");
   });
 });

@@ -9,85 +9,36 @@ Two bugs fixed:
   both execute_task and _execute_task_internal_background so that execution
   records are closed synchronously on backend shutdown, preventing the cleanup
   service from inflating failure duration.
+
+Lives under tests/unit/ since #4620. In tests/ root it stubbed `database`,
+`utils.helpers`, `redis` and more into `sys.modules` with `setdefault`, which
+keeps whatever an earlier-collected file left there. In the live tier that was
+`tests/git_sync/test_s5_conflict_classifier.py`'s load-time `database` stub,
+whose `db` is None, so every service `execute_task` reaches was bound to None
+and seven tests died before they got to the circuit breaker or the cancel
+handler. Here the conftest provides the real `database` on a per-process
+file, so this module installs no stubs; it imports the service at collection
+instead (below), so the service's collaborators are bound to that database.
 """
 
 import asyncio
-import os
 import sys
-import types
-from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from unit._write_params import flat_kwargs
 
-# ---------------------------------------------------------------------------
-# Path setup — mirror pattern from test_watchdog_unit.py
-# ---------------------------------------------------------------------------
-_backend_path = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "src", "backend")
-)
-if _backend_path not in sys.path:
-    sys.path.insert(0, _backend_path)
+_BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
 
-# ---------------------------------------------------------------------------
-# Stub heavy dependencies before importing backend modules
-# ---------------------------------------------------------------------------
-_helpers_mod = types.ModuleType("utils.helpers")
-_helpers_mod.utc_now = lambda: datetime.utcnow()
-_helpers_mod.utc_now_iso = lambda: datetime.utcnow().isoformat() + "Z"
-_helpers_mod.iso_cutoff = lambda hours: datetime.utcnow().isoformat() + "Z"
-_helpers_mod.parse_iso_timestamp = lambda s: datetime.utcnow()
-_helpers_mod.to_utc_iso = lambda *a, **k: datetime.utcnow().isoformat() + "Z"
-sys.modules.setdefault("utils.helpers", _helpers_mod)
-
-def _install_sanitizer_stub() -> None:
-    """Install our credential_sanitizer stub even if another test (e.g.
-    test_validation.py) already cached an incomplete one in sys.modules.
-
-    Using setdefault here was a bug: test_validation.py installs a partial
-    stub at module-collection time with only `sanitize_text`, so our
-    setdefault is a no-op and `from utils.credential_sanitizer import
-    sanitize_execution_log` (inside the real task_execution_service.py)
-    fails with ImportError when our fixture re-imports the service.
-    """
-    sanitizer = types.ModuleType("utils.credential_sanitizer")
-    sanitizer.sanitize_response = lambda x: x
-    sanitizer.sanitize_execution_log = lambda x: x
-    sanitizer.sanitize_text = lambda x: x
-    sanitizer.sanitize_dict = lambda x: x
-    sanitizer.sanitize_list = lambda x: x
-    sanitizer.sanitize_json_string = lambda x: x
-    sanitizer.scrub_secret = lambda text, secret: text
-    sanitizer.scrub_secret_and_urls = lambda text, secret: text
-    sanitizer.redact_url_userinfo = lambda text: text
-    # The real module has exported this constant since 2026-02; the stub
-    # lacked it, so `from utils.credential_sanitizer import REDACTION_PLACEHOLDER`
-    # inside the service under test raised ImportError for every test here (#2802).
-    sanitizer.REDACTION_PLACEHOLDER = "***REDACTED***"
-    sys.modules["utils.credential_sanitizer"] = sanitizer
-    return sanitizer
-
-
-# Keep a module-level handle to the complete stub so the autouse fixture can
-# re-assert it after cross-file pollution (#1260: previously referenced an
-# unbound `_sanitizer_mod`, raising NameError at setup for all tests here).
-_sanitizer_mod = _install_sanitizer_stub()
-
-sys.modules.setdefault("database", MagicMock())
-
-# Stub redis to prevent connection attempts
-_redis_mod = types.ModuleType("redis")
-_redis_mod.Redis = MagicMock
-_redis_mod.ConnectionError = ConnectionError
-sys.modules.setdefault("redis", _redis_mod)
-
-# Stub APScheduler and other heavy deps
-for _stub in (
-    "apscheduler", "apscheduler.schedulers", "apscheduler.schedulers.asyncio",
-    "docker", "docker.errors", "docker.types",
-):
-    sys.modules.setdefault(_stub, MagicMock())
+# Bound at collection, while `database` is still the conftest's real module.
+# A test elsewhere that swaps `sys.modules["database"]` for its own double and
+# is the first to import a service leaves that service holding the double for
+# the rest of the process; `execute_task` here then reads settings through it
+# (seen with `test_backlog.py` run just before this file, and four others).
+import services.task_execution_service  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
@@ -99,39 +50,6 @@ def _make_execution(status="running"):
     ex.id = "exec-test-001"
     ex.status = status
     return ex
-
-
-# Issue #678 cluster A: cross-file sys.modules pollution defense.
-#
-# test_validation.py installs an incomplete `utils.credential_sanitizer`
-# stub at module-collection time:
-#     sys.modules["utils.credential_sanitizer"] = _stub  # only sanitize_text
-# Our file used `setdefault` (no-op once polluted), so the polluted stub
-# wins and the real `services.task_execution_service` re-import fails with
-#     ImportError: cannot import name 'sanitize_dict'
-#       from 'utils.credential_sanitizer'
-# (because #678 added sanitize_dict to the salvage path imports).
-#
-# In addition, some prior tests stub `services.task_execution_service`
-# itself as a MagicMock; tests/conftest.py's _SYS_MODULES_BASELINE captures
-# `None` for that key (not preloaded), so the autouse restore is a no-op
-# and the MagicMock persists. The re-import then returns a MagicMock
-# class, and `await svc.execute_task(...)` raises "MagicMock can't be used
-# in await expression".
-#
-# Defense: before every test, overwrite the sanitizer stub with our
-# complete one and evict the task_execution_service module so the test's
-# import statement loads the real class against our complete stub.
-@pytest.fixture(autouse=True)
-def _restore_complete_stubs(monkeypatch):
-    """Re-assert our complete stubs against cross-file pollution.
-
-    Uses monkeypatch so the lint at tests/lint_sys_modules.py (#762)
-    stays green and the mutations auto-revert on teardown.
-    """
-    monkeypatch.setitem(sys.modules, "utils.credential_sanitizer", _sanitizer_mod)
-    monkeypatch.delitem(sys.modules, "services.task_execution_service", raising=False)
-    yield
 
 
 # ===========================================================================
@@ -161,36 +79,6 @@ class TestCircuitBreakerFastFail:
     """execute_task closes the execution record immediately when CB is open."""
 
     pytestmark = pytest.mark.unit
-
-    @pytest.fixture(autouse=True)
-    def _patch_env(self):
-        """Ensure backend config can load without real env vars.
-
-        Also evict any cross-file `services.task_execution_service` stub
-        (test_validation.py installs a plain MagicMock at module-collection
-        time). The conftest baseline-restore can't help because the baseline
-        was None — the real module isn't preloadable from conftest without
-        TRINITY_DB_PATH set. Force a fresh import so `TaskExecutionService`
-        resolves to the real coroutine class, not a MagicMock attribute that
-        would fail `await svc.execute_task(...)`.
-        """
-        env_patch = {
-            "REDIS_URL": "redis://test:test@localhost:6379",
-            "REDIS_PASSWORD": "test",
-            "REDIS_BACKEND_PASSWORD": "test",
-            "SECRET_KEY": "test-secret-key",
-        }
-        with patch.dict(os.environ, env_patch, clear=False):
-            _install_sanitizer_stub()
-            sys.modules.pop("services.task_execution_service", None)
-            yield
-
-    def _make_task_service(self):
-        """Return a TaskExecutionService with all external deps mocked."""
-        from services.task_execution_service import TaskExecutionService, TaskExecutionStatus
-
-        svc = TaskExecutionService.__new__(TaskExecutionService)
-        return svc
 
     @pytest.mark.asyncio
     async def test_cb_open_fails_execution_record(self):
@@ -382,20 +270,6 @@ class TestCancelledErrorInExecuteTask:
     """execute_task closes the execution record when cancelled by backend shutdown."""
 
     pytestmark = pytest.mark.unit
-
-    @pytest.fixture(autouse=True)
-    def _patch_env(self):
-        """See TestCircuitBreakerFastFail._patch_env — same stub-eviction rationale."""
-        env_patch = {
-            "REDIS_URL": "redis://test:test@localhost:6379",
-            "REDIS_PASSWORD": "test",
-            "REDIS_BACKEND_PASSWORD": "test",
-            "SECRET_KEY": "test-secret-key",
-        }
-        with patch.dict(os.environ, env_patch, clear=False):
-            _install_sanitizer_stub()
-            sys.modules.pop("services.task_execution_service", None)
-            yield
 
     @pytest.mark.asyncio
     async def test_cancelled_error_marks_execution_failed(self):

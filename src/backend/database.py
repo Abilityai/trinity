@@ -1510,8 +1510,8 @@ class DatabaseManager:
     # Agent Guardrails (GUARD-001)
     # =========================================================================
 
-    def get_guardrails_config(self, agent_name: str) -> dict:
-        return self._agent_ops.get_guardrails_config(agent_name)
+    def get_guardrails_config(self, agent_name: str, strict: bool = False) -> dict:
+        return self._agent_ops.get_guardrails_config(agent_name, strict=strict)
 
     def set_guardrails_config(self, agent_name: str, config: dict = None) -> bool:
         return self._agent_ops.set_guardrails_config(agent_name, config)
@@ -2007,6 +2007,12 @@ class DatabaseManager:
     def clear_webhook_secret(self, schedule_id: str):
         # ent#77: disable signature auth + drop the stored secret.
         return self._schedule_ops.clear_webhook_secret(schedule_id)
+
+    def set_schedule_email_results(self, schedule_id: str, user_id, *, error=None):
+        return self._schedule_ops.set_schedule_email_results(schedule_id, user_id, error=error)
+
+    def record_schedule_email_results_outcome(self, schedule_id: str, error):
+        return self._schedule_ops.record_schedule_email_results_outcome(schedule_id, error)
 
     def set_schedule_enabled(self, schedule_id: str, enabled: bool):
         return self._schedule_ops.set_schedule_enabled(schedule_id, enabled)
