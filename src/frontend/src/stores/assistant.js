@@ -67,10 +67,13 @@ const detail = (error) => error?.response?.data?.detail
 // an answer to it came back. No answer at all (the network dropped before one could)
 // or a proxy that could not reach Trinity means it never arrived and may be sent
 // again; a timeout means Trinity had it and was still working, so it may not.
+// A 502/503 counts as the proxy only when it carries no named code: Trinity's own
+// /turn answers 502 gateway_interrupted / gateway_unreachable after the gateway
+// may already have taken the turn, so those keep the buttons closed.
 const NOT_REACHED = new Set([502, 503])
 const neverArrived = (error) => {
   const status = error?.response?.status
-  if (status) return NOT_REACHED.has(status)
+  if (status) return NOT_REACHED.has(status) && !detail(error)?.code
   return !['ECONNABORTED', 'ETIMEDOUT'].includes(error?.code)
 }
 const CHOICE_UNSENT = "Couldn't reach the assistant, so your choice wasn't sent. Check your connection, then press it again."

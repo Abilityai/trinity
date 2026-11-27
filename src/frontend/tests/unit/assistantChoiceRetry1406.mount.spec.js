@@ -19,7 +19,9 @@ let turns
 const failure = (props) => Object.assign(new Error('failed'), props)
 const NETWORK = () => failure({ code: 'ERR_NETWORK' })
 const TIMEOUT = () => failure({ code: 'ECONNABORTED' })
-const BAD_GATEWAY = () => failure({ response: { status: 502, data: {} } })
+const BAD_GATEWAY = () => failure({ response: { status: 502, data: '<html>502 Bad Gateway</html>' } })
+const INTERRUPTED = () => failure({ response: { status: 502, data: { detail: { code: 'gateway_interrupted', message: "Trinity didn't finish answering. Send that again." } } } })
+const SERVER_ERROR = () => failure({ response: { status: 500, data: { detail: 'Internal Server Error' } } })
 
 vi.mock('@/api', () => {
   const respond = (method, url, body) => {
@@ -127,6 +129,23 @@ describe('a choice that failed to send can be pressed again (ent#1406)', () => {
     turns = [BAD_GATEWAY]
     await press('Inbox helper')
     expect(enabled()).toEqual(OPTIONS)
+  })
+
+  it("Trinity's own 502 (gateway_interrupted) may have taken the turn: closed, with Trinity's words", async () => {
+    await offerChoice()
+    turns = [INTERRUPTED]
+    await press('Inbox helper')
+    expect(enabled()).toEqual([])
+    expect(wrapper.text()).toContain("Trinity didn't finish answering")
+    expect(wrapper.text()).not.toContain("your choice wasn't sent")
+  })
+
+  it('a 500 is an answer from Trinity: the choice stays closed', async () => {
+    await offerChoice()
+    turns = [SERVER_ERROR]
+    await press('Inbox helper')
+    expect(enabled()).toEqual([])
+    expect(wrapper.text()).not.toContain("your choice wasn't sent")
   })
 
   it('after a reload the buttons are still usable, and one click sends', async () => {
