@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4412_agent_server_is_container_lifetime.py",
+      "feature": "#4412",
+      "added": "2026-11-27",
+      "categories": [
+        "agent-runtime",
+        "reliability",
+        "unit"
+      ],
+      "description": "#4412: the block of startup.sh that starts the agent server and the block that ends the script are run under bash with a stand-in server: a server that dies, exits cleanly, never starts or is killed ends the script non-zero with its code; the script stays up while the server runs; steps after the start still run; without the server the container is kept alive and no server is started. The Dockerfile's single HEALTHCHECK command is run under sh with a stand-in curl: healthy when the server answers, unhealthy when it does not, follows AGENT_SERVER_PORT, healthy without probing when no server is started, fails on HTTP errors, and its time limit sits inside Docker's."
+    },
+    {
       "file": "unit/test_ent978_narrowed_read_marker.py",
       "feature": "trinity-enterprise#978",
       "added": "2026-11-24",

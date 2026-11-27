@@ -615,5 +615,14 @@ RUN chmod 0755 /usr/local/bin/git-credential-trinity && \
 
 USER developer
 
+# #4412: the container reports whether the agent server answers, not only
+# whether a process exists. Shell form, so the port and the "no server" switch
+# are read from the container's environment at check time. An agent started
+# without the server (ENABLE_AGENT_UI not "true") is healthy by definition.
+# The start period covers startup.sh's work before the server is launched
+# (dependency check, first clone); failures inside it are not counted.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
+    CMD [ "${ENABLE_AGENT_UI}" != "true" ] || curl -fsS -o /dev/null --max-time 8 "http://127.0.0.1:${AGENT_SERVER_PORT:-8000}/health" || exit 1
+
 CMD ["/app/startup.sh"]
 
