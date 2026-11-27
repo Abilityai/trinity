@@ -6058,6 +6058,10 @@ class FirstRunState(BaseModel):
     seeded_agents: List[str] = []
     own_agent_count: int = 0
     demo_agent: Optional[str] = None
+    # trinity-enterprise#1408: the seeded company brain (Cornelius) when the
+    # caller can see it, else None. The assistant puts it on the Claude
+    # credential connected in the first session; the examples stay as they are.
+    brain_agent: Optional[str] = None
     # A short opaque mark of this install: the browser remembers "setup closed"
     # against it, so a fresh install at the same address offers setup again.
     install: Optional[str] = None
