@@ -21,11 +21,11 @@ import { defineStore } from 'pinia'
 import api from '../api'
 import { useOnboardingStore } from './onboarding'
 import { buildContext, buildFleet, describePage } from '../utils/assistantContext'
-import { acceptCards, buildOutcome, cardButton, cardLabel, cardNote, CLAUDE_KINDS, claudeCard, claudeSwitchFor, credentialLine, outcomeLine, runCard, useClaude, validBuild, webLink } from '../utils/assistantCards'
+import { acceptCards, buildOutcome, cardButton, cardLabel, cardNote, CLAUDE_KINDS, claudeCard, claudeSwitchFor, credentialLine, outcomeLine, runCard, useClaude, validBuild, webLink, withBrain } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
 import { useAuthStore } from './auth'
 import { useFirstRunStore } from './firstRun'
-import { examplesOutOfSight, examplesShownOnRequest, firstResultSeen, inFirstSession, markFirstResultSeen, resultPath } from '../utils/firstSession'
+import { examplesOutOfSight, examplesShownOnRequest, examplesToHide, firstResultSeen, inFirstSession, markFirstResultSeen, resultPath } from '../utils/firstSession'
 import { BRAIN_SETUP_MESSAGE, brainButton, brainContext, brainLabel, brainLine, brainNote, brainOfferAnswered, markBrainOffer, offerable, readyWords } from '../utils/companyBrain'
 
 export const FEATURE_ID = 'assistant'
@@ -424,10 +424,28 @@ export const useAssistantStore = defineStore('assistant', {
      * shows them or tells the assistant.
      */
     outOfSight(fleet = this.fleet) {
-      // ent#1409: the company brain is never an example, so never out of sight.
+      // ent#1409: the company brain is never an example, so never out of sight
+      // (what ent#1408's `keepBrain` asked for, now always so).
       const firstRun = useFirstRunStore()
       const examples = examplesOutOfSight(this.status, fleet, firstRun.seededAgents || [], examplesShownOnRequest(), firstRun.brainAgent)
       return new Set([...examples, ...this.systemAgents])
+    },
+
+    /**
+     * trinity-enterprise#1408: the company brain the install seeded (Cornelius),
+     * when it is in `fleet` and the Grid shows it; else null. It is part of the
+     * product, not an example: it goes onto the Claude credential the person
+     * connects, in the same card as their own agent. Since ent#1409 the Grid
+     * never hides it (`examplesToHide` is told which agent is the brain, as the
+     * Dashboard tells it), so this reads the same gate the Grid does.
+     */
+    brainIn(fleet = this.fleet) {
+      const firstRun = useFirstRunStore()
+      const brain = firstRun.brainAgent
+      if (!brain || !(fleet || []).some((a) => a?.name === brain)) return null
+      const seeded = firstRun.seededAgents || []
+      const own = (fleet || []).filter((a) => a?.name && !seeded.includes(a.name)).length
+      return examplesToHide(this.status, seeded, own, examplesShownOnRequest(), brain).includes(brain) ? null : brain
     },
 
     /**
@@ -463,13 +481,13 @@ export const useAssistantStore = defineStore('assistant', {
         const fleet = await this.refreshFleet()
         const firstSession = inFirstSession(this.status, fleet, useFirstRunStore().seededAgents || [])
         // ent#1409: the assistant knows where the company brain stands, from the instance.
-        const brain = brainContext(this.brain || await this.readBrain())
+        const brainState = brainContext(this.brain || await this.readBrain())
         let { data } = await api.post(`${BASE}/turn`, {
           conversation_id: this.conversationId,
           message: clicked.length ? `${clicked.join('\n')}\n${message}` : message,
           context: { ...buildContext(route, fleet.filter((a) => !this.outOfSight(fleet).has(a.name))), ...(said ? { said } : {}), ...setupSteps(),
             // trinity-enterprise#1355: the assistant leads this session and follows its script for it.
-            ...(firstSession ? { first_session: true } : {}), ...(brain ? { brain } : {}) },
+            ...(firstSession ? { first_session: true } : {}), ...(brainState ? { brain: brainState } : {}) },
           counted,
         }, { timeout: STEP_TIMEOUT_MS })
         reached = true
@@ -500,13 +518,20 @@ export const useAssistantStore = defineStore('assistant', {
         const after = await this.refreshFleet()
         useAgentsStore().fetchAgents().catch(() => {})
         // ent#1390: a switch is never offered for an agent the person cannot see.
+        // ent#1408: the company brain is not an example. In the first session it
+        // goes on the same card as the person's own agent: `withBrain` adds it
+        // (whether or not the assistant named it), and the kind check below drops
+        // it again when it is already on that credential. Outside the first
+        // session no example is out of sight unless the Grid hides them, and
+        // then the brain is not named either (`brainIn`).
         const hidden = this.outOfSight(after)
+        const brain = firstSession ? this.brainIn(after) : null
         const accepted = acceptCards(data.cards, after)
         // ent#1399: a switch names the kind the instance saved or holds, never the
         // assistant's guess, and only agents its confirm would be accepted for.
         const kinds = accepted.some((c) => c.action === 'use-claude') ? await this.claudeKinds() : {}
         const cards = accepted
-          .map((c) => (c.action === 'use-claude' ? { ...c, agents: c.agents.filter((n) => !hidden.has(n)) } : c))
+          .map((c) => (c.action === 'use-claude' ? { ...c, agents: withBrain(c.agents.filter((n) => !hidden.has(n)), brain) } : c))
           .map((c) => (c.action === 'use-claude' && c.agents.length > 0 ? claudeSwitchFor(c, kinds) : c))
           .filter((c) => c && (c.action !== 'use-claude' || c.agents.length > 0))
         const reply = {
@@ -514,7 +539,7 @@ export const useAssistantStore = defineStore('assistant', {
           role: 'assistant',
           content: data.text || (cards.length ? '' : 'Done.'),
           cards: cards.map((card) => ({
-            id: newId(), card, label: cardLabel(card, after, { firstSession }), note: cardNote(card, { firstSession, fleet: after }),
+            id: newId(), card, label: cardLabel(card, after, { firstSession }), note: cardNote(card, { firstSession, fleet: after, brain: this.brainIn(after) }),
             button: cardButton(card, after, { firstSession }),
             state: FOLLOWED.includes(card.action) ? 'making' : 'open', reason: '', progress: '', picked: '',
             since: Date.now(), fraction: null,
@@ -1083,6 +1108,7 @@ export const useAssistantStore = defineStore('assistant', {
           : (data && 'not_using' in data ? null : undefined)
         entry.moving = Array.isArray(data?.moving) ? data.moving.filter((n) => typeof n === 'string').map((n) => n.slice(0, 81)) : []
         // ent#1390: only agents the person can see are named, on the card and to the assistant.
+        // ent#1408: the company brain is named too: it goes onto this credential with their own agent.
         const hidden = this.outOfSight()
         const before = (Array.isArray(entry.notUsing) ? entry.notUsing.length : 0) + entry.moving.length
         if (Array.isArray(entry.notUsing)) entry.notUsing = entry.notUsing.filter((r) => !hidden.has(r.name))

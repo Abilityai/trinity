@@ -10061,6 +10061,29 @@
         "unit"
       ],
       "description": "POST /api/setup/admin-password with registration terms that carry usage_sharing_on_accept: true switches usage sharing on through set_consent (Settings reads it on, the first-run step's flag is on, a backfill share is scheduled, one telemetry_sharing_consent audit line naming via=registration_terms); never after a refusal on record (switched off, on-then-off, Don't ask again) or under the kill switch; an install already sharing is left alone; terms without the flag (or a non-True value), no provider and the instance-ID form are unchanged; a failing switch or audit never fails setup."
+    },
+    {
+      "file": "unit/test_ent1408_brain_on_claude.py",
+      "feature": "trinity-enterprise#1408",
+      "added": "2026-11-27",
+      "categories": [
+        "unit",
+        "backend",
+        "onboarding",
+        "subscriptions"
+      ],
+      "description": "trinity-enterprise#1408 backend: GET /api/onboarding/first-run names the seeded company brain (brain_agent: Cornelius when the caller sees it, never an example) and FirstRunState keeps it; a run that fails auth on an agent with no Claude credential (no subscription, the platform key in use, none held) carries one next-step sentence after the agent's own error, within the first 300 characters, driven through execute_task's real failure path; an agent on a subscription, the instance key or its own key gets none."
+    },
+    {
+      "file": "../src/frontend/tests/unit/assistantBrainOnClaude1408.mount.spec.js",
+      "feature": "trinity-enterprise#1408",
+      "added": "2026-11-27",
+      "categories": [
+        "unit",
+        "frontend",
+        "assistant"
+      ],
+      "description": "trinity-enterprise#1408, mounted: when the person connects Claude in the first session the line told to the assistant names the seeded Cornelius with their own agent and never the other examples; the switch card names Cornelius with their own agent and says it is the company brain, adding it when the assistant named only theirs and dropping an example it named; the confirm switches both. Cornelius already on it, an instance naming no brain, or a later session: the card is the assistant's, as before."
     }
   ]
 }
