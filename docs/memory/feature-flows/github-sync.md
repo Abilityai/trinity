@@ -1187,11 +1187,13 @@ When a pull operation fails due to local changes conflicting with remote:
 
 | Strategy | Description | When to Use |
 |----------|-------------|-------------|
-| `clean` (default) | Simple pull with rebase. Fails if conflicts. | When you have no local changes |
+| `clean` (default) | Pull with rebase, uncommitted edits set aside and put back (trinity-enterprise#1414). | Always — local edits and notes survive |
 | `stash_reapply` | Stash local changes, pull, reapply stash | When you want to keep local changes |
 | `force_reset` | Hard reset to remote, discard all local changes | When remote is source of truth |
 
 **A pinned agent is never pulled (trinity#4470).** An agent created from `github:owner/repo@<tag>` runs on a detached HEAD (trinity#4165). Every strategy above is refused `400` on it — "pinned to a tag or commit … Nothing was changed" — before anything is fetched, so `force_reset` cannot discard a pinned workspace. The automatic cycle records the same condition as a named skip. A detached HEAD left by a rebase that stopped part-way is not a pin and keeps the conflict handling. Moving a pinned agent to another ref is a recreate. `agent_server/routers/git.py::pull_from_github`; `tests/unit/test_4470_manual_pull_pinned_tag.py`.
+
+**A workspace with notes still takes its template's updates (trinity-enterprise#1414).** `clean` used to run a bare `git pull --rebase`, which git refuses on any dirty tree ("cannot pull with rebase: You have unstaged changes"), so a pull-only agent whose person had written into a tracked file never received a template fix again. It now runs inside `_with_stash` with `keep_local`: tracked edits are stashed and re-applied (merged where the update changed other lines), untracked files are never touched, and a file both sides changed on the same lines keeps the person's whole version (`_keep_stashed_version`) and is named in the reply (`kept_local_files`, plus the message). An update that would overwrite a file the person created is refused `409` naming the file, "Nothing was changed". `GET /api/git/status` adds `incoming_files` (what `origin/<pull_branch>` changed since the common ancestor, capped at 200) and `incoming_overlap` (those the person also changed). `stash_reapply` and the automatic pull cycle are unchanged. `tests/unit/test_ent1414_pull_keeps_notes.py`.
 
 ### Sync (Push) Conflict Strategies
 

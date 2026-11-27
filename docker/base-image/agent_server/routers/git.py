@@ -1164,7 +1164,63 @@ def _record_pull(home_dir: Path, status: str, *, error: Optional[str] = None,
     return result
 
 
-def _with_stash(home_dir: Path, branch: str, step) -> Optional[str]:
+def _would_overwrite_paths(output: str) -> List[str]:
+    """The files git lists under "...would be overwritten by merge/checkout:"."""
+    paths: List[str] = []
+    capture = False
+    for line in (output or "").splitlines():
+        if "would be overwritten by" in line:
+            capture = True
+            continue
+        if capture:
+            if line.startswith("\t"):
+                paths.append(line.strip())
+            else:
+                capture = False
+    return paths
+
+
+def _plain_pull_error(output: str, conflicted: List[str], source: str) -> str:
+    """A failed manual pull, in words a person can act on (trinity-enterprise#1414)."""
+    overwrite = _would_overwrite_paths(output)
+    if overwrite:
+        return ("The update would overwrite files you created: "
+                f"{', '.join(overwrite[:10])}. Move or rename them, then pull again.")
+    if conflicted or "CONFLICT" in output:
+        files = f" ({', '.join(conflicted[:5])})" if conflicted else ""
+        return (f"Your committed changes and the update from origin/{source} change the "
+                f"same lines{files}, so they could not be combined automatically.")
+    return _summarize_git_error(output or "pull failed")
+
+
+def _keep_stashed_version(home_dir: Path) -> Optional[List[str]]:
+    """After a `git stash pop` that conflicted (the stash is still there and the
+    index holds unmerged paths), resolve every conflicted path to the STASHED
+    side — the person's own version, whole — unstage, and drop the stash.
+
+    Returns the paths kept, or None when the conflict cannot be settled that way
+    (no unmerged path to resolve, a side git cannot check out, a path still
+    unmerged afterwards); the caller then undoes the pull as before. A path the
+    person deleted has no stashed side, so it is never resolved by guessing.
+    (trinity-enterprise#1414)"""
+    def git(*args, timeout=30):
+        return run_registered(["git", *args], cwd=str(home_dir), timeout=timeout)
+
+    conflicted = _unmerged_paths(home_dir)
+    if not conflicted:
+        return None
+    for path in conflicted:
+        if git("checkout", "--theirs", "--", path).returncode != 0:
+            return None
+    if git("reset", "-q").returncode != 0 or _unmerged_paths(home_dir):
+        return None
+    # The tree now holds everything the stash held; the entry is spent.
+    git("stash", "drop")
+    return sorted(conflicted)
+
+
+def _with_stash(home_dir: Path, branch: str, step,
+                keep_local: Optional[List[str]] = None) -> Optional[str]:
     """Run `step()` — something that moves HEAD, or fails and leaves it where it
     was — with uncommitted tracked edits set aside and put back afterwards.
     Returns None, or the error recorded (trinity-enterprise#703).
@@ -1208,6 +1264,18 @@ def _with_stash(home_dir: Path, branch: str, step) -> Optional[str]:
         if git("stash", "pop", timeout=30).returncode == 0:
             stashed = False
             return None
+        # trinity-enterprise#1414: a caller that passes `keep_local` (the
+        # manual Pull) keeps the update AND the person's edits: for each file
+        # both sides changed on the same lines, the person's whole version
+        # (stage 3 of the stash re-apply) is written back and the file is
+        # named to the caller. Nothing they wrote is lost; the update's version
+        # of that file stays readable in `origin/<branch>`.
+        if keep_local is not None:
+            kept = _keep_stashed_version(home_dir)
+            if kept is not None:
+                stashed = False
+                keep_local.extend(kept)
+                return None
         # The edits collide with what came in. Undo the pull — the stash is
         # still there — and re-apply on the base it was taken from. Unless an
         # execution started meanwhile: then a reset would discard what it
@@ -2073,6 +2141,23 @@ def _compute_git_status(home_dir: Path) -> Dict:
                                 f"Could not parse common-ancestor date: {date_str!r}"
                             )
 
+        # trinity-enterprise#1414: what an update will touch — the files
+        # origin/<pull_branch> changed since the common ancestor — and which of
+        # them the person has changed too, so "behind" reads as something
+        # specific before anyone presses Pull. Capped; empty when unknown.
+        incoming_files: List[str] = []
+        if common_ancestor_sha:
+            incoming_result = run_registered(
+                ["git", "diff", "--name-only", "-z", f"HEAD...origin/{pull_branch}"],
+                cwd=str(home_dir),
+                timeout=10,
+                errors="backslashreplace",
+            )
+            if incoming_result.returncode == 0:
+                incoming_files = [p for p in incoming_result.stdout.split("\0") if p][:200]
+        local_paths = {c["path"] for c in changes}
+        incoming_overlap = sorted(p for p in incoming_files if p in local_paths)
+
         # Get remote URL (without credentials)
         remote_result = run_registered(
             ["git", "remote", "get-url", "origin"],
@@ -2105,6 +2190,8 @@ def _compute_git_status(home_dir: Path) -> Dict:
             "behind": behind,
             "common_ancestor_sha": common_ancestor_sha,
             "common_ancestor_age_days": common_ancestor_age_days,
+            "incoming_files": incoming_files,
+            "incoming_overlap": incoming_overlap,
             # #2105: `ahead` aliases the main tuple, which is now None (not a
             # best-effort 0) on a repo with no `main`. Treat unknown as 0 so a
             # clean `master` repo keeps reading "Synced", as it did before.
@@ -2605,7 +2692,9 @@ async def pull_from_github(request: GitPullRequest = GitPullRequest()):
     Pull latest changes from the remote branch with conflict resolution strategies.
 
     Strategies:
-    - clean: Try simple pull --rebase (fails if local changes conflict)
+    - clean: pull --rebase with uncommitted edits set aside and put back; a
+      file both sides changed keeps the local version and is named
+      (trinity-enterprise#1414)
     - stash_reapply: Stash local changes, pull, then reapply stash
     - force_reset: Discard local changes and reset to remote (destructive!)
     """
@@ -2792,38 +2881,82 @@ async def pull_from_github(request: GitPullRequest = GitPullRequest()):
                     "commits_behind": 0
                 }
 
-            # Try simple pull with rebase (from upstream branch)
-            pull_result = subprocess.run(
-                ["git", *GIT_NO_AUTO_MAINTENANCE, "pull", "--rebase", "origin", pull_branch],
-                capture_output=True,
-                text=True,
-                cwd=str(home_dir),
-                timeout=60
-            )
+            conflict_type = "local_uncommitted" if has_local_changes else "merge_conflict"
 
-            if pull_result.returncode != 0:
-                # Abort rebase
-                subprocess.run(["git", *GIT_NO_AUTO_MAINTENANCE, "rebase", "--abort"], cwd=str(home_dir), timeout=10, capture_output=True)
-
-                # Determine conflict type
-                conflict_type = "local_uncommitted" if has_local_changes else "merge_conflict"
-                error_detail = pull_result.stderr.strip()
-
+            # trinity-enterprise#1414: a bare `git pull --rebase` refuses any
+            # dirty tree ("cannot pull with rebase: You have unstaged
+            # changes"), so a pull-only agent whose person had written anything
+            # into a tracked file never took a template update again. The pull
+            # now runs inside `_with_stash`: tracked edits are set aside and put
+            # back (merged where the update touched other lines), untracked
+            # notes are never touched, and a file both sides changed on the
+            # same lines keeps the person's version and is named in the reply.
+            unmerged = _unmerged_paths(home_dir)
+            if unmerged:
                 return _conflict_response(
                     status_code=409,
-                    detail=f"Pull failed: {error_detail}",
-                    conflict_type=conflict_type,
-                    stderr=pull_result.stderr or "",
+                    detail=("Pull refused: these files still hold an unresolved "
+                            f"conflict: {', '.join(unmerged[:5])}. Resolve them, then "
+                            "pull again. Nothing was changed."),
+                    conflict_type="merge_conflict",
+                    stderr="",
                     home_dir=home_dir,
                     branch=pull_branch,
                 )
 
+            pre_head = run_registered(
+                ["git", "rev-parse", "HEAD"], cwd=str(home_dir), timeout=10,
+            ).stdout.strip()
+            pull_output: List[str] = []
+            pull_stderr: List[str] = []
+
+            def step() -> Optional[str]:
+                pull = run_registered(
+                    ["git", *GIT_NO_AUTO_MAINTENANCE, "pull", "--rebase", "origin", pull_branch],
+                    cwd=str(home_dir), timeout=60,
+                )
+                pull_output.append(pull.stdout or "")
+                if pull.returncode == 0:
+                    return None
+                pull_stderr.append(pull.stderr or "")
+                conflicted = _unmerged_paths(home_dir)
+                if _rebase_in_progress(home_dir):
+                    run_registered(["git", *GIT_NO_AUTO_MAINTENANCE, "rebase", "--abort"],
+                                   cwd=str(home_dir), timeout=60)
+                return _plain_pull_error(
+                    f"{pull.stdout or ''}\n{pull.stderr or ''}", conflicted, pull_branch)
+
+            kept: List[str] = []
+            err = _with_stash(home_dir, current_branch, step, keep_local=kept)
+            if err:
+                head_now = run_registered(
+                    ["git", "rev-parse", "HEAD"], cwd=str(home_dir), timeout=10,
+                ).stdout.strip()
+                if head_now == pre_head and "git stash" not in err:
+                    err += " Nothing was changed."
+                return _conflict_response(
+                    status_code=409,
+                    detail=f"Pull failed: {err}",
+                    conflict_type=conflict_type,
+                    stderr="\n".join(pull_stderr),
+                    home_dir=home_dir,
+                    branch=pull_branch,
+                )
+
+            message = f"Pulled {commits_behind} commit(s) from origin/{pull_branch}"
+            if kept:
+                message += (
+                    f". You and the update both changed {', '.join(kept)} in the same "
+                    f"place, so your version was kept; the update's version is in "
+                    f"origin/{pull_branch}"
+                )
             return {
                 "success": True,
-                "message": f"Pulled {commits_behind} commit(s) from origin/{pull_branch}",
+                "message": message,
                 "strategy": "clean",
                 "commits_behind": commits_behind,
-                "output": pull_result.stdout
+                "kept_local_files": kept,
+                "output": "".join(pull_output),
             }
 
     except subprocess.TimeoutExpired:

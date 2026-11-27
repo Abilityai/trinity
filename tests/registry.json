@@ -10084,6 +10084,17 @@
         "assistant"
       ],
       "description": "trinity-enterprise#1408, mounted: when the person connects Claude in the first session the line told to the assistant names the seeded Cornelius with their own agent and never the other examples; the switch card names Cornelius with their own agent and says it is the company brain, adding it when the assistant named only theirs and dropping an example it named; the confirm switches both. Cornelius already on it, an instance naming no brain, or a later session: the card is the assistant's, as before."
+    },
+    {
+      "file": "unit/test_ent1414_pull_keeps_notes.py",
+      "feature": "trinity-enterprise#1414",
+      "added": "2026-11-27",
+      "categories": [
+        "agent-server",
+        "git",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1414: on real repos through the real pull route, a clean Pull on a workspace with uncommitted edits and untracked notes takes the template update and keeps every edit (merged on other lines; the person's whole file kept and named when both changed the same lines, including a file the update deleted); an update that would overwrite a person's file is refused naming it with nothing changed; git status reports incoming_files and incoming_overlap."
     }
   ]
 }
