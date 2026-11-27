@@ -372,6 +372,18 @@ def test_the_chat_path_still_answers_a_typed_refusal_403():
 
 
 @pytest.mark.parametrize("detail,expected", [
+    ("nope", "agent_error"),
+    ({"message": "refused"}, "agent_error"),
+    ({"message": "refused", "error_code": "turn_refused"}, "turn_refused"),
+], ids=["bare-403", "untyped-dict-403", "typed-403"])
+def test_the_pull_record_codes_turn_refused_only_from_the_body(detail, expected):
+    """The agent's pull worker follows the same item-3 rule as the push and
+    `/chat` paths: a 403 is a turn refusal only when its body says so."""
+    exc = HTTPException(status_code=403, detail=detail)
+    assert pull_worker._failed_result_body_from_http("tok", exc)["error_code"] == expected
+
+
+@pytest.mark.parametrize("detail,expected", [
     ("nope", None),
     ({"message": "refused", "error_code": "turn_refused"}, "turn_refused"),
 ], ids=["bare-403", "typed-403"])
@@ -510,7 +522,8 @@ def test_the_db_facade_the_callers_pass_carries_strict_through(ownership_db):
 # Item 5 — instruction file names at any depth are owner-tier
 # =========================================================================== #
 
-_NAMES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md")
+# `AGENTS.override.md`: Codex reads it ahead of `AGENTS.md` in the same folder.
+_NAMES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", "GEMINI.md")
 
 
 def test_claude_local_md_is_in_the_name_list():
@@ -528,7 +541,7 @@ def test_a_nested_instruction_file_is_instructions(folder, name):
     assert "write" in policy.restricted_verbs(policy.SHARE, path)
 
 
-@pytest.mark.parametrize("name", ["CLAUDE.local.md", "AGENTS.md", "GEMINI.md"])
+@pytest.mark.parametrize("name", ["CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", "GEMINI.md"])
 def test_the_share_tier_may_not_delete_one(name):
     assert policy.decide(policy.SHARE, policy.DELETE, f"docs/{name}") == (False, policy.OWNER_TIER)
     assert policy.decide(policy.OWNER, policy.DELETE, f"docs/{name}").allowed
@@ -538,6 +551,7 @@ def test_the_share_tier_may_not_delete_one(name):
     "docs/template.yaml",          # only the agent's own template.yaml declares metrics
     "docs/claude.md",              # the runtimes load the exact name
     "docs/CLAUDE.md.bak",
+    "docs/AGENTS.override.md.bak",
     "docs/MY-CLAUDE.md",
     "docs/CLAUDE.md/notes.txt",    # a folder of that name holds ordinary files
     "workspace/notes.md",
@@ -560,3 +574,21 @@ def test_an_agent_key_needs_instructions_manage_for_a_nested_one():
     assert _touches_instructions("docs/CLAUDE.md", include_ancestors=False) is True
     assert _touches_instructions("docs/AGENTS.md", include_ancestors=False) is True
     assert _touches_instructions("docs/notes.md", include_ancestors=False) is False
+
+
+@pytest.mark.parametrize("path", [".codex/config.toml", ".codex/AGENTS.override.md", ".codex/prompts/x.md"])
+def test_the_codex_project_folder_is_code_only_the_owner_writes(path):
+    """Codex reads a project `.codex/config.toml` from its working directory (the
+    agent home) above its own settings, and that file can declare MCP servers it
+    starts as commands. Trinity keeps Codex's own state in CODEX_HOME
+    (`~/.tmp/codex`), so `~/.codex` has no platform use: it runs code, so the
+    owner writes it and an agent key never does."""
+    assert policy.RUNS_CODE in policy.classes(path)
+    assert policy.decide(policy.SHARE, policy.WRITE, path) == (False, policy.OWNER_TIER)
+    assert policy.decide(policy.KEY, policy.WRITE, path) == (False, policy.PROTECTED)
+    assert policy.decide(policy.OWNER, policy.WRITE, path).allowed
+
+
+def test_the_share_tier_may_not_delete_the_codex_folder():
+    assert policy.decide(policy.SHARE, policy.DELETE, ".codex") == (False, policy.OWNER_TIER)
+    assert policy.decide(policy.OWNER, policy.DELETE, ".codex").allowed

@@ -227,7 +227,9 @@ _PULL_STATUS_MAP = {
     429: "billing",
     422: "max_turns",
     500: "agent_error",
-    403: "turn_refused",  # ent#926 — the runtime refused the turn for who it is for
+    # No 403 entry (trinity-enterprise#978 item 3): a turn refusal is read from
+    # the typed body (`error_code: "turn_refused"`, below) and never from the
+    # status alone, as on the push and `/chat` paths; a bare 403 is agent_error.
 }
 
 
