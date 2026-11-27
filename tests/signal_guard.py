@@ -164,6 +164,8 @@ def guarded_kill(pid: int, sig: int, /) -> None:
         return _real_kill(pid, sig)  # gone — let the real ESRCH surface
     if _in_session_cgroup(pid):
         return _real_kill(pid, sig)
+    if _is_gone(pid):
+        return _real_kill(pid, sig)  # #4138: exited during the cgroup read
     _refuse("os.kill", pid, sig, "target is not in the test session's cgroup")
 
 
@@ -180,7 +182,13 @@ def guarded_killpg(pgid: int, sig: int, /) -> None:
     # Membership is decided per LIVE member. A member that exited after the
     # walk (see `_is_gone`) is neither ours nor foreign — it is not there.
     live = [m for m in members if not _is_gone(m)]
-    if not live or all(_in_session_cgroup(m) for m in live):
+    # #4138: liveness and membership are two reads. A member that exits between
+    # them has no readable cgroup and looked foreign, so a group that was all
+    # ours was refused. Ask again whether it is still there before refusing; a
+    # member that is still alive and still not ours is refused as before.
+    foreign = [m for m in live if not _in_session_cgroup(m)]
+    foreign = [m for m in foreign if not _is_gone(m)]
+    if not foreign:
         return _real_killpg(pgid, sig)
     _refuse("os.killpg", pgid, sig, "group contains a process outside the session cgroup")
 
