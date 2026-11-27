@@ -847,9 +847,14 @@ if [ -s /var/lib/trinity/oauth-token ]; then
 fi
 
 # Start Agent Web Server (self-contained UI)
+# #4412: its pid is kept. The last block of this script waits on it, so the
+# container lives exactly as long as the server does. Everything between here
+# and that block still runs while the server is up.
+AGENT_SERVER_PID=""
 if [ "${ENABLE_AGENT_UI}" = "true" ]; then
     echo "Starting Agent Web UI on port ${AGENT_SERVER_PORT:-8000}..."
     python3 /app/agent-server.py &
+    AGENT_SERVER_PID=$!
 fi
 
 # === Persistent Setup Script ===
@@ -960,6 +965,27 @@ mkdir -p /home/developer/content/{videos,audio,images,exports}
 # shell-level append created `M .gitignore` drift for freshly-deployed
 # agents whose template already shipped the patterns correctly.
 
-echo "Agent ready. Keeping container alive..."
+# === The container lives as long as the agent server (#4412) ===
+# This script is the container's main process. It used to end in
+# `tail -f /dev/null`, so an agent server that exited (or never started, #3106)
+# left a container Docker reported as Up: the restart policy never fired and
+# every dispatch failed until someone restarted the agent by hand.
+#
+# Now it waits on the server. When the server exits, so does this script, with
+# a non-zero code, and the container's `unless-stopped` policy starts it again.
+# `wait` also returns at once for a server that already exited during the steps
+# above. A clean exit is still reported as 1: the server is not meant to stop
+# while the container runs.
+if [ -n "${AGENT_SERVER_PID}" ]; then
+    echo "Agent ready. The container runs for as long as the agent server (pid ${AGENT_SERVER_PID})."
+    wait "${AGENT_SERVER_PID}"
+    _agent_server_rc=$?
+    echo "ERROR: agent server exited (code ${_agent_server_rc}); ending the container so its restart policy applies (#4412)"
+    [ "${_agent_server_rc}" -eq 0 ] && _agent_server_rc=1
+    exit "${_agent_server_rc}"
+fi
+
+# No agent server was started (ENABLE_AGENT_UI is not "true"): nothing to wait on.
+echo "Agent ready (no agent server). Keeping container alive..."
 tail -f /dev/null
 
