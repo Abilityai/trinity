@@ -44,7 +44,8 @@ def admin_user():
 
 @pytest.fixture(autouse=True)
 def bundled_manifest(monkeypatch):
-    monkeypatch.delenv(sss.MANIFEST_ENV_VAR, raising=False)
+    # trinity-enterprise#1416: a manifest is derived from only when named.
+    monkeypatch.setenv(sss.MANIFEST_ENV_VAR, "bundled")
     monkeypatch.setattr(sss.system_seed_service, "_resolve_manifest",
                         lambda override_raw: (MANIFEST, "bundled", None))
 

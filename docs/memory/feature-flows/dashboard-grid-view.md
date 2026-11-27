@@ -108,6 +108,40 @@ explains the colors once — never repeated per tile.
 
 ## Layout model
 
+- **The automatic board (trinity-enterprise#1416)**: on a **fresh install**
+  (first-run state `fresh_install`, the persisted `chief_of_staff_fresh`
+  verdict) with nothing saved for the user (no server record, no per-user
+  cache), `fleetGrid.syncLayout(…, arrange)` shows `utils/gridOrg.js::firstLoadLayout` — info tiles in one row
+  directly above the agents (row −1), the core agents' department block first
+  (the Chief of Staff with the Company Brain directly below, under
+  `dept-headquarters`, so the `reports-to-corbin` line is one short straight
+  arrow down the gap — side by side, #2066 routing drew a loop), other
+  departments, then agents in no department (a newly built agent lands beside
+  the pair), one empty column, then the system agent. It is recomputed on every
+  reconcile and **persists nothing** (`layoutIsAuto`), so a reconcile never
+  passes for a person's layout; FleetGrid keeps it fitted to the canvas (agent
+  arrivals, assistant panel open/close) until the person pans or zooms, with
+  `firstLoadFit`: placed from the top with 28px padding, framed on the agents
+  and the tiles row above them — tiles wider than the agents run on to the
+  right (reached by panning) instead of setting the zoom. The
+  first gesture (`_persist()`: drag, tidy, group, block move) saves the board,
+  and from then on the saved layout wins and newcomers are placed by
+  `normalizeLayout` as before. A record already on the server or in the
+  per-user cache is never re-arranged. An **existing** install with nothing
+  saved (a new teammate, a new browser) keeps the old `defaultLayout`
+  placement. FleetGrid reads the first-run state itself on mount; until it
+  lands an unsaved board is held (`arrange` returns `null`: nothing placed,
+  nothing saved), so the old default is never written over a fresh install
+  before it can be told apart. **Not known is never "existing"**: when the
+  read fails, errors or times out, or answers `fresh_install: null` (the
+  backend has not recorded the verdict yet, or cannot read it; its error
+  fallback answers `null` too), the board shows the old placement through
+  `fleetGrid.defaultArrangement` but stays automatic — nothing saved — and
+  `firstRun.ensureInstallKind()` asks again on a backing-off schedule
+  (`INSTALL_KIND_RETRY_MS`, 2 s / 6 s / 18 s; the retry writes only
+  `freshInstall` + `coreAgents`). A known answer re-arranges an untouched
+  board: fresh → the first-load arrangement; existing → the old placement,
+  saved then. A person's move saves at any point.
 - Layout = per-user map `agent|widget:* → {c, r}`. **Since trinity-enterprise#413
   the record of truth is the SERVER** — `user_ui_preferences` key `grid_layout`
   (the Tiles ▾ override map is `grid_widgets`, the org Zones/Lines toggles

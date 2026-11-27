@@ -759,6 +759,18 @@ def test_first_run_seed_on_fresh_install(install):
 
     monkeypatch.setattr(sss.cornelius_agent_service, "ensure_seeded", cornelius_seed)
 
+    # trinity-enterprise#1416: a fresh install deploys the bundled fleet only
+    # when the operator names it, and the Chief of Staff is a second GitHub
+    # clone replaced for the same reason as Cornelius. Naming the manifest
+    # keeps this golden pinning the system seeder's create-mode path unchanged.
+    monkeypatch.setenv(sss.MANIFEST_ENV_VAR, "bundled")
+
+    async def chief_seed(fresh):
+        return {"agent": "corbin", "action": "none", "status": "skipped",
+                "message": "replaced by the ent#695 golden harness"}
+
+    monkeypatch.setattr(sss.chief_of_staff_agent_service, "ensure_seeded", chief_seed)
+
     real_deploy = system_service.deploy_manifest
     deploy_calls = []
 

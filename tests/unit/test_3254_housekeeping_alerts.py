@@ -104,7 +104,8 @@ def seed(db, monkeypatch, tmp_path):
     monkeypatch.setattr(db, "is_agent_name_reserved", lambda name: False)
     monkeypatch.setattr(sss, "docker_client", object())
     monkeypatch.setattr(sss, "get_breaker_redis", lambda: None)
-    monkeypatch.delenv(sss.MANIFEST_ENV_VAR, raising=False)
+    # trinity-enterprise#1416: the bundled fleet is seeded only when named.
+    monkeypatch.setenv(sss.MANIFEST_ENV_VAR, "bundled")
     bundled = tmp_path / "default-system.yaml"
     bundled.write_text(MANIFEST, encoding="utf-8")
     monkeypatch.setattr(sss, "BUNDLED_MANIFEST_PATH", str(bundled))
@@ -132,6 +133,12 @@ def _boot(seed, cornelius_action="none"):
 
     seed.monkeypatch.setattr(sss.cornelius_agent_service, "ensure_seeded", cornelius)
     seed.monkeypatch.setattr(sss, "_connect_seeded_agents", lambda *results: None)
+
+    async def chief(fresh=None):
+        return {"agent_name": "corbin", "action": "none", "status": "skipped", "message": ""}
+
+    # ent#1416: the Chief of Staff's own alarm is pinned in test_ent1416_core_agents_seed.py.
+    seed.monkeypatch.setattr(sss.chief_of_staff_agent_service, "ensure_seeded", chief)
     return asyncio.run(sss.ensure_first_run_seeded())
 
 

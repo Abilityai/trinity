@@ -69,6 +69,16 @@ The default Cornelius clones the shared public upstream and tracks it **read-onl
 
 The cost is on the other side: the knowledge base it builds lives only on that server's disk, with no off-server copy, until the owner binds a repository of their own. `POST /api/agents/{name}/git/initialize` accepts an agent with no existing binding, which is that upgrade path; durable ownership remains **fork-to-own** (trinity-enterprise#109).
 
+## Chief of Staff (trinity-enterprise#1416)
+A second instance of the same seeder provisions `corbin` from `github:Abilityai/corbin` (flag and lock of its own, same pull-only pin).
+
+- **Order**: `system_seed_service.ensure_first_run_seeded()` resolves the persisted `chief_of_staff_fresh` verdict *before* Cornelius runs (true only when neither `cornelius_seeded` nor the default-system flag was set), then seeds Cornelius, then `_seed_chief_of_staff()`.
+- **Failure**: `create_failed`/`create_blocked` → `system_seed:chief-of-staff-failed` alert; a later pass that finds the agent clears it. The flag stays unset, so the next boot retries.
+- **Organize**: `_organize_core_agents()` runs only on a pass that created one of them — `dept-headquarters` on both, `reports-to-corbin` on Cornelius, permission `corbin → cornelius`.
+- **Memory**: Cornelius keeps its template's 4g (`memory_ceiling="4g"`; one PDF intake peaked at 3.19 GB on a dev instance), the Chief of Staff is capped at `"2g"`; `crud._apply_memory_ceiling` only lowers a template's declaration. Limits are Docker caps, not reservations.
+- **Starter fleet**: no longer deployed unless `TRINITY_DEFAULT_SYSTEM_MANIFEST` is set (`bundled` or a path) — `no_default_manifest` skip, no flag set.
+- **Frontend**: `GET` first-run state adds `core_agents` and `fresh_install` (the persisted verdict; only a fresh install gets the new Grid arrangement); `utils/firstSession.js` never hides them, `utils/gridOrg.js::firstLoadLayout` arranges an unsaved Grid (`stores/fleetGrid.js::layoutIsAuto`), and `FleetGrid.vue` keeps it fitted until the first gesture.
+
 ## Related Flows
 - [brain-orb.md](brain-orb.md) — the capability-gated Brain Orb page this agent lights up
 - [fork-to-own](../requirements/core-agent.md) (§4.4) — the durable-ownership path (trinity-enterprise#93/#109)

@@ -20,7 +20,7 @@
  *  keep in sync with ORG_TAG_PREFIXES in src/backend/db/tags.py.)
  */
 
-import { CELL_W, CELL_H, GAP_X, GAP_Y, cellXY, nearestFreeCell } from './gridLayout'
+import { CELL_W, CELL_H, GAP_X, GAP_Y, cellXY, nearestFreeCell, layoutBBox } from './gridLayout'
 import { isWidgetKey } from './gridWidgets'
 
 /**
@@ -558,3 +558,126 @@ export function newcomerOrigin(name, layout, agents, meta) {
 /* GAP re-export so the chrome-budget unit test pins the contract in one
    place: ZONE_CHROME must fit inside the lattice gaps. */
 export { GAP_X, GAP_Y }
+
+/**
+ * The Grid on first load, before anyone has arranged it (trinity-enterprise#1416).
+ *
+ * A pure function of the roster, recomputed on every reconcile until the person
+ * makes a gesture (drag, tidy, group) — from then on their saved layout wins
+ * and newcomers are placed beside it as before. Shape:
+ *
+ *   row -1   info tiles, left to right in one row (directly above the agents —
+ *            no empty band between them, which is what left a large gap before)
+ *   row  0+  the person's agents in department blocks, packed left to right:
+ *              1. the block holding the core agents (`core`, in that order —
+ *                 the Chief of Staff, then the Company Brain), which share one
+ *                 named group and stand in one column, the Brain below;
+ *              2. other named departments, largest first;
+ *              3. agents in no department (e.g. one built in the first session)
+ *                 — so a new agent lands next to the core pair, never on top of
+ *                 it and never off screen;
+ *            then one empty column, then the system agent(s): set apart.
+ *
+ * A core agent whose department tag has not arrived yet is still placed in the
+ * first block, so the pair does not jump when the tags land a poll later.
+ * Blocks wrap onto a new band past MAX_COLS like `arrangeByDept`.
+ */
+export function firstLoadLayout(agents, widgetKeys = [], meta = null, core = []) {
+  const m = meta || orgMeta(agents)
+  const coreNames = (core || []).filter((n) => agents.some((a) => a.name === n && !a.is_system))
+  const CORE_GROUP = '\u0000core'
+  let coreDept = null
+  for (const n of coreNames) {
+    const d = deptOf(agents.find((a) => a.name === n), m)
+    if (d) { coreDept = d; break }
+  }
+  const groups = new Map()
+  for (const a of agents) {
+    if (a.is_system) continue
+    let g = deptOf(a, m) || ''
+    if (coreNames.includes(a.name) && (!g || g === coreDept)) g = CORE_GROUP
+    else if (coreDept && g === coreDept) g = CORE_GROUP
+    if (!groups.has(g)) groups.set(g, [])
+    groups.get(g).push(a.name)
+  }
+  const rank = (n) => {
+    const i = coreNames.indexOf(n)
+    return i === -1 ? coreNames.length : i
+  }
+  for (const list of groups.values()) list.sort((x, y) => rank(x) - rank(y) || x.localeCompare(y))
+  const order = [...groups.entries()].sort((x, y) => {
+    if (x[0] === CORE_GROUP) return -1
+    if (y[0] === CORE_GROUP) return 1
+    if (!x[0]) return 1
+    if (!y[0]) return -1
+    return y[1].length - x[1].length || x[0].localeCompare(y[0])
+  })
+
+  const MAX_COLS = 8
+  const out = {}
+  let blockC = 0
+  let blockR = 0
+  let bandRows = 0
+  for (const [g, names] of order) {
+    // The core block is a column: the Chief of Staff on top, the Brain directly
+    // below, so the reporting line is one short straight arrow down the gap
+    // (#2066 lines leave a bottom and enter a top; side by side drew a loop).
+    // Others in the core department fill further columns of the same height.
+    const coreRows = g === CORE_GROUP ? Math.max(1, coreNames.length) : 0
+    const cols = coreRows ? Math.ceil(names.length / coreRows) : blockCols(names.length)
+    const rows = coreRows ? Math.min(coreRows, names.length) : Math.ceil(names.length / cols)
+    if (blockC > 0 && blockC + cols > MAX_COLS) {
+      blockC = 0
+      blockR += bandRows
+      bandRows = 0
+    }
+    names.forEach((n, i) => {
+      out[n] = coreRows
+        ? { c: blockC + Math.floor(i / coreRows), r: blockR + (i % coreRows) }
+        : { c: blockC + (i % cols), r: blockR + Math.floor(i / cols) }
+    })
+    blockC += cols
+    bandRows = Math.max(bandRows, rows)
+  }
+
+  const system = agents.filter((a) => a.is_system).map((a) => a.name).sort()
+  if (system.length) {
+    let c = blockC > 0 ? blockC + 1 : 0
+    let r = blockR
+    if (c + system.length > MAX_COLS && blockC > 0) {
+      c = 0
+      r = blockR + Math.max(bandRows, 1)
+    }
+    system.forEach((n, i) => { out[n] = { c: c + i, r } })
+  }
+
+  ;(widgetKeys || []).forEach((k, i) => { out[k] = { c: i, r: -1 } })
+  return out
+}
+
+/**
+ * The view for the automatic first-load board (trinity-enterprise#1416).
+ *
+ * Frames the agents plus the tiles row directly above them, placed from the
+ * top with normal padding (never centred vertically: a width-bound fit left an
+ * empty band above the board). Tiles wider than the agents do not set the
+ * zoom: they run on to the right and are reached by panning, so a three-agent
+ * board stays readable with the assistant open. `names` are the agents.
+ * Returns `{ z, tx, ty }` for the world transform.
+ */
+export function firstLoadFit(layout, names, vw, vh, { pad = 28, overhang = 28, zMax = 1.1, zMin = 0.15 } = {}) {
+  const agentCells = names.map((n) => layout[n]).filter(Boolean)
+  const cells = agentCells.length ? agentCells : Object.values(layout)
+  const maxC = Math.max(...cells.map((p) => p.c))
+  const minC = Math.min(...cells.map((p) => p.c))
+  const minR = Math.min(...cells.map((p) => p.r))
+  const frame = {}
+  for (const [k, p] of Object.entries(layout)) {
+    if (p.c >= minC && p.c <= maxC && p.r >= minR - 1) frame[k] = p
+  }
+  const b = layoutBBox(frame)
+  b.x -= overhang
+  b.w += overhang
+  const z = Math.max(zMin, Math.min((vw - 2 * pad) / b.w, (vh - 2 * pad) / b.h, zMax))
+  return { z, tx: pad - b.x * z, ty: pad - b.y * z }
+}

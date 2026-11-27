@@ -149,14 +149,41 @@ export function claudeHelp(tokenCard = CLAUDE_TOKEN_CARD) {
 }
 
 /**
+ * trinity-enterprise#1416: what each core agent is to the person, by its
+ * seeded name. Read by the assistant's greeting; names it does not know are
+ * left out of the sentence rather than given a guessed role.
+ */
+export const CORE_AGENT_ROLES = Object.freeze({ corbin: 'Chief of Staff', cornelius: 'Company Brain' })
+
+/** "Your Chief of Staff (corbin) and Company Brain (cornelius) are already here." or ''. */
+export function coreTeamSentence(core = []) {
+  const parts = coreList(core)
+    .filter((n) => CORE_AGENT_ROLES[n])
+    .map((n) => `${CORE_AGENT_ROLES[n]} (${n})`)
+  if (!parts.length) return ''
+  const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+  return `Your ${list} ${parts.length === 1 ? 'is' : 'are'} already here.`
+}
+
+/**
+ * trinity-enterprise#1416: the seeded agents that are the person's team from
+ * the start, as a list (one name or several). Never examples.
+ */
+function coreList(core) {
+  if (Array.isArray(core)) return core
+  return core ? [core] : []
+}
+
+/**
  * The example agents kept off the first screen (checkpoint 4): only where the
  * assistant leads, only until the person has an agent of their own, and never
- * once they asked to see them.
+ * once they asked to see them. The core agents (`core`, ent#1416: the Company
+ * Brain and the Chief of Staff) are never among them.
  */
-export function examplesToHide(status, seeded = [], ownAgentCount = 0, shownOnRequest = false, brain = null) {
+export function examplesToHide(status, seeded = [], ownAgentCount = 0, shownOnRequest = false, core = []) {
   if (!status?.leads_setup || shownOnRequest || ownAgentCount > 0) return []
-  // trinity-enterprise#1409: the company brain is part of the product, never an example to hide.
-  return Array.isArray(seeded) ? seeded.filter((n) => n !== brain) : []
+  const keep = coreList(core)
+  return Array.isArray(seeded) ? seeded.filter((n) => !keep.includes(n)) : []
 }
 export const SHOW_EXAMPLES_KEY = 'trinity-show-example-agents'
 
@@ -177,11 +204,13 @@ export function examplesShownOnRequest() {
  * not the person's to think about; never once the person asked to see them.
  * `fleet` is the panel's own reading: [{ name }].
  */
-export function examplesOutOfSight(status, fleet = [], seeded = [], shownOnRequest = false, brain = null) {
+export function examplesOutOfSight(status, fleet = [], seeded = [], shownOnRequest = false, core = []) {
   if (!status?.leads_setup || shownOnRequest || !Array.isArray(seeded) || !seeded.length) return []
   const own = (fleet || []).filter((a) => a?.name && !seeded.includes(a.name)).length
-  // trinity-enterprise#1409: the brain still is not the person's own agent, but it is never out of sight.
-  const examples = seeded.filter((n) => n !== brain)
-  if (examples.length && (examplesToHide(status, seeded, own, false).length || inFirstSession(status, fleet, seeded))) return examples
+  // ent#1416: the core agents are not the person's own build, but they are
+  // never out of sight — the assistant is told about them like any agent.
+  const keep = coreList(core)
+  const examples = seeded.filter((n) => !keep.includes(n))
+  if (examples.length && (examplesToHide(status, seeded, own, false, keep).length || inFirstSession(status, fleet, seeded))) return examples
   return []
 }

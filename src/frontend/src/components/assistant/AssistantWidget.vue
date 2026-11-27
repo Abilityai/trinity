@@ -742,7 +742,7 @@ import { useFirstRunStore } from '../../stores/firstRun'
 import { irreversibleTool, toolWords, webLink } from '../../utils/assistantCards'
 import { describePage } from '../../utils/assistantContext'
 import { starterGroups } from '../../utils/assistantStarters'
-import { OPENING, inFirstSession, isFirstSession, openingGroup } from '../../utils/firstSession'
+import { OPENING, coreTeamSentence, inFirstSession, isFirstSession, openingGroup } from '../../utils/firstSession'
 import { renderMarkdown } from '../../utils/markdown'
 
 defineProps({
@@ -809,14 +809,19 @@ const fresh = computed(() => store.messages.every((m) => m.opener))
 // The agents a new install comes with are examples, not theirs: a new person
 // is taken to an agent of their own.
 function hello() {
-  const examples = firstRun.seededAgents || []
-  const own = store.fleet.filter((a) => !examples.includes(a.name)).length
+  const seeded = firstRun.seededAgents || []
+  // ent#1416: the Company Brain and the Chief of Staff came with the install
+  // but are the person's team, never "examples".
+  const core = firstRun.coreAgents || []
+  const examples = seeded.filter((n) => !core.includes(n))
+  const own = store.fleet.filter((a) => !seeded.includes(a.name)).length
   if (own) {
     return `Hi, I'm Trinity's assistant 👋\n\nYou have ${own} ${own === 1 ? 'agent' : 'agents'} here. I can check how they're doing, fix what's failing, set them to run by themselves, or build the next one with you.\n\nTell me one thing about you first, so what I suggest fits your work.`
   }
-  const shown = examples.length
-    ? `\n\nThe ${examples.length === 1 ? 'agent' : 'agents'} on the dashboard came with Trinity as ${examples.length === 1 ? 'an example' : 'examples'}.`
-    : ''
+  const team = coreTeamSentence(core.filter((n) => store.fleet.some((a) => a.name === n)))
+  const shown = (team ? `\n\n${team}` : '') + (examples.length
+    ? `\n\nThe ${team ? 'other ' : ''}${examples.length === 1 ? 'agent' : 'agents'} on the dashboard came with Trinity as ${examples.length === 1 ? 'an example' : 'examples'}.`
+    : '')
   return `Hi, I'm Trinity's assistant 👋\n\nLet's get you **an agent of your own** working in a few minutes: tell me a little about your work, I'll suggest one, build it and run it once so you see what it produces.${shown}`
 }
 // trinity-enterprise#1355: while the first session runs, no settings steps are raised (checkpoint 4).

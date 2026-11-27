@@ -580,7 +580,7 @@ function showExamples() {
 const ownAgentCount = computed(() => networkStore.agents
   .filter((a) => !a.is_system && !(firstRunStore.seededAgents || []).includes(a.name)).length)
 watch(
-  () => examplesToHide(assistantStore.status, firstRunStore.seededAgents, ownAgentCount.value, examplesShown.value, firstRunStore.brainAgent),
+  () => examplesToHide(assistantStore.status, firstRunStore.seededAgents, ownAgentCount.value, examplesShown.value, firstRunStore.coreAgents),
   (names) => networkStore.setHiddenExamples(names),
   { immediate: true },
 )

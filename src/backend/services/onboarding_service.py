@@ -36,7 +36,8 @@ from database import db
 from dependencies import principal_reach
 from models import User
 from services.agent_client.client import get_agent_client
-from services.cornelius_agent_service import CORNELIUS_AGENT_NAME
+from services.cornelius_agent_service import CHIEF_OF_STAFF_AGENT_NAME, CORNELIUS_AGENT_NAME
+from services.system_seed_service import is_fresh_install
 from services.system_seed_service import seeded_agent_names as manifest_seeded_agent_names
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,12 @@ logger = logging.getLogger(__name__)
 # is the second brain the install seeds for exactly this purpose; anything else
 # is a fallback so the "Show me" door is never a dead link.
 _PREFERRED_DEMO_AGENTS = (CORNELIUS_AGENT_NAME,)
+
+# trinity-enterprise#1416: the two agents a fresh install comes with as the
+# person's own team — the Company Brain and the Chief of Staff. They are seeded
+# (so they do not end the first run) but they are never examples: the Grid shows
+# them from the first load and the assistant is told about them.
+CORE_AGENTS = (CHIEF_OF_STAFF_AGENT_NAME, CORNELIUS_AGENT_NAME)
 
 
 def get_seeded_agent_names() -> Set[str]:
@@ -55,7 +62,7 @@ def get_seeded_agent_names() -> Set[str]:
     `TRINITY_DEFAULT_SYSTEM_MANIFEST`). Each half is owned by the service that
     seeds it, so this composes rather than re-derives. Never raises.
     """
-    return {CORNELIUS_AGENT_NAME} | manifest_seeded_agent_names()
+    return set(CORE_AGENTS) | manifest_seeded_agent_names()
 
 
 def _visible_agents(current_user: User) -> List[dict]:
@@ -129,6 +136,10 @@ def get_first_run_state(current_user: User) -> dict:
             # (epic ent#1407: part of the product, not an example), so the
             # assistant puts it on Claude together with the person's own agent.
             "brain_agent": CORNELIUS_AGENT_NAME if CORNELIUS_AGENT_NAME in seeded_present else None,
+            "core_agents": [n for n in CORE_AGENTS if n in seeded_present],
+            # ent#1416: the Grid's new first-load arrangement is for these only.
+            # None until the setup pass has recorded the verdict.
+            "fresh_install": is_fresh_install(),
             "install": _install_marker(),
         }
     except Exception:  # pragma: no cover - the surface is a nudge, never a gate
@@ -138,6 +149,10 @@ def get_first_run_state(current_user: User) -> dict:
             "seeded_agents": [],
             "own_agent_count": 0,
             "demo_agent": None,
+            "core_agents": [],
+            # ent#1416: not known, never "existing install" (the browser would
+            # save the old placement over a fresh install for good).
+            "fresh_install": None,
         }
 
 

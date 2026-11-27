@@ -173,12 +173,11 @@ describe('the seeded Cornelius goes onto the Claude connected in the first sessi
     expect(providedLine()).not.toContain(BRAIN)
   })
 
-  it('the fleet the page sends the assistant in the first session names Cornelius and leaves the examples out', async () => {
-    // ent#1409: the company brain is never an example, so it is never out of sight.
+  it('the fleet the page sends the assistant in the first session still leaves Cornelius out', async () => {
     await connectThenOffer([OWN])
     const fleets = posted(TURN).map((c) => c.body.context?.fleet).filter(Boolean)
     expect(fleets.length).toBeGreaterThan(0)
-    for (const fleet of fleets) expect(fleet.map((a) => a.name)).toEqual([OWN, BRAIN])
+    for (const fleet of fleets) expect(fleet.map((a) => a.name)).toEqual([OWN])
   })
 
   it('a Cornelius deleted after the first-run read is never put on the card', async () => {
@@ -203,25 +202,13 @@ describe('the seeded Cornelius goes onto the Claude connected in the first sessi
     expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'subscription', agents: [OWN, BRAIN] }])
   })
 
-  it('while the Grid hides the examples (no agent of their own yet), Cornelius is still named and the examples are not', async () => {
-    // ent#1409: the Grid never hides the company brain, so the person can find it.
+  it('while the Grid hides the examples (no agent of their own yet), Cornelius is never named', async () => {
     present = [...EXAMPLES]
     off = { subscription: [BRAIN, 'acme-scout'], api_key: [BRAIN, 'acme-scout'] }
     await connectThenOffer([BRAIN])
-    expect(providedLine()).toContain(BRAIN)
-    expect(providedLine()).not.toContain('acme-scout')
-    expect(useCard().text()).toContain(`Use this subscription on these agents: ${BRAIN}`)
-    expect(useCard().text()).not.toContain('acme-scout')
-  })
-
-  it('while the Grid hides the examples, the page still adds Cornelius to a card that named only examples (ent#1409)', async () => {
-    // The assistant named only an example: the panel drops it (out of sight)
-    // and adds the brain, which the Grid shows (ent#1409: never an example).
-    present = [...EXAMPLES]
-    off = { subscription: [BRAIN, 'acme-scout'], api_key: [BRAIN, 'acme-scout'] }
-    await connectThenOffer(['acme-scout'])
-    expect(useCard().text()).toContain(`Use this subscription on these agents: ${BRAIN}`)
-    expect(useCard().text()).not.toContain('acme-scout')
+    expect(providedLine()).not.toContain(BRAIN)
+    expect(useCard()).toBeUndefined()
+    expect(wrapper.text()).not.toContain(BRAIN)
   })
 
   it('an instance that names no brain keeps Cornelius out of sight, as before (ent#1390)', async () => {

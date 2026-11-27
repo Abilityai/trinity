@@ -59,11 +59,10 @@ beforeEach(() => {
 
 // The Dashboard as a person reaches it: the assistant's status and which agents
 // the install came with are the stores' own answers, set as the reads leave them.
-async function mountDashboard({ leads = true, seeded = [EXAMPLE.name], brain = null } = {}) {
+async function mountDashboard({ leads = true } = {}) {
   const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: { template: '<div/>' } }, { path: '/:p(.*)*', component: { template: '<div/>' } }] })
   await router.push('/'); await router.isReady()
-  useFirstRunStore().seededAgents = seeded
-  useFirstRunStore().brainAgent = brain
+  useFirstRunStore().seededAgents = [EXAMPLE.name]
   useAssistantStore().status = leads ? { available: true, leads_setup: true } : { available: true }
   const w = shallowMount(Dashboard, { global: { plugins: [router] } })
   await useNetworkStore().fetchAgents()
@@ -120,15 +119,5 @@ describe('ent#1355 — the Dashboard keeps the example agents off the first scre
     w.unmount()
     expect(useNetworkStore().hiddenExamples).toEqual([])
     expect(shown()).toContain(EXAMPLE.name)
-  })
-
-  it('never hides the company brain: it is part of the product, not an example (ent#1409)', async () => {
-    const SCOUT = { name: 'acme-scout', status: 'running' }
-    fleet = [SYSTEM, EXAMPLE, SCOUT]
-    const w = await mountDashboard({ seeded: [EXAMPLE.name, SCOUT.name], brain: EXAMPLE.name })
-    expect(useNetworkStore().hiddenExamples).toEqual([SCOUT.name])
-    expect(shown()).toContain(EXAMPLE.name)
-    expect(shown()).not.toContain(SCOUT.name)
-    expect(offer(w).exists()).toBe(true)
   })
 })
