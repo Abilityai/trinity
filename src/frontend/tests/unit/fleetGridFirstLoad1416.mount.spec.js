@@ -1,0 +1,280 @@
+// @vitest-environment jsdom
+/**
+ * The real FleetGrid on a fresh install with no saved layout
+ * (trinity-enterprise#1416): it hands the store its first-load arrangement,
+ * reads the core agents from the first-run store, and keeps the board fitted
+ * to the window (as agents arrive and as the assistant panel opens and closes)
+ * until the person pans or zooms.
+ *
+ * Mounted (#2918): FleetGrid with the real fleetGrid / firstRun / prefs stores,
+ * the network mocked. jsdom has no layout, so the canvas size is given through
+ * clientWidth/clientHeight and the fit is read back from the world transform.
+ */
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { mount, flushPromises } from '@vue/test-utils'
+import { setActivePinia, createPinia } from 'pinia'
+import { nextTick } from 'vue'
+
+vi.hoisted(() => {
+  const store = new Map()
+  // jsdom on Node 20 (CI) exposes `window.localStorage` as a getter-only
+  // accessor, so a plain assignment throws at load. Define it instead
+  // (autonomyDialPanel.spec.js).
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+      clear: () => store.clear(),
+    },
+  })
+  window.matchMedia = window.matchMedia || ((q) => ({
+    matches: false, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+  }))
+})
+const { axiosMock, resizeCallbacks } = vi.hoisted(() => ({
+  axiosMock: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn(), patch: vi.fn() },
+  resizeCallbacks: [],
+}))
+vi.mock('axios', () => ({
+  default: Object.assign(axiosMock, {
+    create: () => ({ ...axiosMock, interceptors: { request: { use() {} }, response: { use() {} } }, defaults: { headers: { common: {} } } }),
+    interceptors: { request: { use() {} }, response: { use() {} } },
+    defaults: { headers: { common: {} } },
+  }),
+}))
+vi.mock('@/stores/auth', () => ({
+  useAuthStore: () => ({ authHeader: { Authorization: 'Bearer t' }, user: { role: 'admin' }, principalId: 'ada', isAuthenticated: true }),
+}))
+
+globalThis.ResizeObserver = class {
+  constructor(cb) { resizeCallbacks.push(cb) }
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+import FleetGrid from '@/components/FleetGrid.vue'
+import { useFleetGridStore } from '@/stores/fleetGrid'
+import { useFirstRunStore } from '@/stores/firstRun'
+import { cellXY, defaultLayout } from '@/utils/gridLayout'
+
+const SYSTEM = { name: 'trinity-system', status: 'running', is_system: true, tags: [] }
+const CHIEF = { name: 'corbin', status: 'running', tags: ['dept-headquarters'] }
+const BRAIN = { name: 'cornelius', status: 'running', tags: ['dept-headquarters', 'reports-to-corbin'] }
+
+let canvas = { w: 1440, h: 800 }
+// The first-run read FleetGrid makes for itself: a fresh install by default.
+let firstRunRead
+Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get() { return this.classList?.contains('fleet-canvas') ? canvas.w : 0 } })
+Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get() { return this.classList?.contains('fleet-canvas') ? canvas.h : 0 } })
+
+beforeEach(() => {
+  setActivePinia(createPinia())
+  localStorage.clear()
+  resizeCallbacks.length = 0
+  canvas = { w: 1440, h: 800 }
+  axiosMock.get.mockReset()
+  axiosMock.put.mockReset()
+  firstRunRead = () => Promise.resolve({ data: { fresh_install: true, core_agents: ['corbin', 'cornelius'] }, headers: {} })
+  axiosMock.get.mockImplementation((url) => (String(url).includes('/onboarding/first-run')
+    ? firstRunRead()
+    : Promise.resolve({ data: {}, headers: {} })))
+  axiosMock.put.mockImplementation(() => Promise.resolve({ data: { updated_at: 's1' } }))
+})
+
+async function mountGrid(agents, core = ['corbin', 'cornelius']) {
+  const fresh = firstRunRead
+  firstRunRead = () => fresh().then((r) => ({ ...r, data: { ...r.data, core_agents: core } }))
+  const wrapper = mount(FleetGrid, {
+    props: { agents, orgAgents: agents, arrivals: [] },
+    global: { stubs: { AgentTile: true, RouterLink: true, 'router-link': true } },
+    attachTo: document.body,
+  })
+  await flushPromises()
+  await nextTick()
+  return wrapper
+}
+
+function worldTransform(wrapper) {
+  const style = wrapper.find('.gv-world').attributes('style') || ''
+  expect(style).toMatch(/scale|translate/)   // never a vacuous comparison of two blanks
+  return style
+}
+
+describe('FleetGrid first load (ent#1416)', () => {
+  it('stacks the Brain below the Chief of Staff and sets the system agent apart', async () => {
+    await mountGrid([SYSTEM, BRAIN, CHIEF])
+    const store = useFleetGridStore()
+
+    expect(store.layoutIsAuto).toBe(true)
+    expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
+    expect(store.layout.cornelius).toEqual({ c: 0, r: 1 })
+    expect(store.layout['trinity-system']).toEqual({ c: 2, r: 0 })
+    // the info tiles sit in the row directly above
+    const tiles = Object.entries(store.layout).filter(([k]) => k.startsWith('widget:'))
+    expect(tiles.length).toBeGreaterThan(0)
+    expect(tiles.every(([, p]) => p.r === -1)).toBe(true)
+  })
+
+  it('reads the core order from the first-run store', async () => {
+    await mountGrid([SYSTEM, BRAIN, CHIEF], ['cornelius', 'corbin'])
+    const store = useFleetGridStore()
+    expect(store.layout.cornelius).toEqual({ c: 0, r: 0 })
+    expect(store.layout.corbin).toEqual({ c: 0, r: 1 })
+  })
+
+  it('writes no layout while nobody has arranged it', async () => {
+    await mountGrid([SYSTEM, BRAIN, CHIEF])
+    await new Promise((r) => setTimeout(r, 50))
+    const layoutPuts = axiosMock.put.mock.calls.filter(([url]) => String(url).endsWith('/grid_layout'))
+    expect(layoutPuts).toEqual([])
+  })
+
+  it('places an agent built in the first session next to the pair', async () => {
+    const wrapper = await mountGrid([SYSTEM, BRAIN, CHIEF])
+    const roster = [SYSTEM, BRAIN, CHIEF, { name: 'lead-finder', status: 'running', tags: [] }]
+    await wrapper.setProps({ agents: roster, orgAgents: roster })
+    await flushPromises()
+    const store = useFleetGridStore()
+    expect(store.layout['lead-finder']).toEqual({ c: 1, r: 0 })
+  })
+
+  it('re-fits when the canvas changes size (assistant opened or closed)', async () => {
+    const wrapper = await mountGrid([SYSTEM, BRAIN, CHIEF])
+    const wide = worldTransform(wrapper)
+
+    canvas = { w: 1000, h: 800 }   // the assistant panel took ~440px
+    resizeCallbacks.forEach((cb) => cb([]))
+    await nextTick()
+
+    expect(worldTransform(wrapper)).not.toBe(wide)
+  })
+
+  it('places the board from the top and stays readable with the assistant open', async () => {
+    canvas = { w: 1042, h: 788 }   // 1440x900 with the assistant panel open
+    const wrapper = await mountGrid([SYSTEM, BRAIN, CHIEF])
+    const store = useFleetGridStore()
+    const m = worldTransform(wrapper).match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)\s*scale\(([-\d.]+)\)/)
+    const [tx, ty, z] = m.slice(1).map(Number)
+    expect(z).toBeGreaterThanOrEqual(0.75)
+    const topRow = Math.min(...Object.values(store.layout).map((p) => p.r))
+    const [, y] = cellXY(0, topRow)
+    expect(y * z + ty).toBeCloseTo(28, 5)   // normal padding, no empty band above
+    expect(tx).toBeGreaterThan(0)
+  })
+
+  it('stops re-fitting once the person zooms', async () => {
+    const wrapper = await mountGrid([SYSTEM, BRAIN, CHIEF])
+    wrapper.find('.fleet-canvas').element.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, clientX: 10, clientY: 10, cancelable: true }))
+    await nextTick()
+    const zoomed = worldTransform(wrapper)
+
+    canvas = { w: 1000, h: 800 }
+    resizeCallbacks.forEach((cb) => cb([]))
+    await nextTick()
+
+    expect(worldTransform(wrapper)).toBe(zoomed)
+  })
+
+  it('an existing install with nothing saved keeps the old default placement', async () => {
+    firstRunRead = () => Promise.resolve({ data: { fresh_install: false, core_agents: ['cornelius'] }, headers: {} })
+    const roster = [SYSTEM, BRAIN, CHIEF]
+    await mountGrid(roster, ['cornelius'])
+    const store = useFleetGridStore()
+
+    expect(store.layoutIsAuto).toBe(false)
+    const old = defaultLayout(roster.map((a) => a.name), new Set(['trinity-system']))
+    for (const a of roster) expect(store.layout[a.name]).toEqual(old[a.name])
+  })
+
+  it('arranges nothing, and saves nothing, until it knows the install is fresh', async () => {
+    let answer
+    firstRunRead = () => new Promise((r) => { answer = r })
+    await mountGrid([SYSTEM, BRAIN, CHIEF])
+    const store = useFleetGridStore()
+    const layoutPuts = () => axiosMock.put.mock.calls.filter(([url]) => String(url).endsWith('/grid_layout'))
+
+    expect(store.layoutIsAuto).toBe(false)
+    expect(store.layout.corbin).toBeUndefined()
+    expect(layoutPuts()).toEqual([])
+
+    answer({ data: { fresh_install: true, core_agents: ['corbin', 'cornelius'] }, headers: {} })
+    await flushPromises()
+    await nextTick()
+
+    expect(store.layoutIsAuto).toBe(true)
+    expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
+    expect(layoutPuts()).toEqual([])
+  })
+
+  // Validation vrtwKN9y0mZ42UNpVdCSHQ: "not known" is never "existing install".
+  // A failed read, or the backend answering unknown (asked before the setup
+  // pass recorded its verdict), shows the old placement WITHOUT saving it and
+  // asks again; only a known answer or a person's move saves a layout.
+  describe('when the install kind is not known', () => {
+    const layoutPuts = () => axiosMock.put.mock.calls.filter(([url]) => String(url).endsWith('/grid_layout'))
+    const roster = [SYSTEM, BRAIN, CHIEF]
+    const old = () => defaultLayout(roster.map((a) => a.name), new Set(['trinity-system']))
+    const firstRunReads = () => axiosMock.get.mock.calls.filter(([url]) => String(url).includes('/onboarding/first-run')).length
+
+    beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }) })
+    afterEach(() => { vi.useRealTimers() })
+
+    it('a failed first-run read shows the old placement and saves nothing to /grid_layout', async () => {
+      firstRunRead = () => Promise.reject(new Error('Network Error'))
+      await mountGrid(roster, ['cornelius'])
+      const store = useFleetGridStore()
+
+      for (const a of roster) expect(store.layout[a.name]).toEqual(old()[a.name])
+      expect(store.layoutIsAuto).toBe(true)   // shown, not saved
+
+      await vi.advanceTimersByTimeAsync(120000)   // every retry, and any debounced save
+      expect(firstRunReads()).toBeGreaterThan(1)  // it asked again
+      expect(layoutPuts()).toEqual([])
+      expect(store.layoutIsAuto).toBe(true)
+    })
+
+    it('retries the read and opens on the first-load arrangement once it is known', async () => {
+      let calls = 0
+      firstRunRead = () => (++calls === 1
+        ? Promise.reject(new Error('timeout of 30000ms exceeded'))
+        : Promise.resolve({ data: { fresh_install: true }, headers: {} }))
+      await mountGrid(roster)
+      const store = useFleetGridStore()
+      expect(store.layout.corbin).toEqual(old().corbin)
+
+      await vi.advanceTimersByTimeAsync(120000)
+      expect(store.layoutIsAuto).toBe(true)
+      expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
+      expect(store.layout.cornelius).toEqual({ c: 0, r: 1 })
+      expect(layoutPuts()).toEqual([])
+    })
+
+    it('the backend answering unknown saves nothing; a later "existing install" answer saves the old placement', async () => {
+      let calls = 0
+      firstRunRead = () => Promise.resolve({ data: { fresh_install: ++calls === 1 ? null : false }, headers: {} })
+      await mountGrid(roster, ['cornelius'])
+      const store = useFleetGridStore()
+      expect(store.layoutIsAuto).toBe(true)
+      expect(layoutPuts()).toEqual([])
+
+      await vi.advanceTimersByTimeAsync(120000)
+      expect(store.layoutIsAuto).toBe(false)
+      for (const a of roster) expect(store.layout[a.name]).toEqual(old()[a.name])
+      expect(layoutPuts().length).toBe(1)
+    })
+
+    it('a tile the person moves is saved even while the install kind is unknown', async () => {
+      firstRunRead = () => Promise.reject(new Error('Network Error'))
+      await mountGrid(roster, ['cornelius'])
+      const store = useFleetGridStore()
+      store.moveTile('corbin', 6, 3)
+      await vi.advanceTimersByTimeAsync(120000)
+      expect(store.layoutIsAuto).toBe(false)
+      expect(layoutPuts().length).toBe(1)
+      expect(store.layout.corbin).toEqual({ c: 6, r: 3 })
+    })
+  })
+})

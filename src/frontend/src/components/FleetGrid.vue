@@ -375,7 +375,8 @@ import {
   widgetById,
   widgetIdFromKey,
 } from '@/utils/gridWidgets'
-import { zoneAt } from '@/utils/gridOrg'
+import { zoneAt, firstLoadLayout, firstLoadFit, orgMeta } from '@/utils/gridOrg'
+import { useFirstRunStore } from '@/stores/firstRun'
 import { useOrgOverlay } from '@/composables/useOrgOverlay'
 
 /**
@@ -425,7 +426,12 @@ const canvasStyle = computed(() => ({
   backgroundPosition: `${vtx.value}px ${vty.value}px`,
 }))
 
+// trinity-enterprise#1416: the person moved the view themselves (zoom or pan);
+// the automatic board then stops re-fitting under them.
+let viewTouched = false
+
 function zoomAt(px, py, nz) {
+  viewTouched = true
   nz = Math.max(Z_MIN, Math.min(Z_MAX, nz))
   const wx = (px - vtx.value) / vz.value
   const wy = (py - vty.value) / vz.value
@@ -507,11 +513,73 @@ function isCellBlocked(c, r) {
   return !!zoneAt(zones.value, x + CELL_W / 2, y + CELL_H / 2)
 }
 
+// trinity-enterprise#1416: the board nobody has arranged yet. Arranged from the
+// roster WITHOUT the type-to-filter (typing must not reshuffle it); the core
+// agents (the Chief of Staff and the Company Brain) lead, side by side.
+// Only an install whose first seed ran under ent#1416 opens on it
+// (`fresh_install` on the first-run read); an existing install with nothing
+// saved (a new teammate, a new browser) keeps the old default placement. Until
+// that read lands nothing is placed or saved, so the old default is never
+// written over a fresh install that has not been told apart yet. When the read
+// fails or answers "not known" (`freshInstall === null`), the old placement is
+// SHOWN but kept automatic — not saved — while the store asks again; it is
+// saved only once the answer is known or the person moves a tile.
+const firstRunStore = useFirstRunStore()
+function arrangeFirstLoad(widgetKeys) {
+  const roster = unfilteredAgents.value
+  return firstLoadLayout(roster, widgetKeys, orgMeta(roster), firstRunStore.coreAgents || [])
+}
+const waitForInstallKind = () => null
+let heldForInstallKind = false
+
 function syncLayoutFromAgents() {
   const names = props.agents.map((a) => a.name)
   const systemNames = new Set(props.agents.filter((a) => a.is_system).map((a) => a.name))
-  gridStore.syncLayout(names, systemNames, newcomerOriginFor, isCellBlocked)
+  let arrange = null
+  if (!firstRunStore.loaded) arrange = waitForInstallKind
+  else if (firstRunStore.freshInstall === true) arrange = arrangeFirstLoad
+  else if (firstRunStore.freshInstall !== false) {
+    arrange = () => gridStore.defaultArrangement(names, systemNames, newcomerOriginFor, isCellBlocked)
+    firstRunStore.ensureInstallKind()   // not known: shown unsaved, and asked again
+  }
+  gridStore.syncLayout(names, systemNames, newcomerOriginFor, isCellBlocked, arrange)
+  if (arrange === waitForInstallKind && !Object.keys(gridStore.layout).length) heldForInstallKind = true
 }
+
+// The first-run read decides which board an unsaved layout gets; once it
+// lands, place the board and frame it (the mount-time fit saw an empty board).
+watch(
+  () => firstRunStore.loaded,
+  (loaded) => {
+    if (!loaded || !heldForInstallKind) return
+    heldForInstallKind = false
+    syncLayoutFromAgents()
+    nextTick(fitBoard)
+  }
+)
+
+// A retried read that settles the install kind re-arranges a board nobody has
+// arranged yet: fresh → the first-load arrangement; existing → the old
+// placement, now saved.
+watch(
+  () => firstRunStore.freshInstall,
+  () => {
+    if (!gridStore.layoutIsAuto) return
+    syncLayoutFromAgents()
+    nextTick(fitBoard)
+  }
+)
+
+// While the board is automatic, its shape also follows the org tags (a
+// department or line that lands a poll after the agent) and the core-agent
+// list (read after first paint).
+watch(
+  () => gridStore.layoutIsAuto && [
+    unfilteredAgents.value.map((a) => `${a.name}:${(a.tags || []).join(',')}`).join('|'),
+    (firstRunStore.coreAgents || []).join(','),
+  ].join('#'),
+  (key) => { if (key) syncLayoutFromAgents() }
+)
 
 // Toggling a tile on/off re-runs the reconcile so it is seeded (or dropped)
 // immediately rather than on the next roster change.
@@ -749,7 +817,7 @@ function land(names) {
   const fresh = names.filter((n) => !arriving.value[n] && layout.value[n])
   if (!fresh.length) return
   // A landing nobody can see is no landing: bring the whole fleet into view.
-  if (fresh.some((n) => !inView(n))) fitView()
+  if (fresh.some((n) => !inView(n))) fitBoard()
   const next = { ...arriving.value }
   fresh.forEach((name, i) => {
     const delay = reducedMotion ? 0 : i * ARRIVE_STAGGER_MS
@@ -1000,6 +1068,7 @@ function onCanvasDragStart(e) {
 
 function onCanvasPointerMove(e) {
   if (!isPanning.value || e.pointerId !== panPointerId) return
+  viewTouched = true
   vtx.value = panTX + (e.clientX - panSX)
   vty.value = panTY + (e.clientY - panSY)
 }
@@ -1055,10 +1124,31 @@ function measureCanvas() {
   if (!canvasEl.value) return
   canvasW.value = canvasEl.value.clientWidth
   canvasH.value = canvasEl.value.clientHeight
+  fitIfAutomatic()
+}
+
+// trinity-enterprise#1416: an automatic board stays fitted to the window — as
+// agents arrive, and when the assistant panel opens or closes — until the
+// person pans or zooms. A saved layout is never re-fitted here.
+function fitIfAutomatic() {
+  if (!gridStore.layoutIsAuto || viewTouched || !canvasW.value || !canvasH.value) return
+  // Placed from the top, framed on the agents and the tiles row above them;
+  // extra tiles run on to the right rather than shrinking the board.
+  const f = firstLoadFit(layout.value, placedAgents.value.map((a) => a.name), canvasW.value, canvasH.value)
+  vz.value = f.z
+  vtx.value = f.tx
+  vty.value = f.ty
+}
+watch(() => gridStore.layout, () => nextTick(fitIfAutomatic))
+// The automatic board's own fit while it applies, otherwise the whole board.
+function fitBoard() {
+  if (gridStore.layoutIsAuto && !viewTouched) fitIfAutomatic()
+  else fitView()
 }
 
 onMounted(() => {
   gridStore.startPolling()
+  firstRunStore.fetchState()   // ent#1416: fresh install or not (no-op once read)
   measureCanvas()
   resizeObserver = new ResizeObserver(() => measureCanvas())
   resizeObserver.observe(canvasEl.value)
@@ -1073,7 +1163,7 @@ onMounted(() => {
     if (!document.hidden) now.value = Date.now()
   }, 1000)
   nextTick(() => {
-    fitView()
+    fitBoard()
     land(props.arrivals)
   })
 })

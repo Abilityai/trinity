@@ -76,6 +76,7 @@ from .capabilities import (
     AGENT_RESTART_POLICY,
     normalize_cpu,
     normalize_memory,
+    VALID_MEMORY,
 )
 from services.agent_ssh_binding import (
     AgentSshBindAddressError,
@@ -2167,6 +2168,27 @@ async def _resolve_template(
     return tr
 
 
+def _apply_memory_ceiling(config: AgentConfig, ceiling: str) -> None:
+    """Cap ``config.resources['memory']`` at ``ceiling`` (trinity-enterprise#1416).
+
+    Runs after the template's resources are applied and before
+    `_stage_config_files` normalizes and writes them, so the config file,
+    labels and container limit all carry the capped value. A smaller
+    declared limit is kept. An invalid declared value is left for the
+    normalizer's named 400. A fresh dict is assigned, never an in-place
+    write: `config.resources` may be the template catalog's own dict.
+    """
+    try:
+        cap = normalize_memory(ceiling, ceiling)
+        current = normalize_memory(
+            (config.resources or {}).get("memory"), _get_default_resource("memory")
+        )
+    except ValueError:
+        return
+    if VALID_MEMORY.index(current) > VALID_MEMORY.index(cap):
+        config.resources = {**(config.resources or {}), "memory": cap}
+
+
 def _stage_config_files(
     config: AgentConfig, template_data: dict,
     github_template_path: Optional[Union[Path, str]]
@@ -4143,11 +4165,15 @@ async def create_agent_internal(
     ws_manager=None,
     adopt_existing_workspace: bool = False,
     allow_unforked_pull_only: bool = False,
+    memory_ceiling: Optional[str] = None,
 ) -> AgentStatus:
     """
     Internal function to create an agent.
 
     Used by both the API endpoint and system deployment.
+
+    `memory_ceiling` (trinity-enterprise#1416) caps the memory limit the
+    template declares; it never raises one. Only the first-run seeders pass it.
 
     `request` is optional: the HTTP request object is not dereferenced anywhere
     in this function, so boot-time / background callers with no live request
@@ -4269,6 +4295,9 @@ async def create_agent_internal(
     # via the inject_credentials endpoint, not auto-injected during creation.
     # The agent starts without credentials and they are added via Quick Inject
     # or imported from .credentials.enc files.
+
+    if memory_ceiling:
+        _apply_memory_ceiling(config, memory_ceiling)
 
     (
         config_path,

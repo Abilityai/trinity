@@ -51,7 +51,8 @@ def plain_user():
 @pytest.fixture(autouse=True)
 def bundled_manifest(monkeypatch):
     """Resolve the manifest to a fixed two-agent fleet, override-free."""
-    monkeypatch.delenv(sss.MANIFEST_ENV_VAR, raising=False)
+    # trinity-enterprise#1416: a manifest is derived from only when named.
+    monkeypatch.setenv(sss.MANIFEST_ENV_VAR, "bundled")
     monkeypatch.setattr(
         sss.system_seed_service, "_resolve_manifest",
         lambda override_raw: (MANIFEST, "bundled", None),
@@ -75,16 +76,16 @@ USER_ROW = {"id": 2, "username": "bob", "email": "bob@example.com", "role": "use
 
 # --- seeded-name derivation -------------------------------------------------
 
-def test_seeded_names_are_system_prefixed_plus_cornelius():
+def test_seeded_names_are_system_prefixed_plus_the_core_agents():
     names = onboarding_service.get_seeded_agent_names()
-    assert names == {CORNELIUS, "acme-scout", "acme-sage"}
+    assert names == {CORNELIUS, "corbin", "acme-scout", "acme-sage"}  # ent#1416: corbin
 
 
 def test_disabled_seeding_still_knows_cornelius(monkeypatch):
     """Cornelius is seeded by its own service, not the manifest — disabling the
     manifest must not make it read as a user-created agent."""
     monkeypatch.setenv(sss.MANIFEST_ENV_VAR, "disabled")
-    assert onboarding_service.get_seeded_agent_names() == {CORNELIUS}
+    assert onboarding_service.get_seeded_agent_names() == {CORNELIUS, "corbin"}  # ent#1416
 
 
 def test_unresolvable_manifest_degrades_to_cornelius_only(monkeypatch):
@@ -92,7 +93,7 @@ def test_unresolvable_manifest_degrades_to_cornelius_only(monkeypatch):
         sss.system_seed_service, "_resolve_manifest",
         lambda override_raw: (None, "override", "cannot read '/nope': missing"),
     )
-    assert onboarding_service.get_seeded_agent_names() == {CORNELIUS}
+    assert onboarding_service.get_seeded_agent_names() == {CORNELIUS, "corbin"}  # ent#1416
 
 
 def test_operator_override_names_follow_their_own_manifest(monkeypatch):
@@ -101,7 +102,7 @@ def test_operator_override_names_follow_their_own_manifest(monkeypatch):
         sss.system_seed_service, "_resolve_manifest",
         lambda override_raw: ("name: mine\nagents:\n  one:\n    template: local:scout\n", "override", None),
     )
-    assert onboarding_service.get_seeded_agent_names() == {CORNELIUS, "mine-one"}
+    assert onboarding_service.get_seeded_agent_names() == {CORNELIUS, "corbin", "mine-one"}  # ent#1416
 
 
 # --- the first-run predicate ------------------------------------------------
@@ -193,7 +194,8 @@ def test_a_db_failure_reads_as_not_first_run(monkeypatch, admin_user):
 
     state = onboarding_service.get_first_run_state(admin_user)
     assert state == {
-        "first_run": False, "seeded_agents": [], "own_agent_count": 0, "demo_agent": None,
+        "first_run": False, "seeded_agents": [], "own_agent_count": 0, "demo_agent": None, "core_agents": [],
+        "fresh_install": None,  # ent#1416: unknown, never "existing install"
     }
 
 

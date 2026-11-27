@@ -416,9 +416,38 @@ export const useAssistantStore = defineStore('assistant', {
      * shows them or tells the assistant.
      */
     outOfSight(fleet = this.fleet, { keepBrain = false } = {}) {
-      const examples = examplesOutOfSight(this.status, fleet, useFirstRunStore().seededAgents || [], examplesShownOnRequest())
-      const brain = keepBrain ? this.brainIn(fleet) : null
-      return new Set([...examples.filter((n) => n !== brain), ...this.systemAgents])
+      const firstRun = useFirstRunStore()
+      const examples = examplesOutOfSight(this.status, fleet, firstRun.seededAgents || [], examplesShownOnRequest(), firstRun.coreAgents || [])
+      const kept = keepBrain ? this.coreIn(fleet) : []
+      return new Set([...examples.filter((n) => !kept.includes(n)), ...this.systemAgents])
+    },
+
+    /**
+     * trinity-enterprise#1416: the agents the install came with as the person's
+     * team — the Chief of Staff, then the company brain — that are in `fleet`
+     * and on the Grid. They go onto the Claude the person connects in the first
+     * session, on the same card as their own agent (the ent#1408 rule,
+     * extended to both). An instance that names no core agents falls back to
+     * the brain alone, exactly as before.
+     */
+    coreIn(fleet = this.fleet) {
+      const firstRun = useFirstRunStore()
+      const named = [...(firstRun.coreAgents || []), firstRun.brainAgent].filter(Boolean)
+      return [...new Set(named)].filter((n) => this._onGrid(n, fleet))
+    },
+
+    /** The Chief of Staff the install came with, when it is in `fleet` and on the Grid; else null. */
+    chiefIn(fleet = this.fleet) {
+      const brain = useFirstRunStore().brainAgent
+      return this.coreIn(fleet).find((n) => n !== brain) || null
+    },
+
+    _onGrid(name, fleet) {
+      const firstRun = useFirstRunStore()
+      if (!name || !(fleet || []).some((a) => a?.name === name)) return false
+      const seeded = firstRun.seededAgents || []
+      const own = (fleet || []).filter((a) => a?.name && !seeded.includes(a.name)).length
+      return !examplesToHide(this.status, seeded, own, examplesShownOnRequest(), firstRun.coreAgents || []).includes(name)
     },
 
     /**
@@ -431,12 +460,8 @@ export const useAssistantStore = defineStore('assistant', {
      * own): the person would be told about an agent they cannot find.
      */
     brainIn(fleet = this.fleet) {
-      const firstRun = useFirstRunStore()
-      const brain = firstRun.brainAgent
-      if (!brain || !(fleet || []).some((a) => a?.name === brain)) return null
-      const seeded = firstRun.seededAgents || []
-      const own = (fleet || []).filter((a) => a?.name && !seeded.includes(a.name)).length
-      return examplesToHide(this.status, seeded, own, examplesShownOnRequest()).includes(brain) ? null : brain
+      const brain = useFirstRunStore().brainAgent
+      return this._onGrid(brain, fleet) ? brain : null
     },
 
     /**
@@ -514,13 +539,14 @@ export const useAssistantStore = defineStore('assistant', {
         // session no example is out of sight unless the Grid hides them, and
         // then the brain is not named either (`brainIn`).
         const hidden = this.outOfSight(after)
-        const brain = firstSession ? this.brainIn(after) : null
+        // ent#1416: the Chief of Staff goes on the same card as the brain.
+        const core = firstSession ? this.coreIn(after) : []
         const accepted = acceptCards(data.cards, after)
         // ent#1399: a switch names the kind the instance saved or holds, never the
         // assistant's guess, and only agents its confirm would be accepted for.
         const kinds = accepted.some((c) => c.action === 'use-claude') ? await this.claudeKinds() : {}
         const cards = accepted
-          .map((c) => (c.action === 'use-claude' ? { ...c, agents: withBrain(c.agents.filter((n) => !hidden.has(n)), brain) } : c))
+          .map((c) => (c.action === 'use-claude' ? { ...c, agents: withBrain(c.agents.filter((n) => !hidden.has(n)), core) } : c))
           .map((c) => (c.action === 'use-claude' && c.agents.length > 0 ? claudeSwitchFor(c, kinds) : c))
           .filter((c) => c && (c.action !== 'use-claude' || c.agents.length > 0))
         const reply = {
@@ -528,7 +554,7 @@ export const useAssistantStore = defineStore('assistant', {
           role: 'assistant',
           content: data.text || (cards.length ? '' : 'Done.'),
           cards: cards.map((card) => ({
-            id: newId(), card, label: cardLabel(card, after, { firstSession }), note: cardNote(card, { firstSession, fleet: after, brain: this.brainIn(after) }),
+            id: newId(), card, label: cardLabel(card, after, { firstSession }), note: cardNote(card, { firstSession, fleet: after, brain: this.brainIn(after), chief: this.chiefIn(after) }),
             button: cardButton(card, after, { firstSession }),
             state: FOLLOWED.includes(card.action) ? 'making' : 'open', reason: '', progress: '', picked: '',
             since: Date.now(), fraction: null,

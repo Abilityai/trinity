@@ -10086,6 +10086,71 @@
       "description": "trinity-enterprise#1408, mounted: when the person connects Claude in the first session the line told to the assistant names the seeded Cornelius with their own agent and never the other examples; the switch card names Cornelius with their own agent and says it is the company brain, adding it when the assistant named only theirs and dropping an example it named; the confirm switches both. Cornelius already on it, an instance naming no brain, or a later session: the card is the assistant's, as before."
     },
     {
+      "file": "unit/test_ent1416_core_agents_seed.py",
+      "feature": "trinity-enterprise#1416",
+      "added": "2026-11-27",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "A fresh install seeds the Company Brain (cornelius) and the Chief of Staff (corbin, github:Abilityai/corbin, pull-only, 2g ceiling) through the real seeders and first-run orchestrator, groups them (dept-headquarters, reports-to-corbin) and grants corbin -> cornelius on the creating pass only; no Acme fleet unless TRINITY_DEFAULT_SYSTEM_MANIFEST names one; a Chief of Staff miss leaves the Brain, alerts, and retries once without duplicating; an install seeded under an earlier version gets no new agent; the create path caps memory before staging; first-run state names core_agents. An install seeded with the Acme fleet before the change keeps those agents as examples (names derived from the bundled manifest; the stored record holds a count); first-run state carries fresh_install from the persisted verdict; routers/agents.py declares its # mcp: surface."
+    },
+    {
+      "file": "../src/frontend/tests/unit/gridFirstLoad1416.spec.js",
+      "feature": "trinity-enterprise#1416",
+      "added": "2026-11-27",
+      "categories": [
+        "unit",
+        "frontend",
+        "grid"
+      ],
+      "description": "firstLoadLayout: core pair stacked (Chief of Staff above the Brain) under one zone with the reports-to line, system agent one column apart, info tiles in one row directly above, a built agent next to the pair, core group first even beside a larger department."
+    },
+    {
+      "file": "../src/frontend/tests/unit/fleetGridFirstLoad1416.spec.js",
+      "feature": "trinity-enterprise#1416",
+      "added": "2026-11-27",
+      "categories": [
+        "unit",
+        "frontend",
+        "grid"
+      ],
+      "description": "fleetGrid store: with nothing saved the board is automatic and writes nothing; the first gesture saves it and the saved layout then wins; a server or per-user record is never re-arranged."
+    },
+    {
+      "file": "../src/frontend/tests/unit/fleetGridFirstLoad1416.mount.spec.js",
+      "feature": "trinity-enterprise#1416",
+      "added": "2026-11-27",
+      "categories": [
+        "unit",
+        "frontend",
+        "grid"
+      ],
+      "description": "Mounted FleetGrid: hands the store its first-load arrangement in the first-run store's core order, writes no layout, places a built agent next to the pair, re-fits on canvas resize until the person zooms. Only a fresh install (first-run fresh_install) gets it: an existing install with nothing saved keeps the old default placement, and nothing is placed or saved until the first-run read lands."
+    },
+    {
+      "file": "../src/frontend/tests/unit/dashboardCoreAgents1416.mount.spec.js",
+      "feature": "trinity-enterprise#1416",
+      "added": "2026-11-27",
+      "categories": [
+        "unit",
+        "frontend",
+        "assistant"
+      ],
+      "description": "Mounted Dashboard: core_agents from the first-run read are never hidden as examples, still count as seeded, and the assistant is told about them; examplesToHide/examplesOutOfSight/coreTeamSentence rules."
+    },
+    {
+      "file": "../src/frontend/tests/unit/assistantChiefOnClaude1416.mount.spec.js",
+      "feature": "trinity-enterprise#1416",
+      "added": "2026-11-27",
+      "categories": [
+        "unit",
+        "frontend",
+        "assistant"
+      ],
+      "description": "Mounted AssistantWidget: after Connect Claude in the first session the Chief of Staff joins the brain on the same use-claude card, with the note; already on it or absent, it is not added."
+    },
+    {
       "file": "unit/test_ent1414_pull_keeps_notes.py",
       "feature": "trinity-enterprise#1414",
       "added": "2026-11-27",
@@ -10095,6 +10160,27 @@
         "unit"
       ],
       "description": "trinity-enterprise#1414: on real repos through the real pull route, a clean Pull on a workspace with uncommitted edits and untracked notes takes the template update and keeps every edit (merged on other lines; the person's whole file kept and named when both changed the same lines, including a file the update deleted); an update that would overwrite a person's file is refused naming it with nothing changed; git status reports incoming_files and incoming_overlap."
+    },
+    {
+      "file": "../src/frontend/tests/unit/networkSocketOpenResync1416.spec.js",
+      "feature": "trinity-enterprise#1416",
+      "added": "2026-11-27",
+      "categories": [
+        "unit",
+        "frontend",
+        "websocket"
+      ],
+      "description": "Network store: a socket opened with no replay cursor re-reads the agent list once, so a tag edited between the mount read and the socket opening is not lost; a reconnect carrying last-event-id does not re-read."
+    },
+    {
+      "file": "../src/frontend/tests/unit/firstRunInstallKind1416.spec.js",
+      "feature": "trinity-enterprise#1416",
+      "added": "2026-11-27",
+      "categories": [
+        "unit",
+        "frontend"
+      ],
+      "description": "First-run store: a forced re-read answering fresh_install null keeps a known install kind; a re-read that knows it still updates it."
     }
   ]
 }

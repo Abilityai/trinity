@@ -46,6 +46,7 @@ multi-agent shape opens):
     condition over ends its row as the platform (#3254).
   * **Fail-open**: never raises, never blocks boot or setup completion.
 """
+import asyncio
 import hashlib
 import json
 import logging
@@ -57,7 +58,13 @@ from database import db
 from utils.admin_identity import admin_username
 from models import User
 from services.docker_service import docker_client
-from services.cornelius_agent_service import cornelius_agent_service
+from services.cornelius_agent_service import (
+    CHIEF_OF_STAFF_AGENT_NAME,
+    CHIEF_OF_STAFF_SEEDED_FLAG,
+    CORNELIUS_AGENT_NAME,
+    chief_of_staff_agent_service,
+    cornelius_agent_service,
+)
 from services import platform_alerts
 from redis_breaker_util import get_breaker_redis, SingleFlightLock
 from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
@@ -70,6 +77,19 @@ logger = logging.getLogger(__name__)
 _SEEDED_FLAG = "default_system_seeded"
 _SEED_INFO_KEY = "default_system_seed_info"
 _FRESH_VERDICT_KEY = "first_run_fresh"
+# trinity-enterprise#1416: may this install be given the Chief of Staff? Decided
+# once, on the first pass that runs this version, and kept — so a Chief of Staff
+# whose template could not be fetched is retried on a later boot, while an
+# install whose first seed finished under an earlier version is never handed a
+# new agent by an upgrade.
+_CHIEF_OF_STAFF_VERDICT_KEY = "chief_of_staff_fresh"
+
+# trinity-enterprise#1416: the named group the two core agents share on the
+# Grid, and the line between them (the Chief of Staff directs the Brain). Both
+# are ordinary org-overlay tags (`dept-*` / `reports-to-*`, frontend
+# utils/gridOrg.js), so a person can rename, move or remove them like any other.
+CORE_DEPARTMENT_TAG = "dept-headquarters"
+CORE_REPORTS_TO_TAG = f"reports-to-{CHIEF_OF_STAFF_AGENT_NAME}"
 
 # Cross-worker provisioning lock (Cornelius pattern; fail-open when Redis is
 # down — the existence backstop below is the real duplicate guard). TTL covers
@@ -106,6 +126,11 @@ _PASS_LOCK_TTL = 900  # seconds
 MANIFEST_ENV_VAR = "TRINITY_DEFAULT_SYSTEM_MANIFEST"
 BUNDLED_MANIFEST_PATH = "config/manifests/default-system.yaml"
 _DISABLE_SENTINELS = {"disabled", "none", "off", "0", "false"}
+# trinity-enterprise#1416: a fresh install no longer deploys the bundled Acme
+# fleet by default — it comes with the Company Brain and the Chief of Staff
+# instead, and the Acme templates stay in the Library. An operator who wants the
+# bundled fleet seeded names it explicitly with this sentinel (or a path).
+_BUNDLED_SENTINEL = "bundled"
 
 # #3254: the seed alarms are one `system_seed` subject per seed kind on
 # `trinity-system`. A clear needs positive evidence the condition is over:
@@ -150,6 +175,7 @@ def _resolve_first_run_verdict() -> Optional[bool]:
                 stored == "true"
                 and db.get_setting_value("cornelius_seeded", "false") != "true"
                 and db.get_setting_value(_SEEDED_FLAG, "false") != "true"
+                and db.get_setting_value(CHIEF_OF_STAFF_SEEDED_FLAG, "false") != "true"
                 and db.count_non_system_agents() > 0
             ):
                 logger.warning(
@@ -178,6 +204,61 @@ def _resolve_first_run_verdict() -> Optional[bool]:
         return None
 
 
+def _resolve_chief_of_staff_verdict(fresh: Optional[bool]) -> Optional[bool]:
+    """May this install be given the Chief of Staff? (trinity-enterprise#1416)
+
+    Decided once and persisted, BEFORE the Cornelius seeder runs in the pass
+    that first decides it. True only for a fresh install whose first seed had
+    not already finished: neither Cornelius nor the default system was seeded
+    yet. An install set up under an earlier version has at least one of those
+    flags, so an upgrade never adds an agent to it. Persisting the answer is
+    what lets a Chief of Staff whose template could not be fetched retry on a
+    later boot (by then Cornelius IS seeded, which would otherwise read as an
+    established install). None while the first-run verdict is undetermined;
+    nothing is persisted then, so a later pass decides.
+    """
+    if fresh is None:
+        return None
+    try:
+        stored = db.get_setting_value(_CHIEF_OF_STAFF_VERDICT_KEY, None)
+        if stored is not None:
+            return stored == "true"
+        eligible = (
+            bool(fresh)
+            and db.get_setting_value("cornelius_seeded", "false") != "true"
+            and db.get_setting_value(_SEEDED_FLAG, "false") != "true"
+        )
+        db.set_setting(_CHIEF_OF_STAFF_VERDICT_KEY, "true" if eligible else "false")
+        return eligible
+    except Exception as e:
+        logger.warning(
+            "Chief of Staff verdict resolution failed (%s) — deferring this pass", e
+        )
+        return None
+
+
+def is_fresh_install() -> Optional[bool]:
+    """Was this install's first seed run under ent#1416 (the core pair)?
+
+    Read-only view of the persisted Chief of Staff verdict, for the first-run
+    state the browser reads: the Grid's new first-load arrangement is for these
+    installs only. Three answers: True (fresh), False (existing install), and
+    None when the verdict is not known — not decided yet (the browser asked
+    before the setup pass recorded it) or unreadable. None is never folded into
+    False: the browser saves the old placement for an existing install, and a
+    saved layout always wins, so "not known" read as "existing" would keep a
+    fresh install off its first-load arrangement for good. Never raises.
+    """
+    try:
+        stored = db.get_setting_value(_CHIEF_OF_STAFF_VERDICT_KEY, None)
+    except Exception:
+        logger.debug("Fresh-install read failed (non-fatal)", exc_info=True)
+        return None
+    if stored is None:
+        return None
+    return stored == "true"
+
+
 def _acquire_pass_lock():
     """Take the #2215 pass lock via the shared ownership-checked primitive
     (#1920). Returns a held ``SingleFlightLock`` when this pass may run, or
@@ -193,6 +274,25 @@ def _acquire_pass_lock():
         _PASS_LOCK_KEY, _PASS_LOCK_TTL, client=get_breaker_redis()
     )
     return lock if lock.acquire() else None
+
+
+def _notify_chief_of_staff_failure(message) -> None:
+    """trinity-enterprise#1416: a failed Chief of Staff seed is reported the way
+    a failed Cornelius seed is (`_notify_cornelius_failure`): one pending
+    `system_seed:chief-of-staff-failed` row, credential-sanitized, ended by a
+    later pass that finds the agent present. The install still comes up with
+    the Brain; the unset flag's next-boot retry is the recovery, and the fixed
+    name plus the create path's 409 keep a retry from ever duplicating it."""
+    safe_message = sanitize_text(redact_url_userinfo(str(message or "")))[:500]
+    SystemSeedService._notify_operator(
+        "chief-of-staff-failed",
+        "Chief of Staff seed failed",
+        "The default Chief of Staff agent could not be created during first-run "
+        "seeding (the Company Brain is unaffected). See the backend logs for the "
+        "underlying create error. The seed flag is left unset, so the next boot "
+        "retries automatically.",
+        {"agent": CHIEF_OF_STAFF_AGENT_NAME, "message": safe_message},
+    )
 
 
 def _notify_cornelius_failure(message) -> None:
@@ -249,6 +349,10 @@ async def ensure_first_run_seeded() -> dict:
                 "message": "Another worker is running the first-run seed pass"}
     try:
         fresh = _resolve_first_run_verdict()
+        # ent#1416: decided before Cornelius runs, so this pass's own Cornelius
+        # can never make a fresh install read as an established one. Sync db
+        # reads/writes, so off the event loop (#4674).
+        chief_fresh = await asyncio.to_thread(_resolve_chief_of_staff_verdict, fresh)
         cornelius_result = None
         try:
             cornelius_result = await cornelius_agent_service.ensure_seeded(fresh=fresh)
@@ -266,16 +370,80 @@ async def ensure_first_run_seeded() -> dict:
             cornelius_result.get("action") in _CORNELIUS_PRESENT
         ):
             SystemSeedService._clear_operator_alarms("cornelius-failed")
+        chief_result = await _seed_chief_of_staff(chief_fresh)
+        await asyncio.to_thread(_organize_core_agents, cornelius_result, chief_result)
         try:
             result = await system_seed_service.ensure_seeded(fresh=fresh)
         except Exception as e:  # belt: keeps the entry point's never-raises contract
             logger.error("Default-system seed pass failed unexpectedly: %s", e)
             result = {"system": None, "action": "create_failed", "status": "error",
                       "message": f"seed pass failed: {e}"}
-        _connect_seeded_agents(cornelius_result, result)
+        _connect_seeded_agents(cornelius_result, chief_result, result)
         return result
     finally:
         pass_lock.release_if_owned()
+
+
+async def _seed_chief_of_staff(fresh: Optional[bool]):
+    """Run the Chief of Staff seeder and report its outcome (ent#1416).
+
+    Never raises. A failure raises the operator alert and leaves Cornelius and
+    the rest of the pass untouched; a result that shows the agent exists ends
+    the alarm.
+    """
+    result = None
+    try:
+        result = await chief_of_staff_agent_service.ensure_seeded(fresh=fresh)
+    except Exception as e:  # belt: the service already never-raises
+        logger.error("Chief of Staff seed pass failed unexpectedly: %s", e)
+        _notify_chief_of_staff_failure(f"Chief of Staff seed pass raised: {e}")
+        return None
+    if isinstance(result, dict) and result.get("action") in ("create_failed", "create_blocked"):
+        _notify_chief_of_staff_failure(result.get("message"))
+    elif isinstance(result, dict) and result.get("action") in _CORNELIUS_PRESENT:
+        SystemSeedService._clear_operator_alarms("chief-of-staff-failed")
+    return result
+
+
+def _organize_core_agents(*results) -> None:
+    """Put the two core agents together on the Grid and let the Chief of Staff
+    ask the Brain (trinity-enterprise#1416).
+
+    Runs only on a pass whose seeders CREATED one of them, so a person's later
+    changes (a renamed group, a removed line, a revoked permission) are never
+    put back on a later boot. Each write is idempotent (tag and permission
+    inserts ignore duplicates); every step is best-effort and never raises.
+
+    * both agents: the `dept-headquarters` tag (one named group);
+    * Cornelius: `reports-to-corbin`, the line the Grid draws between them;
+    * the permission corbin → cornelius, so "file this in the brain" and
+      "what do we know about X" work without setup.
+    """
+    if not any(isinstance(r, dict) and r.get("action") == "created" for r in results):
+        return
+    try:
+        present = {
+            n for n in (CORNELIUS_AGENT_NAME, CHIEF_OF_STAFF_AGENT_NAME)
+            if db.get_agent_owner(n)
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ent#1416] core agent lookup failed: %s", e)
+        return
+    for name in sorted(present):
+        try:
+            db.add_agent_tag(name, CORE_DEPARTMENT_TAG)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[ent#1416] tagging %s failed: %s", name, e)
+    if present != {CORNELIUS_AGENT_NAME, CHIEF_OF_STAFF_AGENT_NAME}:
+        return
+    try:
+        db.add_agent_tag(CORNELIUS_AGENT_NAME, CORE_REPORTS_TO_TAG)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ent#1416] reporting line failed: %s", e)
+    try:
+        db.add_agent_permission(CHIEF_OF_STAFF_AGENT_NAME, CORNELIUS_AGENT_NAME, admin_username())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ent#1416] chief-of-staff → brain permission failed: %s", e)
 
 
 def _connect_seeded_agents(*results) -> None:
@@ -340,6 +508,16 @@ class SystemSeedService:
             return self._skip(
                 result, "disabled",
                 f"Default system seed disabled via {MANIFEST_ENV_VAR}={override_raw!r}",
+            )
+
+        # 2b. ent#1416: no manifest is deployed unless the operator names one.
+        #     Like the disable sentinel this sets no flag, so naming one later
+        #     on a still-fresh install seeds it normally.
+        if not override_raw:
+            return self._skip(
+                result, "no_default_manifest",
+                f"No default system manifest configured — set {MANIFEST_ENV_VAR}="
+                f"{_BUNDLED_SENTINEL} (or a path) to seed one",
             )
 
         # 3. Freshness verdict (precomputed + persisted by the orchestrator).
@@ -541,7 +719,7 @@ class SystemSeedService:
         fallback; an absent bundled manifest returns (None, 'bundled', None)
         with a warning log (broken build — visible each boot, recoverable).
         """
-        if override_raw:
+        if override_raw and override_raw.lower() != _BUNDLED_SENTINEL:
             try:
                 text = Path(override_raw).read_text(encoding="utf-8")
                 if not text.strip():
@@ -690,18 +868,54 @@ def seeded_agent_names() -> set:
     empty set. Does NOT include Cornelius — that name belongs to
     `cornelius_agent_service`, which seeds it independently.
     """
+    # ent#1416: what an earlier seed actually created counts too. Without a
+    # named manifest nothing is derived from the bundled file, so an install
+    # seeded with the Acme fleet before this change keeps it as examples while a
+    # person who deploys the same system from the Library does not have it
+    # hidden as one.
+    seeded = _names_from_seed_info()
     override_raw = (os.getenv(MANIFEST_ENV_VAR) or "").strip()
-    if override_raw.lower() in _DISABLE_SENTINELS:
-        return set()
+    if not override_raw or override_raw.lower() in _DISABLE_SENTINELS:
+        return seeded
     try:
         manifest_yaml, _source, error = system_seed_service._resolve_manifest(override_raw)
         if error or not manifest_yaml:
-            return set()
+            return seeded
         system_name, short_names = system_seed_service._manifest_agent_names(manifest_yaml)
         if not system_name:
+            return seeded
+        return seeded | {f"{system_name}-{short}" for short in short_names}
+    except Exception:
+        logger.debug("Seeded-name derivation failed (non-fatal)", exc_info=True)
+        return seeded
+
+
+def _names_from_seed_info() -> set:
+    """The agent names an earlier default-system seed created. Never raises.
+
+    The stored record (`_store_seed_info`) holds the system name and a COUNT of
+    created agents, never their names, so the names are derived from the
+    manifest that seeded them: the bundled one, when the recorded system is the
+    bundled manifest's system (every install seeded with the Acme fleet before
+    ent#1416). The names are `{system}-{short}` for every agent the manifest
+    declares, as the seeder's own existence backstop reads them, so a partly
+    seeded install keeps the agents it did get as examples. A record naming
+    another system (an operator manifest no longer named) derives nothing: its
+    agent list is not knowable from here.
+    """
+    try:
+        if db.get_setting_value(_SEEDED_FLAG, "false") != "true":
+            return set()
+        raw = db.get_setting_value(_SEED_INFO_KEY, None)
+        info = json.loads(raw) if raw else {}
+        recorded = info.get("system") if isinstance(info, dict) else None
+        manifest_yaml, _source, error = system_seed_service._resolve_manifest(_BUNDLED_SENTINEL)
+        if error or not manifest_yaml:
+            return set()
+        system_name, short_names = system_seed_service._manifest_agent_names(manifest_yaml)
+        if not system_name or (recorded and recorded != system_name):
             return set()
         return {f"{system_name}-{short}" for short in short_names}
     except Exception:
-        logger.debug("Seeded-name derivation failed (non-fatal)", exc_info=True)
+        logger.debug("Seed-info name read failed (non-fatal)", exc_info=True)
         return set()
-

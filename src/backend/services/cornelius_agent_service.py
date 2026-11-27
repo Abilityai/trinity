@@ -61,8 +61,25 @@ logger = logging.getLogger(__name__)
 CORNELIUS_AGENT_NAME = "cornelius"
 CORNELIUS_TEMPLATE = "github:Abilityai/cornelius"
 
+# trinity-enterprise#1416: the Chief of Staff, the second agent a fresh install
+# comes with. Same public-template, tokenless, pull-only rules as Cornelius; a
+# separate durable flag so the two seeds succeed, fail and retry independently.
+CHIEF_OF_STAFF_AGENT_NAME = "corbin"
+CHIEF_OF_STAFF_TEMPLATE = "github:Abilityai/corbin"
+
+# trinity-enterprise#1416: memory limits for the two seeded agents. These are
+# Docker `mem_limit` caps, never reservations: an idle agent uses far less, and
+# a cap only bounds one runaway turn. The Brain keeps its template's own 4g —
+# measured on a dev instance, one PDF intake over the seed library peaked at
+# 3.19 GB, so a 2g cap would kill it mid-intake. The Chief of Staff is capped
+# at 2g (measured ~230 MB in use). `crud._apply_memory_ceiling` only ever
+# lowers a template's declaration, never raises it.
+CORNELIUS_MEMORY_CEILING = "4g"
+CHIEF_OF_STAFF_MEMORY_CEILING = "2g"
+
 # Durable "already seeded" marker (system_settings KV — no migration).
 _SEEDED_FLAG = "cornelius_seeded"
+CHIEF_OF_STAFF_SEEDED_FLAG = "chief_of_staff_seeded"
 # Brain Orb platform flag we default-on at seed time (existence-guarded).
 _BRAIN_ORB_FLAG = "brain_orb_enabled"
 
@@ -70,11 +87,35 @@ _BRAIN_ORB_FLAG = "brain_orb_enabled"
 # race). TTL covers a slow container create but auto-expires so a crashed
 # provisioner lets a later boot retry. Fail-open when Redis is down.
 _PROVISION_LOCK_KEY = "cornelius:provision"
+_CHIEF_OF_STAFF_LOCK_KEY = "chief_of_staff:provision"
 _PROVISION_LOCK_TTL = 300  # seconds
 
 
 class CorneliusAgentService:
-    """Seeds the default Cornelius agent exactly once on a fresh install."""
+    """Seeds one default agent exactly once on a fresh install.
+
+    Parametrised since trinity-enterprise#1416: the same rules seed Cornelius
+    (the Company Brain) and the Chief of Staff. The defaults are Cornelius's,
+    so `CorneliusAgentService()` is unchanged for every existing caller.
+    """
+
+    def __init__(
+        self,
+        agent_name: str = CORNELIUS_AGENT_NAME,
+        template: str = CORNELIUS_TEMPLATE,
+        seeded_flag: str = _SEEDED_FLAG,
+        lock_key: str = _PROVISION_LOCK_KEY,
+        label: str = "Cornelius",
+        memory_ceiling: Optional[str] = CORNELIUS_MEMORY_CEILING,
+        enables_brain_orb: bool = True,
+    ):
+        self.agent_name = agent_name
+        self.template = template
+        self.seeded_flag = seeded_flag
+        self.lock_key = lock_key
+        self.label = label
+        self.memory_ceiling = memory_ceiling
+        self.enables_brain_orb = enables_brain_orb
 
     async def ensure_seeded(self, fresh: Optional[bool] = None) -> dict:
         """
@@ -94,16 +135,16 @@ class CorneliusAgentService:
                 seeded after the starter fleet lands). `None` preserves the
                 legacy behavior: compute from `count_non_system_agents()`.
         """
-        result = {"agent_name": CORNELIUS_AGENT_NAME, "action": None, "status": None, "message": None}
+        result = {"agent_name": self.agent_name, "action": None, "status": None, "message": None}
 
         # 0. Docker required (demo mode has no containers).
         if docker_client is None:
-            return self._skip(result, "docker_unavailable", "Docker not available — skipping Cornelius seed")
+            return self._skip(result, "docker_unavailable", f"Docker not available — skipping {self.label} seed")
 
         # 1. Already seeded? Durable flag survives a user deleting the agent, so we
         #    never resurrect a deliberately-removed Cornelius.
-        if db.get_setting_value(_SEEDED_FLAG, "false") == "true":
-            return self._skip(result, "none", "Cornelius already seeded")
+        if db.get_setting_value(self.seeded_flag, "false") == "true":
+            return self._skip(result, "none", f"{self.label} already seeded")
 
         # 2. Fresh-install only. Any pre-existing non-system agent means this is an
         #    established install being upgraded — do NOT surprise it with a heavy
@@ -114,13 +155,13 @@ class CorneliusAgentService:
             try:
                 fresh = db.count_non_system_agents() == 0
             except Exception as e:  # never let a count query break startup
-                logger.warning("Cornelius seed: non-system agent count failed (%s) — skipping this pass", e)
+                logger.warning("%s seed: non-system agent count failed (%s) — skipping this pass", self.label, e)
                 return self._skip(result, "skipped_error", f"agent count failed: {e}")
         if not fresh:
             try:
-                db.set_setting(_SEEDED_FLAG, "true")
+                db.set_setting(self.seeded_flag, "true")
             except Exception as e:  # preserve the never-raises contract
-                logger.warning("Cornelius seed: failed to persist seeded flag (%s)", e)
+                logger.warning("%s seed: failed to persist seeded flag (%s)", self.label, e)
                 return self._skip(result, "skipped_error", f"flag write failed: {e}")
             return self._skip(
                 result, "skipped_not_fresh",
@@ -134,7 +175,7 @@ class CorneliusAgentService:
         if not admin_row:
             return self._skip(
                 result, "deferred",
-                "Admin user not present yet (pre-setup) — deferring Cornelius seed",
+                f"Admin user not present yet (pre-setup) — deferring {self.label} seed",
             )
 
         # 4. Cross-worker lock (fail-open). Only the winner provisions this
@@ -144,7 +185,7 @@ class CorneliusAgentService:
         #    it shared verbatim with system_seed_service.
         lock = self._acquire_lock()
         if lock is None:
-            return self._skip(result, "skipped_locked", "Another worker is provisioning Cornelius")
+            return self._skip(result, "skipped_locked", f"Another worker is provisioning {self.label}")
 
         try:
             admin_user = User(
@@ -155,12 +196,14 @@ class CorneliusAgentService:
             )
             await self._provision(admin_user)
             # Default the Brain Orb ON for the install (existence-guarded).
-            self._seed_brain_orb_flag()
+            if self.enables_brain_orb:
+                self._seed_brain_orb_flag()
             # Mark done only after a successful provision.
-            db.set_setting(_SEEDED_FLAG, "true")
+            db.set_setting(self.seeded_flag, "true")
             result.update(action="created", status="running",
-                          message="Cornelius agent seeded (Brain Orb enabled)")
-            logger.info("Cornelius agent seeded and Brain Orb enabled by default")
+                          message=(f"{self.label} agent seeded (Brain Orb enabled)"
+                                   if self.enables_brain_orb else f"{self.label} agent seeded"))
+            logger.info("%s agent seeded", self.label)
             return result
         except Exception as e:
             # A 409 is NOT self-evidently "already exists" (#1790). The create path
@@ -176,26 +219,27 @@ class CorneliusAgentService:
             status_code = getattr(e, "status_code", None)
             if status_code == 409:
                 if self._agent_is_present():
-                    db.set_setting(_SEEDED_FLAG, "true")
-                    self._seed_brain_orb_flag()
-                    return self._skip(result, "already_exists", "Cornelius already exists (409) — marking seeded")
+                    db.set_setting(self.seeded_flag, "true")
+                    if self.enables_brain_orb:
+                        self._seed_brain_orb_flag()
+                    return self._skip(result, "already_exists", f"{self.label} already exists (409) — marking seeded")
                 # 409 with no agent behind it: a precondition blocked creation. Leave
                 # the flag unset so the next boot retries — the usual cause (a
                 # leftover `agent-cornelius-workspace`) is reclaimed on its own by
                 # the #1581 orphan-volume sweep, so the retry converges unattended.
                 result.update(
                     action="create_blocked", status="error",
-                    message=f"Cornelius seed blocked (409, agent not created): {e}",
+                    message=f"{self.label} seed blocked (409, agent not created): {e}",
                 )
                 logger.error(
-                    "Cornelius seed blocked by a 409 that created no agent — flag left "
-                    "unset so a later boot retries. Cause: %s", e,
+                    "%s seed blocked by a 409 that created no agent — flag left "
+                    "unset so a later boot retries. Cause: %s", self.label, e,
                 )
                 return result
             # Any other failure: do NOT set the flag — retry on the next trigger/boot.
             result.update(action="create_failed", status="error",
-                          message=f"Failed to seed Cornelius: {e}")
-            logger.error("Failed to seed Cornelius agent: %s", e)
+                          message=f"Failed to seed {self.label}: {e}")
+            logger.error("Failed to seed %s agent: %s", self.label, e)
             return result
         finally:
             self._release_lock(lock)
@@ -220,8 +264,8 @@ class CorneliusAgentService:
         from routers.agents import create_agent_internal
 
         config = AgentConfig(
-            name=CORNELIUS_AGENT_NAME,
-            template=CORNELIUS_TEMPLATE,
+            name=self.agent_name,
+            template=self.template,
             # resources / tools / capabilities / runtime are read from the bundled
             # template.yaml inside create_agent_internal.
             # trinity-enterprise#705: pinned pull-only. The template is a SHARED
@@ -241,9 +285,11 @@ class CorneliusAgentService:
         # exists to stop a push into the shared upstream, and a pull-only agent
         # has none. `_apply_fork_to_own` re-checks that shape itself, so this
         # flag cannot open the gate for a create that could push.
-        await create_agent_internal(
-            config, admin_user, request=None, allow_unforked_pull_only=True,
-        )
+        kwargs = {"request": None, "allow_unforked_pull_only": True}
+        if self.memory_ceiling:
+            # trinity-enterprise#1416: a cap over the template's own declaration.
+            kwargs["memory_ceiling"] = self.memory_ceiling
+        await create_agent_internal(config, admin_user, **kwargs)
 
     def _agent_is_present(self) -> bool:
         """Is a Cornelius actually claiming the name? (#1790)
@@ -262,10 +308,11 @@ class CorneliusAgentService:
         try:
             from services.agent_service.crud import agent_name_is_taken
 
-            return agent_name_is_taken(CORNELIUS_AGENT_NAME)
+            return agent_name_is_taken(self.agent_name)
         except Exception as e:  # noqa: BLE001 — never let the probe raise out of the handler
             logger.warning(
-                "Cornelius seed: presence probe failed (%s) — treating as absent so a later boot retries", e,
+                "%s seed: presence probe failed (%s) — treating as absent so a later boot retries",
+                self.label, e,
             )
             return False
 
@@ -289,7 +336,7 @@ class CorneliusAgentService:
         lock (the pre-#1920 constant-``"1"`` + unconditional ``delete`` bug,
         shared verbatim with system_seed_service)."""
         lock = SingleFlightLock(
-            _PROVISION_LOCK_KEY, _PROVISION_LOCK_TTL, client=get_breaker_redis()
+            self.lock_key, _PROVISION_LOCK_TTL, client=get_breaker_redis()
         )
         return lock if lock.acquire() else None
 
@@ -299,12 +346,22 @@ class CorneliusAgentService:
         if lock is not None:
             lock.release_if_owned()
 
-    @staticmethod
-    def _skip(result: dict, action: str, message: str) -> dict:
+    def _skip(self, result: dict, action: str, message: str) -> dict:
         result.update(action=action, status="skipped", message=message)
-        logger.info("Cornelius seed: %s", message)
+        logger.info("%s seed: %s", self.label, message)
         return result
 
 
-# Global service instance
+# Global service instances
 cornelius_agent_service = CorneliusAgentService()
+
+# trinity-enterprise#1416: the Chief of Staff. Same seeding rules; no Brain Orb.
+chief_of_staff_agent_service = CorneliusAgentService(
+    agent_name=CHIEF_OF_STAFF_AGENT_NAME,
+    template=CHIEF_OF_STAFF_TEMPLATE,
+    seeded_flag=CHIEF_OF_STAFF_SEEDED_FLAG,
+    lock_key=_CHIEF_OF_STAFF_LOCK_KEY,
+    label="Chief of Staff",
+    memory_ceiling=CHIEF_OF_STAFF_MEMORY_CEILING,
+    enables_brain_orb=False,
+)

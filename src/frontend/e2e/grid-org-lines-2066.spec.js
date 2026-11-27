@@ -32,8 +32,18 @@ async function extendFleet(page) {
     (url) => url.pathname === '/api/agents',
     async (route) => {
       if (route.request().method() !== 'GET') return route.continue()
-      const response = await route.fetch()
-      const agents = await response.json()
+      // A list read still in flight when the spec reloads the page (the
+      // dashboard re-reads the list when its socket opens, ent#1416) is
+      // aborted by the navigation; its response is gone, and there is nothing
+      // left to answer. Every read on the reloaded page is extended as before.
+      let response
+      let agents
+      try {
+        response = await route.fetch()
+        agents = await response.json()
+      } catch {
+        return
+      }
       const sys = agents.find((a) => a.is_system) || agents[0]
       const fake = (name, tags) => ({
         ...sys,
@@ -48,7 +58,7 @@ async function extendFleet(page) {
         fake('e2e-boss', ['dept-e2e-org']),
         ...REPORTS.map((n) => fake(n, ['dept-e2e-org', 'reports-to-e2e-boss'])),
       ]
-      await route.fulfill({ response, json: [...agents, ...extra] })
+      await route.fulfill({ response, json: [...agents, ...extra] }).catch(() => {})
     }
   )
 }

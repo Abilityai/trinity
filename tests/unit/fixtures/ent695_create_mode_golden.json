@@ -17,7 +17,8 @@
       "abilityai/trinity-enterprise#1102",
       "abilityai/trinity#4284",
       "abilityai/trinity-enterprise#1202",
-      "abilityai/trinity-enterprise#1391"
+      "abilityai/trinity-enterprise#1391",
+      "abilityai/trinity-enterprise#1416"
     ]
   },
   "cases": {
@@ -2199,6 +2200,11 @@
         },
         "system_settings": {
           "added": [
+            {
+              "key": "chief_of_staff_fresh",
+              "updated_at": "<timestamp>",
+              "value": "true"
+            },
             {
               "key": "default_system_seed_info",
               "updated_at": "<timestamp>",
