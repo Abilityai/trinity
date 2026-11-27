@@ -29,7 +29,6 @@ import sqlalchemy  # noqa: E402
 from sqlalchemy.exc import OperationalError, ProgrammingError  # noqa: E402
 
 from services import health_service as hs  # noqa: E402
-from services import loop_health  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -220,18 +219,25 @@ def test_docker_probe_states(monkeypatch):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def clean_ticks(monkeypatch):
-    monkeypatch.setattr(loop_health, "_ticks", {})
-    monkeypatch.setattr(loop_health, "_last_tick_at", {})
+def ticks(monkeypatch):
+    """The loop-health module `health_service` reads, resolved the way it
+    resolves it (at call time): another test module can re-import the service
+    package, and a module object held from collection would then be a copy
+    nobody reads."""
+    from services import loop_health as current
+
+    monkeypatch.setattr(current, "_ticks", {})
+    monkeypatch.setattr(current, "_last_tick_at", {})
+    return current
 
 
-def test_a_completed_cycle_is_reported_with_its_time_and_age(clean_ticks, monkeypatch):
-    monkeypatch.setattr(loop_health.time, "time", lambda: 1_800_000_000.0)
-    loop_health.record_tick("monitoring", 0.25)
+def test_a_completed_cycle_is_reported_with_its_time_and_age(ticks, monkeypatch):
+    monkeypatch.setattr(ticks.time, "time", lambda: 1_800_000_000.0)
+    ticks.record_tick("monitoring", 0.25)
 
-    ticks = hs.loop_ticks(now=1_800_000_042.0)
+    reported = hs.loop_ticks(now=1_800_000_042.0)
 
-    assert ticks == {"monitoring": {
+    assert reported == {"monitoring": {
         "last_tick_at": "2027-01-15T08:00:00.000000Z",
         "age_seconds": 42.0,
         "last_ms": 250.0,
@@ -239,18 +245,20 @@ def test_a_completed_cycle_is_reported_with_its_time_and_age(clean_ticks, monkey
     }}
 
 
-def test_the_tick_context_manager_stamps_the_time(clean_ticks):
-    before = datetime.utcnow().timestamp() - 5
-    with loop_health.tick("heartbeat_watch"):
+def test_the_tick_context_manager_stamps_the_time(ticks):
+    import time as _time
+
+    before = _time.time() - 5
+    with ticks.tick("heartbeat_watch"):
         pass
 
-    assert loop_health.last_tick_times()["heartbeat_watch"] > before
+    assert ticks.last_tick_times()["heartbeat_watch"] > before
 
 
-def test_the_telemetry_snapshot_keeps_its_shape(clean_ticks):
-    loop_health.record_tick("monitoring", 0.01)
+def test_the_telemetry_snapshot_keeps_its_shape(ticks):
+    ticks.record_tick("monitoring", 0.01)
 
-    assert set(loop_health.tick_snapshot()["monitoring"]) == {
+    assert set(ticks.tick_snapshot()["monitoring"]) == {
         "ticks", "slow_ticks", "last_ms", "max_ms",
     }
 

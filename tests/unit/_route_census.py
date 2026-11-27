@@ -1240,6 +1240,7 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
     "routers/aauth.py::aauth_resource_metadata": ("GET /.well-known/aauth-resource.json", "unauthenticated by design (AAuth resource metadata; 404 unless the prototype flag is on)"),
     "routers/mcp_keys.py::validate_mcp_api_key_http_endpoint": ("POST /api/mcp/validate", "validates the presented MCP key itself (MCP server auth)"),
     "main.py::health_check": ("GET /health", "unauthenticated by design (health probe)"),
+    "main.py::readiness_check": ("GET /health/ready", "unauthenticated by design (#4407 readiness probe: fixed words per dependency and loop tick times, no dependency error text, 2 s answer cache)"),
     "routers/slack.py::handle_slack_event": ("POST /api/public/slack/events", "Slack request signature"),
     "routers/slack.py::slack_oauth_callback": ("GET /api/public/slack/oauth/callback", "OAuth state parameter"),
     "routers/telegram.py::handle_telegram_webhook": ("POST /api/telegram/webhook/{webhook_secret}", "per-binding webhook secret"),
