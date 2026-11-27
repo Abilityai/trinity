@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
 /**
- * trinity-enterprise#1409 — the assistant introduces Cornelius as the company
- * brain after the first result, and walks the first document in.
+ * trinity-enterprise#1409 — after the first result the assistant introduces
+ * the team the instance came with in one card: Cornelius, the company brain
+ * (set up with no command typed, then a document dropped on it), and the Chief
+ * of Staff, corbin (ent#1416: a transcript or an email, and the person's name).
+ * Never-an-example is ent#1416's (dashboardCoreAgents1416 / assistantChiefOnClaude1416).
  * Mounted through the real AssistantWidget and the real store; the instance
  * (`/api/onboarding/brain`, the task route, the execution read) is faked at
  * the api seam.
@@ -13,6 +16,7 @@ import { createPinia, setActivePinia } from 'pinia'
 const ALLOWANCE = { plan: 'free', period_hours: 24, messages_left: 20, messages_limit: 25, builds_left: 0, builds_limit: 1, reached: null, resets_at: null }
 const OWN = 'bakery-scout'
 const BRAIN = 'cornelius'
+const CHIEF = 'corbin'
 const calls = []
 let brain          // what /api/onboarding/brain answers (null → 500)
 let brainAfterRun  // what it answers once the setup run ended
@@ -27,7 +31,8 @@ vi.mock('@/api', () => {
         trial_terms: { version: 't0', url: '', accepted: 't0' }, profile_known: true }
     }
     if (url === '/api/onboarding/first-run') {
-      return { first_run: false, seeded_agents: seeded, own_agent_count: 1, brain_agent: seeded.includes(BRAIN) ? BRAIN : null }
+      return { first_run: false, seeded_agents: seeded, own_agent_count: 1, brain_agent: seeded.includes(BRAIN) ? BRAIN : null,
+        core_agents: [CHIEF, BRAIN].filter((n) => seeded.includes(n)) }
     }
     if (url === '/api/onboarding/brain') {
       if (brain === null) throw Object.assign(new Error('down'), { response: { status: 500 } })
@@ -44,7 +49,7 @@ vi.mock('@/api', () => {
     if (url === `/api/enterprise/assistant/runs/${OWN}/exec-own-1`) return { status: 'success', ended: true, ok: true }
     if (url === '/api/agents') {
       return [{ name: 'trinity-system', status: 'running', is_system: true }, { name: OWN, status: 'running' },
-        ...seeded.map((name) => ({ name, status: 'running', ...(name === BRAIN ? { display_label: 'Cornelius' } : {}) }))]
+        ...seeded.map((name) => ({ name, status: 'running', ...(name === BRAIN ? { display_label: 'Cornelius' } : name === CHIEF ? { display_label: 'Corbin' } : {}) }))]
     }
     if (url === '/api/agents/autonomy-status') return {}
     return {}
@@ -62,11 +67,11 @@ import AssistantWidget from '@/components/assistant/AssistantWidget.vue'
 import { useAssistantStore } from '@/stores/assistant'
 import { useFirstRunStore } from '@/stores/firstRun'
 import { BRAIN_OFFER_KEY, teamLabel } from '@/utils/companyBrain'
-import { FIRST_RESULT_KEY, examplesOutOfSight, examplesToHide } from '@/utils/firstSession'
+import { FIRST_RESULT_KEY } from '@/utils/firstSession'
 
 const TURN = '/api/enterprise/assistant/turn'
 const posted = (url) => calls.filter((c) => c.url === url && c.method === 'post')
-const brainCards = (w) => w.findAll('[data-testid="assistant-card"]').filter((c) => c.text().includes('company brain'))
+const brainCards = (w) => w.findAll('[data-testid="assistant-card"]').filter((c) => c.text().includes('Already on your team'))
 
 describe('the company brain (ent#1409)', () => {
   let wrapper
@@ -94,7 +99,7 @@ describe('the company brain (ent#1409)', () => {
     localStorage.clear()
     sessionStorage.clear()
     calls.length = 0
-    seeded = ['acme-scout', BRAIN]
+    seeded = ['acme-scout', CHIEF, BRAIN]
     brain = { agent: BRAIN, state: 'not_set_up', notes: 0 }
     brainAfterRun = { agent: BRAIN, state: 'ready', notes: 0 }
     runStatus = 'success'
@@ -110,21 +115,15 @@ describe('the company brain (ent#1409)', () => {
     vi.useRealTimers()
   })
 
-  describe('it is never an example', () => {
-    it('the Grid hides the other examples but never the brain', () => {
-      expect(examplesToHide({ leads_setup: true }, seeded, 0, false, BRAIN)).toEqual(['acme-scout'])
-    })
-    it('the panel keeps the other examples out of sight, never the brain', () => {
-      expect(store.outOfSight().has('acme-scout')).toBe(true)
-      expect(store.outOfSight().has(BRAIN)).toBe(false)
-      expect(examplesOutOfSight({ leads_setup: true }, [{ name: OWN }], seeded, false, BRAIN)).toEqual(['acme-scout'])
-    })
-    it('the assistant is told about it in the fleet and in its own context line', async () => {
+  describe('the assistant knows where the brain stands', () => {
+    it('its own context line carries the state the instance gave', async () => {
       await store.send('hello', { path: '/' })
-      const ctx = posted(TURN).at(-1).body.context
-      expect(ctx.fleet.map((a) => a.name)).toContain(BRAIN)
-      expect(ctx.fleet.map((a) => a.name)).not.toContain('acme-scout')
-      expect(ctx.brain).toEqual({ agent: BRAIN, state: 'not_set_up', notes: 0 })
+      expect(posted(TURN).at(-1).body.context.brain).toEqual({ agent: BRAIN, state: 'not_set_up', notes: 0 })
+    })
+    it('an unreadable brain is left out of the context, never guessed', async () => {
+      brain = null
+      await store.send('hello', { path: '/' })
+      expect(posted(TURN).at(-1).body.context.brain).toBeUndefined()
     })
   })
 
@@ -134,9 +133,10 @@ describe('the company brain (ent#1409)', () => {
       await firstResult()
       expect(localStorage.getItem(FIRST_RESULT_KEY)).toBeTruthy()
       const [card] = brainCards(wrapper)
-      expect(card.text()).toContain('Already on your team: Cornelius, your company brain')
-      expect(card.text()).toContain('came with this instance')
+      expect(card.text()).toContain('Already on your team: Corbin, your Chief of Staff; and Cornelius, your company brain')
+      expect(card.text()).toContain('give it documents')
       expect(card.text()).toContain("you don't type anything")
+      expect(card.text()).toContain('give it a meeting transcript or an email, tell it your name')
       expect(card.findAll('button').map((b) => b.text())).toEqual(['Set it up', 'Not now'])
     })
 
@@ -155,10 +155,39 @@ describe('the company brain (ent#1409)', () => {
       expect(brainCards(wrapper)).toHaveLength(1)
     })
 
-    it('is not made when the brain was deleted', async () => {
+    it('is not made when neither agent is there', async () => {
+      seeded = ['acme-scout']
+      await useFirstRunStore().fetchState(true)
+      await store.refreshFleet()
       brain = { agent: null, state: 'absent', notes: null }
       await firstResult()
       expect(brainCards(wrapper)).toHaveLength(0)
+    })
+
+    it('a deleted brain leaves only the Chief of Staff on the card', async () => {
+      seeded = ['acme-scout', CHIEF]
+      await useFirstRunStore().fetchState(true)
+      await store.refreshFleet()
+      brain = { agent: null, state: 'absent', notes: null }
+      await firstResult()
+      const card = brainCards(wrapper)[0]
+      expect(card.text()).toContain('Already on your team: Corbin, your Chief of Staff')
+      expect(card.text()).not.toContain('Cornelius')
+      await press(card, 'Show me how')
+      expect(posted(`/api/agents/${BRAIN}/task`)).toHaveLength(0)
+      const done = brainCards(wrapper)[0].text()
+      expect(done).toContain('open Corbin in your Workspace, tell it your name, and drop a meeting transcript or an email')
+      expect(done).not.toContain('Cornelius')
+    })
+
+    it('an instance without a Chief of Staff offers the brain alone', async () => {
+      seeded = ['acme-scout', BRAIN]
+      await useFirstRunStore().fetchState(true)
+      await store.refreshFleet()
+      await firstResult()
+      const card = brainCards(wrapper)[0]
+      expect(card.text()).toContain('Already on your team: Cornelius, your company brain')
+      expect(card.text()).not.toContain('Chief of Staff')
     })
 
     it('says honestly when the brain cannot be read', async () => {
@@ -186,8 +215,10 @@ describe('the company brain (ent#1409)', () => {
       expect(done).toContain('Cornelius is ready, with no notes yet.')
       expect(done).toContain('Drop files to send to Cornelius')
       expect(done).toContain('take this in')
+      expect(done).toContain('open Corbin in your Workspace, tell it your name, and drop a meeting transcript or an email')
       const told = posted(TURN).at(-1).body.message
       expect(told).toContain('The company brain Cornelius is ready with no notes yet.')
+      expect(told).toContain('The Chief of Staff Corbin takes a meeting transcript or an email')
     })
 
     it('a brain already ready only shows the way in', async () => {

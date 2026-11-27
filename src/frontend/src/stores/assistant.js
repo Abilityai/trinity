@@ -26,7 +26,7 @@ import { useAgentsStore } from './agents'
 import { useAuthStore } from './auth'
 import { useFirstRunStore } from './firstRun'
 import { examplesOutOfSight, examplesShownOnRequest, examplesToHide, firstResultSeen, inFirstSession, markFirstResultSeen, resultPath } from '../utils/firstSession'
-import { BRAIN_SETUP_MESSAGE, brainButton, brainContext, brainLabel, brainLine, brainNote, brainOfferAnswered, markBrainOffer, offerable, readyWords } from '../utils/companyBrain'
+import { BRAIN_SETUP_MESSAGE, brainButton, brainContext, brainLabel, brainLine, brainNote, brainOfferAnswered, chiefWords, markBrainOffer, offerable, readyWords } from '../utils/companyBrain'
 
 export const FEATURE_ID = 'assistant'
 
@@ -711,23 +711,27 @@ export const useAssistantStore = defineStore('assistant', {
     },
 
     /**
-     * ent#1409: one card that introduces the company brain, once. Not when the
-     * person already answered it (a "Not now" does not come back), and not
-     * when the instance has no brain (deleted, or never seeded).
+     * ent#1409: one card that introduces the team the instance came with, once:
+     * the company brain (drop a document) and the Chief of Staff (ent#1416: a
+     * transcript or an email, and the person's name). Not when the person
+     * already answered it (a "Not now" does not come back), and not when the
+     * instance has neither (deleted, or never seeded).
      */
     async offerBrain() {
       if (brainOfferAnswered()) return
       const state = await this.readBrain()
-      if (!offerable(state)) return
-      const name = this.brainName(state.agent)
+      const chiefAgent = this.chiefIn()
+      if (!offerable(state) && !chiefAgent) return
+      const name = offerable(state) ? this.brainName(state.agent) : null
+      const chief = chiefAgent ? this.brainName(chiefAgent) : null
       markBrainOffer('offered')
-      const card = { action: 'brain', agent: state.agent }
+      const card = { action: 'brain', agent: name ? state.agent : null, chief: chiefAgent }
       this.messages.push({
         id: newId(),
         role: 'assistant',
         content: '',
         cards: [{
-          id: newId(), card, label: brainLabel(name), note: brainNote(name, state), button: brainButton(state),
+          id: newId(), card, label: brainLabel(name, chief), note: brainNote(name, state, chief), button: brainButton(state),
           state: 'open', reason: '', progress: '', picked: '', since: Date.now(), fraction: null,
         }],
       })
@@ -744,18 +748,19 @@ export const useAssistantStore = defineStore('assistant', {
       const find = () => this.messages.find((m) => m.id === messageId)?.cards?.find((c) => c.id === cardId)
       const entry = find()
       const agent = entry.card.agent
-      const name = this.brainName(agent)
+      const name = agent ? this.brainName(agent) : null
+      const chief = entry.card.chief ? this.brainName(entry.card.chief) : null
       markBrainOffer('accepted')
-      const state = await this.readBrain()
-      if (!offerable(state)) {
-        entry.state = 'refused'
-        entry.reason = `${name} is not on this instance any more.`
+      const state = agent ? await this.readBrain() : null
+      if (agent && !offerable(state)) {
+        entry.state = chief ? 'done' : 'refused'
+        entry.reason = [`${name} is not on this instance any more.`, chief ? chiefWords(chief) : ''].filter(Boolean).join(' ')
         return
       }
-      if (state.state === 'ready') {
+      if (!agent || state.state === 'ready') {
         entry.state = 'done'
-        entry.reason = readyWords(name, state)
-        return this.comeBack(brainLine(name, state, 'The person asked how to use the company brain; the card told them.'), route)
+        entry.reason = readyWords(name, state, chief)
+        return this.comeBack(brainLine(name, state, 'The person asked how to use the team the instance came with; the card told them.', chief), route)
       }
       let runId = null
       try {
@@ -782,8 +787,9 @@ export const useAssistantStore = defineStore('assistant', {
     /** Follow the brain's setup run until it ends, then say what the instance says. */
     async followBrain(messageId, cardId, route) {
       const find = () => this.messages.find((m) => m.id === messageId)?.cards?.find((c) => c.id === cardId)
-      const { agent, execution_id: runId } = find()?.card || {}
+      const { agent, execution_id: runId, chief: chiefAgent } = find()?.card || {}
       const name = this.brainName(agent)
+      const chief = chiefAgent ? this.brainName(chiefAgent) : null
       let seen = null
       for (let i = 0; i < JOB_POLL_LIMIT; i++) {
         await wait(i < 5 ? RUN_FIRST_POLL_MS : JOB_POLL_MS)
@@ -803,8 +809,8 @@ export const useAssistantStore = defineStore('assistant', {
       let line
       if (state?.state === 'ready') {
         entry.state = 'done'
-        entry.reason = readyWords(name, state)
-        line = brainLine(name, state, `The person set up the company brain (execution ${runId}); the card told them it is ready and how to give it documents.`)
+        entry.reason = readyWords(name, state, chief)
+        line = brainLine(name, state, `The person set up the company brain (execution ${runId}); the card told them it is ready and how to give it documents.`, chief)
       } else if (seen && BRAIN_ENDED.includes(seen.status)) {
         entry.state = 'refused'
         entry.reason = String(seen.error || `${name} finished without saying it is ready.`).slice(0, 300)

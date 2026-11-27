@@ -763,7 +763,7 @@ const OUTCOME = Object.freeze({
 })
 const CONFIRM = Object.freeze({ build: 'Build', upgrade: 'Continue', feedback: 'Send', 'use-claude': 'Yes, switch them', 'email-results': 'Email it to me', brain: 'Set it up' })
 const LOADING = Object.freeze({ build: 'Building…', feedback: 'Sending…', 'use-claude': 'Switching…', brain: 'Starting…' })
-const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running', feedback: 'For the Trinity team', credential: 'A credential, kept from the assistant', 'local-move': 'On your machine', brain: 'The company brain' })
+const HEADING = Object.freeze({ build: 'Ready to build', tool: 'Cannot be undone', job: 'Being made', run: 'Running', feedback: 'For the Trinity team', credential: 'A credential, kept from the assistant', 'local-move': 'On your machine', brain: 'Came with this instance' })
 const SHOWN_STEPS = 4
 // ent#1390: which tool cards have their parameters open (closed by default).
 const detailsOpen = reactive({})

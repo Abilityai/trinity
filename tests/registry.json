@@ -10202,7 +10202,7 @@
         "frontend",
         "assistant"
       ],
-      "description": "trinity-enterprise#1409, mounted: Cornelius is never hidden or out of sight as an example; the offer card ('Already on your team: Cornelius, your company brain') comes after the first result only, a 'Not now' never comes back, a deleted brain offers nothing, an unreadable one says so; accepting runs /first-run --empty with no command typed, follows the run and ends with the note count and where documents go; the turn context carries the brain's state. teamLabel takes a second core agent."
+      "description": "trinity-enterprise#1409, mounted: after the first result only, one card introduces the team the instance came with ('Already on your team: Corbin, your Chief of Staff; and Cornelius, your company brain'); a 'Not now' never comes back; a deleted brain leaves only the Chief of Staff, neither offers nothing, no Chief of Staff offers the brain alone; an unreadable brain says so; accepting runs /first-run --empty with no command typed, follows the run and ends with the note count, where documents go and how to start the Chief of Staff (name, then a transcript or an email); the turn context carries the brain's state."
     }
   ]
 }

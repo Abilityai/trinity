@@ -29,11 +29,6 @@ export function markBrainOffer(answer) {
   } catch { /* it may be offered once more; harmless */ }
 }
 
-/** The seeded agents the screens call examples: every one but the brain. */
-export function examplesOf(seeded = [], brain = null) {
-  return Array.isArray(seeded) ? seeded.filter((n) => n !== brain) : []
-}
-
 /** Whether the brain is worth offering: it is there, and readable or not, it exists. */
 export function offerable(state) {
   return Boolean(state?.agent) && state.state !== 'absent'
@@ -57,13 +52,27 @@ export function teamLabel(members = []) {
   return `Already on your team: ${list}`
 }
 
-/** The card's title for the company brain. */
-export function brainLabel(name) {
-  return teamLabel([{ name, role: 'company brain' }])
+/**
+ * The card's title: the Chief of Staff (when the instance has one) and the
+ * company brain (when it is there), in one card.
+ */
+export function brainLabel(name, chief = null) {
+  return teamLabel([...(chief ? [{ name: chief, role: 'Chief of Staff' }] : []), ...(name ? [{ name, role: 'company brain' }] : [])])
 }
 
-/** The line under it: what the brain is, and where it stands now. */
-export function brainNote(name, state) {
+/** What the Chief of Staff is for, and how to start, in the words the Workspace shows. */
+export function chiefWords(name) {
+  return `To start ${name}, your Chief of Staff, open ${name} in your Workspace, tell it your name, and drop a meeting transcript or an email on the conversation (it says "Drop files to send to ${name}"). It reads it and tells you what needs doing.`
+}
+
+/** The line under it: what each agent is, and where the brain stands now. */
+export function brainNote(name, state, chief = null) {
+  const cos = chief ? `${chief} came with this instance too: give it a meeting transcript or an email, tell it your name, and it keeps track of what needs doing.` : ''
+  if (!name) return cos
+  return [brainState(name, state), cos].filter(Boolean).join(' ')
+}
+
+function brainState(name, state) {
   const what = `${name} came with this instance. It keeps what your company knows: give it documents and it writes them up as notes that you and every agent you build can ask about.`
   if (state?.state === 'ready') return `${what} It is ready, with ${notesWords(state.notes) || 'its notes'}.`
   if (state?.state === 'unknown') return `${what} I can't reach it right now, so I can't say whether it is set up.`
@@ -71,7 +80,7 @@ export function brainNote(name, state) {
 }
 
 export function brainButton(state) {
-  return state?.state === 'ready' ? 'Show me how' : 'Set it up'
+  return !offerable(state) || state?.state === 'ready' ? 'Show me how' : 'Set it up'
 }
 
 /** Where documents go, in the words the Workspace shows. */
@@ -79,18 +88,21 @@ export function dropWords(name) {
   return `To give it a document, open ${name} in your Workspace and drop the file on the conversation (it says "Drop files to send to ${name}"), or attach it with "Attach a file for the agent", and say "take this in". ${name} works out what it is, writes notes from it, and replies with a short summary of what it made.`
 }
 
-/** The card's ending once the brain is ready. */
-export function readyWords(name, state) {
+/** The card's ending once the brain is ready (and, when there is one, how to start the Chief of Staff). */
+export function readyWords(name, state, chief = null) {
   const notes = notesWords(state?.notes)
-  return `${name} is ready${notes ? `, with ${notes}` : ''}. ${dropWords(name)}`
+  const brain = name ? `${name} is ready${notes ? `, with ${notes}` : ''}. ${dropWords(name)}` : ''
+  return [brain, chief ? chiefWords(chief) : ''].filter(Boolean).join(' ')
 }
 
 /** What the assistant is told, in plain words, so it says the same thing. */
-export function brainLine(name, state, what) {
+export function brainLine(name, state, what, chief = null) {
+  const cos = chief ? ` The Chief of Staff ${chief} takes a meeting transcript or an email dropped on its conversation, once the person has told it their name.` : ''
+  if (!name) return `${what}${cos}`
   const where = state?.state === 'ready'
     ? `ready${typeof state.notes === 'number' ? ` with ${notesWords(state.notes)}` : ''}`
     : state?.state === 'not_set_up' ? 'not set up yet' : 'not readable right now'
-  return `${what} The company brain ${name} is ${where}. Documents reach it in the Workspace: the person drops a file on ${name}'s conversation and says "take this in"; it writes notes and replies with a summary.`
+  return `${what} The company brain ${name} is ${where}. Documents reach it in the Workspace: the person drops a file on ${name}'s conversation and says "take this in"; it writes notes and replies with a summary.${cos}`
 }
 
 /** The brain's state for the assistant's context: only what the instance said. */
