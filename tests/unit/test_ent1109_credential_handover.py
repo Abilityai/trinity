@@ -180,10 +180,30 @@ class _Instance:
         return httpx.AsyncClient(transport=httpx.MockTransport(_handler), follow_redirects=False)
 
 
+def _clear_asker_queue():
+    from db.engine import get_engine
+    from sqlalchemy import text
+    with get_engine().begin() as conn:
+        conn.execute(text("DELETE FROM operator_queue WHERE agent_name = :a"), {"a": ASKER})
+
+
 @pytest.fixture
 def real_db():
+    """The process's unit-test database, with ASKER's queue empty before and
+    after the test (#4620).
+
+    Every ask in this module is raised for ONE agent, and the database outlives
+    the test. The asks piled up: 18 left pending by `TestDelivery`, 11 raised by
+    `TestTheAsk`, against a cap of 25 pending per agent
+    (`OPERATOR_QUEUE_MAX_PENDING_PER_AGENT`). In file order `TestTheAsk` runs
+    first and never meets the cap; in any order that runs enough of
+    `TestDelivery` first, the next raise is refused `queue_full` — four tests
+    on two of the nightly's three seeds, a different four on each.
+    """
     from database import db as real
-    return real
+    _clear_asker_queue()
+    yield real
+    _clear_asker_queue()
 
 
 @pytest.fixture(autouse=True)
