@@ -2573,8 +2573,10 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   - **Organized on creation only**: on a pass that created either agent, both get `dept-headquarters`,
     Cornelius gets `reports-to-corbin`, and `corbin → cornelius` is permitted. A later boot never
     re-applies these, so a person's own changes stand.
-  - **Memory ceiling 2g each**, passed to the create path; `crud._apply_memory_ceiling` caps a template's
-    declaration and never raises it.
+  - **Memory caps**: the Brain keeps its template's 4g (one PDF intake over the seed library peaked at
+    3.19 GB on a dev instance, so 2g would kill it); the Chief of Staff is capped at 2g (~230 MB in use).
+    Passed to the create path; `crud._apply_memory_ceiling` caps a template's declaration and never raises
+    it. These are Docker `mem_limit` caps, not reservations.
   - **Never examples**: first-run state carries `core_agents`; the frontend keeps them on the Grid and in
     what the assistant is told, and the ent#1408 Connect-Claude card offers both.
   - **Grid first load**: with nothing saved the layout is automatic and persists nothing — fleet tiles in

@@ -67,14 +67,14 @@ CORNELIUS_TEMPLATE = "github:Abilityai/cornelius"
 CHIEF_OF_STAFF_AGENT_NAME = "corbin"
 CHIEF_OF_STAFF_TEMPLATE = "github:Abilityai/corbin"
 
-# trinity-enterprise#1416: memory ceilings for the two seeded agents. The
-# smallest self-serve host has 8 GB; these are Docker `mem_limit` ceilings
-# (never reservations), applied as a cap over whatever the template declares.
-# Budget: platform services ~2 GB + system agent (4g ceiling, idles well under
-# 1 GB) + these two + one agent the person builds (agent default) — idle use of
-# all four agents together stays far below the host, and the two seeded
-# ceilings keep a runaway brain/chief-of-staff turn from starving the rest.
-CORNELIUS_MEMORY_CEILING = "2g"
+# trinity-enterprise#1416: memory limits for the two seeded agents. These are
+# Docker `mem_limit` caps, never reservations: an idle agent uses far less, and
+# a cap only bounds one runaway turn. The Brain keeps its template's own 4g —
+# measured on a dev instance, one PDF intake over the seed library peaked at
+# 3.19 GB, so a 2g cap would kill it mid-intake. The Chief of Staff is capped
+# at 2g (measured ~230 MB in use). `crud._apply_memory_ceiling` only ever
+# lowers a template's declaration, never raises it.
+CORNELIUS_MEMORY_CEILING = "4g"
 CHIEF_OF_STAFF_MEMORY_CEILING = "2g"
 
 # Durable "already seeded" marker (system_settings KV — no migration).

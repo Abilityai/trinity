@@ -137,7 +137,7 @@ class TestFreshInstall:
         _pass()
 
         assert {c["name"]: c["memory_ceiling"] for c in install.created} == {
-            "cornelius": "2g", "corbin": "2g",
+            "cornelius": "4g", "corbin": "2g",
         }
 
     def test_they_are_one_named_group_with_a_line_and_a_permission(self, install):

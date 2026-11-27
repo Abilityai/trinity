@@ -345,8 +345,8 @@ def test_provision_builds_local_template_config(monkeypatch):
     # fresh install nobody is watching.
     assert captured["allow_unforked_pull_only"] is True
     assert captured["request"] is None
-    # ent#1416: the 8 GB self-serve host budget caps the template's 4g.
-    assert captured["memory_ceiling"] == "2g"
+    # ent#1416: the Brain keeps its template's 4g (a PDF intake peaked at 3.19 GB).
+    assert captured["memory_ceiling"] == "4g"
     assert captured["user"].username == "admin"
 
 
