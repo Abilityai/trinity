@@ -109,6 +109,13 @@ _POLL_DEADLINE_WHEN_NULL = 7200
 # became able to land on the durable pull queue.
 _NON_TERMINAL_POLL_STATES = (ExecutionStatus.RUNNING, ExecutionStatus.QUEUED)
 
+# #4410: the runs this scheduler is following to their terminal, kept in Redis
+# so a restart can pick them up again. Field = execution id, value = JSON with
+# the agent name and the poll budget. A run is added when its poll starts and
+# removed when the poll ends on its own; a poll cancelled by shutdown (or lost
+# to a kill) leaves its entry, which is what boot recovery reads.
+_FOLLOWED_EXECUTIONS_KEY = "scheduler:followed_executions"
+
 
 # #3993: the code a pull terminal folds into the row's error text
 # (`pull_coordination_service`: "[<error_code>] <text>"; there is no error_code
@@ -235,6 +242,14 @@ class SchedulerService:
 
         # RETRY-001: Recover any pending retries from before restart
         self._recover_pending_retries()
+
+        # #4410: follow again the runs that were in flight at the last stop, so
+        # their retry and validation still happen. Own try: a recovery error
+        # must never stop the scheduler from booting.
+        try:
+            self._recover_followed_executions()
+        except Exception as e:
+            logger.error(f"In-flight run recovery failed (continuing): {e}")
 
         # #1296: recover/arm reminder jobs after restart (own try — a reminder
         # error, or a not-yet-migrated agent_reminders table, must never crash
@@ -1430,7 +1445,12 @@ class SchedulerService:
         return result
 
     def _spawn_poll(self, execution_id: str, timeout_seconds: Optional[int], agent_name: str):
-        """Start `_poll_and_finalize` in the background, tracked for graceful shutdown."""
+        """Start `_poll_and_finalize` in the background, tracked for graceful shutdown.
+
+        #4410: the run is also recorded in Redis before the poll starts, so a
+        scheduler that stops while the run is in flight follows it again at boot.
+        """
+        self._record_followed(execution_id, timeout_seconds, agent_name)
         task = asyncio.create_task(
             self._poll_and_finalize(
                 execution_id=execution_id,
@@ -1440,6 +1460,110 @@ class SchedulerService:
         )
         self._active_poll_tasks.add(task)
         task.add_done_callback(self._active_poll_tasks.discard)
+        task.add_done_callback(
+            lambda finished, eid=execution_id: self._on_poll_done(eid, finished)
+        )
+
+    def _record_followed(self, execution_id: str, timeout_seconds: Optional[int], agent_name: str) -> None:
+        """Remember that this run is being followed (#4410). Fail-open: a Redis
+        fault costs restart recovery for this run, never the run itself."""
+        try:
+            self.redis.hset(
+                _FOLLOWED_EXECUTIONS_KEY,
+                execution_id,
+                json.dumps({"agent_name": agent_name, "timeout_seconds": timeout_seconds}),
+            )
+        except Exception as e:
+            logger.warning(
+                f"Could not record execution {execution_id} as followed — "
+                f"a restart will not pick it up again: {e}"
+            )
+
+    def _forget_followed(self, execution_id: str) -> None:
+        """Drop a run from the followed set (#4410)."""
+        try:
+            self.redis.hdel(_FOLLOWED_EXECUTIONS_KEY, execution_id)
+        except Exception as e:
+            logger.warning(f"Could not clear followed execution {execution_id}: {e}")
+
+    def _on_poll_done(self, execution_id: str, task) -> None:
+        """A poll that ended on its own has done its post-terminal work (or gave
+        up at its deadline); only then is the run forgotten. A poll cancelled by
+        shutdown keeps its entry so the next boot follows the run again (#4410)."""
+        if task.cancelled():
+            return
+        self._forget_followed(execution_id)
+
+    def _recover_followed_executions(self) -> None:
+        """Follow again the runs that were in flight when the scheduler last
+        stopped (#4410).
+
+        The poll task is what publishes a run's completion and applies retry
+        (RETRY-001) and validation (VALIDATE-001). It lives in this process, so
+        a restart during a run used to skip all three for that run.
+
+        Two sources, merged by execution id:
+
+        1. The Redis record `_spawn_poll` writes. It also covers a run that
+           reached its terminal while the scheduler was down: the poll sees the
+           terminal on its first read and handles it.
+        2. Rows still `running` or `queued` that a cron fire or a retry created.
+           This covers a lost Redis record, and the first boot after this change.
+           Other triggers are left out: nothing says this scheduler was following
+           them, and a validation run must not gain a retry.
+
+        A row already `pending_retry` has had its retry decided (the status is
+        written by `schedule_retry` and never reverted) and is owned by
+        `_recover_pending_retries`, so it is dropped here.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("No event loop — in-flight runs are not followed again this boot")
+            return
+
+        followed: Dict[str, dict] = {}
+        try:
+            raw = self.redis.hgetall(_FOLLOWED_EXECUTIONS_KEY) or {}
+            for execution_id, value in dict(raw).items():
+                try:
+                    meta = json.loads(value)
+                except (TypeError, ValueError):
+                    meta = {}
+                followed[str(execution_id)] = meta if isinstance(meta, dict) else {}
+        except Exception as e:
+            logger.warning(f"Could not read the followed-execution record: {e}")
+
+        try:
+            for row in self.db.get_inflight_scheduled_executions() or []:
+                if row.id in followed:
+                    continue
+                schedule = self.db.get_schedule(row.schedule_id)
+                followed[row.id] = {
+                    "agent_name": row.agent_name,
+                    "timeout_seconds": schedule.timeout_seconds if schedule else None,
+                }
+        except Exception as e:
+            logger.warning(f"Could not read in-flight scheduled executions: {e}")
+
+        rearmed = 0
+        for execution_id, meta in followed.items():
+            execution = self.db.get_execution(execution_id)
+            if not execution or execution.status == ExecutionStatus.PENDING_RETRY:
+                self._forget_followed(execution_id)
+                continue
+            timeout_seconds = meta.get("timeout_seconds")
+            if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool):
+                timeout_seconds = None
+            self._spawn_poll(
+                execution_id,
+                timeout_seconds,
+                meta.get("agent_name") or execution.agent_name,
+            )
+            rearmed += 1
+
+        if rearmed:
+            logger.info(f"Following {rearmed} in-flight execution(s) again after restart")
 
     async def _poll_execution_completion(
         self,

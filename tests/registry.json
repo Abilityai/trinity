@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4410_scheduler_restart_follows_inflight.py",
+      "feature": "#4410",
+      "added": "2026-11-27",
+      "categories": [
+        "scheduler",
+        "reliability",
+        "unit"
+      ],
+      "description": "#4410: two SchedulerService objects over one SQLite database and one Redis hash stand for a restart. A run that fails, succeeds or is still going while the scheduler is down gets its retry or validation from the real poll loop after boot; the poll budget and agent survive; initialize() runs the recovery and a failing recovery does not stop boot; a poll that ends forgets the run and a cancelled one keeps it; a Redis fault does not stop a run being followed; pending_retry rows, missing rows and unreadable records are handled; the database fallback takes only running or queued rows a cron fire or a retry created."
+    },
+    {
       "file": "unit/test_ent978_narrowed_read_marker.py",
       "feature": "trinity-enterprise#978",
       "added": "2026-11-24",

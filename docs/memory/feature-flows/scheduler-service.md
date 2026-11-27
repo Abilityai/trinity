@@ -658,6 +658,12 @@ first-autonomous-success milestone (ent#437) counts it (#3363).
 
 On startup, `_recover_pending_retries()` queries executions with `status='pending_retry'` and reschedules their APScheduler jobs.
 
+### In-flight runs across a restart (#4410)
+
+The poll task that follows a run lives in the scheduler process, and it is what publishes the completion event and applies retry and validation. `_spawn_poll` therefore records each run it follows in the Redis hash `scheduler:followed_executions` (execution id → agent name and poll budget). A poll that ends on its own removes its entry; a poll cancelled by shutdown, or lost to a kill, leaves it.
+
+On startup, `_recover_followed_executions()` starts a poll again for every recorded run, including one that reached its terminal while the scheduler was down. It also reads `running` / `queued` rows created by a cron fire or a retry (`get_inflight_scheduled_executions()`), which covers a lost record and the first boot after the change. Rows already `pending_retry` are left to `_recover_pending_retries()`. Runs started by other triggers are not picked up from the database.
+
 ### Statuses
 
 | Status | Meaning |
