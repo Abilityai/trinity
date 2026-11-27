@@ -712,7 +712,7 @@ async def _execute_task_internal_background(
                     TaskExecutionStatus.FAILED,
                     TaskExecutionStatus.CANCELLED,
                 ):
-                    db.update_execution_status(
+                    won = db.update_execution_status(
                         execution_id=request.execution_id,
                         status=TaskExecutionStatus.FAILED,
                         result=ExecutionResult(
@@ -720,6 +720,15 @@ async def _execute_task_internal_background(
                         ),
                     )
                     logger.info(f"Updated execution {request.execution_id} to FAILED")
+                    # #1804: this writer left its activity open. The cancel
+                    # handler's close used to sit in the same function, which is
+                    # all the per-function parity scan could see (#4408).
+                    if won:
+                        await activity_service.close_execution_activity(
+                            request.execution_id,
+                            TaskExecutionStatus.FAILED,
+                            error=error_msg,
+                        )
             except Exception as db_err:
                 logger.error(f"Failed to update execution status: {db_err}")
 

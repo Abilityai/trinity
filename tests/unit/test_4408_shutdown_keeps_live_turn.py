@@ -250,6 +250,33 @@ def test_the_background_wrapper_fails_a_turn_that_never_reached_the_agent():
     mock_activity.close_execution_activity.assert_awaited_once()
 
 
+@pytest.mark.parametrize("won", [True, False])
+def test_an_escaped_exception_fails_the_row_and_closes_the_activity_it_won(won):
+    """#1804, found while moving the cancel handler's close out of this
+    function: the generic failure writer here never closed its activity."""
+    import routers.internal as internal
+
+    mock_db = MagicMock()
+    mock_db.get_execution.return_value = _row(marker="dispatched")
+    mock_db.update_execution_status.return_value = won
+    mock_activity = MagicMock(close_execution_activity=AsyncMock(return_value=True))
+    task_service = MagicMock(execute_task=AsyncMock(side_effect=RuntimeError("boom")))
+    request = MagicMock(execution_id="exec-1", agent_name="test-agent")
+
+    with patch.object(internal, "db", mock_db), \
+            patch.object(internal, "activity_service", mock_activity):
+        _await(internal._execute_task_internal_background(task_service, request))
+
+    assert mock_db.update_execution_status.call_args.kwargs["status"] == TaskExecutionStatus.FAILED
+    if won:
+        mock_activity.close_execution_activity.assert_awaited_once()
+        args, kwargs = mock_activity.close_execution_activity.await_args
+        assert args == ("exec-1", TaskExecutionStatus.FAILED)
+        assert "boom" in kwargs["error"]
+    else:
+        mock_activity.close_execution_activity.assert_not_awaited()
+
+
 def test_both_handlers_use_the_one_writer():
     """Two copies of this rule is how one of them would drift."""
     import ast
