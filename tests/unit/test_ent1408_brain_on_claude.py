@@ -85,7 +85,14 @@ class TestFirstRunNamesTheBrain:
 
 # --- 2. a run with no credential says what to do next ------------------------
 
-def _creds(monkeypatch, *, subscription_id=None, use_platform_key=True, instance_key=False):
+_NO_CONTAINER = object()
+
+
+def _creds(monkeypatch, *, subscription_id=None, use_platform_key=True, instance_key=False,
+           runtime="claude-code"):
+    """``runtime`` is the container's ``trinity.agent-runtime`` label: None for a
+    container without one, ``_NO_CONTAINER`` for no container at all."""
+    import services.docker_service as docker_service
     import services.subscription_service as subs
 
     fake = MagicMock()
@@ -93,6 +100,9 @@ def _creds(monkeypatch, *, subscription_id=None, use_platform_key=True, instance
     fake.get_use_platform_api_key.return_value = use_platform_key
     monkeypatch.setattr(subs, "db", fake)
     monkeypatch.setattr(subs, "instance_has_api_key", lambda: instance_key)
+    labels = {} if runtime is None else {"trinity.agent-runtime": runtime}
+    container = None if runtime is _NO_CONTAINER else MagicMock(labels=labels)
+    monkeypatch.setattr(docker_service, "get_agent_container", lambda name: container)
 
 
 class TestNoCredentialNextStep:
@@ -115,6 +125,37 @@ class TestNoCredentialNextStep:
         from services.subscription_service import no_credential_next_step
 
         _creds(monkeypatch, **kwargs)
+        assert no_credential_next_step(CORNELIUS) is None
+
+    @pytest.mark.parametrize("runtime", ["codex", "gemini-cli", "gemini", "opencode"])
+    def test_an_agent_that_does_not_run_claude_gets_no_hint(self, monkeypatch, runtime):
+        """A Codex agent with its own OpenAI key, on an install with no Anthropic
+        key: its row reads "no subscription, platform key on" (the column
+        defaults to 1), but Claude is not what it runs on, so it is never told
+        to go onto Claude. The sweep's condition 4 (#1187 decision 7)."""
+        from services.subscription_service import no_credential_next_step
+
+        _creds(monkeypatch, runtime=runtime)
+        assert no_credential_next_step("my-codex") is None
+
+    @pytest.mark.parametrize("runtime", [None, _NO_CONTAINER])
+    def test_an_unproven_runtime_gets_no_hint(self, monkeypatch, runtime):
+        """Label-strict, as the sweep is: no label (or no container) is not
+        evidence of Claude, so no sentence that could be wrong."""
+        from services.subscription_service import no_credential_next_step
+
+        _creds(monkeypatch, runtime=runtime)
+        assert no_credential_next_step(CORNELIUS) is None
+
+    def test_docker_unreadable_gets_no_hint(self, monkeypatch):
+        import services.docker_service as docker_service
+        from services.subscription_service import no_credential_next_step
+
+        _creds(monkeypatch)
+
+        def boom(name):
+            raise RuntimeError("docker down")
+        monkeypatch.setattr(docker_service, "get_agent_container", boom)
         assert no_credential_next_step(CORNELIUS) is None
 
     def test_an_unreadable_row_gets_no_hint(self, monkeypatch):
@@ -145,6 +186,13 @@ class TestNoCredentialNextStep:
         assert "test-agent is not on a Claude credential" in result.error
         # The assistant's run card shows the first 300 characters of the error.
         assert "Claude Subscriptions" in result.error[:300]
+
+    def test_a_codex_runs_error_is_left_as_it_is(self, monkeypatch):
+        """The execute_task path end to end for a Codex agent that answered 503
+        on an install with no Anthropic key: its own error stands alone."""
+        result = self._fail_auth(monkeypatch, runtime="codex")
+        assert result.error.startswith("Authentication failure: Not logged in")
+        assert "not on a Claude credential" not in (result.error or "")
 
     def test_a_run_on_a_subscription_keeps_its_error(self, monkeypatch):
         result = self._fail_auth(monkeypatch, subscription_id="sub-1")

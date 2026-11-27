@@ -25,7 +25,7 @@ import { acceptCards, buildOutcome, cardButton, cardLabel, cardNote, CLAUDE_KIND
 import { useAgentsStore } from './agents'
 import { useAuthStore } from './auth'
 import { useFirstRunStore } from './firstRun'
-import { examplesOutOfSight, examplesShownOnRequest, firstResultSeen, inFirstSession, markFirstResultSeen, resultPath } from '../utils/firstSession'
+import { examplesOutOfSight, examplesShownOnRequest, examplesToHide, firstResultSeen, inFirstSession, markFirstResultSeen, resultPath } from '../utils/firstSession'
 
 export const FEATURE_ID = 'assistant'
 
@@ -408,13 +408,20 @@ export const useAssistantStore = defineStore('assistant', {
 
     /**
      * trinity-enterprise#1408: the company brain the install seeded (Cornelius),
-     * when it is in `fleet`; else null. It is part of the product, not an
-     * example: it goes onto the Claude credential the person connects, in the
-     * same card as their own agent. The other examples stay out of sight.
+     * when it is in `fleet` and the Grid shows it; else null. It is part of the
+     * product, not an example: it goes onto the Claude credential the person
+     * connects, in the same card as their own agent. The other examples stay
+     * out of sight. It is never named while the Grid keeps the examples off the
+     * first screen (`examplesToHide`, before the person has an agent of their
+     * own): the person would be told about an agent they cannot find.
      */
     brainIn(fleet = this.fleet) {
-      const brain = useFirstRunStore().brainAgent
-      return brain && (fleet || []).some((a) => a?.name === brain) ? brain : null
+      const firstRun = useFirstRunStore()
+      const brain = firstRun.brainAgent
+      if (!brain || !(fleet || []).some((a) => a?.name === brain)) return null
+      const seeded = firstRun.seededAgents || []
+      const own = (fleet || []).filter((a) => a?.name && !seeded.includes(a.name)).length
+      return examplesToHide(this.status, seeded, own, examplesShownOnRequest()).includes(brain) ? null : brain
     },
 
     /**
@@ -484,10 +491,12 @@ export const useAssistantStore = defineStore('assistant', {
         useAgentsStore().fetchAgents().catch(() => {})
         // ent#1390: a switch is never offered for an agent the person cannot see.
         // ent#1408: the company brain is not an example. In the first session it
-        // goes on the same card as the person's own agent; the page adds it when
-        // the assistant left it out, and the kind check below drops it again when
-        // it is already on that credential.
-        const hidden = this.outOfSight(after, { keepBrain: true })
+        // goes on the same card as the person's own agent: `withBrain` adds it
+        // (whether or not the assistant named it), and the kind check below drops
+        // it again when it is already on that credential. Outside the first
+        // session no example is out of sight unless the Grid hides them, and
+        // then the brain is not named either (`brainIn`).
+        const hidden = this.outOfSight(after)
         const brain = firstSession ? this.brainIn(after) : null
         const accepted = acceptCards(data.cards, after)
         // ent#1399: a switch names the kind the instance saved or holds, never the

@@ -30,6 +30,7 @@ let held
 let off          // per kind, the agents not on it (credential._report: not_using)
 let leads        // the assistant leads this session (status.leads_setup)
 let brain        // what the first-run read names as the brain, or undefined (an older instance)
+let present      // the agents /api/agents lists besides trinity-system
 
 vi.mock('@/api', () => {
   const respond = (method, url, body, config) => {
@@ -66,8 +67,7 @@ vi.mock('@/api', () => {
       return { kind: body.kind, now_using: body.agents, not_switched: [] }
     }
     if (url === '/api/agents') {
-      return [{ name: 'trinity-system', status: 'running', is_system: true }, { name: OWN, status: 'running' },
-        ...EXAMPLES.map((name) => ({ name, status: 'running' }))]
+      return [{ name: 'trinity-system', status: 'running', is_system: true }, ...present.map((name) => ({ name, status: 'running' }))]
     }
     if (url === '/api/agents/autonomy-status') return {}
     if (url === '/api/ops/schedules') return { schedules: [] }
@@ -133,6 +133,7 @@ describe('the seeded Cornelius goes onto the Claude connected in the first sessi
     held = null
     leads = true
     brain = BRAIN
+    present = [OWN, ...EXAMPLES]
     off = { subscription: [OWN, BRAIN, 'acme-scout'], api_key: [OWN, BRAIN, 'acme-scout'] }
     localStorage.clear()
     sessionStorage.clear()
@@ -170,6 +171,44 @@ describe('the seeded Cornelius goes onto the Claude connected in the first sessi
     expect(useCard().text()).toContain(`Use this subscription on these agents: ${OWN}`)
     expect(useCard().text()).not.toContain(BRAIN)
     expect(providedLine()).not.toContain(BRAIN)
+  })
+
+  it('the fleet the page sends the assistant in the first session still leaves Cornelius out', async () => {
+    await connectThenOffer([OWN])
+    const fleets = posted(TURN).map((c) => c.body.context?.fleet).filter(Boolean)
+    expect(fleets.length).toBeGreaterThan(0)
+    for (const fleet of fleets) expect(fleet.map((a) => a.name)).toEqual([OWN])
+  })
+
+  it('a Cornelius deleted after the first-run read is never put on the card', async () => {
+    present = [OWN, 'acme-sage', 'acme-scout']     // brainAgent is still set in the store
+    await connectThenOffer([OWN])
+    expect(useCard().text()).toContain(`Use this subscription on these agents: ${OWN}`)
+    expect(useCard().text()).not.toContain(BRAIN)
+    await button(useCard(), 'Yes, switch them').trigger('click')
+    await flushPromises()
+    expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'subscription', agents: [OWN] }])
+  })
+
+  it('Cornelius named by the assistant too is on the card once', async () => {
+    // Examples shown on request: nothing is out of sight, so the assistant's
+    // own mention of Cornelius reaches the card as it is.
+    localStorage.setItem('trinity-show-example-agents', 'true')
+    await connectThenOffer([OWN, BRAIN])
+    expect(useCard().text()).toContain(`Use this subscription on these agents: ${OWN}, ${BRAIN}`)
+    expect(useCard().text().split(BRAIN).length - 1).toBe(2)     // the list and the note, never twice in the list
+    await button(useCard(), 'Yes, switch them').trigger('click')
+    await flushPromises()
+    expect(posted(USE).map((c) => c.body)).toEqual([{ kind: 'subscription', agents: [OWN, BRAIN] }])
+  })
+
+  it('while the Grid hides the examples (no agent of their own yet), Cornelius is never named', async () => {
+    present = [...EXAMPLES]
+    off = { subscription: [BRAIN, 'acme-scout'], api_key: [BRAIN, 'acme-scout'] }
+    await connectThenOffer([BRAIN])
+    expect(providedLine()).not.toContain(BRAIN)
+    expect(useCard()).toBeUndefined()
+    expect(wrapper.text()).not.toContain(BRAIN)
   })
 
   it('an instance that names no brain keeps Cornelius out of sight, as before (ent#1390)', async () => {
