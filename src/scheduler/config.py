@@ -132,11 +132,6 @@ class SchedulerConfig:
         "LOG_LEVEL", "INFO"
     ))
 
-    # Event publishing (for WebSocket compatibility)
-    publish_events: bool = field(default_factory=lambda: os.getenv(
-        "PUBLISH_EVENTS", "true"
-    ).lower() == "true")
-
     @classmethod
     def from_env(cls) -> "SchedulerConfig":
         """Create config from environment variables."""

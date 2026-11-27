@@ -263,9 +263,9 @@ The scheduler runs as a **dedicated standalone service** (not embedded in backen
 |   |   2. Create execution record                                               ||
 |   |      - INSERT INTO schedule_executions                                     ||
 |   |                                                                            ||
-|   |   3. Publish "started" event to Redis                                      ||
-|   |      - Channel: scheduler:events                                           ||
-|   |      - Backend subscribes and relays to WebSocket clients                  ||
+|   |   3. No event from the scheduler                                           ||
+|   |      - The backend broadcasts the run as agent_activity (chat_start)       ||
+|   |        at its start and at its end                                         ||
 |   |                                                                            ||
 |   |   4. Send task to agent via HTTP                                           ||
 |   |      - POST http://agent-{name}:8000/api/task                              ||
@@ -282,7 +282,7 @@ The scheduler runs as a **dedicated standalone service** (not embedded in backen
 |   |   7. Update schedule run times                                             ||
 |   |      - last_run_at, next_run_at                                            ||
 |   |                                                                            ||
-|   |   8. Publish "completed" event to Redis                                    ||
+|   |   8. The backend closes the run's activity (agent_activity)                ||
 |   |                                                                            ||
 |   |   9. Release lock                                                          ||
 |   |                                                                            ||

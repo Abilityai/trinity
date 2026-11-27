@@ -1,6 +1,26 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4813_scheduler_publishes_nothing.py",
+      "feature": "#4813",
+      "added": "2026-11-27",
+      "categories": [
+        "scheduler",
+        "unit"
+      ],
+      "description": "#4813: the scheduler sends nothing on Redis. Every path that used to publish a schedule_execution_* event (a run that starts, ends inline, fails to dispatch or is finished by the background poll; a tick skipped by an overlap, the agent's pre-check, the readiness gate or a sync freeze on a retry) runs on a real SchedulerService whose Redis client records its calls, and none publishes; an AST scan of src/scheduler/ finds no publish or xadd call and no mention of the old channel; SchedulerConfig has no publish_events field and no compose file sets PUBLISH_EVENTS."
+    },
+    {
+      "file": "../src/frontend/tests/unit/executionsStoreLiveRefresh4813.spec.js",
+      "feature": "#4813",
+      "added": "2026-11-27",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "#4813: the fleet Executions list refreshes on a run's activity. The real store, fed the events the backend sends: a run's chat_start refreshes the open list at its start and at each end state; an agent_collaboration or schedule_end activity, another event type and a closed panel read nothing; socket refreshes are paced (a burst refreshes at once and once more when the 2 s window ends, the next event after a quiet window refreshes at once, a refresh still owed when the panel closes is dropped)."
+    },
+    {
       "file": "unit/test_ent978_narrowed_read_marker.py",
       "feature": "trinity-enterprise#978",
       "added": "2026-11-24",

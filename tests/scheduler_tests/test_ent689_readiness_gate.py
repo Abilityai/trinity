@@ -46,7 +46,6 @@ def svc(db_with_data):
     s = SchedulerService.__new__(SchedulerService)
     s.db = db_with_data
     s.lock_manager = MagicMock()
-    s._publish_event = AsyncMock()
     s._call_backend_execute_task = AsyncMock(return_value={"status": "dispatched"})
     s._get_next_run_time = MagicMock(return_value=None)
     s._run_pre_check = AsyncMock(return_value=None)
@@ -63,12 +62,14 @@ class TestReadinessGate:
 
         svc._run_readiness_check.assert_awaited_once_with("test-agent")
         svc._call_backend_execute_task.assert_not_called()
-        event = svc._publish_event.await_args.args[0]
-        assert event["type"] == "schedule_execution_skipped"
-        assert event["reason"] == HELD
-        row = db_with_data.get_execution(event["execution_id"])
-        assert row.status == ExecutionStatus.SKIPPED
-        assert HELD in (row.error or "")
+        with db_with_data.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT error FROM schedule_executions "
+                "WHERE schedule_id = 'schedule-1' AND status = ?",
+                (ExecutionStatus.SKIPPED,),
+            ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["error"] == HELD
 
     @pytest.mark.asyncio
     async def test_a_held_brief_never_runs_the_agents_pre_check_hook(self, svc, initialized_db):

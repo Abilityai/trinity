@@ -750,9 +750,6 @@ set_public_links_ws_manager(manager)
 # Inject trinity meta-prompt function into system agent router
 set_inject_trinity_meta_prompt(inject_trinity_meta_prompt)
 
-# Subscribe to scheduler events from Redis (dedicated scheduler publishes to scheduler:events channel)
-# Backend relays events to WebSocket manager
-
 # Set up activity service WebSocket manager
 activity_service.set_websocket_manager(manager)
 ```
@@ -1732,7 +1729,7 @@ else:
 **Activity Types Considered**:
 - `chat_start` - Agent processing a chat message
 - `tool_call` - Agent executing a tool
-- `schedule_start` - Agent running scheduled task
+- `schedule_start` - Historical rows only; a scheduled run is a `chat_start` today
 - `agent_collaboration` - Agent communicating with another agent
 
 ### Dashboard Lifecycle Integration

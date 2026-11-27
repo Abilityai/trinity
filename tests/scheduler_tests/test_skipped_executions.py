@@ -205,7 +205,6 @@ class TestSchedulerServiceSkippedEvents:
         """Test that _record_skipped_agent_schedule creates a skipped execution record."""
         from scheduler.service import SchedulerService
         from scheduler.config import SchedulerConfig
-        from unittest.mock import patch, AsyncMock
 
         config = SchedulerConfig(
             database_path=":memory:",
@@ -219,10 +218,8 @@ class TestSchedulerServiceSkippedEvents:
         service = SchedulerService(config)
         service.db = db_with_data
 
-        # Mock asyncio.create_task to prevent actual task creation
-        with patch('asyncio.create_task'):
-            # Record the skip
-            service._record_skipped_agent_schedule("schedule-1")
+        # Record the skip
+        service._record_skipped_agent_schedule("schedule-1")
 
         # Verify execution was created
         with db_with_data.get_connection() as conn:

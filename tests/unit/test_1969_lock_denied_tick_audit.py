@@ -89,12 +89,11 @@ class _Recorder:
     def __init__(self):
         self.calls: list[dict] = []
 
-    def __call__(self, schedule_id, skip_reason=None, event_reason=None):
+    def __call__(self, schedule_id, skip_reason=None):
         self.calls.append(
             {
                 "schedule_id": schedule_id,
                 "skip_reason": skip_reason,
-                "event_reason": event_reason,
             }
         )
 
@@ -138,7 +137,7 @@ def test_recorded_reason_names_the_lock_not_max_instances():
 
     Reusing the default wording would file a lock collision as a
     max_instances refusal, which sends anyone debugging it to the wrong
-    mechanism — the parameters exist (#1808) precisely so callers say which
+    mechanism — the parameter exists (#1808) precisely so callers say which
     one they are.
     """
     service = _service(grant_lock=False)
@@ -151,7 +150,6 @@ def test_recorded_reason_names_the_lock_not_max_instances():
     assert skip_reason, "the skip reason must be explicit, not the default"
     assert "lock" in skip_reason.lower()
     assert "max_instances" not in skip_reason
-    assert recorder.calls[0]["event_reason"]
 
 
 def test_denied_tick_does_not_run_the_schedule():

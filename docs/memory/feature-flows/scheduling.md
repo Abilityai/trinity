@@ -760,34 +760,52 @@ CREATE TABLE schedule_executions (
 
 ## WebSocket Events
 
-Broadcast via dedicated scheduler -> Redis pub/sub -> backend WebSocket relay for real-time UI updates:
+The scheduler sends no events of its own (#4813). It dispatches a run through `POST /api/internal/execute-task`, so the run's live signal is the backend's `agent_activity` for its dispatch activity, on both `/ws` and `/ws/events`. The same holds for a manual or webhook-triggered run; only `details.triggered_by` differs.
 
-### schedule_execution_started
-**Source**: Dedicated scheduler (`src/scheduler/service.py`) via Redis `scheduler:events` channel
-
-```json
-{
-  "type": "schedule_execution_started",
-  "agent": "agent-name",
-  "schedule_id": "abc123",
-  "execution_id": "def456",
-  "schedule_name": "Daily Report"
-}
-```
-
-### schedule_execution_completed
-**Source**: Dedicated scheduler (`src/scheduler/service.py`) via Redis `scheduler:events` channel
+### Run started
+**Source**: `activity_service.track_activity`, called by `TaskExecutionService` (`start_dispatch_activity`)
 
 ```json
 {
-  "type": "schedule_execution_completed",
-  "agent": "agent-name",
-  "schedule_id": "abc123",
-  "execution_id": "def456",
-  "status": "success",          // or "failed"
-  "error": null                 // error message if failed
+  "type": "agent_activity",
+  "agent_name": "agent-name",
+  "activity_id": "9f1c…",
+  "activity_type": "chat_start",
+  "activity_state": "started",
+  "details": {
+    "execution_id": "def456",
+    "triggered_by": "schedule"
+  }
 }
 ```
+
+### Run ended
+**Source**: `activity_service.complete_activity`, closing the same `activity_id`
+
+```json
+{
+  "type": "agent_activity",
+  "agent_name": "agent-name",
+  "activity_id": "9f1c…",
+  "activity_type": "chat_start",
+  "activity_state": "completed",   // or "failed", "cancelled"
+  "error": null                    // error message if failed
+}
+```
+
+The end event does not repeat `execution_id` or `triggered_by`: match it to its start by `activity_id`.
+
+One run normally sends exactly these two events; there are no updates in between. Two cases send more: a run re-delivered from the durable queue opens a new activity for each delivery attempt (one start and one end per attempt), and a late result can correct a provisional `failed` close, which sends a second end event (`completed`) for the same `activity_id`.
+
+### Runs with no live signal
+
+The events above belong to the run's dispatch activity, so a run that never reaches dispatch sends none:
+
+- **Skipped.** A run a gate held back (the previous run still going, a sync freeze, the agent's pre-check, the readiness gate) is a `skipped` row the scheduler writes itself, and nothing broadcasts it. `GET /api/agents/{name}/executions` lists it with `status: "skipped"`; the reason is in `error` on `GET /api/agents/{name}/schedules/{schedule_id}/executions` and `GET /api/agents/{name}/executions/{execution_id}` (MCP: `get_schedule_executions` with a `schedule_id`).
+- **Refused before dispatch.** When the backend's admission gate refuses a run (no free slot, an open circuit breaker, a spent ephemeral budget), the row is written `failed` before any activity opens.
+- **Queued.** A run handed to the durable queue has no event until a worker claims it, and none at all if it is cancelled while still queued.
+
+A listener waiting on a start or end event for one of these waits forever: read the run's row from the executions API instead.
 
 ---
 
@@ -1072,24 +1090,9 @@ JOIN schedule_executions e ON a.related_execution_id = e.id
 WHERE e.agent_name = ?;
 ```
 
-### WebSocket Events
+### Activity Events
 
-Activity events broadcast in addition to existing schedule events:
-```json
-{
-  "type": "agent_activity",
-  "agent_name": "my-agent",
-  "activity_id": "uuid-123",
-  "activity_type": "schedule_start",
-  "activity_state": "started",
-  "action": "Running: Daily Report",
-  "timestamp": "2025-12-02T09:00:00.000Z",
-  "details": {
-    "schedule_name": "Daily Report",
-    "schedule_id": "sched-456"
-  }
-}
-```
+The activity record above is what clients receive live: its opening and its close are the two `agent_activity` events shown under [WebSocket Events](#websocket-events). There is no separate schedule event.
 
 ### Query Examples
 
@@ -1103,14 +1106,15 @@ sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_activities WHERE agent_na
 SELECT a.*, se.response, se.error, se.cost, se.tool_calls
 FROM agent_activities a
 JOIN schedule_executions se ON a.related_execution_id = se.id
-WHERE a.activity_type = 'schedule_start'
+WHERE a.activity_type = 'chat_start'
+  AND a.triggered_by = 'schedule'
   AND a.agent_name = 'my-agent'
 ORDER BY a.started_at DESC
 ```
 
-**Cross-agent schedule timeline**:
+**Cross-agent run timeline** (scheduled runs are the rows whose `triggered_by` is `schedule`):
 ```bash
-curl "http://localhost:8000/api/activities/timeline?activity_types=schedule_start&start_time=2025-12-02T00:00:00"
+curl "http://localhost:8000/api/activities/timeline?activity_types=chat_start&start_time=2025-12-02T00:00:00"
 ```
 
 ### Benefits
@@ -1361,53 +1365,21 @@ if (props.schedules && props.schedules.length > 0) {
 
 ---
 
-## Trinity Connect Integration (Added 2026-02-05)
+## Trinity Connect Integration
 
-Schedule execution events are now broadcast to Trinity Connect clients via the filtered WebSocket endpoint.
-
-### Event Publishing Pattern
-
-> **Note (2026-02-11)**: The dedicated scheduler publishes events to Redis pub/sub channel `scheduler:events`. The backend subscribes and relays to WebSocket managers.
-
-**Location**: `src/scheduler/service.py:387-401`
-
-```python
-async def _publish_event(self, event: dict):
-    """Publish an event to Redis for WebSocket compatibility."""
-    if not config.publish_events:
-        return
-    try:
-        event_json = json.dumps(event)
-        self.redis.publish("scheduler:events", event_json)
-        logger.debug(f"Published event: {event['type']}")
-    except Exception as e:
-        logger.error(f"Failed to publish event: {e}")
-```
-
-### Events Broadcast to Trinity Connect
-
-| Event Type | Trigger | Agent Name Field |
-|------------|---------|------------------|
-| `schedule_execution_started` | Schedule begins execution | `agent` |
-| `schedule_execution_completed` | Schedule completes (success or failure) | `agent` |
-
-### Backend Event Relay
-
-**Location**: `src/backend/main.py` (Redis subscriber)
-
-The backend subscribes to the `scheduler:events` Redis channel and relays events to both WebSocket managers:
-- Main WebSocket Manager: All UI clients
-- Filtered WebSocket Manager: Trinity Connect clients (server-side agent filtering)
+A scheduled run reaches Trinity Connect clients (`/ws/events`) as the backend's `agent_activity` for its dispatch activity: see [WebSocket Events](#websocket-events). The scheduler sends no event of its own, and a skipped run has no live signal (#4813).
 
 ### Use Case: Event-Driven Coordination
 
-External Claude Code instances can listen for schedule completion events to coordinate work:
+External Claude Code instances can listen for an agent's run to finish:
 
 ```bash
-# Wait for my-agent's scheduled task to complete
+# Wait for the next activity of my-agent that completes
 ./trinity-listen.sh my-agent completed
 # On event: Claude Code receives JSON, can fetch results, continue work
 ```
+
+The listener matches on the agent and on `activity_state`, whatever started the run. To pick out a scheduled run, take the start event whose `details.triggered_by` is `"schedule"` and wait for the same `activity_id` to close.
 
 ### Related Documentation
 

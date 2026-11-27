@@ -181,15 +181,15 @@ describe('executions store — a refresh keeps the loaded window (#3451)', () =>
     expect(store.rows).toHaveLength(100)
   })
 
-  it('a schedule event or the Stop refresh during Load more is not dropped, and several coalesce into one', async () => {
+  it('a run event or the Stop refresh during Load more is not dropped, and several coalesce into one', async () => {
     const route = serveExecutions(400)
     store.startPolling(30000)
     await flush()
     const release = route.hold(route.calls.length + 1)
     const more = store.loadMore()
     const reads = route.listReads().length
-    store.handleWebSocketEvent({ type: 'agent_activity', activity_type: 'schedule_end' })
-    store.handleWebSocketEvent({ type: 'agent_activity', activity_type: 'schedule_start' })
+    store.handleWebSocketEvent({ type: 'agent_activity', activity_type: 'chat_start', activity_state: 'completed' })
+    store.handleWebSocketEvent({ type: 'agent_activity', activity_type: 'chat_start', activity_state: 'started' })
     store.refresh() // ExecutionsPanel's refresh after a Stop
     await flush()
     expect(route.listReads().length).toBe(reads)
@@ -200,16 +200,16 @@ describe('executions store — a refresh keeps the loaded window (#3451)', () =>
     expect(store.rows).toHaveLength(100)
   })
 
-  it('a schedule event reads nothing while no panel shows the list, and refreshes it while one does', async () => {
+  it('a run event reads nothing while no panel shows the list, and refreshes it while one does', async () => {
     const route = serveExecutions(400)
-    store.handleWebSocketEvent({ type: 'agent_activity', activity_type: 'schedule_start' })
+    store.handleWebSocketEvent({ type: 'agent_activity', activity_type: 'chat_start', activity_state: 'started' })
     await flush()
     expect(route.listReads()).toHaveLength(0)
 
     store.startPolling(30000)
     await flush()
     const reads = route.listReads().length
-    store.handleWebSocketEvent({ type: 'agent_activity', activity_type: 'schedule_end' })
+    store.handleWebSocketEvent({ type: 'agent_activity', activity_type: 'chat_start', activity_state: 'completed' })
     await flush()
     expect(route.listReads().length).toBe(reads + 1)
   })

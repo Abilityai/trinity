@@ -55,7 +55,7 @@ The server remains the authority: an expression the form accepts but the schedul
 3. Scheduler polls the database every 10 seconds until execution completes.
 4. Execution record is updated with response, cost, and duration.
 
-On an agent piloting pull dispatch, the backend may hand the run to the durable queue instead of running it directly. The scheduler then polls that row to its real outcome, so retries, post-run validation and the completion event still apply to a queued scheduled run.
+On an agent piloting pull dispatch, the backend may hand the run to the durable queue instead of running it directly. The scheduler then polls that row to its real outcome, so retries and post-run validation still apply to a queued scheduled run.
 
 ### Run now and chain depth
 

@@ -74,7 +74,7 @@ def svc(initialized_db, mock_lock_manager):
         database=SchedulerDatabase(database_path=initialized_db),
         lock_manager=mock_lock_manager,
     )
-    s._redis = MagicMock()  # _publish_event must not hit real Redis
+    s._redis = MagicMock()  # never a real Redis client
     return s
 
 

@@ -93,7 +93,6 @@ def _run_dispatch_error(db):
     svc = object.__new__(scheduler_service.SchedulerService)
     svc.db = db
     svc._active_poll_tasks = set()
-    svc._publish_event = AsyncMock()
     svc._call_backend_execute_task = AsyncMock(
         side_effect=Exception("dispatch to /api/internal/execute-task timed out after 30s")
     )
@@ -127,7 +126,6 @@ class TestDispatchErrorPath:
         poll.assert_awaited_once()
         assert poll.await_args.kwargs["execution_id"] == EXEC_ID
         assert poll.await_args.kwargs["timeout_seconds"] == 600
-        svc._publish_event.assert_not_awaited()
 
     def test_claimed_running_row_is_not_failed(self, tmp_path):
         """A row a pull worker claimed is owned by that worker: writing FAILED
@@ -138,11 +136,10 @@ class TestDispatchErrorPath:
 
         assert _status(path)[0] == "running"
         poll.assert_awaited_once()
-        svc._publish_event.assert_not_awaited()
 
     def test_unclaimed_running_row_is_still_failed(self, tmp_path):
         """Push path, unchanged: nothing else owns the row, so it is FAILED
-        with the dispatch error and the completion is published."""
+        with the dispatch error and nothing polls it."""
         path, db = _make_db(tmp_path, status="running")
         svc, poll = _run_dispatch_error(db)
 
@@ -150,19 +147,28 @@ class TestDispatchErrorPath:
         assert status == "failed"
         assert "timed out after 30s" in error
         poll.assert_not_awaited()
-        event = svc._publish_event.await_args.args[0]
-        assert event["status"] == "failed"
-        assert event["execution_id"] == EXEC_ID
 
     def test_finalized_row_is_left_alone(self, tmp_path):
         path, db = _make_db(tmp_path, status="success")
         svc, poll = _run_dispatch_error(db)
 
-        assert _status(path)[0] == "success"
+        assert _status(path) == ("success", None)
         poll.assert_not_awaited()
-        event = svc._publish_event.await_args.args[0]
-        assert event["status"] == "success"
-        assert event["error"] is None
+
+    def test_a_row_that_is_gone_is_neither_written_nor_polled(self, tmp_path):
+        """The row was deleted between the dispatch and its failure: there is
+        nothing to mark FAILED and nothing for a poll to follow."""
+        path, db = _make_db(tmp_path, status="running")
+        conn = sqlite3.connect(path)
+        conn.execute("DELETE FROM schedule_executions WHERE id = ?", (EXEC_ID,))
+        conn.commit()
+        conn.close()
+        db.update_execution_status = MagicMock(wraps=db.update_execution_status)
+
+        svc, poll = _run_dispatch_error(db)
+
+        db.update_execution_status.assert_not_called()
+        poll.assert_not_awaited()
 
 
 class TestFailedWriteIsACas:

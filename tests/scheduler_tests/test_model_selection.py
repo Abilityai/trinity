@@ -60,9 +60,8 @@ class TestSchedulerModelSelection:
         mock_lock.acquire.return_value = True
         mock_lock_manager.try_acquire_schedule_lock = MagicMock(return_value=mock_lock)
 
-        # Mock backend call and event publishing
-        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock):
+        # Mock backend call
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend:
 
             mock_backend.return_value = {
                 "status": "success",
@@ -96,8 +95,7 @@ class TestSchedulerModelSelection:
         mock_lock_manager.try_acquire_schedule_lock = MagicMock(return_value=mock_lock)
 
         # Mock backend call
-        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock):
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend:
 
             mock_backend.return_value = {
                 "status": "success",
@@ -149,8 +147,7 @@ class TestSchedulerModelSelection:
         mock_lock_manager.try_acquire_schedule_lock = MagicMock(return_value=mock_lock)
 
         # Mock backend call
-        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock):
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend:
 
             mock_backend.return_value = {
                 "status": "success",
@@ -212,8 +209,7 @@ class TestSchedulerModelSelection:
         mock_lock_manager.try_acquire_schedule_lock = MagicMock(return_value=mock_lock)
 
         # Mock backend call
-        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend, \
-             patch.object(service, '_publish_event', new_callable=AsyncMock):
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as mock_backend:
 
             mock_backend.return_value = {
                 "status": "success",

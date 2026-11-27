@@ -32,6 +32,7 @@ import { useAuthStore } from '../../src/stores/auth'
 import { useLoopsStore } from '../../src/stores/loops'
 import { useSkillsStore } from '../../src/stores/skills'
 import { useNetworkStore } from '../../src/stores/network'
+import { useExecutionsStore } from '../../src/stores/executions'
 
 class FakeSocket {
   static last = null
@@ -45,7 +46,7 @@ const OPERATOR_EVENTS = [
   { event: 'agent_notification', notification_id: 'n1', agent_name: 'scout', title: 'Heads up' },
   { type: 'operator_queue_new', data: { id: 'q1', agent_name: 'scout' } },
   { type: 'notifications_cleared' },
-  { type: 'agent_activity', activity_type: 'schedule_start', agent_name: 'scout' },
+  { type: 'agent_activity', activity_type: 'chat_start', activity_state: 'started', agent_name: 'scout' },
 ]
 const OPERATOR_READS = ['/api/agents', '/api/notifications', '/api/operator-queue', '/api/executions']
 
@@ -107,6 +108,40 @@ describe('/ws events and the Workspace-only rung', () => {
     socket.disconnect()
     return { loops: loops.mock.calls.length, skills: skills.mock.calls.length }
   }
+
+  // #4813: the Executions list follows a run's activity only if this socket
+  // hands the event to its store. With the Executions tab open (the store's
+  // poll running), a run's start refetches the list and its stats for an
+  // operator, and nothing for a member.
+  async function executionsReadsAs(role) {
+    const auth = useAuthStore()
+    auth.isAuthenticated = true
+    auth.token = 'jwt'
+    auth.user = { email: 'x@example.com', role }
+    const executions = useExecutionsStore()
+    executions.startPolling(30000)
+    const socket = useWebSocket()
+    await socket.connect()
+    await new Promise((r) => setTimeout(r, 0))
+    http.get.mockClear()
+    FakeSocket.last.onmessage({ data: JSON.stringify({
+      type: 'agent_activity', activity_type: 'chat_start', activity_state: 'started', agent_name: 'scout',
+      details: { execution_id: 'exec-1', triggered_by: 'schedule' },
+    }) })
+    await new Promise((r) => setTimeout(r, 0))
+    const reads = http.get.mock.calls.map(([url]) => String(url)).filter((u) => u.startsWith('/api/executions'))
+    executions.stopPolling()
+    socket.disconnect()
+    return reads.sort()
+  }
+
+  it('an operator’s run activity refetches the open Executions list', async () => {
+    expect(await executionsReadsAs('operator')).toEqual(['/api/executions', '/api/executions/stats'])
+  })
+
+  it('a member’s run activity does not', async () => {
+    expect(await executionsReadsAs('user')).toEqual([])
+  })
 
   it('a member’s loop and skills events reach no operator store', async () => {
     expect(await storeHitsAs('user')).toEqual({ loops: 0, skills: 0 })

@@ -1841,8 +1841,8 @@ async def websocket_events_endpoint(
         wscat -c "ws://localhost:8000/ws/events?token=trinity_mcp_xxx"
 
     Events received:
-        - agent_activity (chat_start, schedule_start, tool_call completions)
-        - schedule_execution_completed
+        - agent_activity (a run's chat_start activity, at its start and at
+          its end; a scheduled run's details.triggered_by is "schedule")
         - agent_started / agent_stopped
         - agent_collaboration
 

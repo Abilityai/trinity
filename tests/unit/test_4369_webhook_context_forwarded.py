@@ -196,7 +196,6 @@ def test_service_dispatches_the_framed_message(tmp_path):
         dispatched.append(message)
 
     service._dispatch_and_record_outcome = _capture
-    service._publish_event = lambda *a, **k: asyncio.sleep(0)
 
     asyncio.run(
         service._execute_schedule_with_lock(

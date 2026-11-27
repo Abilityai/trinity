@@ -1,0 +1,142 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-27",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/4813-remove-scheduler-events",
+  "merge_base": "ea04de240",
+  "issue": "abilityai/trinity#4813",
+  "counts_as_full_run": false,
+  "docker_available": false,
+  "docker_note": "Diff run. No image or dependency changed; four compose files lose one environment line each. The stack was not booted on the audit host.",
+  "phases_run": [
+    0,
+    1,
+    2,
+    5,
+    7,
+    9,
+    12,
+    13,
+    14
+  ],
+  "phases_skipped_no_overlap": [
+    3,
+    4,
+    6,
+    8,
+    10,
+    11
+  ],
+  "stack_cve_quicklist": [
+    {
+      "component": "Starlette (BadHost)",
+      "verdict": "not reachable in the diff",
+      "why": "No added line reads a request path; the scope fences read scope['path'] (#3102)."
+    },
+    {
+      "component": "Vite",
+      "verdict": "not in the diff",
+      "why": "Lockfile untouched (8.3.5 resolved)."
+    },
+    {
+      "component": "Vitest / @vitest/mocker",
+      "verdict": "not in the diff",
+      "why": "Lockfile untouched (5.0.5 resolved)."
+    },
+    {
+      "component": "axios",
+      "verdict": "not in the diff",
+      "why": "Both lockfiles untouched."
+    },
+    {
+      "component": "Redis image",
+      "verdict": "coverage gap",
+      "why": "Floating tag, unchanged by the diff; the resolved digest needs a running stack."
+    },
+    {
+      "component": "Claude Code in the base image",
+      "verdict": "not in the diff",
+      "why": "Base image untouched (pin 2.1.322)."
+    },
+    {
+      "component": "runc / Docker host",
+      "verdict": "not in the diff",
+      "why": "Operator host check; deploy docs untouched."
+    },
+    {
+      "component": "Node CLIs in the base image",
+      "verdict": "not in the diff",
+      "why": "Base image untouched; both CLIs are version-pinned."
+    }
+  ],
+  "attack_surface": {
+    "new_public_endpoints": 0,
+    "new_authenticated_endpoints": 0,
+    "changed_authenticated_endpoints": 0,
+    "removed": [
+      "the scheduler's Redis pub/sub publish (three event types, nine call sites)",
+      "the PUBLISH_EVENTS setting"
+    ],
+    "changed": [
+      "the Executions list store refetches on a run's chat_start activity, through the existing GET /api/executions"
+    ]
+  },
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "No Docker pass: the compose files lose one environment line each and were not booted on the audit host; CI's stack-boot job is the first real render.",
+    "231 unit ids are red on the audit host: 227 fail identically on the merge-base (same 25 files, same flags), 4 signal-timing tests failed only under the parallel full run and pass alone on the branch. The guards that import the assembled app are among the 227, so CI is the first real import of main.py with the docstring change.",
+    "The optional private module is not mounted in this worktree; a text search of it for the removed names found no reference.",
+    "No dependency scanner ran, because no dependency changed.",
+    "No independent verifier ran, because there is no finding to verify."
+  ],
+  "supply_chain_summary": {
+    "scanner": "none (no dependency, lockfile, image or workflow change in the diff)"
+  },
+  "checks": {
+    "secret_shapes_in_added_lines": 0,
+    "hidden_characters_in_added_lines": 0,
+    "enterprise_docs_guard_hits": 0,
+    "unit_tier": {
+      "flags": "-m 'not slow' -n 8 --dist loadfile -p randomly --randomly-seed=12345",
+      "passed": 43931,
+      "failed": 130,
+      "errors": 101,
+      "red_ids": 231,
+      "red_ids_identical_on_merge_base": 227,
+      "red_ids_load_dependent": 4
+    },
+    "scheduler_tests_folder": {
+      "passed": 232,
+      "note": "runs in no CI workflow"
+    },
+    "frontend_unit": {
+      "passed": 8909,
+      "failed": 1,
+      "files_failed_to_load": 3,
+      "note": "the four are missing or newer host packages, in files the branch does not touch"
+    },
+    "regression_tests": [
+      "tests/unit/test_4813_scheduler_publishes_nothing.py",
+      "src/frontend/tests/unit/executionsStoreLiveRefresh4813.spec.js"
+    ]
+  },
+  "filter_stats": {
+    "candidates": 1,
+    "reported": 0,
+    "dropped": 1,
+    "dropped_reasons": [
+      "socket-driven refetch rate (denial of service is excluded; paced to one refresh per 2 s per open tab after the pre-landing review, no model cost)"
+    ]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "open": 0
+  },
+  "verifier": "none needed: no finding. Two independent reviewers read the plan before implementation.",
+  "trend": "Diff run: no trend."
+}

@@ -162,7 +162,7 @@ scheduler cron fire, schedule.deliver_to_workspace_email set
           stamp? → ready fires / else held
           no stamp → container running? template.yaml (≤3 s) has x-role? → held : fires
           any ambiguity → fires (logged)
-      fire:false → _record_gate_skip: skipped row + reason, run times advanced, skipped event
+      fire:false → _record_gate_skip: skipped row + reason, run times advanced (no live event, #4813)
   → _apply_pre_check_gate (#454)            → skipped? stop
   → dispatch
 ```

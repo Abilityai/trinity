@@ -269,9 +269,11 @@ Generated: {timestamp}
 
 ### WebSocket Events
 
-Subscribe to real-time execution updates:
-- `schedule_execution_started`
-- `schedule_execution_completed`
+Subscribe to real-time execution updates. A scheduled run arrives as `agent_activity`:
+- started: `activity_type: "chat_start"`, `activity_state: "started"`, `details.triggered_by: "schedule"`
+- ended: the same `activity_id` with `activity_state` `completed`, `failed` or `cancelled`
+
+A skipped run sends no event. It appears in the schedule's execution history with status `skipped`.
 
 ---
 

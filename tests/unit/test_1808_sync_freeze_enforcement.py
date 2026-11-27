@@ -351,8 +351,8 @@ def _gate_service(reason):
 
     svc = scheduler_service.SchedulerService(database=_GateDB(reason), lock_manager=object())
     calls = []
-    svc._record_skipped_agent_schedule = lambda sid, skip_reason=None, event_reason=None: \
-        calls.append({"skip_reason": skip_reason, "event_reason": event_reason})
+    svc._record_skipped_agent_schedule = lambda sid, skip_reason=None: \
+        calls.append({"skip_reason": skip_reason})
     svc._advance_next_run_only = lambda schedule: None
 
     async def _hold(schedule, triggered_by):
@@ -367,7 +367,6 @@ def test_the_skipped_row_carries_the_freeze_reason():
     asyncio.run(svc._execute_schedule_with_lock("s1", triggered_by="schedule"))
     assert calls == [{
         "skip_reason": "Git sync frozen: diverged 0 behind / 7 ahead for 26h",
-        "event_reason": "Git sync frozen (schedules paused)",
     }]
 
 

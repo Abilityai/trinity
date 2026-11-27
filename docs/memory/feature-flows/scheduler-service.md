@@ -15,7 +15,6 @@ The Dedicated Scheduler Service is a standalone Python service that executes sch
 - **Single-instance design** - Only one scheduler runs, preventing duplicates
 - **Distributed locking** - Redis locks ensure exactly-once execution
 - **Independent deployment** - Can be scaled/monitored separately from API workers
-- **Event publishing** - Redis pub/sub for WebSocket compatibility
 - **Health endpoints** - Kubernetes-ready health checks
 
 ---
@@ -57,7 +56,7 @@ As a **platform administrator**, I want **scheduled tasks to execute exactly onc
 3. APScheduler triggers jobs at cron times
 4. Scheduler acquires Redis lock before execution
 5. For **agent schedules**: Scheduler calls backend's `POST /api/internal/execute-task` which routes through `TaskExecutionService` for slot management, activity tracking, agent HTTP call, and credential sanitization
-6. Scheduler publishes events to Redis for WebSocket relay
+6. The scheduler sends no event of its own; the backend broadcasts the run's start and end as `agent_activity` (see [Flow 4](#flow-4-live-signals))
 
 ---
 
@@ -111,7 +110,6 @@ As a **platform administrator**, I want **scheduled tasks to execute exactly onc
 | `BACKEND_URL` | `http://backend:8000` | Backend API URL for task dispatch and reminders |
 | `INTERNAL_API_SECRET` | _(empty)_ | Shared secret for backend internal API auth (C-003) |
 | `LOG_LEVEL` | `INFO` | Logging verbosity |
-| `PUBLISH_EVENTS` | `true` | Enable Redis event publishing |
 
 ---
 
@@ -259,9 +257,6 @@ async def _execute_schedule_with_lock(self, schedule_id: str, triggered_by: str 
     # Create execution record
     execution = self.db.create_execution(...)
 
-    # Broadcast execution started
-    await self._publish_event({...})
-
     try:
         # Delegate to backend's TaskExecutionService
         result = await self._call_backend_execute_task(...)
@@ -384,38 +379,25 @@ def _renewal_loop(self):
 
 ---
 
-## Flow 4: Event Publishing
+## Flow 4: Live Signals
 
-**Purpose**: Broadcast execution events to Redis for backend WebSocket relay
+**The scheduler sends no events** (#4813). It used to publish `schedule_execution_*` events on a Redis pub/sub channel that had no subscriber; the publisher and its `PUBLISH_EVENTS` setting are removed.
 
 ```
-service.py:1166                 Redis                           Backend
-_publish_event()    -->         PUBLISH scheduler:events  -->   (subscriber)
-|                               {type, agent, ...}              |
-v                                                               v
-JSON serialize                                                  Relay to WebSocket
-redis.publish()                                                 clients
+service.py                          Backend                          Clients
+_call_backend_execute_task() -->    TaskExecutionService      -->    /ws, /ws/events
+POST /api/internal/execute-task     activity_service                 agent_activity
+                                    (dispatch activity)              (chat_start)
 ```
 
-**Event Types**:
+| What happens | Live signal | Where to read it |
+|--------------|-------------|------------------|
+| A run starts | `agent_activity`: `activity_type: "chat_start"`, `activity_state: "started"`, `details.triggered_by`, `details.execution_id` | the event |
+| A run ends | `agent_activity` for the same `activity_id`: `activity_state` `completed` / `failed` / `cancelled` | the event |
+| A run is skipped | none | `GET /api/agents/{name}/executions` lists it with `status: "skipped"`; the reason is in `error` on `GET /api/agents/{name}/schedules/{schedule_id}/executions` and `GET /api/agents/{name}/executions/{execution_id}` (MCP: `get_schedule_executions` with a `schedule_id`) |
+| A run never reaches dispatch (refused at admission, or cancelled while still queued) | none; a queued run's start event is sent when a worker claims it | the executions API, as above |
 
-| Event | Fields | Description |
-|-------|--------|-------------|
-| `schedule_execution_started` | agent, schedule_id, execution_id, schedule_name, triggered_by | Agent execution begins |
-| `schedule_execution_completed` | agent, schedule_id, execution_id, status, error? | Agent execution ends |
-| `schedule_execution_skipped` | agent, schedule_id, execution_id, schedule_name, reason | Agent execution skipped (max_instances) |
-
-**Publishing Code** (`service.py:1166-1180`):
-```python
-async def _publish_event(self, event: dict):
-    if not config.publish_events:
-        return
-    try:
-        event_json = json.dumps(event)
-        self.redis.publish("scheduler:events", event_json)
-    except Exception as e:
-        logger.error(f"Failed to publish event: {e}")
-```
+Payloads: [scheduling.md](scheduling.md#websocket-events). A new live signal from the scheduler is a call to an internal backend route (the pattern `POST /api/internal/schedule-retry-dropped` follows), and the backend broadcasts it through the event bus (Invariant #10); it never goes from the scheduler straight to Redis: `tests/unit/test_4813_scheduler_publishes_nothing.py` holds that.
 
 ---
 
@@ -560,10 +542,6 @@ max_instances=1 reached         "schedule_" -> agent            duration_ms=0
                                 v
                                 _record_skipped_agent_schedule()
                                 service.py:512
-                                |
-                                v
-                                Publish event
-                                "schedule_execution_skipped"
 ```
 
 **Handler** (`service.py:488-511`):
@@ -577,17 +555,7 @@ def _on_job_max_instances(self, event: JobExecutionEvent):
         logger.warning(f"Unknown job_id format for skipped job: {job_id}")
 ```
 
-**WebSocket Event**:
-```json
-{
-  "type": "schedule_execution_skipped",
-  "agent": "my-agent",
-  "schedule_id": "abc123",
-  "execution_id": "exec-456",
-  "schedule_name": "Daily Report",
-  "reason": "Previous execution still running"
-}
-```
+**No live event** (#4813): the `skipped` row is the record. Its `error` column holds the reason, returned by `GET /api/agents/{name}/schedules/{schedule_id}/executions` and `GET /api/agents/{name}/executions/{execution_id}`.
 
 ---
 
@@ -758,7 +726,6 @@ backend copy, like `failure_classifier.py`):
 | `_execute_schedule_with_lock()` | 615-758 | Agent execution with lock held |
 | `_call_backend_execute_task()` | 760-833 | HTTP dispatch to backend + async handoff |
 | `_poll_execution_completion()` | 835-887 | Poll DB for execution completion (SCHED-ASYNC-001) |
-| `_publish_event()` | 1166-1180 | Publish event to Redis pub/sub |
 | `get_status()` | 1186-1212 | Get scheduler status |
 | `is_healthy()` | 1214-1220 | Health check |
 
@@ -903,10 +870,10 @@ docker compose -f docker/scheduler/docker-compose.test.yml up
 | Autonomy disabled | Log info, **advance next_run_at only** (no execution row, no last_run_at — #1472), return (cron only, not manual) | Skipped; projection stays fresh (no "Next: Nd ago") |
 | **_add_job fails (bad cron/timezone)** | #1472: classify permanent (`UnknownTimeZoneError`/`ValueError`/`zoneinfo.ZoneInfoNotFoundError` → snapshot + log once, bounded) vs transient (retry next sync). API pre-validates (`services/schedule_validation.py`) so permanent failures rarely reach here. **#1823**: `ZoneInfoNotFoundError` — raised by APScheduler's `astimezone()` for a zone this runtime's IANA database lacks — is a `KeyError` subclass, so it used to fall through to the transient arm and retry every 60s forever. Added **by name**, never as a bare `KeyError`: this arm suppresses retries, so widening it would permanently park recoverable failures | Registered on retry, or bounded + surfaced (not a silent orphan) |
 | Lock not acquired | Log info, return | Execution skipped (another running) |
-| **Max instances reached** | Create skipped execution, publish event | **Recorded with status='skipped'** (Issue #46) |
-| Agent not reachable | Update status=failed (with overwrite guard), publish event | Error recorded |
-| Agent timeout | Update status=failed (with overwrite guard), publish event | Error recorded |
-| Auth failure detected | Log auth-specific error, publish event | Error recorded with auth context |
+| **Max instances reached** | Create skipped execution | **Recorded with status='skipped'** (Issue #46) |
+| Agent not reachable | Update status=failed (with overwrite guard) | Error recorded |
+| Agent timeout | Update status=failed (with overwrite guard) | Error recorded |
+| Auth failure detected | Log auth-specific error | Error recorded with auth context |
 | **TCP disconnect (SCHED-ASYNC-001)** | **Check DB before overwriting -- if backend already finalized, preserve status** | **No false failures** |
 | **Dispatch timeout (#1022)** | Re-raised as a named non-blank error *before* the generic handler; outcome UNKNOWN (task may already be running → orphan) | Descriptive `error` persisted (never blank); cleanup service recovers any orphan |
 | **Blank-stringifying exception (e.g. httpx timeout)** | `_describe_exception()` falls back to the exception type name | `error` never persisted blank (#1022) |
@@ -949,18 +916,9 @@ async def shutdown(self):
 
 ---
 
-## Trinity Connect Integration (Added 2026-02-05)
+## Trinity Connect Integration
 
-The dedicated scheduler service publishes events to Redis, which the backend relays to both the main WebSocket and the filtered Trinity Connect WebSocket.
-
-### Events Broadcast to Trinity Connect
-
-Schedule execution events are forwarded to external listeners:
-
-| Event Type | Agent Name Field | Description |
-|------------|------------------|-------------|
-| `schedule_execution_started` | `agent` | Execution begins |
-| `schedule_execution_completed` | `agent` | Execution ends (success or failure) |
+The scheduler sends nothing to Trinity Connect itself (#4813). An external listener on `/ws/events` sees a scheduled run as the backend's `agent_activity` for the run's dispatch activity: see [Flow 4](#flow-4-live-signals). A skipped run has no live signal.
 
 ### Related Documentation
 
@@ -1001,6 +959,7 @@ The embedded scheduler (`src/backend/services/scheduler_service.py`) has been co
 
 | Date | Change |
 |------|--------|
+| 2026-11-27 | **Redis event publisher removed (#4813)**: the scheduler published `schedule_execution_*` events on a pub/sub channel that never had a subscriber, so they reached neither `/ws` nor `/ws/events`. `_publish_event`, its nine call sites and `PUBLISH_EVENTS` are gone. A run's live signal is the backend's `agent_activity` for its dispatch activity; a skipped run has none and is read from the executions API (Flow 4). |
 | 2026-10-09 | **Process-schedule remnant removed (#3432)**: the scheduler no longer creates, reads or executes `process_schedules` / `process_schedule_executions` (nothing could create a row, and the execute route went with #430). Removed Flow 3 (renumbered 4–10 → 3–9), the process sync, the process events, the `process_schedule_` max-instances branch (such an id now falls to the unknown-prefix warning) and the process DB operations. The two tables are left in place on existing installs; no migration. |
 | 2026-08-09 | **Legacy IANA timezone aliases (#1823)**: `python:3.13-slim` carries no codename pin, so both images silently migrated bookworm→trixie, where the IANA *backward-compatibility links* were split out of `tzdata` into `tzdata-legacy`. A schedule stored under any legacy alias (`Europe/Kiev`) then could not resolve. Three layers: (1) both images install `tzdata-legacy` + declare the `tzdata` wheel — `zoneinfo` reads the system db first and falls back to the wheel only for missing keys, so the wheel is the portability floor against the next silent base-tag move; guarded by `tests/unit/test_1823_tz_capability_parity.py`. (2) `validate_timezone` gains a `zoneinfo` probe (the resolver APScheduler's `astimezone()` actually binds; pytz bundles its own complete db and accepts every alias everywhere), and `validate_cron_expression` **delegates** to it — the create route calls only the latter and the update route only the former, so two probes meant two contracts. (3) `_add_job` files `ZoneInfoNotFoundError` in the **permanent** arm; as a `KeyError` subclass it previously fell through to transient and retry-stormed every 60s with a frozen `next_run_at` — the exact symptom #1472 existed to remove, and what canary **E-06** fires on. Also: a cron-only `PUT` now validates against the row's own timezone instead of a hardcoded `"UTC"` (deliberate 200→400 for an already-non-firing row), and the scheduler's `APScheduler` floor is pinned to the backend's `==3.11.0` so validator and executor cannot resolve different versions of the parser the contract is stated against. |
 | 2026-07-06 | **UTC `Z`-suffix serialization (#1474)**: scheduler-written execution/schedule timestamps were naive (no `Z`), so JS `new Date(...)` parsed them as local time and schedule-triggered rows rendered shifted by the viewer's UTC offset. New vendored `src/scheduler/utils.py` (byte-parity mirror of backend `utils/helpers.py`): `utc_now_iso`/`to_utc_iso` writes emit `Z`; `parse_scheduler_ts` reads tolerantly and returns naive-UTC (write+read atomic — a `Z` write + a tz-aware read would break `update_execution_status`'s `aware − naive` duration math). Backend read boundaries (`get_agent_executions_summary`/`get_fleet_executions`/`get_agent_schedules_summary`; `db/activities.py` mappers) normalize historical naive rows; the 5 execution panels parse via `parseUTC`. `next_run_at` stays mixed-format across writers by design (Python-compared only). See the Timestamp serialization contract section + Architectural Invariant #16. |

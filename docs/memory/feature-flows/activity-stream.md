@@ -100,8 +100,8 @@ class ActivityType(str, Enum):
     TOOL_CALL = "tool_call"            # Tool execution (child of chat_start)
 
     # Schedule activities
-    SCHEDULE_START = "schedule_start"  # Schedule execution started
-    SCHEDULE_END = "schedule_end"      # Schedule completed (not yet used)
+    SCHEDULE_START = "schedule_start"  # Historical rows only: a scheduled run writes chat_start
+    SCHEDULE_END = "schedule_end"      # System event of a subscription auto-switch
 
     # Collaboration activities
     AGENT_COLLABORATION = "agent_collaboration"  # Agent-to-agent communication
@@ -526,17 +526,17 @@ One endpoint serves it (the duplicate `GET /api/agents/activities/timeline` in `
   "count": 42,
   "start_time": "2025-12-02T10:00:00",
   "end_time": "2025-12-02T12:00:00",
-  "activity_types": ["chat_start", "schedule_start"],
+  "activity_types": ["chat_start"],
   "activities": [
     {
       "id": "uuid-789",
       "agent_name": "agent-1",
-      "activity_type": "schedule_start",
+      "activity_type": "chat_start",
       "activity_state": "completed",
       "started_at": "2025-12-02T11:45:00.000Z",
       "duration_ms": 12340,
       "details": {
-        "schedule_name": "Daily Report",
+        "triggered_by": "schedule",
         "cost_usd": 0.015
       }
     }
@@ -733,7 +733,8 @@ ORDER BY a.created_at DESC
 SELECT a.*, se.response, se.error, se.cost, se.tool_calls
 FROM agent_activities a
 JOIN schedule_executions se ON a.related_execution_id = se.id
-WHERE a.activity_type = 'schedule_start'
+WHERE a.activity_type = 'chat_start'
+  AND a.triggered_by = 'schedule'
   AND a.agent_name = 'my-agent'
 ORDER BY a.started_at DESC
 ```
@@ -976,7 +977,7 @@ sqlite3 ~/trinity-data/trinity.db "DELETE FROM agent_activities WHERE agent_name
 
 - **Upstream**:
   - Agent Chat (`agent-chat.md`) - Creates chat_start and tool_call activities
-  - Scheduling (`scheduling.md`) - Creates schedule_start activities
+  - Scheduling (`scheduling.md`) - Its runs write `chat_start` activities with `triggered_by = 'schedule'`
 
 - **Downstream**:
   - Activity Monitoring (`activity-monitoring.md`) - Uses in-memory tracking (parallel system)
@@ -1038,8 +1039,9 @@ await filtered_manager.broadcast_filtered(event)
 | `agent_activity` | activity_service.py | `agent_name` |
 | `agent_started` | routers/agents.py | `name` |
 | `agent_stopped` | routers/agents.py | `name` |
-| `schedule_execution_completed` | dedicated scheduler (src/scheduler/) | `agent` |
 | `agent_collaboration` | activity_service.py | `agent_name` |
+
+A scheduled run is an `agent_activity` (`activity_type: "chat_start"`, `details.triggered_by: "schedule"`): the scheduler sends no event of its own (#4813).
 
 ### Initialization
 

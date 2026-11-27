@@ -565,7 +565,6 @@ class TestTheSchedulerSaysWhenARetryIsDropped:
         svc.db.create_execution.return_value = SimpleNamespace(id="retry-1")
         svc.db.create_skipped_execution.return_value = SimpleNamespace(id="skipped-1")
         svc._call_backend_execute_task = AsyncMock(return_value={"status": "dispatched"})
-        svc._publish_event = AsyncMock()
         svc._report_retry_dropped = AsyncMock()
         asyncio.run(svc._execute_retry(
             original_execution_id="orig", failed_execution_id="failed", schedule_id="s1",
