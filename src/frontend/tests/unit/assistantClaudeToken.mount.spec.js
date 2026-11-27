@@ -260,6 +260,7 @@ describe('connecting Claude with a token made in a terminal', () => {
     })
 
     it('yes switches exactly the agents on the card and tells the assistant which now use it', async () => {
+      credentialCurrent = 'subscription'      // ent#1399: a switch names only a kind the instance holds
       await openAndAsk(SWITCH)
       const card = cardFor('Use this subscription on these agents: scout')
       expect(card).toBeTruthy()
@@ -271,6 +272,7 @@ describe('connecting Claude with a token made in a terminal', () => {
     })
 
     it('no changes nothing and says so', async () => {
+      credentialCurrent = 'subscription'      // ent#1399: a switch names only a kind the instance holds
       await openAndAsk(SWITCH)
       await button(cardFor('Use this subscription on these agents: scout'), 'Not now').trigger('click')
       await flushPromises()

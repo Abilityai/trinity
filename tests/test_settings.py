@@ -1010,7 +1010,24 @@ class TestOpsSettingsReset:
         assert "message" in data or "reset" in data
 
     def test_reset_restores_default_values(self, api_client: TrinityApiClient):
-        """After reset, settings are at default values."""
+        """After reset, every ops setting is at its default — except the
+        retention windows, which a reset leaves exactly as they were (#1638)."""
+        # #4620: the retention windows, as the product itself lists them. Reset
+        # skips them on purpose: a fresh install seeds some of them with the
+        # community floor, which is not the code default, and "reset to
+        # defaults" must never change how much of the operator's data is kept.
+        retention_response = api_client.get("/api/settings/retention")
+        assert_status(retention_response, 200)
+        # key -> where its value comes from (a stored row, or the code default)
+        retention_sources = retention_response.json()["sources"]
+        retention_keys = set(retention_sources)
+
+        before_response = api_client.get("/api/settings/ops/config")
+        assert_status(before_response, 200)
+        before = before_response.json()["settings"]
+        assert retention_keys & set(before), \
+            "no retention window among the ops settings — the half of this test that protects them would check nothing"
+
         # First modify a setting (API expects string values)
         api_client.put(
             "/api/settings/ops/config",
@@ -1028,9 +1045,20 @@ class TestOpsSettingsReset:
 
         settings = data.get("settings", {})
         for key, setting in settings.items():
-            if isinstance(setting, dict) and "is_default" in setting:
+            if key in retention_keys:
+                assert setting["value"] == before[key]["value"], \
+                    f"Reset must leave the retention window {key} as it was (#1638)"
+            elif isinstance(setting, dict) and "is_default" in setting:
                 assert setting["is_default"] is True, \
                     f"Setting {key} should be at default after reset"
+
+        # A stored window whose value happens to equal the code default reads the
+        # same before and after its row is deleted, so the values above cannot
+        # see that; where each window comes from can.
+        retention_after = api_client.get("/api/settings/retention")
+        assert_status(retention_after, 200)
+        assert retention_after.json()["sources"] == retention_sources, \
+            "Reset must not remove a stored retention window (#1638)"
 
 
 class TestMcpUrlSettings:

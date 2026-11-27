@@ -300,7 +300,7 @@ def write_baseline(paths: Iterable[str]) -> None:
         "#   - they are currently red-and-hidden: broken vs a product change while",
         "#     uncollected, so moving them would redden the per-PR gate. Fixing the",
         "#     drift and relocating each is a separate follow-up (see the batch",
-        "#     commit messages: cb_probe #1804, github_pat AgentGitConfig,",
+        "#     commit messages: github_pat AgentGitConfig,",
         "#     ip_rate_limit assert_owns #1310, audit_log_unit).",
         "# Ratcheted — never grow this list; a NEW self-contained root test must go",
         "# to tests/unit/ instead. Regenerate (only when intentionally accepting",

@@ -345,6 +345,40 @@ export function validUseClaude(raw, fleet) {
   return { action: 'use-claude', kind: raw.kind, agents: [...new Set(raw.agents)] }
 }
 
+/**
+ * trinity-enterprise#1399: the kind a `use-claude` card switches agents onto is
+ * the instance's, never the assistant's guess. The assistant reads the name the
+ * card was asked under (ANTHROPIC_API_KEY), and on the walk of 2026-11-25 it
+ * offered "this API key" after a subscription was saved; the confirm was refused.
+ * `saved`: the kind this conversation's Claude card saved last; it decides the
+ * kind only. `held`: what the instance holds now ("subscription", "api_key",
+ * "subscription_and_api_key", null), or undefined when it could not be read.
+ * `off`: per kind, the agents not on it (`not_using` ∪ `moving`, which is what
+ * the switch accepts), read from the instance when the card is built — the
+ * save's own lists only when that read failed — or undefined when no list could
+ * be read. Answers the card with the kind and only the agents its confirm would
+ * be accepted for, or null when none is left: the instance holds no kind (or no
+ * longer holds the saved one), or every agent on the card is already on it.
+ */
+export function claudeSwitchFor(card, { saved, held, off } = {}) {
+  const listed = (kind) => (off && Array.isArray(off[kind]) ? card.agents.filter((n) => off[kind].includes(n)) : card.agents)
+  let kind
+  if (Object.hasOwn(CLAUDE_KINDS, saved || '')) {
+    // A saved kind the instance no longer holds: its confirm could only be refused.
+    if (held !== undefined && held !== saved && held !== 'subscription_and_api_key') return null
+    kind = saved
+  } else if (held === null) return null
+  else if (Object.hasOwn(CLAUDE_KINDS, held || '')) kind = held
+  else if (!off) kind = card.kind      // unreadable: the instance could not say
+  else {
+    // Holding both: the kind most of the card's agents are off, the one named on a tie.
+    const other = card.kind === 'subscription' ? 'api_key' : 'subscription'
+    kind = listed(other).length > listed(card.kind).length ? other : card.kind
+  }
+  const agents = listed(kind)
+  return agents.length ? { ...card, kind, agents } : null
+}
+
 /** What the instance said about its existing agents, in the words the assistant is given: names, never a value. */
 export function notUsingWords(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return ''
@@ -546,9 +580,10 @@ const TOOL_COPY = Object.freeze({
   toggle_agent_schedule: (a, { fleet }) => {
     const which = scheduleTitle(a, fleet)
     const its = `${str(a.agent_name)}'s schedule${which ? ` ${which}` : ''}`
+    // ent#1399: the title in plain words too, not the tool's name.
     return a.enabled === false
-      ? { sentence: `Switches off ${its}: it does not run until it is switched on again.`, button: 'Switch it off' }
-      : { sentence: `Switches on ${its}: it runs at its times from now on.`, button: 'Switch it on' }
+      ? { title: `Switch off ${its}`, sentence: `Switches off ${its}: it does not run until it is switched on again.`, button: 'Switch it off' }
+      : { title: `Switch on ${its}`, sentence: `Switches on ${its}: it runs at its times from now on.`, button: 'Switch it on' }
   },
   update_agent_schedule: (a, { fleet }) => {
     const which = scheduleTitle(a, fleet)
@@ -596,6 +631,8 @@ export function cardLabel(card, fleet, { firstSession = false } = {}) {
   if (card.action === 'credential') return `${card.name} for ${card.agent || 'this instance'}`
   if (card.action === 'use-claude') return `Use ${CLAUDE_KINDS[card.kind]} on these agents: ${card.agents.join(', ')}`
   if (card.action === 'tool') {
+    const own = toolCopy(card, { fleet }).title
+    if (own) return own
     const { title, details } = toolWords(card)
     const first = details.find((d) => ['name', 'agent name', 'agent'].includes(d.key)) || details[0]
     return first ? `${title}: ${first.value.slice(0, 80)}` : title

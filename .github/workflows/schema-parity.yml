@@ -62,6 +62,10 @@ name: Schema Parity Gate
 # on PostgreSQL is by construction about db-layer behaviour, so the PR adding one
 # almost always touches a matched path (this one does). Widening the regex to all
 # of `tests/unit/` would run the whole job on every test-only PR in the repo.
+# One exception is named in the regex and in the push paths (#4620):
+# `tests/testing_utils/backend_db.py` and its test. That seam is test code, so no
+# db-layer path changes with it, and the one thing it exists for is that a
+# live-tier fixture's statement runs on PostgreSQL.
 #
 # ALEMBIC SINGLE-HEAD GUARD (#2068): a version-line must resolve to exactly ONE
 # head. Two revisions declaring the same `down_revision` are two heads, and
@@ -114,6 +118,8 @@ on:
       - 'scripts/ci/check_sqlite_upgrade_parity.py'
       - 'tests/unit/test_sqlite_upgrade_parity_guard.py'
       - 'tests/requirements-test.txt'
+      - 'tests/testing_utils/backend_db.py'
+      - 'tests/unit/test_4620_live_tier_db_seam.py'
       - '.github/workflows/schema-parity.yml'
   workflow_dispatch:
 
@@ -207,7 +213,7 @@ jobs:
           fi
           CHANGED="$(git diff --name-only "$PR_BASE_SHA...$PR_HEAD_SHA")"
           echo "Changed files in PR:"; echo "$CHANGED"
-          if printf '%s\n' "$CHANGED" | grep -qE '^(src/backend/db/|src/backend/database\.py$|src/backend/utils/helpers\.py$|tests/unit/test_schema_parity\.py$|tests/unit/test_alembic_parity_guard\.py$|scripts/ci/check_alembic_parity\.py$|scripts/ci/check_sqlite_upgrade_parity\.py$|tests/unit/test_sqlite_upgrade_parity_guard\.py$|tests/requirements-test\.txt$|\.github/workflows/schema-parity\.yml$)'; then
+          if printf '%s\n' "$CHANGED" | grep -qE '^(src/backend/db/|src/backend/database\.py$|src/backend/utils/helpers\.py$|tests/unit/test_schema_parity\.py$|tests/unit/test_alembic_parity_guard\.py$|scripts/ci/check_alembic_parity\.py$|scripts/ci/check_sqlite_upgrade_parity\.py$|tests/unit/test_sqlite_upgrade_parity_guard\.py$|tests/requirements-test\.txt$|tests/testing_utils/backend_db\.py$|tests/unit/test_4620_live_tier_db_seam\.py$|\.github/workflows/schema-parity\.yml$)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
             echo "schema-relevant files changed — running the parity check."
           else

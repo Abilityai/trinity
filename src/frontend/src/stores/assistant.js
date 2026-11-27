@@ -21,7 +21,7 @@ import { defineStore } from 'pinia'
 import api from '../api'
 import { useOnboardingStore } from './onboarding'
 import { buildContext, buildFleet, describePage } from '../utils/assistantContext'
-import { acceptCards, buildOutcome, cardButton, cardLabel, cardNote, credentialLine, outcomeLine, runCard, useClaude, validBuild, webLink } from '../utils/assistantCards'
+import { acceptCards, buildOutcome, cardButton, cardLabel, cardNote, CLAUDE_KINDS, claudeCard, claudeSwitchFor, credentialLine, outcomeLine, runCard, useClaude, validBuild, webLink } from '../utils/assistantCards'
 import { useAgentsStore } from './agents'
 import { useAuthStore } from './auth'
 import { useFirstRunStore } from './firstRun'
@@ -63,6 +63,21 @@ const newId = () => `m${nextId++}`
 let statusFlight = null
 
 const detail = (error) => error?.response?.data?.detail
+// trinity-enterprise#1406: a turn is known to have reached the assistant only once
+// an answer to it came back. No answer at all (the network dropped before one could)
+// or a proxy that could not reach Trinity means it never arrived and may be sent
+// again; a timeout means Trinity had it and was still working, so it may not.
+// A 502/503 counts as the proxy only when it carries no named code: Trinity's own
+// /turn answers 502 gateway_interrupted / gateway_unreachable after the gateway
+// may already have taken the turn, so those keep the buttons closed.
+const NOT_REACHED = new Set([502, 503])
+const neverArrived = (error) => {
+  const status = error?.response?.status
+  if (status) return NOT_REACHED.has(status) && !detail(error)?.code
+  return !['ECONNABORTED', 'ETIMEDOUT'].includes(error?.code)
+}
+const CHOICE_UNSENT = "Couldn't reach the assistant, so your choice wasn't sent. Check your connection, then press it again."
+
 const words = (error, fallback) => {
   const d = detail(error)
   return (typeof d === 'string' ? d : d?.message) || fallback
@@ -433,6 +448,7 @@ export const useAssistantStore = defineStore('assistant', {
       this.steps = []
       this.saying = ''
       this.startedAt = Date.now()
+      let reached = false
       try {
         const fleet = await this.refreshFleet()
         const firstSession = inFirstSession(this.status, fleet, useFirstRunStore().seededAgents || [])
@@ -444,6 +460,7 @@ export const useAssistantStore = defineStore('assistant', {
             ...(firstSession ? { first_session: true } : {}) },
           counted,
         }, { timeout: STEP_TIMEOUT_MS })
+        reached = true
 
         for (let step = 0; data.status === 'working' && step < MAX_STEPS; step++) {
           this.conversationId = data.conversation_id
@@ -472,9 +489,14 @@ export const useAssistantStore = defineStore('assistant', {
         useAgentsStore().fetchAgents().catch(() => {})
         // ent#1390: a switch is never offered for an agent the person cannot see.
         const hidden = this.outOfSight(after)
-        const cards = acceptCards(data.cards, after)
+        const accepted = acceptCards(data.cards, after)
+        // ent#1399: a switch names the kind the instance saved or holds, never the
+        // assistant's guess, and only agents its confirm would be accepted for.
+        const kinds = accepted.some((c) => c.action === 'use-claude') ? await this.claudeKinds() : {}
+        const cards = accepted
           .map((c) => (c.action === 'use-claude' ? { ...c, agents: c.agents.filter((n) => !hidden.has(n)) } : c))
-          .filter((c) => c.action !== 'use-claude' || c.agents.length > 0)
+          .map((c) => (c.action === 'use-claude' && c.agents.length > 0 ? claudeSwitchFor(c, kinds) : c))
+          .filter((c) => c && (c.action !== 'use-claude' || c.agents.length > 0))
         const reply = {
           id: newId(),
           role: 'assistant',
@@ -503,6 +525,7 @@ export const useAssistantStore = defineStore('assistant', {
         }
         if (code === 404 || code === 403) this.absent = true
         this.sendError = words(error, "Couldn't reach the assistant. Check your connection and try again.")
+        if (!reached && neverArrived(error)) return 'unsent'
       } finally {
         this.sending = false
         this.activity = ''
@@ -666,6 +689,52 @@ export const useAssistantStore = defineStore('assistant', {
       else if (this.agreed) await this.loadStatus()      // nothing asked yet: let it say where to start
     },
 
+    /**
+     * ent#1399: which Claude credential a switch card may name, and which agents
+     * its confirm would accept (the switch refuses any other agent, not_listed).
+     * `saved` is the kind this conversation's Claude card saved last; it decides
+     * the kind and nothing else. `held` is what the instance holds now (undefined
+     * when it could not say), so a saved kind removed since shows no card. `off`
+     * is, per kind the card may name, the agents off it, read from the instance
+     * now (an agent switched or created since the save is counted as it is); the
+     * save's own lists stand in only when that read fails. undefined when no list
+     * could be read at all.
+     */
+    async claudeKinds() {
+      const entries = this.messages.flatMap((m) => m.cards || [])
+      const save = entries.filter((e) => claudeCard(e.card) && e.state === 'done' && Object.hasOwn(CLAUDE_KINDS, e.kind || '')).at(-1)
+      const saved = save?.kind
+      const fromSave = save && Array.isArray(save.notUsing) && Array.isArray(save.moving)
+        ? { [saved]: [...save.notUsing.map((r) => r?.name), ...save.moving].filter((n) => typeof n === 'string') }
+        : undefined
+      const fallback = (held) => (saved ? { saved, held, off: fromSave } : { held })
+      let held
+      try {
+        const { data } = await api.get(`${BASE}/credential`, { params: { name: 'CLAUDE_SUBSCRIPTION' } })
+        held = typeof data?.current === 'string' || data?.current === null ? data.current : undefined
+      } catch {
+        held = undefined
+      }
+      if (held === undefined) return fallback(undefined)
+      const holds = (kind) => held === kind || held === 'subscription_and_api_key'
+      const kinds = saved
+        ? (holds(saved) ? [saved] : [])
+        : held === 'subscription_and_api_key' ? Object.keys(CLAUDE_KINDS) : Object.hasOwn(CLAUDE_KINDS, held || '') ? [held] : []
+      if (!kinds.length) return { saved, held }
+      try {
+        const reports = await Promise.all(kinds.map((kind) =>
+          api.get(`${BASE}/credential/agents`, { params: { kind } }).then(({ data }) => [kind, data])))
+        const off = {}
+        for (const [kind, data] of reports) {
+          if (!Array.isArray(data?.not_using) || !Array.isArray(data?.moving)) return fallback(held)
+          off[kind] = [...data.not_using.map((r) => r?.name), ...data.moving].filter((n) => typeof n === 'string')
+        }
+        return { saved, held, off }
+      } catch {
+        return fallback(held)
+      }
+    },
+
     /** Write the conversation down. Cheap, and called on every change. */
     keep() {
       try {
@@ -738,7 +807,14 @@ export const useAssistantStore = defineStore('assistant', {
       if (asked.some((c) => c.state === 'open')) return
       const reply = asked.length === 1 ? option : asked.map((c) => `${c.card.question} ${c.picked}`).join('\n')
       for (const c of asked) c.state = 'done'
-      await this.send(reply, route, { counted: false })
+      const sent = await this.send(reply, route, { counted: false })
+      if (sent !== 'unsent') return
+      // ent#1406: it never reached the assistant. The answers stand as clicked, so one
+      // more click on any of them sends them again; what the page showed as said goes.
+      for (const c of asked) c.state = 'picked'
+      const said = this.messages.findLastIndex((m) => m.role === 'user' && m.content === reply)
+      if (said >= 0) this.messages.splice(said, 1)
+      this.sendError = CHOICE_UNSENT
     },
 
     /**

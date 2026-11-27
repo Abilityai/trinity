@@ -262,7 +262,7 @@ class TestAvatarGeneration:
     def test_generate_returns_501_without_gemini_key(
         self, api_client: TrinityApiClient, created_agent
     ):
-        """POST generate returns 501 when GEMINI_API_KEY is not configured."""
+        """POST generate returns 501 when no Gemini key is configured."""
         response = api_client.post(
             f"/api/agents/{created_agent['name']}/avatar/generate",
             json={"identity_prompt": "A sleek chrome android"},
@@ -270,7 +270,11 @@ class TestAvatarGeneration:
         # Either 501 (no key) or 200 (key configured) — both valid
         if response.status_code == 501:
             data = assert_json_response(response)
-            assert "GEMINI_API_KEY" in data["detail"]
+            # #4620: the status is the contract. The message is copy written
+            # for the person in the dialog (#957 replaced "GEMINI_API_KEY not
+            # configured" with it) and the body carries no error code, so the
+            # words are not asserted — only that there is a message to show.
+            assert isinstance(data.get("detail"), str) and data["detail"].strip()
         else:
             assert_status_in(response, [200, 422])
 

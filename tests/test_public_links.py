@@ -531,35 +531,51 @@ class TestPublicChat:
     """Test public chat functionality."""
 
     @pytest.fixture
-    def public_link(self, auth_headers):
-        """Create a public link for chat testing."""
-        import subprocess
-        result = subprocess.run(
-            ["docker", "ps", "--filter", "name=agent-", "--format", "{{.Names}}"],
-            capture_output=True, text=True
-        )
-        agents = [name.replace("agent-", "") for name in result.stdout.strip().split("\n") if name]
-        if not agents:
-            pytest.skip("No running agents found")
-        agent_name = agents[0]
+    def public_link(self, auth_headers, created_agent):
+        """Create a public link on an agent whose policy does not require email.
+
+        #4620: the requirement belongs to the AGENT's access policy, not to the
+        link (#311), and a new agent is created with it ON (#1129). The link
+        used to go on whichever running agent `docker ps` listed first, with the
+        policy that agent happened to have. It now goes on the module's own
+        agent, so the policy this class is about is set here, on an agent the
+        suite created and will delete, never on one it found.
+        """
+        agent_name = created_agent["name"]
+        policy_url = f"{BASE_URL}/api/agents/{agent_name}/access-policy"
+
+        # The agent is the suite's own, so a refusal here is a failure, not a skip.
+        policy_before = httpx.get(policy_url, headers=auth_headers)
+        assert policy_before.status_code == 200, \
+            f"Could not read the access policy of {agent_name}: {policy_before.text}"
+        prior_policy = policy_before.json()
 
         response = httpx.post(
             f"{BASE_URL}/api/agents/{agent_name}/public-links",
             headers=auth_headers,
             json={"name": "Chat Test Link"}
         )
-
-        if response.status_code != 200:
-            pytest.skip(f"Could not create link: {response.text}")
+        assert response.status_code == 200, \
+            f"Could not create a link on {agent_name}: {response.text}"
 
         link = response.json()
-        yield link
-
-        # Cleanup
-        httpx.delete(
-            f"{BASE_URL}/api/agents/{agent_name}/public-links/{link['id']}",
-            headers=auth_headers
-        )
+        try:
+            # The route replaces the whole policy, so every field is sent.
+            policy_set = httpx.put(
+                policy_url,
+                headers=auth_headers,
+                json={**prior_policy, "require_email": False},
+            )
+            assert policy_set.status_code == 200, \
+                f"Could not switch off the email requirement on {agent_name}: {policy_set.text}"
+            yield link
+        finally:
+            # The agent is shared by the module: leave its policy as created.
+            httpx.put(policy_url, headers=auth_headers, json=prior_policy)
+            httpx.delete(
+                f"{BASE_URL}/api/agents/{agent_name}/public-links/{link['id']}",
+                headers=auth_headers
+            )
 
     def test_chat_without_email_requirement(self, public_link):
         """Test chat when email is not required."""
