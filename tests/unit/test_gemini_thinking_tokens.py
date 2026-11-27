@@ -1,4 +1,4 @@
-"""Gemini thinking tokens are counted as output tokens and priced.
+"""Gemini thinking tokens are counted as output tokens and priced (#4798).
 
 gemini-cli's stream-json ``result`` stats report ``output_tokens`` as the
 candidates count only; thinking tokens show up just in ``total_tokens``.
