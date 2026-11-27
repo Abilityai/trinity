@@ -26,6 +26,7 @@ const EXAMPLES = ['acme-sage', 'acme-scout', 'acme-scribe', 'cornelius']
 const calls = []
 let turns
 let saveReport
+let held = null      // ent#1399: what the instance holds; a switch card names only a kind it holds
 let storedSchedules
 
 vi.mock('@/api', () => {
@@ -41,7 +42,7 @@ vi.mock('@/api', () => {
     }
     if (url === '/api/enterprise/assistant/tools/confirm') return { ok: true, content: '{"status": "accepted", "execution_id": "exec-1390abc"}' }
     if (url === '/api/enterprise/assistant/credential' && method === 'get') {
-      return { agent: null, name: config?.params?.name, set: false, current: null, use: '' }
+      return { agent: null, name: config?.params?.name, set: held !== null, current: held, use: '' }
     }
     if (url === '/api/enterprise/assistant/credential' && method === 'post') {
       return { provided: true, agent: body.agent, name: body.name, replaced: false, ...saveReport }
@@ -104,6 +105,7 @@ describe('the first session, in the person’s words (ent#1390)', () => {
     calls.length = 0
     turns = []
     saveReport = {}
+    held = null
     storedSchedules = []
     wrapper = mount(AssistantWidget, {
       attachTo: document.body,
@@ -261,6 +263,7 @@ describe('the first session, in the person’s words (ent#1390)', () => {
     })
 
     it('a switch the assistant proposes names only agents the person can see', async () => {
+      held = 'subscription'
       const card = await offer([{ action: 'use-claude', kind: 'subscription', agents: [OWN, 'cornelius'] }])
       expect(body(card)).toContain(`Use this subscription on these agents: ${OWN}`)
       expect(body(card)).not.toContain('cornelius')
