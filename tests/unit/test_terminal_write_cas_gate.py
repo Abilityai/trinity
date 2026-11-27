@@ -36,7 +36,7 @@ def _make_execution(status: str = "running"):
 
 def _success_response() -> MagicMock:
     """A healthy 200 agent response that drives execute_task to the SUCCESS
-    terminal (mirrors tests/test_cb_probe_execution_close.py)."""
+    terminal (mirrors tests/unit/test_cb_probe_execution_close.py)."""
     resp = MagicMock()
     resp.status_code = 200
     resp.raise_for_status = MagicMock()

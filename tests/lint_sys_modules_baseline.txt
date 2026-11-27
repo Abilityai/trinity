@@ -6,7 +6,6 @@
 3 tests/git_sync/test_s5_conflict_classifier.py
 9 tests/git_sync/test_s7_reserve_instance_id.py
 3 tests/test_audit_log_unit.py
-8 tests/test_cb_probe_execution_close.py
 6 tests/test_github_pat_propagation_unit.py
 1 tests/test_ip_rate_limit_fix.py
 2 tests/unit/test_agent_server_auto_sync.py

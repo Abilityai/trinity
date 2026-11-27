@@ -3102,7 +3102,7 @@
       ]
     },
     {
-      "file": "test_cb_probe_execution_close.py",
+      "file": "unit/test_cb_probe_execution_close.py",
       "feature": "#767",
       "added": "2026-05-11",
       "categories": [
