@@ -63,6 +63,18 @@ const newId = () => `m${nextId++}`
 let statusFlight = null
 
 const detail = (error) => error?.response?.data?.detail
+// trinity-enterprise#1406: a turn is known to have reached the assistant only once
+// an answer to it came back. No answer at all (the network dropped before one could)
+// or a proxy that could not reach Trinity means it never arrived and may be sent
+// again; a timeout means Trinity had it and was still working, so it may not.
+const NOT_REACHED = new Set([502, 503])
+const neverArrived = (error) => {
+  const status = error?.response?.status
+  if (status) return NOT_REACHED.has(status)
+  return !['ECONNABORTED', 'ETIMEDOUT'].includes(error?.code)
+}
+const CHOICE_UNSENT = "Couldn't reach the assistant, so your choice wasn't sent. Check your connection, then press it again."
+
 const words = (error, fallback) => {
   const d = detail(error)
   return (typeof d === 'string' ? d : d?.message) || fallback
@@ -433,6 +445,7 @@ export const useAssistantStore = defineStore('assistant', {
       this.steps = []
       this.saying = ''
       this.startedAt = Date.now()
+      let reached = false
       try {
         const fleet = await this.refreshFleet()
         const firstSession = inFirstSession(this.status, fleet, useFirstRunStore().seededAgents || [])
@@ -444,6 +457,7 @@ export const useAssistantStore = defineStore('assistant', {
             ...(firstSession ? { first_session: true } : {}) },
           counted,
         }, { timeout: STEP_TIMEOUT_MS })
+        reached = true
 
         for (let step = 0; data.status === 'working' && step < MAX_STEPS; step++) {
           this.conversationId = data.conversation_id
@@ -508,6 +522,7 @@ export const useAssistantStore = defineStore('assistant', {
         }
         if (code === 404 || code === 403) this.absent = true
         this.sendError = words(error, "Couldn't reach the assistant. Check your connection and try again.")
+        if (!reached && neverArrived(error)) return 'unsent'
       } finally {
         this.sending = false
         this.activity = ''
@@ -789,7 +804,14 @@ export const useAssistantStore = defineStore('assistant', {
       if (asked.some((c) => c.state === 'open')) return
       const reply = asked.length === 1 ? option : asked.map((c) => `${c.card.question} ${c.picked}`).join('\n')
       for (const c of asked) c.state = 'done'
-      await this.send(reply, route, { counted: false })
+      const sent = await this.send(reply, route, { counted: false })
+      if (sent !== 'unsent') return
+      // ent#1406: it never reached the assistant. The answers stand as clicked, so one
+      // more click on any of them sends them again; what the page showed as said goes.
+      for (const c of asked) c.state = 'picked'
+      const said = this.messages.findLastIndex((m) => m.role === 'user' && m.content === reply)
+      if (said >= 0) this.messages.splice(said, 1)
+      this.sendError = CHOICE_UNSENT
     },
 
     /**
