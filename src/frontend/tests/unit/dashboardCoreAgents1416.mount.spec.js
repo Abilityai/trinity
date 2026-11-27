@@ -9,7 +9,7 @@
  * Mounted (#2918): Dashboard shallow, the stores real, the network mocked —
  * the harness of dashboardHidesExamples.mount.spec.js.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { shallowMount, flushPromises } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 import { createRouter, createMemoryHistory } from 'vue-router'
@@ -67,12 +67,23 @@ beforeEach(() => {
   axiosMock.post.mockImplementation(async () => ({ data: {} }))
 })
 
+// Every mounted Dashboard is unmounted (its socket, polling and their logs
+// stop) and its async mount tail settled before the file ends: a log still
+// pending at worker teardown fails the whole run (EnvironmentTeardownError).
+const mounted = []
+afterEach(async () => {
+  await flushPromises()
+  while (mounted.length) mounted.pop().unmount()
+  await flushPromises()
+})
+
 async function mountDashboard() {
   const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: { template: '<div/>' } }, { path: '/:p(.*)*', component: { template: '<div/>' } }] })
   await router.push('/'); await router.isReady()
   await firstRunStore().fetchState(true)       // the real read of /first-run
   useAssistantStore().status = { available: true, leads_setup: true }
   const w = shallowMount(Dashboard, { global: { plugins: [router] } })
+  mounted.push(w)
   await useNetworkStore().fetchAgents()
   await flushPromises()
   return w
