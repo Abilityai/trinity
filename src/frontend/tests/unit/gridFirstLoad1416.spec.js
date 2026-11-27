@@ -77,6 +77,14 @@ describe('firstLoadLayout (ent#1416)', () => {
     expect(untagged.cornelius).toEqual(tagged.cornelius)
   })
 
+  it('the core group leads even when another department is larger', () => {
+    const sales = ['s1', 's2', 's3'].map((name) => ({ name, tags: ['dept-sales'] }))
+    const l = arrange([SYSTEM, BRAIN, CHIEF, ...sales])
+    expect(l.corbin).toEqual({ c: 0, r: 0 })
+    expect(l.cornelius).toEqual({ c: 1, r: 0 })
+    expect(Math.min(...sales.map((a) => l[a.name].c))).toBe(2)
+  })
+
   it('places each cell once', () => {
     const agents = [SYSTEM, BRAIN, CHIEF, { name: 'a' }, { name: 'b' }, { name: 'c', tags: ['dept-sales'] }]
     const l = arrange(agents)

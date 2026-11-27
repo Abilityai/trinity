@@ -335,6 +335,17 @@ export function savedReportText({ connected, notUsing, moving } = {}, fallback) 
 export const CLAUDE_KINDS = Object.freeze({ subscription: 'this subscription', api_key: 'this API key' })
 export const USE_CLAUDE_MAX_AGENTS = 20
 
+/**
+ * trinity-enterprise#1408: a switch in the first session carries the company
+ * brain (`brain`, or null) along with the agents the assistant named, once.
+ * trinity-enterprise#1416: `brain` may be a list — the core agents the install
+ * came with (the Chief of Staff and the Company Brain) — each added once.
+ */
+export function withBrain(agents, brain) {
+  const add = (Array.isArray(brain) ? brain : [brain]).filter((n) => n && !agents.includes(n))
+  return add.length ? [...agents, ...add] : agents
+}
+
 /** One `use-claude` proposal: a kind and the agents, each one the page itself read. */
 export function validUseClaude(raw, fleet) {
   if (!raw || raw.action !== 'use-claude' || !Object.hasOwn(CLAUDE_KINDS, raw.kind)) return null
@@ -641,7 +652,7 @@ export function cardLabel(card, fleet, { firstSession = false } = {}) {
 }
 
 /** The line under a card's title. Every change to an agent runs as the person. */
-export function cardNote(card, { firstSession = false, fleet = [] } = {}) {
+export function cardNote(card, { firstSession = false, fleet = [], brain = null, chief = null } = {}) {
   if (card.action === 'job') return "Each agent is made with the standard tools and checked. This takes a few minutes. Keep talking or close this panel: I'll come back when they're ready."
   if (card.action === 'run') return "Running on the agent. Keep talking or close this panel: I'll come back with the result."
   if (card.action === 'choice') return ''
@@ -656,7 +667,18 @@ export function cardNote(card, { firstSession = false, fleet = [] } = {}) {
     return `The assistant cannot see what you type. It is stored on ${credentialWhere(card)} as ${card.name}, and the assistant is only told whether it was provided.`
   }
   if (card.action === 'use-claude') {
-    return 'Switches only these agents, as you. A running one restarts, which takes about a minute. Nothing else changes.'
+    // ent#1408: the company brain on the card is said for what it is.
+    // ent#1416: so is the Chief of Staff, when it is on the card too.
+    const hasBrain = Boolean(brain && card.agents.includes(brain))
+    const hasChief = Boolean(chief && card.agents.includes(chief))
+    const why = hasBrain && hasChief
+      ? ` ${chief} and ${brain} are the chief of staff and the company brain this instance came with, so they run on the same Claude.`
+      : hasBrain
+        ? ` ${brain} is the company brain this instance came with, so it runs on the same Claude.`
+        : hasChief
+          ? ` ${chief} is the chief of staff this instance came with, so it runs on the same Claude.`
+          : ''
+    return `Switches only these agents, as you.${why} A running one restarts, which takes about a minute. Nothing else changes.`
   }
   if (card.action === 'upgrade') return "A larger allowance and bigger teams. We email a code to this instance's registered address to confirm."
   return CARD_ACTIONS[card.action]?.note || 'Runs as you, not as the assistant.'

@@ -6058,6 +6058,10 @@ class FirstRunState(BaseModel):
     seeded_agents: List[str] = []
     own_agent_count: int = 0
     demo_agent: Optional[str] = None
+    # trinity-enterprise#1408: the seeded company brain (Cornelius) when the
+    # caller can see it, else None. The assistant puts it on the Claude
+    # credential connected in the first session; the examples stay as they are.
+    brain_agent: Optional[str] = None
     # trinity-enterprise#1416: the seeded agents that are the person's team from
     # the start (the Company Brain and the Chief of Staff) — still "seeded" for
     # `first_run`, but never an example to hide. Present and visible ones only.

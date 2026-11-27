@@ -130,6 +130,10 @@ def get_first_run_state(current_user: User) -> dict:
             "seeded_agents": sorted(seeded_present),
             "own_agent_count": len(own_agents),
             "demo_agent": _pick_demo_agent(seeded_present),
+            # trinity-enterprise#1408: the company brain the install seeded
+            # (epic ent#1407: part of the product, not an example), so the
+            # assistant puts it on Claude together with the person's own agent.
+            "brain_agent": CORNELIUS_AGENT_NAME if CORNELIUS_AGENT_NAME in seeded_present else None,
             "core_agents": [n for n in CORE_AGENTS if n in seeded_present],
             "install": _install_marker(),
         }

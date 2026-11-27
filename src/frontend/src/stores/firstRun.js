@@ -28,6 +28,7 @@ export const useFirstRunStore = defineStore('firstRun', {
     seededAgents: [],
     ownAgentCount: 0,
     demoAgent: null,
+    brainAgent: null,     // ent#1408: the seeded company brain (Cornelius), part of the product, not an example
     // trinity-enterprise#1416: the seeded agents that are the person's team from
     // the start (the Company Brain and the Chief of Staff). Still "seeded" (they
     // do not end the first run) but never an example kept off the screen.
@@ -46,6 +47,7 @@ export const useFirstRunStore = defineStore('firstRun', {
         this.seededAgents = Array.isArray(r.data?.seeded_agents) ? r.data.seeded_agents : []
         this.ownAgentCount = r.data?.own_agent_count ?? 0
         this.demoAgent = r.data?.demo_agent ?? null
+        this.brainAgent = typeof r.data?.brain_agent === 'string' ? r.data.brain_agent : null
         this.coreAgents = Array.isArray(r.data?.core_agents) ? r.data.core_agents : []
         this.install = r.data?.install ?? null
       } catch (e) {
