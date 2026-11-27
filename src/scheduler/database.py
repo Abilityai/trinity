@@ -724,6 +724,24 @@ class SchedulerDatabase:
             row = cursor.fetchone()
             return self._row_to_execution(row) if row else None
 
+    def get_inflight_scheduled_executions(self) -> List[ScheduleExecution]:
+        """Runs a cron fire or a retry created that have not reached a terminal
+        (#4410). Read at boot so the scheduler can follow them again."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM schedule_executions
+                WHERE status IN (?, ?)
+                  AND schedule_id IS NOT NULL
+                  AND triggered_by IN (?, ?)
+            """, (
+                ExecutionStatus.RUNNING,
+                ExecutionStatus.QUEUED,
+                "schedule",
+                "retry",
+            ))
+            return [self._row_to_execution(row) for row in cursor.fetchall()]
+
     # =========================================================================
     # Retry Operations (RETRY-001)
     # =========================================================================
