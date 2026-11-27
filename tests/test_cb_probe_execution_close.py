@@ -551,8 +551,9 @@ class TestCancelledErrorInBackground:
         request.schedule_cron = None
         request.schedule_next_run = None
 
-        with patch("routers.internal.db", mock_db):
-            import routers.internal as internal_mod
+        import routers.internal as internal_mod
+        # #4408: the shutdown writer lives in the service; patch the copy the router holds.
+        with patch.dict(internal_mod.settle_cancelled_dispatch.__globals__, {"db": mock_db}):
             with pytest.raises(asyncio.CancelledError):
                 await internal_mod._execute_task_internal_background(mock_task_service, request)
 
@@ -586,8 +587,9 @@ class TestCancelledErrorInBackground:
         request.schedule_cron = None
         request.schedule_next_run = None
 
-        with patch("routers.internal.db", mock_db):
-            import routers.internal as internal_mod
+        import routers.internal as internal_mod
+        # #4408: the shutdown writer lives in the service; patch the copy the router holds.
+        with patch.dict(internal_mod.settle_cancelled_dispatch.__globals__, {"db": mock_db}):
             with pytest.raises(asyncio.CancelledError):
                 await internal_mod._execute_task_internal_background(mock_task_service, request)
 
@@ -616,8 +618,9 @@ class TestCancelledErrorInBackground:
         request.schedule_cron = None
         request.schedule_next_run = None
 
-        with patch("routers.internal.db", mock_db):
-            import routers.internal as internal_mod
+        import routers.internal as internal_mod
+        # #4408: the shutdown writer lives in the service; patch the copy the router holds.
+        with patch.dict(internal_mod.settle_cancelled_dispatch.__globals__, {"db": mock_db}):
             with pytest.raises(asyncio.CancelledError):
                 await internal_mod._execute_task_internal_background(mock_task_service, request)
 

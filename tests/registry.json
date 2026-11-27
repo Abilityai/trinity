@@ -1,6 +1,28 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4408_shutdown_keeps_live_turn.py",
+      "feature": "#4408",
+      "added": "2026-11-27",
+      "categories": [
+        "backend",
+        "reliability",
+        "unit"
+      ],
+      "description": "#4408: settle_cancelled_dispatch leaves a row carrying a dispatch marker running and writes nothing, fails a row that never reached the agent and closes its activity only when the write won, never touches a terminal row and never raises; the real execute_task cancelled during the agent call writes no terminal, cancelled before the dispatch marker writes FAILED, and still releases the slot; the internal background wrapper follows the same rule; an AST scan keeps both cancellation handlers on the one writer."
+    },
+    {
+      "file": "unit/test_4408_scheduler_retry_of_shutdown_failure.py",
+      "feature": "#4408",
+      "added": "2026-11-27",
+      "categories": [
+        "scheduler",
+        "reliability",
+        "unit"
+      ],
+      "description": "#4408: with the scheduler's real retry decision and poll loop over SQLite, a run failed with the backend-shutdown error is retried (the suspected interaction, confirmed), and a run left running is not retried and is followed to its real terminal."
+    },
+    {
       "file": "unit/test_ent978_narrowed_read_marker.py",
       "feature": "trinity-enterprise#978",
       "added": "2026-11-24",
