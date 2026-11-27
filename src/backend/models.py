@@ -6058,9 +6058,27 @@ class FirstRunState(BaseModel):
     seeded_agents: List[str] = []
     own_agent_count: int = 0
     demo_agent: Optional[str] = None
+    # trinity-enterprise#1408: the seeded company brain (Cornelius) when the
+    # caller can see it, else None. The assistant puts it on the Claude
+    # credential connected in the first session; the examples stay as they are.
+    brain_agent: Optional[str] = None
     # A short opaque mark of this install: the browser remembers "setup closed"
     # against it, so a fresh install at the same address offers setup again.
     install: Optional[str] = None
+
+
+class BrainState(BaseModel):
+    """The company brain's state, for the assistant (trinity-enterprise#1409).
+
+    `agent` is the seeded Cornelius when the caller can see it, else None and
+    `state` is `absent`. Otherwise `state` is `not_set_up` (no setup marker),
+    `ready` (the template's setup finished) or `unknown` (the agent could not be
+    read: stopped, or unreachable). `notes` counts the person's notes in the
+    vault, scaffold excluded; None when it could not be counted.
+    """
+    agent: Optional[str] = None
+    state: str
+    notes: Optional[int] = None
 
 
 # =============================================================================

@@ -35,6 +35,7 @@ from typing import List, Optional, Set
 from database import db
 from dependencies import principal_reach
 from models import User
+from services.agent_client.client import get_agent_client
 from services.cornelius_agent_service import CORNELIUS_AGENT_NAME
 from services.system_seed_service import seeded_agent_names as manifest_seeded_agent_names
 
@@ -124,6 +125,10 @@ def get_first_run_state(current_user: User) -> dict:
             "seeded_agents": sorted(seeded_present),
             "own_agent_count": len(own_agents),
             "demo_agent": _pick_demo_agent(seeded_present),
+            # trinity-enterprise#1408: the company brain the install seeded
+            # (epic ent#1407: part of the product, not an example), so the
+            # assistant puts it on Claude together with the person's own agent.
+            "brain_agent": CORNELIUS_AGENT_NAME if CORNELIUS_AGENT_NAME in seeded_present else None,
             "install": _install_marker(),
         }
     except Exception:  # pragma: no cover - the surface is a nudge, never a gate
@@ -134,3 +139,83 @@ def get_first_run_state(current_user: User) -> dict:
             "own_agent_count": 0,
             "demo_agent": None,
         }
+
+
+# --- the company brain (trinity-enterprise#1409) ----------------------------
+#
+# Cornelius is part of the product (epic trinity-enterprise#1407), and the
+# assistant says where it stands. Both facts come from the agent's own files,
+# through the agent door, so nothing is recorded on the platform side:
+#
+#   * set up: the template's bootstrap and its `/first-run` write
+#     `~/.trinity-bootstrap.done` once search works (Abilityai/cornelius,
+#     first-run v1.5);
+#   * notes: Markdown files in `Brain/`, minus the scaffold the template ships
+#     (READMEs, the changelog, `_SAMPLE` notes, `05-Meta/` templates, the empty
+#     article index).
+#
+# An agent that cannot be read is `unknown`, never `not_set_up`: telling a
+# person their brain is not set up when it is only stopped would be a guess.
+
+_BRAIN_MARKER = "/home/developer/.trinity-bootstrap.done"
+_BRAIN_VAULT = "/home/developer/Brain"
+_SCAFFOLD_NAMES = {"README.md", "CHANGELOG.md", "ARTICLE-INDEX.md"}
+_SCAFFOLD_DIRS = ("Brain/05-Meta/", "05-Meta/")
+
+
+def _count_notes(tree) -> int:
+    count = 0
+    for item in tree or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "directory":
+            count += _count_notes(item.get("children"))
+            continue
+        if item.get("type") != "file":
+            continue
+        name = str(item.get("name") or "")
+        path = str(item.get("path") or "")
+        if not name.endswith(".md") or name in _SCAFFOLD_NAMES or name.startswith("_SAMPLE"):
+            continue
+        if path.startswith(_SCAFFOLD_DIRS):
+            continue
+        count += 1
+    return count
+
+
+async def get_brain_state(current_user: User) -> dict:
+    """The company brain for this caller: `{agent, state, notes}`. Never raises."""
+    from services.agent_client.client import AgentCircuitOpenError, AgentNotReachableError
+
+    absent = {"agent": None, "state": "absent", "notes": None}
+    try:
+        visible = {a["name"] for a in _visible_agents(current_user)}
+    except Exception:  # pragma: no cover - the read is a nudge, never a gate
+        logger.warning("[onboarding] brain state unavailable", exc_info=True)
+        return absent
+    if CORNELIUS_AGENT_NAME not in visible:
+        return absent
+
+    brain = CORNELIUS_AGENT_NAME
+    unknown = {"agent": brain, "state": "unknown", "notes": None}
+    client = get_agent_client(brain)
+    try:
+        marker = await client.get(f"/api/files?path={_BRAIN_MARKER}", timeout=10.0)
+        if marker.status_code == 200:
+            state = "ready"
+        elif marker.status_code == 404:
+            state = "not_set_up"
+        else:
+            return unknown
+        notes = None
+        vault = await client.get(f"/api/files?path={_BRAIN_VAULT}", timeout=15.0)
+        if vault.status_code == 200:
+            body = vault.json()
+            if isinstance(body, dict):
+                notes = _count_notes(body.get("tree"))
+    except (AgentNotReachableError, AgentCircuitOpenError):
+        return unknown
+    except Exception:  # noqa: BLE001 - an unreadable brain is unknown, not a 500
+        logger.debug("[onboarding] brain state of '%s' unreadable", brain, exc_info=True)
+        return unknown
+    return {"agent": brain, "state": state, "notes": notes}

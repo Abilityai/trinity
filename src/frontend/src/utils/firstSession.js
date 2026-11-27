@@ -153,9 +153,10 @@ export function claudeHelp(tokenCard = CLAUDE_TOKEN_CARD) {
  * assistant leads, only until the person has an agent of their own, and never
  * once they asked to see them.
  */
-export function examplesToHide(status, seeded = [], ownAgentCount = 0, shownOnRequest = false) {
+export function examplesToHide(status, seeded = [], ownAgentCount = 0, shownOnRequest = false, brain = null) {
   if (!status?.leads_setup || shownOnRequest || ownAgentCount > 0) return []
-  return Array.isArray(seeded) ? seeded.slice() : []
+  // trinity-enterprise#1409: the company brain is part of the product, never an example to hide.
+  return Array.isArray(seeded) ? seeded.filter((n) => n !== brain) : []
 }
 export const SHOW_EXAMPLES_KEY = 'trinity-show-example-agents'
 
@@ -176,9 +177,11 @@ export function examplesShownOnRequest() {
  * not the person's to think about; never once the person asked to see them.
  * `fleet` is the panel's own reading: [{ name }].
  */
-export function examplesOutOfSight(status, fleet = [], seeded = [], shownOnRequest = false) {
+export function examplesOutOfSight(status, fleet = [], seeded = [], shownOnRequest = false, brain = null) {
   if (!status?.leads_setup || shownOnRequest || !Array.isArray(seeded) || !seeded.length) return []
   const own = (fleet || []).filter((a) => a?.name && !seeded.includes(a.name)).length
-  if (examplesToHide(status, seeded, own, false).length || inFirstSession(status, fleet, seeded)) return seeded.slice()
+  // trinity-enterprise#1409: the brain still is not the person's own agent, but it is never out of sight.
+  const examples = seeded.filter((n) => n !== brain)
+  if (examples.length && (examplesToHide(status, seeded, own, false).length || inFirstSession(status, fleet, seeded))) return examples
   return []
 }

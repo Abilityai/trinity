@@ -28,6 +28,7 @@ export const useFirstRunStore = defineStore('firstRun', {
     seededAgents: [],
     ownAgentCount: 0,
     demoAgent: null,
+    brainAgent: null,     // ent#1408: the seeded company brain (Cornelius), part of the product, not an example
     install: null,        // a short mark of this install: "setup closed" is remembered against it
     overlayOpen: false,   // the setup overlay has the screen (set by FirstRunOverlay)
   }),
@@ -42,6 +43,7 @@ export const useFirstRunStore = defineStore('firstRun', {
         this.seededAgents = Array.isArray(r.data?.seeded_agents) ? r.data.seeded_agents : []
         this.ownAgentCount = r.data?.own_agent_count ?? 0
         this.demoAgent = r.data?.demo_agent ?? null
+        this.brainAgent = typeof r.data?.brain_agent === 'string' ? r.data.brain_agent : null
         this.install = r.data?.install ?? null
       } catch (e) {
         // Fail toward "not first run": a missed nudge is a non-event, whereas a
