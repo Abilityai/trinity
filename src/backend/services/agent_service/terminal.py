@@ -17,7 +17,8 @@ from fastapi import WebSocket, WebSocketDisconnect
 from database import db
 from services import live_connections
 from services.live_connections import CloseReason
-from services.docker_service import docker_client, execute_command_in_container, get_agent_container
+from services import docker_service
+from services.docker_service import execute_command_in_container, get_agent_container
 from services.docker_utils import container_reload, api_exec_create, api_exec_start
 
 logger = logging.getLogger(__name__)
@@ -467,7 +468,7 @@ class TerminalSessionManager:
                                     # Resize the PTY
                                     cols = ctrl.get("cols", 80)
                                     rows = ctrl.get("rows", 24)
-                                    docker_client.api.exec_resize(
+                                    docker_service.get_docker_client().api.exec_resize(
                                         exec_id,
                                         height=rows,
                                         width=cols

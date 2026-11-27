@@ -15,7 +15,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -115,8 +115,12 @@ def _check(cores_busy, online, host_config):
     )
     client = MagicMock()
     client.containers.get.return_value = container
-    _MS.docker_client = client
-    result = _MS.check_docker_health("worker")
+    # #4406: check_docker_health reads the client through
+    # docker_service.get_docker_client() at call time, so patch that.
+    with patch.object(
+        _MS.docker_service, "get_docker_client", return_value=client, create=True
+    ):
+        result = _MS.check_docker_health("worker")
     client.containers.get.assert_called_once_with("agent-worker")
     return result
 

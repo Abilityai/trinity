@@ -51,8 +51,9 @@ def _load_docker_utils():
             "docker_utils", f"{_backend}/services/docker_utils.py"
         )
         mod = importlib.util.module_from_spec(spec)
-        mod.docker_client = mock_client
         spec.loader.exec_module(mod)
+        # #4406: docker_utils reaches the client through docker_service.get_docker_client().
+        mod.docker_service = Mock(get_docker_client=Mock(return_value=mock_client))
     return mod, mock_client
 
 
@@ -662,7 +663,7 @@ class TestCreateRefusesAnUnclaimedVolume:
         db = self._db()
         with patch.object(crud, "db", db), \
              patch.object(crud, "get_agent_by_name", MagicMock(return_value=None)), \
-             patch.object(crud, "docker_client", MagicMock()), \
+             patch("services.docker_service.get_docker_client", return_value=MagicMock()), \
              patch.object(crud, "volume_get", AsyncMock(return_value=MagicMock())):
             with pytest.raises(HTTPException) as exc:
                 await crud.create_agent_internal(self._cfg(), MagicMock())
@@ -682,7 +683,7 @@ class TestCreateRefusesAnUnclaimedVolume:
         db = self._db()
         with patch.object(crud, "db", db), \
              patch.object(crud, "get_agent_by_name", MagicMock(return_value=None)), \
-             patch.object(crud, "docker_client", MagicMock()), \
+             patch("services.docker_service.get_docker_client", return_value=MagicMock()), \
              patch.object(crud, "volume_get", AsyncMock(return_value=MagicMock())):
             with pytest.raises(HTTPException) as exc:
                 await crud.create_agent_internal(
@@ -701,7 +702,7 @@ class TestCreateRefusesAnUnclaimedVolume:
         db = self._db()
         with patch.object(crud, "db", db), \
              patch.object(crud, "get_agent_by_name", MagicMock(return_value=None)), \
-             patch.object(crud, "docker_client", MagicMock()), \
+             patch("services.docker_service.get_docker_client", return_value=MagicMock()), \
              patch.object(crud, "volume_get",
                           AsyncMock(side_effect=_docker.errors.NotFound("nope"))):
             with pytest.raises(HTTPException) as exc:
@@ -718,7 +719,7 @@ class TestCreateRefusesAnUnclaimedVolume:
         db = self._db()
         with patch.object(crud, "db", db), \
              patch.object(crud, "get_agent_by_name", MagicMock(return_value=None)), \
-             patch.object(crud, "docker_client", MagicMock()), \
+             patch("services.docker_service.get_docker_client", return_value=MagicMock()), \
              patch.object(crud, "volume_get",
                           AsyncMock(side_effect=RuntimeError("docker down"))):
             with pytest.raises(HTTPException) as exc:
@@ -736,7 +737,7 @@ class TestCreateRefusesAnUnclaimedVolume:
         probe = AsyncMock(return_value=MagicMock())
         with patch.object(crud, "db", db), \
              patch.object(crud, "get_agent_by_name", MagicMock(return_value=None)), \
-             patch.object(crud, "docker_client", MagicMock()), \
+             patch("services.docker_service.get_docker_client", return_value=MagicMock()), \
              patch.object(crud, "volume_get", probe):
             with pytest.raises(HTTPException):
                 await crud.create_agent_internal(

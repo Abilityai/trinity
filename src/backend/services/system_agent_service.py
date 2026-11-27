@@ -20,7 +20,6 @@ import docker
 from database import db
 from db.agents import SYSTEM_AGENT_NAME
 from services.docker_service import (
-    docker_client,
     get_agent_container,
     get_next_available_port,
     is_port_available,

@@ -106,7 +106,7 @@ def crud(monkeypatch):
     )
     dc = MagicMock()
     dc.containers.get.return_value = _husk(AFTER_FLOOR)
-    monkeypatch.setattr(crud_mod, "docker_client", dc)
+    monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=dc: _c)
     return crud_mod
 
 
@@ -291,7 +291,7 @@ def test_lookup_failure_aborts_but_lookup_404_means_clear(crud, monkeypatch):
     deliberately does not — absent (404) means safe to retry, anything else
     must abort."""
     calls = _bind_then_succeed(crud, monkeypatch, fail_times=99)
-    crud.docker_client.containers.get.side_effect = RuntimeError("daemon down")
+    crud.docker_service.get_docker_client().containers.get.side_effect = RuntimeError("daemon down")
 
     with pytest.raises(Exception, match="port is already allocated"):
         _run(crud, _config())
@@ -300,7 +300,7 @@ def test_lookup_failure_aborts_but_lookup_404_means_clear(crud, monkeypatch):
 
     # 404-shaped NotFound: no husk exists — the name is clear, retry proceeds.
     calls2 = _bind_then_succeed(crud, monkeypatch)
-    crud.docker_client.containers.get.side_effect = _not_found()
+    crud.docker_service.get_docker_client().containers.get.side_effect = _not_found()
     result = _run(crud, _config())
     assert calls2 == [2227, 2228]
     assert result.labels["trinity.ssh-port"] == "2228"
@@ -309,8 +309,8 @@ def test_lookup_failure_aborts_but_lookup_404_means_clear(crud, monkeypatch):
 
 def test_unprovable_provenance_aborts_retries(crud, monkeypatch):
     calls = _bind_then_succeed(crud, monkeypatch, fail_times=99)
-    crud.docker_client.containers.get.side_effect = None
-    crud.docker_client.containers.get.return_value = _husk(BEFORE_FLOOR)
+    crud.docker_service.get_docker_client().containers.get.side_effect = None
+    crud.docker_service.get_docker_client().containers.get.return_value = _husk(BEFORE_FLOOR)
 
     with pytest.raises(Exception, match="port is already allocated"):
         _run(crud, _config())

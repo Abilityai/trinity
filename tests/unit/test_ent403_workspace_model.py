@@ -943,6 +943,7 @@ def test_the_runtime_read_distinguishes_empty_from_unreadable(monkeypatch):
     ds = _services_module("docker_service")
 
     monkeypatch.setattr(ds, "docker_client", None)
+    monkeypatch.setattr(ds, "_next_docker_attempt_monotonic", float("inf"))  # #4406: no reconnect
     assert ds.agent_container_runtimes() is None            # could not be asked
 
     def _boom(**kwargs):

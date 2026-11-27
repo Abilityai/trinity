@@ -198,7 +198,7 @@ _SYS_MOCKS = {
     "database": Mock(db=_mock_db),
     "docker": Mock(),
     "services.docker_service": Mock(
-        docker_client=Mock(),
+        get_docker_client=Mock(return_value=Mock()),
         get_agent_container=Mock(),
     ),
     "services.docker_utils": Mock(

@@ -60,7 +60,7 @@ def mon(monkeypatch):
     monkeypatch.setitem(sys.modules, "database", fake_db_module)
 
     fake_docker_service = _stub_module("services.docker_service")
-    fake_docker_service.docker_client = None
+    fake_docker_service.get_docker_client = lambda: None
     fake_docker_service.get_agent_container = MagicMock(return_value=None)
     # Default: a realistic mixed fleet — 1 running, 2 stopped. The #675
     # bug dropped the two stopped ones every cycle.

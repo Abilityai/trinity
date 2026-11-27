@@ -89,7 +89,8 @@ def _load_crud(monkeypatch, docker_available=True):
     docker_mod.errors.NotFound = _NotFound
 
     docker_service = MagicMock()
-    docker_service.docker_client = MagicMock() if docker_available else None
+    docker_service.get_docker_client = MagicMock(
+        return_value=MagicMock() if docker_available else None)
     docker_service.get_agent_by_name = MagicMock(return_value=None)
     docker_service.get_next_available_port = MagicMock(return_value=2222)
     docker_service.get_agent_status_from_container = MagicMock(
@@ -969,6 +970,24 @@ async def test_case10_leftover_volume_adopted(crud_env):
     # is mounted, not re-created.
     ctx["docker_utils"].containers_run.assert_awaited()
     ctx["docker_utils"].volume_create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_case10_docker_returning_mid_create_does_not_adopt(crud_env):
+    """#4406: `get_docker_client()` can answer None and then the client while
+    Docker reconnects. Create reads it once, so the #1667 guard and the build
+    agree: no client means 503, never a build that adopts a leftover volume."""
+    crud, ctx = crud_env
+    ctx["docker_utils"].volume_get.side_effect = None
+    ctx["docker_utils"].volume_get.return_value = MagicMock()
+    ctx["docker_service"].get_docker_client.return_value = None
+    ctx["docker_service"].get_docker_client.side_effect = (
+        [None] + [MagicMock()] * 20)
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        await crud.create_agent_internal(_local_config("back-mid"), _user(), None)
+    assert exc.value.status_code == 503
+    ctx["docker_utils"].containers_run.assert_not_awaited()
 
 
 # ===========================================================================
