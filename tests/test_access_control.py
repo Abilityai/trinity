@@ -10,10 +10,10 @@ authenticate as that user, and verify 403 responses on hardened endpoints.
 
 import os
 import uuid
-import subprocess
 import pytest
 import httpx
 
+from testkit import backend_db
 from testkit.api_client import TrinityApiClient, ApiConfig
 from testkit.assertions import assert_status, assert_status_in
 
@@ -22,73 +22,24 @@ from testkit.assertions import assert_status, assert_status_in
 # Fixtures
 # =============================================================================
 
-BACKEND_CONTAINER = os.getenv("TRINITY_BACKEND_CONTAINER", "trinity-backend")
 TEST_USER_USERNAME = f"testuser-{uuid.uuid4().hex[:8]}"
 TEST_USER_PASSWORD = "test-password-174"
 TEST_USER_EMAIL = f"{TEST_USER_USERNAME}@test.example.com"
 
 
-def _run_in_backend(python_code: str) -> str:
-    """Execute Python code inside the backend container and return stdout."""
-    result = subprocess.run(
-        ["docker", "exec", BACKEND_CONTAINER, "python3", "-c", python_code],
-        capture_output=True, text=True, timeout=15,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"Backend exec failed: {result.stderr}")
-    return result.stdout.strip()
-
-
 def _create_test_user(username: str, password: str, email: str, role: str = "operator"):
-    """Create a non-admin user in the backend database via docker exec.
+    """Create a non-admin user in the stack's database.
 
     `operator` by default: a `user` is Workspace-only since trinity-enterprise#837
     and is refused on every route this module checks.
     """
-    # Single Python script that hashes password and inserts the user
-    code = f"""
-import sqlite3, os
-from pathlib import Path
-from passlib.context import CryptContext
-
-ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
-password_hash = ctx.hash("{password}")
-db_path = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
-
-conn = sqlite3.connect(db_path)
-try:
-    conn.execute(
-        "INSERT OR IGNORE INTO users (username, password_hash, role, email, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))",
-        ("{username}", password_hash, "{role}", "{email}"),
-    )
-    conn.commit()
-    print("OK")
-finally:
-    conn.close()
-"""
-    output = _run_in_backend(code)
-    if "OK" not in output:
-        raise RuntimeError(f"Failed to create test user: {output}")
+    backend_db.create_user(username, password, email, role=role)
 
 
 def _delete_test_user(username: str):
-    """Delete the test user from the backend database."""
-    code = f"""
-import sqlite3, os
-from pathlib import Path
-
-db_path = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
-conn = sqlite3.connect(db_path)
-try:
-    conn.execute("DELETE FROM users WHERE username = ?", ("{username}",))
-    conn.commit()
-    print("OK")
-finally:
-    conn.close()
-"""
+    """Delete the test user from the stack's database."""
     try:
-        _run_in_backend(code)
+        backend_db.delete_user(username)
     except Exception:
         pass  # Best-effort cleanup
 
@@ -393,17 +344,22 @@ WS_USER_EMAIL = f"{WS_USER_USERNAME}@test.example.com"
 @pytest.fixture(scope="module")
 def workspace_only_client():
     """A `user`-role account — Workspace-only since trinity-enterprise#837."""
-    _create_test_user(WS_USER_USERNAME, TEST_USER_PASSWORD, WS_USER_EMAIL, role="user")
-    config = ApiConfig(
-        base_url=os.getenv("TRINITY_API_URL", "http://localhost:8000"),
-        username=WS_USER_USERNAME,
-        password=TEST_USER_PASSWORD,
-    )
-    client = TrinityApiClient(config)
-    client.authenticate()
-    yield client
-    client.close()
-    _delete_test_user(WS_USER_USERNAME)
+    client = None
+    try:
+        _create_test_user(WS_USER_USERNAME, TEST_USER_PASSWORD, WS_USER_EMAIL, role="user")
+        config = ApiConfig(
+            base_url=os.getenv("TRINITY_API_URL", "http://localhost:8000"),
+            username=WS_USER_USERNAME,
+            password=TEST_USER_PASSWORD,
+        )
+        client = TrinityApiClient(config)
+        client.authenticate()
+        yield client
+    finally:
+        # Also when the sign-in above fails, so the account never stays behind.
+        if client is not None:
+            client.close()
+        _delete_test_user(WS_USER_USERNAME)
 
 
 class TestWorkspaceOnlyRung:

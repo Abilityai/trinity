@@ -14,82 +14,53 @@ place. These tests cover the surviving end-to-end behaviours.
 Feature Flow: docs/memory/feature-flows/cleanup-service.md
 """
 
-import os
-import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from testkit import backend_db
 from testkit.api_client import TrinityApiClient
 from testkit.assertions import (
     assert_status,
     assert_json_response,
 )
 
-_BACKEND_CONTAINER = os.getenv("TRINITY_BACKEND_CONTAINER", "trinity-backend")
 # trinity-system is a stable, always-running agent on every Trinity instance.
 # Its /api/executions/running endpoint returns an empty list when nothing's
 # in flight, which is the exact state the watchdog sees during the race.
 _SENTINEL_AGENT = "trinity-system"
 
 
-def _exec_backend(python_code: str) -> str:
-    """Run Python inside the trinity-backend container — used for DB/Redis
-    fixture setup. Mirrors the pattern in test_operator_queue.py."""
-    result = subprocess.run(
-        ["docker", "exec", _BACKEND_CONTAINER, "python3", "-c", python_code],
-        capture_output=True, text=True, timeout=15,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"Backend exec failed: {result.stderr}")
-    return result.stdout.strip()
-
-
 def _insert_running_row(execution_id: str, age_seconds: int = 120) -> None:
     """Insert a schedule_executions row that looks like an in-flight task.
 
     `claude_session_id` is set so the #106 no-session fast-fail path doesn't
-    fire before the orphan-recovery path can run.
+    fire before the orphan-recovery path can run. Written through the
+    backend's own engine, so it lands in whichever database the stack booted
+    on (#4620).
     """
     started_at = (
         datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    _exec_backend(f"""
-import sqlite3
-c = sqlite3.connect('/data/trinity.db')
-c.execute(
-    'INSERT INTO schedule_executions (id, schedule_id, agent_name, status, '
-    'started_at, message, triggered_by, claude_session_id) '
-    'VALUES (?,?,?,?,?,?,?,?)',
-    ('{execution_id}', 'sched-921-int', '{_SENTINEL_AGENT}', 'running',
-     '{started_at}', 'integration #921', 'manual', 'sess-921-int'),
-)
-c.commit(); c.close()
-print('OK')
-""")
+    backend_db.execute(
+        "INSERT INTO schedule_executions (id, schedule_id, agent_name, status, "
+        "started_at, message, triggered_by, claude_session_id) "
+        "VALUES (:id, 'sched-921-int', :agent, 'running', :started_at, "
+        "'integration #921', 'manual', 'sess-921-int')",
+        id=execution_id, agent=_SENTINEL_AGENT, started_at=started_at,
+    )
 
 
 def _row_state(execution_id: str) -> dict:
     """Return {status, error, response} for a row, or {} if missing."""
-    out = _exec_backend(f"""
-import json, sqlite3
-c = sqlite3.connect('/data/trinity.db'); c.row_factory = sqlite3.Row
-r = c.execute('SELECT status, error, response FROM schedule_executions WHERE id=?', ('{execution_id}',)).fetchone()
-print(json.dumps(dict(r) if r else {{}}))
-c.close()
-""")
-    import json as _json
-    return _json.loads(out)
+    found = backend_db.rows(
+        "SELECT status, error, response FROM schedule_executions WHERE id = :id",
+        id=execution_id)
+    return dict(zip(("status", "error", "response"), found[0])) if found else {}
 
 
 def _delete_row(execution_id: str) -> None:
-    _exec_backend(f"""
-import sqlite3
-c = sqlite3.connect('/data/trinity.db')
-c.execute('DELETE FROM schedule_executions WHERE id=?', ('{execution_id}',))
-c.commit(); c.close()
-print('OK')
-""")
+    backend_db.execute("DELETE FROM schedule_executions WHERE id = :id", id=execution_id)
 
 
 class TestWatchdogCleanupReportFields:

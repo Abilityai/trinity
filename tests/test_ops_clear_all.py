@@ -19,6 +19,7 @@ import pytest
 import uuid
 from datetime import datetime, timezone
 
+from testkit import backend_db
 from testkit.api_client import TrinityApiClient, ApiConfig
 from testkit.assertions import assert_status
 
@@ -38,9 +39,11 @@ _ISO_EMAIL = f"{_ISO_USERNAME}@test.example.com"
 def _exec_backend(python_code: str) -> str:
     """Run python inside the backend container and return its output.
 
-    Scripts that `import database` trigger an import-time ADMIN_PASSWORD
-    warning on stdout; such scripts must print their value as `RESULT:<v>`
-    and we extract it here. Plain sqlite3 scripts return raw stdout.
+    Used for the checks that call the `db` facade. Scripts that
+    `import database` trigger an import-time ADMIN_PASSWORD warning on stdout;
+    they print their value as `RESULT:<v>` and we extract it here. Rows are
+    seeded and read through `testkit.backend_db`, which reaches whichever
+    database the stack booted on (#4620).
     """
     result = subprocess.run(
         ["docker", "exec", _BACKEND_CONTAINER, "python3", "-c", python_code],
@@ -57,110 +60,64 @@ def _exec_backend(python_code: str) -> str:
 
 def _seed_queue_item(item_id: str, status: str = "pending", agent: str = _AGENT):
     """Insert an operator_queue row directly in the DB."""
-    now = datetime.now(timezone.utc).isoformat()
-    _exec_backend(f"""
-import sqlite3, os
-from pathlib import Path
-db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
-conn = sqlite3.connect(db)
-conn.execute(
-    "INSERT OR IGNORE INTO operator_queue "
-    "(id, agent_name, type, status, priority, title, question, created_at) "
-    "VALUES (?, ?, 'question', ?, 'medium', 'Clear-all test', 'Proceed?', ?)",
-    ("{item_id}", "{agent}", "{status}", "{now}"),
-)
-conn.commit()
-conn.close()
-print("OK")
-""")
+    backend_db.execute(
+        "INSERT INTO operator_queue "
+        "(id, agent_name, type, status, priority, title, question, created_at) "
+        "VALUES (:id, :agent, 'question', :status, 'medium', 'Clear-all test', 'Proceed?', :now) "
+        "ON CONFLICT DO NOTHING",
+        id=item_id, agent=agent, status=status,
+        now=datetime.now(timezone.utc).isoformat(),
+    )
 
 
 def _seed_notification(notif_id: str, status: str = "pending", agent: str = _AGENT):
     """Insert an agent_notifications row directly in the DB."""
-    now = datetime.now(timezone.utc).isoformat()
-    _exec_backend(f"""
-import sqlite3, os
-from pathlib import Path
-db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
-conn = sqlite3.connect(db)
-conn.execute(
-    "INSERT OR IGNORE INTO agent_notifications "
-    "(id, agent_name, notification_type, title, priority, status, created_at) "
-    "VALUES (?, ?, 'info', 'Clear-all test notif', 'normal', ?, ?)",
-    ("{notif_id}", "{agent}", "{status}", "{now}"),
-)
-conn.commit()
-conn.close()
-print("OK")
-""")
+    backend_db.execute(
+        "INSERT INTO agent_notifications "
+        "(id, agent_name, notification_type, title, priority, status, created_at) "
+        "VALUES (:id, :agent, 'info', 'Clear-all test notif', 'normal', :status, :now) "
+        "ON CONFLICT DO NOTHING",
+        id=notif_id, agent=agent, status=status,
+        now=datetime.now(timezone.utc).isoformat(),
+    )
 
 
 def _queue_item_status(item_id: str) -> str:
     """Read an operator_queue row's status straight from the DB ('' if gone)."""
-    return _exec_backend(f"""
-import sqlite3, os
-from pathlib import Path
-db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
-conn = sqlite3.connect(db)
-row = conn.execute("SELECT status FROM operator_queue WHERE id = ?", ("{item_id}",)).fetchone()
-conn.close()
-print(row[0] if row else "")
-""")
+    return backend_db.scalar(
+        "SELECT status FROM operator_queue WHERE id = :id", id=item_id) or ""
 
 
 @pytest.fixture(scope="module")
 def clr_setup(api_client: TrinityApiClient):
     """Sentinel agent owned by admin + a zero-agent non-admin user."""
-    # Non-admin user with no agents (exercises the empty-accessible-set path)
-    _exec_backend(f"""
-import sqlite3, os
-from pathlib import Path
-from passlib.context import CryptContext
-ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
-pw = ctx.hash("{_ISO_PASSWORD}")
-db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
-conn = sqlite3.connect(db)
-conn.execute(
-    "INSERT OR IGNORE INTO users (username, password_hash, role, email, created_at, updated_at) "
-    "VALUES (?, ?, 'operator', ?, datetime('now'), datetime('now'))",
-    ("{_ISO_USERNAME}", pw, "{_ISO_EMAIL}"),
-)
-admin_id = conn.execute("SELECT id FROM users WHERE username='admin'").fetchone()[0]
-conn.execute(
-    "INSERT OR IGNORE INTO agent_ownership (agent_name, owner_id, created_at) "
-    "VALUES (?, ?, datetime('now'))",
-    ("{_AGENT}", admin_id),
-)
-conn.commit()
-conn.close()
-print("OK")
-""")
+    non_admin = None
+    try:
+        # Non-admin user with no agents (exercises the empty-accessible-set path)
+        backend_db.create_user(_ISO_USERNAME, _ISO_PASSWORD, _ISO_EMAIL)
+        backend_db.execute(
+            "INSERT INTO agent_ownership (agent_name, owner_id, created_at) "
+            "VALUES (:agent, :owner, :now) ON CONFLICT DO NOTHING",
+            agent=_AGENT, owner=backend_db.admin_user_id(), now=backend_db.utc_now(),
+        )
 
-    cfg = ApiConfig(
-        base_url=os.getenv("TRINITY_API_URL", "http://localhost:8000"),
-        username=_ISO_USERNAME,
-        password=_ISO_PASSWORD,
-    )
-    non_admin = TrinityApiClient(cfg)
-    non_admin.authenticate()
+        cfg = ApiConfig(
+            base_url=os.getenv("TRINITY_API_URL", "http://localhost:8000"),
+            username=_ISO_USERNAME,
+            password=_ISO_PASSWORD,
+        )
+        non_admin = TrinityApiClient(cfg)
+        non_admin.authenticate()
 
-    yield {"admin": api_client, "non_admin": non_admin, "agent": _AGENT}
-
-    non_admin.close()
-
-    _exec_backend(f"""
-import sqlite3, os
-from pathlib import Path
-db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
-conn = sqlite3.connect(db)
-conn.execute("DELETE FROM operator_queue WHERE agent_name = ?", ("{_AGENT}",))
-conn.execute("DELETE FROM agent_notifications WHERE agent_name = ?", ("{_AGENT}",))
-conn.execute("DELETE FROM agent_ownership WHERE agent_name = ?", ("{_AGENT}",))
-conn.execute("DELETE FROM users WHERE username = ?", ("{_ISO_USERNAME}",))
-conn.commit()
-conn.close()
-print("OK")
-""")
+        yield {"admin": api_client, "non_admin": non_admin, "agent": _AGENT}
+    finally:
+        # Also when the setup above fails: the rows are real, and a login whose
+        # password is in this file must not stay behind on a stack that lives on.
+        if non_admin is not None:
+            non_admin.close()
+        for table in ("operator_queue", "agent_notifications", "agent_ownership"):
+            backend_db.execute(f"DELETE FROM {table} WHERE agent_name = :agent", agent=_AGENT)
+        backend_db.delete_user(_ISO_USERNAME)
 
 
 # ============================================================================
@@ -430,22 +387,12 @@ print("RESULT:" + str(n))
         # The three seeded non-dismissed rows are now dismissed with
         # acknowledged_at set; the pre-dismissed row was left untouched
         # (its acknowledged_at stays NULL).
-        check = _exec_backend(f"""
-import sqlite3, os, json
-from pathlib import Path
-db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
-conn = sqlite3.connect(db)
-rows = {{}}
-for nid in {list(ids.values())!r}:
-    r = conn.execute(
-        "SELECT status, acknowledged_at FROM agent_notifications WHERE id = ?", (nid,)
-    ).fetchone()
-    rows[nid] = list(r) if r else None
-conn.close()
-print("RESULT:" + json.dumps(rows))
-""")
-        import json as _json
-        rows = _json.loads(check)
+        rows = {}
+        for nid in ids.values():
+            found = backend_db.rows(
+                "SELECT status, acknowledged_at FROM agent_notifications WHERE id = :id",
+                id=nid)
+            rows[nid] = found[0] if found else None
         for key in ("pending1", "pending2", "acknowledged"):
             status, ack_at = rows[ids[key]]
             assert status == "dismissed", f"{key} not dismissed"
@@ -503,15 +450,8 @@ print("RESULT:" + str(n.acknowledged_at))
         assert response.json()["dismissed"] == 0
 
         # Admin's notification untouched
-        status = _exec_backend(f"""
-import sqlite3, os
-from pathlib import Path
-db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
-conn = sqlite3.connect(db)
-row = conn.execute("SELECT status FROM agent_notifications WHERE id = ?", ("{sentinel}",)).fetchone()
-conn.close()
-print(row[0] if row else "")
-""")
+        status = backend_db.scalar(
+            "SELECT status FROM agent_notifications WHERE id = :id", id=sentinel)
         assert status == "pending"
 
 

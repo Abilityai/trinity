@@ -9,11 +9,11 @@ Feature Flow: operating-room.md
 """
 
 import os
-import subprocess
 import pytest
 import uuid
 from datetime import datetime, timezone
 
+from testkit import backend_db
 from testkit.api_client import TrinityApiClient, ApiConfig
 from testkit.assertions import (
     assert_status,
@@ -496,22 +496,11 @@ class TestAgentQueueItems:
 # Cross-User Access Isolation Tests (#470)
 # ============================================================================
 
-_BACKEND_CONTAINER = os.getenv("TRINITY_BACKEND_CONTAINER", "trinity-backend")
 _ISO_USERNAME = f"testuser-opq-{uuid.uuid4().hex[:8]}"
 _ISO_PASSWORD = "test-opq-password-470"
 _ISO_EMAIL = f"{_ISO_USERNAME}@test.example.com"
 _ISO_AGENT = f"test-opq-agent-{uuid.uuid4().hex[:6]}"
 _ISO_ITEM_ID = f"test-opq-item-{uuid.uuid4().hex[:12]}"
-
-
-def _exec_backend(python_code: str) -> str:
-    result = subprocess.run(
-        ["docker", "exec", _BACKEND_CONTAINER, "python3", "-c", python_code],
-        capture_output=True, text=True, timeout=15,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"Backend exec failed: {result.stderr}")
-    return result.stdout.strip()
 
 
 @pytest.fixture(scope="module")
@@ -524,86 +513,47 @@ def _iso_setup(api_client: TrinityApiClient):
     - A fake agent ownership row for a sentinel agent owned by admin
     - A queue item for that sentinel agent
     """
-    now = datetime.now(timezone.utc).isoformat()
+    non_admin = None
+    try:
+        # Rows go through the backend's own engine, so they land in whichever
+        # database the stack booted on (#4620).
+        backend_db.create_user(_ISO_USERNAME, _ISO_PASSWORD, _ISO_EMAIL)
 
-    # Create non-admin user
-    _exec_backend(f"""
-import sqlite3, os
-from pathlib import Path
-from passlib.context import CryptContext
-ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
-pw = ctx.hash("{_ISO_PASSWORD}")
-db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
-conn = sqlite3.connect(db)
-conn.execute(
-    "INSERT OR IGNORE INTO users (username, password_hash, role, email, created_at, updated_at) "
-    "VALUES (?, ?, 'operator', ?, datetime('now'), datetime('now'))",
-    ("{_ISO_USERNAME}", pw, "{_ISO_EMAIL}"),
-)
-conn.commit()
-conn.close()
-print("OK")
-""")
+        # Register fake agent ownership under admin's user id
+        backend_db.execute(
+            "INSERT INTO agent_ownership (agent_name, owner_id, created_at) "
+            "VALUES (:agent, :owner, :now) ON CONFLICT DO NOTHING",
+            agent=_ISO_AGENT, owner=backend_db.admin_user_id(), now=backend_db.utc_now(),
+        )
 
-    # Register fake agent ownership under admin's user id
-    _exec_backend(f"""
-import sqlite3, os
-from pathlib import Path
-db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
-conn = sqlite3.connect(db)
-admin_id = conn.execute("SELECT id FROM users WHERE username='admin'").fetchone()[0]
-conn.execute(
-    "INSERT OR IGNORE INTO agent_ownership (agent_name, owner_id, created_at) VALUES (?, ?, datetime('now'))",
-    ("{_ISO_AGENT}", admin_id),
-)
-conn.commit()
-conn.close()
-print("OK")
-""")
+        # Insert a queue item belonging to that agent
+        backend_db.execute(
+            "INSERT INTO operator_queue "
+            "(id, agent_name, type, status, priority, title, question, created_at) "
+            "VALUES (:id, :agent, 'approval', 'pending', 'high', 'Test item 470', 'Proceed?', :now) "
+            "ON CONFLICT DO NOTHING",
+            id=_ISO_ITEM_ID, agent=_ISO_AGENT, now=datetime.now(timezone.utc).isoformat(),
+        )
 
-    # Insert a queue item belonging to that agent
-    _exec_backend(f"""
-import sqlite3, os
-from pathlib import Path
-db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
-conn = sqlite3.connect(db)
-conn.execute(
-    "INSERT OR IGNORE INTO operator_queue "
-    "(id, agent_name, type, status, priority, title, question, created_at) "
-    "VALUES (?, ?, 'approval', 'pending', 'high', 'Test item 470', 'Proceed?', ?)",
-    ("{_ISO_ITEM_ID}", "{_ISO_AGENT}", "{now}"),
-)
-conn.commit()
-conn.close()
-print("OK")
-""")
+        # Build the non-admin client
+        cfg = ApiConfig(
+            base_url=os.getenv("TRINITY_API_URL", "http://localhost:8000"),
+            username=_ISO_USERNAME,
+            password=_ISO_PASSWORD,
+        )
+        non_admin = TrinityApiClient(cfg)
+        non_admin.authenticate()
 
-    # Build the non-admin client
-    cfg = ApiConfig(
-        base_url=os.getenv("TRINITY_API_URL", "http://localhost:8000"),
-        username=_ISO_USERNAME,
-        password=_ISO_PASSWORD,
-    )
-    non_admin = TrinityApiClient(cfg)
-    non_admin.authenticate()
-
-    yield {"admin": api_client, "non_admin": non_admin, "item_id": _ISO_ITEM_ID, "agent": _ISO_AGENT}
-
-    non_admin.close()
-
-    # Teardown: remove queue item, agent ownership, user
-    _exec_backend(f"""
-import sqlite3, os
-from pathlib import Path
-db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
-conn = sqlite3.connect(db)
-conn.execute("DELETE FROM operator_queue WHERE id = ?", ("{_ISO_ITEM_ID}",))
-conn.execute("DELETE FROM agent_ownership WHERE agent_name = ?", ("{_ISO_AGENT}",))
-conn.execute("DELETE FROM users WHERE username = ?", ("{_ISO_USERNAME}",))
-conn.commit()
-conn.close()
-print("OK")
-""")
+        yield {"admin": api_client, "non_admin": non_admin, "item_id": _ISO_ITEM_ID, "agent": _ISO_AGENT}
+    finally:
+        # Teardown: remove queue item, agent ownership, user. Also when the
+        # setup above fails: the rows are real, and a login whose password is
+        # in this file must not stay behind on a stack that lives on.
+        if non_admin is not None:
+            non_admin.close()
+        backend_db.execute("DELETE FROM operator_queue WHERE id = :id", id=_ISO_ITEM_ID)
+        backend_db.execute("DELETE FROM agent_ownership WHERE agent_name = :agent", agent=_ISO_AGENT)
+        backend_db.delete_user(_ISO_USERNAME)
 
 
 class TestOperatorQueueAccessControl:
