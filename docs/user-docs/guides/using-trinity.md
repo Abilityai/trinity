@@ -67,7 +67,7 @@ Click any agent to open its detail page. Tabs appear based on what the agent has
 | **Loops** | Bounded sequential task runs |
 | **Skills** | The agent's own skills and those shared from the library, each with **Run**; owners and admins also set approval and assign skills |
 | **Payments** | Nevermined payment configuration |
-| **Channels** / **Permissions** | External clients and channels, and which agents may call this one (owners and admins) |
+| **Permissions** | Which agents may call this one (owners and admins) |
 | **A2A** | Inbound A2A exposure (owner-only, entitled installations) |
 | **Git** | Sync status, pending changes, commits, **Pull**, **Push** and **Refresh** (only when the agent has a repository binding) |
 | **Files** | Browse the agent workspace, download files |

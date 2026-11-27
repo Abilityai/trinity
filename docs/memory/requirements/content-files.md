@@ -101,7 +101,7 @@
   - MCP-path endpoint `POST /api/agents/{name}/shared-files` (owner/admin or agent-scoped key)
   - Public download endpoint `GET /api/files/{file_id}?sig={token}` (+ `HEAD`) — 192-bit signed token, constant-time compare, streaming, `X-Content-Type-Options: nosniff`, audit logged as `file_share_download`. **Disposition is an allowlist decided by the server** (ent#461): `inline` only for `_INLINE_SAFE_TYPES` (audio/video/image/PDF), `attachment` for everything else — `text/html`, `application/xhtml+xml` and `image/svg+xml` included. A requester may pass **`?download=1`, which is ONE-WAY**: it can only force `attachment` (#2582), never `inline`. Parsed tolerantly (`Optional[str]` + truthy check), so a malformed `?download=` on a link opened from Telegram/iOS is ignored rather than 422'd
   - List / revoke endpoints for the owner (`GET` / `DELETE /api/agents/{name}/shared-files[/{id}]`)
-  - UI panel in Agent Detail → Channels tab (toggle, quota, table, copy URL, revoke)
+  - UI panel in Agent Detail → **Settings › Channels** (toggle, quota, table, copy URL, revoke)
   - File validation: relative path only, no `..` escapes, 50 MB per file, 500 MB per-agent quota, magic-byte MIME detection with executable blocklist (PE/ELF/Mach-O/shebang)
   - Agent delete cascades: DB rows + on-disk files + Docker volume all removed
   - Agent rename cascades: `rename_agent()` in `db/agent_settings/metadata.py` updates our table

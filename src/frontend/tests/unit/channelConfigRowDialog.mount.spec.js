@@ -87,3 +87,44 @@ describe('#3447 ChannelConfigRow opens its config in a dialog', () => {
     expect(api.get).toHaveBeenCalledTimes(2)
   })
 })
+
+// trinity-enterprise#340: a channel that fails its check must not read "Not connected".
+describe('what the row says about its channel', () => {
+  it.each([[500], [503]])('a %s says it could not check, and Retry asks again', async (code) => {
+    api.get.mockRejectedValueOnce(Object.assign(new Error('x'), { response: { status: code } }))
+    await mountRow()
+    expect(wrapper.text()).toContain("Couldn't check")
+    expect(wrapper.text()).not.toContain('Not connected')
+    expect(wrapper.emitted('status').at(-1)[0]).toEqual({ connected: null })
+    api.get.mockResolvedValueOnce({ data: { connected: true } })
+    await wrapper.findAll('button').find((b) => b.text() === 'Retry').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Connected')
+    expect(wrapper.emitted('status').at(-1)[0]).toEqual({ connected: true })
+  })
+
+  it('no response at all is also not an answer', async () => {
+    api.get.mockRejectedValueOnce(new Error('network'))
+    await mountRow()
+    expect(wrapper.text()).toContain("Couldn't check")
+  })
+
+  it('a 4xx is an answer: not connected', async () => {
+    api.get.mockRejectedValueOnce(Object.assign(new Error('x'), { response: { status: 404 } }))
+    await mountRow()
+    expect(wrapper.text()).toContain('Not connected')
+    expect(wrapper.text()).not.toContain("Couldn't check")
+    expect(wrapper.emitted('status').at(-1)[0]).toEqual({ connected: false })
+  })
+
+  it('opens from outside, and says when it closes', async () => {
+    await mountRow()
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+    expect(dialog()).not.toBeNull()
+    document.body.querySelector('[aria-label="Close"]').click()
+    await flushPromises()
+    expect(dialog()).toBeNull()
+    expect(wrapper.emitted('closed')).toHaveLength(1)
+  })
+})

@@ -169,11 +169,11 @@ screenshots:
 
   - file: agent-sharing-access.png
     title: Agent Detail — Sharing / access control
-    route: /agents/{name}?tab=sharing
+    route: /agents/{name}?tab=settings&section=channels
     shows: Identity Proof (require verified email, open access) and the Team Sharing
       allow-list.
     sources:
-      - src/frontend/src/components/SharingPanel.vue
+      - src/frontend/src/components/agent-settings/channels/WhoCanChat.vue
       - src/frontend/src/components/AccessPanel.vue
     captured_at: 2026-06-01
     captured_commit: unknown

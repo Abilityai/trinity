@@ -67,7 +67,8 @@ describe('#2153 the deep-link superset', () => {
 
   it("an old ?tab=playbooks link lands on Skills (trinity-enterprise#754)", () => {
     expect(TAB_ALIASES.playbooks).toBe('skills')
-    expect(TAB_ALIASES.sharing).toBe('channels')
+    expect(TAB_ALIASES.sharing).toBe('settings')
+    expect(TAB_ALIASES.channels).toBe('settings')
     expect(idsFor(OWNER)).toContain('skills')
     expect(idsFor(OWNER)).not.toContain('playbooks')
     // Every alias resolves to a tab that exists for someone.
@@ -81,7 +82,7 @@ describe('#2153 a non-owner still cannot reach owner-only tabs', () => {
   // fallback for a non-owner is unchanged, and no blank panel is ever rendered.
   // trinity-enterprise#754: `skills` left this list — the merged tab is for
   // everyone with access; its management controls are role-gated inside it.
-  const ownerOnly = ['access', 'channels', 'permissions', 'a2a', 'folders', 'settings']
+  const ownerOnly = ['access', 'permissions', 'a2a', 'folders', 'settings']
 
   for (const id of ownerOnly) {
     it(`omits '${id}' when can_share is false`, () => {
@@ -100,7 +101,7 @@ describe('#2153 a non-owner still cannot reach owner-only tabs', () => {
 
   it('omits the sharing tabs for a system agent even when can_share is true', () => {
     const ids = idsFor({ ...OWNER, isSystem: true })
-    expect(ids).not.toContain('channels')
+    expect(ids).not.toContain('permissions')
     expect(ids).not.toContain('permissions')
     expect(ids).toContain('skills')     // its Run surface, as the Playbooks tab had
   })
@@ -130,11 +131,12 @@ describe('#2153 the late reconcile cannot re-create #2130', () => {
   })
 })
 
-// trinity-enterprise#225: an owner sees the tab under its new name, not the old one.
+// trinity-enterprise#340: the console is Settings › Channels. There is no tab
+// for it under either name it has had; both are aliases (asserted above).
 describe('the external-client tab', () => {
-  it('is called Channels', () => {
-    const tab = buildTabs(OWNER).find((t) => t.id === 'channels')
-    expect(tab.label).toBe('Channels')
-    expect(buildTabs(OWNER).some((t) => t.label === 'Sharing')).toBe(false)
+  it('is gone: neither Sharing nor Channels is a tab', () => {
+    const tabs = buildTabs(OWNER)
+    expect(tabs.some((t) => t.id === 'channels' || t.id === 'sharing')).toBe(false)
+    expect(tabs.some((t) => t.label === 'Sharing' || t.label === 'Channels')).toBe(false)
   })
 })

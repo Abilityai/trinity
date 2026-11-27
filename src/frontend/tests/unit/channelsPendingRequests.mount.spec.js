@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * trinity-enterprise#737 — the Channels tab's pending access requests show the
+ * trinity-enterprise#737 — the pending access requests show the
  * requester as a person, not a string.
  *
  * Mounted against stubbed transports; channel panels are stubbed. Pinned:
@@ -12,8 +12,8 @@
  *    identity says "Identity not captured" — never a blank;
  *  - Approve still decides the request by its id.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { mount, flushPromises } from '@vue/test-utils'
+import { describe, it, expect, vi, beforeEach , afterEach } from 'vitest'
+import { mount, flushPromises, DOMWrapper } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 
 const ax = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() }))
@@ -21,7 +21,7 @@ vi.mock('axios', () => ({ default: ax }))
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() }))
 vi.mock('@/api', () => ({ default: api }))
 
-import SharingPanel from '@/components/SharingPanel.vue'
+import WhoCanChat from '@/components/agent-settings/channels/WhoCanChat.vue'
 
 const AGENT = 'scout'
 const base = (over) => ({
@@ -44,38 +44,35 @@ const HANDLE_ONLY = () => base({ id: 'r2', email: 'dee@example.com', channel: 's
 const WEB = () => base({ id: 'r3', email: 'web@example.com', channel: 'web' })
 const OLD = () => base({ id: 'r4', email: 'old@example.com', channel: 'whatsapp' })
 
+const mounted = []
+afterEach(() => {
+  mounted.splice(0).forEach((w) => w.unmount())
+  document.body.innerHTML = ''
+})
+
 beforeEach(() => {
   setActivePinia(createPinia())
   Object.values(ax).forEach((f) => f.mockReset())
   Object.values(api).forEach((f) => f.mockReset())
-  ax.get.mockImplementation((url) => {
+  api.get.mockImplementation((url) => {
     if (url.endsWith('/access-requests')) return Promise.resolve({ data: [CAROL(), HANDLE_ONLY(), WEB(), OLD()] })
     if (url.endsWith('/access-policy')) return Promise.resolve({ data: { require_email: true, open_access: false, group_auth_mode: 'none' } })
     if (url.endsWith('/clients')) return Promise.resolve({ data: [] })
     return Promise.resolve({ data: {} })
   })
-  ax.post.mockResolvedValue({ data: {} })
-  api.get.mockResolvedValue({ data: {} })
+  api.post.mockResolvedValue({ data: {} })
 })
 
-const STUB = { template: '<div />' }
 async function render() {
-  const w = mount(SharingPanel, {
-    props: { agentName: AGENT },
-    global: {
-      stubs: {
-        ChannelDisclosure: STUB, ChannelConfigRow: STUB, PublicLinksPanel: STUB, SlackChannelPanel: STUB,
-        SlackAgentBotPanel: STUB, TelegramChannelPanel: STUB, WhatsAppChannelPanel: STUB,
-        VoipChannelPanel: STUB, ConnectorChannelPanel: STUB, PortalClientsPanel: STUB,
-        'router-link': { props: ['to'], template: '<a :data-to="JSON.stringify(to)"><slot /></a>' },
-      },
-      mocks: { $route: { query: {} } },
-    },
-  })
+  const w = mount(WhoCanChat, { props: { agentName: AGENT }, attachTo: document.body })
   await flushPromises()
+  await w.get('[data-testid="channels-review"]').trigger('click')
+  await flushPromises()
+  mounted.push(w)
   return w
 }
-const row = (w, id) => w.find(`[data-testid="access-request-${id}"]`)
+// The list is in a dialog, teleported to <body>.
+const row = (_w, id) => new DOMWrapper(document.body).find(`[data-testid="access-request-${id}"]`)
 const text = (r, t) => r.find(`[data-testid="access-request-${t}"]`).text()
 
 describe('pending access requests name the person (ent#737)', () => {
@@ -114,24 +111,6 @@ describe('pending access requests name the person (ent#737)', () => {
     const w = await render()
     await row(w, 'r1').findAll('button').find((b) => b.text() === 'Approve').trigger('click')
     await flushPromises()
-    expect(ax.post).toHaveBeenCalledWith(`/api/agents/${AGENT}/access-requests/r1/decide`, { approve: true }, expect.anything())
-  })
-})
-
-// trinity-enterprise#225: the panel names itself after its tab, and points at where
-// teammates moved to rather than at the Access tab that no longer exists.
-describe('how the Channels tab introduces itself', () => {
-  it('is headed Channels and never says Share this agent', async () => {
-    const w = await render()
-    expect(w.find('h3').text()).toBe('Channels')
-    expect(w.text()).not.toContain('Share this agent')
-  })
-
-  it('sends teammates to Settings › People, not the Access tab', async () => {
-    const w = await render()
-    const link = w.find('[data-testid="channels-people-link"]')
-    expect(link.text()).toBe('Settings › People')
-    expect(JSON.parse(link.attributes('data-to'))).toEqual({ query: { tab: 'settings', section: 'people' } })
-    expect(w.text()).not.toContain('Access tab')
+    expect(api.post).toHaveBeenCalledWith(`/api/agents/${AGENT}/access-requests/r1/decide`, { approve: true })
   })
 })

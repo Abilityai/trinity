@@ -196,7 +196,7 @@ any of those 401s -> PublicChat.vue endPublicSession()
 
 | File | Line | Description |
 |------|------|-------------|
-| `src/frontend/src/components/SharingPanel.vue` | 82-83 | Embeds PublicLinksPanel within Channels tab |
+| `src/frontend/src/components/SharingPanel.vue` | 82-83 | Embeds PublicLinksPanel within Settings › Channels |
 | `src/frontend/src/components/SharingPanel.vue` | 92 | Import statement for PublicLinksPanel |
 | `src/frontend/src/components/PublicLinksPanel.vue` | 1-503 | Owner management panel |
 | `src/frontend/src/views/PublicChat.vue` | 1-786 | Public chat interface (PUB-003 intro, PUB-004 header metadata, PUB-005 session persistence, PUB-006 bottom-aligned messages, THINK-001 dynamic status) |

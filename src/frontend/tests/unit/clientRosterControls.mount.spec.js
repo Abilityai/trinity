@@ -1,18 +1,20 @@
 // @vitest-environment jsdom
 /**
- * trinity-enterprise#21 — per-client controls on the Sharing-tab client roster.
+ * trinity-enterprise#21 — per-client controls on the client roster, which lives
+ * in Settings › Channels since trinity-enterprise#340 (`ClientRoster.vue`).
  *
- * Mounted against stubbed transports; the channel panels are stubbed (their own
- * specs cover them). What is pinned:
+ * Mounted against a stubbed api client. What is pinned:
  *  - each row shows its access state, and only the actions that state allows:
  *    Approve on pending, Revoke on approved, Block on everything not blocked,
  *    Unblock on blocked;
  *  - Block and Revoke ask first and say what they do; a cancel sends nothing;
  *  - each control posts {channel, client_id} to its route and reloads the roster;
- *  - Approve is the existing access-request decision, by the row's request id.
+ *  - Approve is the existing access-request decision, by the row's request id,
+ *    and tells the pane so the pending list next door re-reads;
+ *  - a different agent clears the previous agent's rows at once.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { mount, flushPromises } from '@vue/test-utils'
+import { mount, flushPromises, DOMWrapper } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 
 const ax = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() }))
@@ -20,7 +22,7 @@ vi.mock('axios', () => ({ default: ax }))
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() }))
 vi.mock('@/api', () => ({ default: api }))
 
-import SharingPanel from '@/components/SharingPanel.vue'
+import ClientRoster from '@/components/agent-settings/channels/ClientRoster.vue'
 
 const AGENT = 'scout'
 const CLIENTS_URL = `/api/agents/${AGENT}/clients`
@@ -37,41 +39,31 @@ const BOB = () => row({ identity: '@bob', display_name: 'bob', client_id: '1003'
 const DAN = () => row({ identity: '1004', client_id: '1004' })
 
 let roster
+let otherRoster = Promise.resolve({ data: [] })
 beforeEach(() => {
   setActivePinia(createPinia())
   Object.values(ax).forEach((f) => f.mockReset())
   Object.values(api).forEach((f) => f.mockReset())
   roster = [ALICE(), CAROL(), BOB(), DAN()]
-  ax.get.mockImplementation((url) => {
+  api.get.mockImplementation((url) => {
     if (url === CLIENTS_URL) return Promise.resolve({ data: roster })
-    if (url.endsWith('/access-policy')) return Promise.resolve({ data: { require_email: true, open_access: false, group_auth_mode: 'none' } })
-    if (url.endsWith('/access-requests')) return Promise.resolve({ data: [] })
+    if (url === `/api/agents/other/clients`) return otherRoster
     return Promise.resolve({ data: {} })
   })
-  ax.post.mockResolvedValue({ data: {} })
-  api.get.mockResolvedValue({ data: {} })
+  api.post.mockResolvedValue({ data: {} })
+  document.body.innerHTML = ''
 })
 
-const STUB = { template: '<div />' }
+const body = () => new DOMWrapper(document.body)
 async function render() {
-  const w = mount(SharingPanel, {
-    props: { agentName: AGENT },
-    attachTo: document.body,
-    global: {
-      stubs: {
-        ChannelDisclosure: STUB, ChannelConfigRow: STUB, PublicLinksPanel: STUB, SlackChannelPanel: STUB,
-        SlackAgentBotPanel: STUB, TelegramChannelPanel: STUB, WhatsAppChannelPanel: STUB,
-        VoipChannelPanel: STUB, ConnectorChannelPanel: STUB, PortalClientsPanel: STUB,
-        'router-link': { template: '<a><slot /></a>' },
-      },
-      mocks: { $route: { query: {} } },
-    },
-  })
+  const w = mount(ClientRoster, { props: { agentName: AGENT }, attachTo: document.body })
+  await flushPromises()
+  await w.find('[data-testid="channels-roster-open"]').trigger('click')
   await flushPromises()
   return w
 }
 
-const rowOf = (w, text) => w.findAll('tbody tr').find((tr) => tr.text().includes(text))
+const rowOf = (_w, text) => body().findAll('tbody tr').find((tr) => tr.text().includes(text))
 const buttons = (tr) => tr.findAll('button').map((b) => b.text())
 const dialog = () => document.body.querySelector('[data-testid="confirm-dialog"]')
 const clickDialog = async (which) => {
@@ -90,7 +82,7 @@ describe('client roster access controls (ent#21)', () => {
     expect(buttons(rowOf(w, 'bob'))).toEqual(['Unblock'])
     expect(rowOf(w, '1004').text()).toContain('By policy')
     expect(buttons(rowOf(w, '1004'))).toEqual(['Block'])
-    const badge = w.find('[data-testid="client-access-telegram-1003"]')
+    const badge = body().find('[data-testid="client-access-telegram-1003"]')
     expect(badge.attributes('title')).toContain('owner@example.com')
     expect(badge.attributes('title')).toContain('spam')
     w.unmount()
@@ -101,11 +93,10 @@ describe('client roster access controls (ent#21)', () => {
     await rowOf(w, '1004').findAll('button').find((b) => b.text() === 'Block').trigger('click')
     await flushPromises()
     expect(dialog().textContent).toContain('dropped with no reply')
-    expect(ax.post).not.toHaveBeenCalled()
+    expect(api.post).not.toHaveBeenCalled()
     roster = [ALICE(), CAROL(), BOB(), row({ identity: '1004', client_id: '1004', access: 'blocked' })]
     await clickDialog('confirm')
-    expect(ax.post).toHaveBeenCalledWith(`/api/agents/${AGENT}/clients/block`,
-      { channel: 'telegram', client_id: '1004' }, expect.anything())
+    expect(api.post).toHaveBeenCalledWith(`/api/agents/${AGENT}/clients/block`, { channel: 'telegram', client_id: '1004' })
     expect(buttons(rowOf(w, '1004'))).toEqual(['Unblock'])
     w.unmount()
   })
@@ -117,12 +108,11 @@ describe('client roster access controls (ent#21)', () => {
     await flushPromises()
     expect(dialog().textContent).toContain('alice@example.com loses access')
     await clickDialog('cancel')
-    expect(ax.post).not.toHaveBeenCalled()
+    expect(api.post).not.toHaveBeenCalled()
     await revoke().trigger('click')
     await flushPromises()
     await clickDialog('confirm')
-    expect(ax.post).toHaveBeenCalledWith(`/api/agents/${AGENT}/clients/revoke`,
-      { channel: 'telegram', client_id: '1001' }, expect.anything())
+    expect(api.post).toHaveBeenCalledWith(`/api/agents/${AGENT}/clients/revoke`, { channel: 'telegram', client_id: '1001' })
     w.unmount()
   })
 
@@ -130,12 +120,58 @@ describe('client roster access controls (ent#21)', () => {
     const w = await render()
     await rowOf(w, 'bob').findAll('button').find((b) => b.text() === 'Unblock').trigger('click')
     await flushPromises()
-    expect(ax.post).toHaveBeenCalledWith(`/api/agents/${AGENT}/clients/unblock`,
-      { channel: 'telegram', client_id: '1003' }, expect.anything())
+    expect(api.post).toHaveBeenCalledWith(`/api/agents/${AGENT}/clients/unblock`, { channel: 'telegram', client_id: '1003' })
     await rowOf(w, 'carol@example.com').findAll('button').find((b) => b.text() === 'Approve').trigger('click')
     await flushPromises()
-    expect(ax.post).toHaveBeenCalledWith(`/api/agents/${AGENT}/access-requests/req-1/decide`,
-      { approve: true }, expect.anything())
+    expect(api.post).toHaveBeenCalledWith(`/api/agents/${AGENT}/access-requests/req-1/decide`, { approve: true })
+    w.unmount()
+  })
+
+  it('an approval tells the pane, so the pending list next door re-reads', async () => {
+    const w = await render()
+    await rowOf(w, 'carol@example.com').findAll('button').find((b) => b.text() === 'Approve').trigger('click')
+    await flushPromises()
+    expect(w.emitted('requests-changed')).toHaveLength(1)
+    expect(w.emitted('agent-updated')).toHaveLength(1)
+    w.unmount()
+  })
+
+  it('a revoke tells the pane the shares changed; a block does not', async () => {
+    const w = await render()
+    await rowOf(w, '1004').findAll('button').find((b) => b.text() === 'Block').trigger('click')
+    await flushPromises()
+    await clickDialog('confirm')
+    expect(w.emitted('agent-updated')).toBeUndefined()
+    await rowOf(w, 'alice').findAll('button').find((b) => b.text() === 'Revoke').trigger('click')
+    await flushPromises()
+    await clickDialog('confirm')
+    expect(w.emitted('agent-updated')).toHaveLength(1)
+    w.unmount()
+  })
+
+  it('a bumped refresh key re-reads the roster', async () => {
+    const w = await render()
+    const before = api.get.mock.calls.filter(([u]) => u === CLIENTS_URL).length
+    await w.setProps({ refreshKey: 1 })
+    await flushPromises()
+    expect(api.get.mock.calls.filter(([u]) => u === CLIENTS_URL).length).toBe(before + 1)
+    w.unmount()
+  })
+
+  // #4310 review: the previous agent's rows must not stay on screen, or
+  // clickable, while the next agent's roster loads.
+  it('a different agent clears the rows at once, and a late answer for the old one is dropped', async () => {
+    let release
+    otherRoster = new Promise((resolve) => { release = () => resolve({ data: [DAN()] }) })
+    const w = await render()
+    expect(rowOf(w, 'alice')).toBeTruthy()
+    await w.setProps({ agentName: 'other' })
+    await flushPromises()
+    expect(body().findAll('tbody tr')).toHaveLength(0)
+    expect(w.find('[data-testid="channels-roster-open"]').exists()).toBe(false)
+    release()
+    await flushPromises()
+    expect(w.find('[data-testid="channels-roster-summary"]').text()).toContain('1 person')
     w.unmount()
   })
 })

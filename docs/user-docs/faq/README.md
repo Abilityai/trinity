@@ -490,7 +490,7 @@
 - [Why did the invitation email for someone I shared an agent with have no link?](sharing-access-and-monetization.md#why-did-the-invitation-email-for-someone-i-shared-an-agent-with-have-no-link)
 - [What can my teammate do with an agent I've shared with them?](sharing-access-and-monetization.md#what-can-my-teammate-do-with-an-agent-ive-shared-with-them)
 - [Why can't my teammate see my past conversations with a shared agent?](sharing-access-and-monetization.md#why-cant-my-teammate-see-my-past-conversations-with-a-shared-agent)
-- [What's the difference between Settings › People and the Channels tab?](sharing-access-and-monetization.md#whats-the-difference-between-settings--people-and-the-channels-tab)
+- [What's the difference between Settings › People and Settings › Channels?](sharing-access-and-monetization.md#whats-the-difference-between-settings--people-and-settings--channels)
 - [What user roles does Trinity have and what can each one do?](sharing-access-and-monetization.md#what-user-roles-does-trinity-have-and-what-can-each-one-do)
 - [Who can create agents?](sharing-access-and-monetization.md#who-can-create-agents)
 - [Why am I getting an agent quota error when I create an agent?](sharing-access-and-monetization.md#why-am-i-getting-an-agent-quota-error-when-i-create-an-agent)

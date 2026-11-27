@@ -1,19 +1,19 @@
 # Feature: Per-Client Channel Access Controls (trinity-enterprise#21)
 
 ## Overview
-From the Sharing tab's client roster, an agent's owner can block, unblock, revoke or approve one external channel client (Telegram, WhatsApp) on that agent, instead of only changing the agent-wide access policy. Requirement: `requirements/public-access.md` §46.2.
+From the client roster in Settings › Channels, an agent's owner can block, unblock, revoke or approve one external channel client (Telegram, WhatsApp) on that agent, instead of only changing the agent-wide access policy. Requirement: `requirements/public-access.md` §46.2.
 
 ## User Story
 As an agent owner, I want to stop one person on Telegram or WhatsApp from reaching my agent, or withdraw the access I gave them, without changing who else can reach it.
 
 ## Entry Points
-- **UI**: `SharingPanel.vue` → client roster → Block / Unblock / Revoke / Approve per row
+- **UI**: Settings › Channels → Who has talked to it → Open roster (`agent-settings/channels/ClientRoster.vue`) → Block / Unblock / Revoke / Approve per row. An approval there re-reads the pending list in Who can chat, and a decision in Who can chat re-reads the roster (`ChannelsPane.vue`).
 - **API**: `POST /api/agents/{name}/clients/block` (`{channel, client_id, reason?}`), `…/clients/unblock`, `…/clients/revoke`; approve is the existing `POST /api/agents/{name}/access-requests/{id}/decide`
 
 ## Flow
 
 ```
-SharingPanel.vue ─→ routers/sharing.py (OwnedAgentByName + require_person, audit `authorization`)
+ClientRoster.vue ─→ routers/sharing.py (OwnedAgentByName + require_person, audit `authorization`)
                     └─→ services/client_roster_service.py
                           get_client_roster: chat-link rows (Telegram, WhatsApp)
                             + rows with no chat link: a block whose links are gone (bot
@@ -43,4 +43,4 @@ SharingPanel.vue ─→ routers/sharing.py (OwnedAgentByName + require_person, a
 ## Testing
 - `tests/unit/test_ent21_channel_client_controls.py` — roster states, block/unblock/revoke against a real DB; the parsed Telegram `sender_id` equals the roster `client_id`; transport commands from a blocked sender (Telegram, WhatsApp); a block survives a bot unbind and stays unblockable; a pending requester with no chat link is listed and blockable; proactive delivery refused.
 - `tests/unit/test_message_router_access_gate.py` — the turn gate (DM, group) and the observed-message path.
-- `src/frontend/tests/unit/sharingPanelClientControls.mount.spec.js` — the roster controls.
+- `src/frontend/tests/unit/clientRosterControls.mount.spec.js` — the roster controls.
