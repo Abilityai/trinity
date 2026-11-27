@@ -183,8 +183,10 @@ class TestRunTaskRunsInTheChat:
 
         assert sent["result"] == "from the container"
         chat.assert_not_awaited()
-        # …and by agent NAME, the container contract, not the session.
-        assert container.await_args.args[0] == "scout"
+        # …with the session itself: the container path runs a recorded turn for
+        # the person who started the call, so it needs more than the agent name.
+        assert container.await_args.args[0] is session
+        assert session.agent_name == "scout"
 
     def test_half_a_binding_is_not_a_binding(self):
         # A thread with no email cannot be attributed; an email with no thread

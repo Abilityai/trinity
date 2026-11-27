@@ -268,21 +268,29 @@ def test_agent_client_task_sends_the_flag_only_when_asked(monkeypatch):
 
 
 def test_a_voice_tool_call_spawns_with_auto_memory_off(monkeypatch):
-    """VoIP and the legacy voice tool reach the agent through `AgentClient.task`
-    with the caller's speech as the prompt and no execution row to judge."""
+    """VoIP and the legacy voice tool run the caller's speech as a task under an
+    execution row (trinity-enterprise#1392). The row's trigger is one the rule
+    never keeps shared auto-memory for, the owner's own call included."""
     from unittest.mock import AsyncMock
 
-    import services.agent_client as agent_client
     import services.skill_gate_service as sgs
+    import services.task_execution_service as tes
     from services import gemini_voice as gv
+    from services import memory_subject
 
     monkeypatch.setattr(sgs, "enforce", AsyncMock(return_value=None))
-    client = MagicMock()
-    client.task = AsyncMock(return_value=SimpleNamespace(response_text="done"))
-    monkeypatch.setattr(agent_client, "get_agent_client", MagicMock(return_value=client))
+    dispatch = AsyncMock(return_value=SimpleNamespace(status="success", response="done", error=None))
+    monkeypatch.setattr(tes, "dispatch_and_await_terminal", dispatch)
     svc = gv.GeminiVoiceService.__new__(gv.GeminiVoiceService)
-    assert asyncio.run(svc._execute_tool(AGENT, "run_task", {"prompt": "remember my PIN"})) == "done"
-    assert client.task.await_args.kwargs.get("disable_auto_memory") is True
+    session = SimpleNamespace(agent_name=AGENT, user_id=1, user_email="owner@example.com")
+    assert asyncio.run(svc._execute_tool(session, "run_task", {"prompt": "remember my PIN"})) == "done"
+    kwargs = dispatch.await_args.kwargs
+    row = SimpleNamespace(agent_name=AGENT, triggered_by=kwargs["triggered_by"], schedule_id=None,
+                          source_user_id=kwargs["source_user_id"],
+                          source_user_email=kwargs["source_user_email"],
+                          source_channel=None, source_channel_client=None,
+                          continues_execution_id=None)
+    assert memory_subject.keeps_shared_auto_memory(row, "owner@example.com", 1) is False
 
 
 def test_the_public_intro_spawns_with_auto_memory_off(monkeypatch):

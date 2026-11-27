@@ -93,8 +93,6 @@ _DISPATCH_SITES = {
     ("services/chat_execution_service.py", "_walk_chat_dispatch"):
         "the /chat dispatch loop (#3470) — only reached from run_chat_turn, which "
         "routers/chat.py::chat_with_agent calls after admit_chat_request",
-    ("services/gemini_voice.py", "_execute_tool"):
-        "calls skill_gate_service.enforce(refuse_only=True) before client.task",
     ("routers/public.py", "get_agent_intro"):
         "a fixed platform intro prompt — no requester text reaches it",
     ("services/agent_client/client.py", "chat"): "the primitive itself (callers are discovered)",
@@ -163,8 +161,10 @@ def test_the_voice_tool_refuses_before_it_calls_the_agent():
     gate = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and _call_name(n) == "enforce"]
     assert gate and any(k.arg == "refuse_only" and getattr(k.value, "value", None) is True
                         for k in gate[0].keywords)
-    task = _first_line_of_call(fn, {"task"})
-    assert gate[0].lineno < task
+    # trinity-enterprise#1392: the turn runs through the task service, under a
+    # row; the refuse-only check still comes first.
+    task = _first_line_of_call(fn, {"dispatch_and_await_terminal"})
+    assert task and gate[0].lineno < task
 
 
 # ---------------------------------------------------------------------------

@@ -311,6 +311,43 @@ def _caller(current_user) -> tuple[str, str]:
     return "user", _user_identity(current_user)
 
 
+def _turn_person(current_user, client_email: Optional[str]) -> tuple[Optional[int], Optional[str]]:
+    """`(source_user_id, source_user_email)` for a room turn's row: the person
+    the turn-tier rule rates it for (trinity-enterprise#1392).
+
+    A room turn used to carry an email and no user id, which the rule read as
+    a visitor: a person the agent is only shared with got the shell through a
+    room, and the owner got a visitor's limits.
+
+    - A signed-in platform person: their user id. The id, not the email, is
+      the record: an account may have no email (the `ADMIN_PASSWORD` admin).
+    - A Workspace participant and the engine's `Waker`: no user id, and the
+      email the platform verified (None for a waker whose answerer is not
+      seated). The rule reads a room row's email as an account, and a row
+      that names nobody as a shared person.
+    - An agent posting with its own key: the person of the turn it is acting
+      in (`turn_origin_user_id`), as for every other turn an agent's key
+      dispatches. Its key resolves to the agent's OWNER, so the owner's id or
+      email here would lift a shared person's turn to owner tier.
+
+    The agent's reply is posted under the same principal, so the next agent it
+    wakes is rated for the same person. Any failure names nobody."""
+    if isinstance(current_user, Waker) or getattr(current_user, "is_portal", False):
+        return None, client_email
+    try:
+        if getattr(current_user, "agent_name", None):
+            from database import db as core_db
+            from services import turn_tier_service
+
+            return (turn_tier_service.turn_origin_user_id(core_db, current_user),
+                    turn_tier_service.turn_origin_email(core_db, current_user, client_email))
+        user_id = getattr(current_user, "id", None)
+        return (int(user_id) if user_id is not None else None), client_email
+    except Exception:  # noqa: BLE001 - fail closed: the row names nobody
+        logger.warning("room turn: could not resolve the person it is for", exc_info=True)
+        return None, None
+
+
 # --- ACL ---------------------------------------------------------------------
 
 def _assert_can_reach_agent(current_user, agent_name: str) -> None:
@@ -2289,6 +2326,8 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         surface="room", agent_name=agent_name, chat_id=room_id,
         person_email=client_email, internal_audience=not user_facing))
 
+    tier_user_id, tier_email = _turn_person(current_user, client_email)
+
     gated_posts: list[dict] = []
 
     try:
@@ -2313,7 +2352,9 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
             conversation_key=f"room:{room_id}",
             system_prompt=room_prompt,
             images=images or None,
-            source_user_email=client_email,
+            # trinity-enterprise#1392: who the turn is rated for.
+            source_user_id=tier_user_id,
+            source_user_email=tier_email,
             # #2792: WHICH room. Without a chat on the row, the room could only
             # pick its live cards from the Work feed by agent name, and so
             # inlined every execution of a working participant — a schedule
