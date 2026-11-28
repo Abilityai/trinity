@@ -192,39 +192,91 @@ describe('FleetGrid first load (ent#1416)', () => {
   // tile ran off the right edge and the zoom controls sat on the Brain's card;
   // with it open, the org toolbar covered a tile. The first view frames the
   // whole board (every tile, the Headquarters group, the system agent) inside
-  // the canvas and clear of the canvas overlays. Canvas sizes measured in a real
-  // run of the page: 1440x900 and 1280x800, assistant panel closed and open.
+  // the canvas and clear of the canvas overlays. Second ruling (trinity-pm,
+  // 2026-11-28): with the assistant open that cost too much zoom (57% at
+  // 1440x900, 47% at 1280x800) for a new person to read the cards, so on a
+  // canvas too narrow for four tiles in a row at 70% the tiles go two to a row.
+  // Canvas sizes measured in a real run of the page: 1440x900 and 1280x800,
+  // assistant panel closed and open.
   describe('the first view fits inside the canvas, clear of its controls', () => {
     const CANVASES = {
-      '1440x900 assistant closed': { w: 1377, h: 789 },
-      '1440x900 assistant open': { w: 1041, h: 789 },
-      '1280x800 assistant closed': { w: 1217, h: 689 },
-      '1280x800 assistant open': { w: 881, h: 689 },
+      '1440x900 assistant closed': { w: 1377, h: 789, tileRows: 1, zoom: 0.7 },
+      '1440x900 assistant open': { w: 1041, h: 789, tileRows: 2, zoom: 0.7 },
+      '1280x800 assistant closed': { w: 1217, h: 689, tileRows: 1, zoom: 0.65 },
+      '1280x800 assistant open': { w: 881, h: 689, tileRows: 2, zoom: 0.6 },
     }
-    // Overlay bands from FleetGrid's own CSS: the org toolbar and Tiles button
-    // (top: 14px + 58px rows, ~88px down), the zoom controls (left 14px, 30px
-    // wide), the legend and zoom readout (bottom 14px, ~32px tall).
-    const CLEAR = { top: 88, left: 44, bottom: 46 }
+    // The overlays as measured in that real run (canvas pixels): the org
+    // toolbar and the Tiles button top-right, the zoom controls and readout
+    // bottom-left, the legend bottom-right.
+    const overlays = (w, h) => [
+      { l: w - 285, t: 14, r: w - 16, b: 49 },
+      { l: w - 74, t: 58, r: w - 16, b: 88 },
+      { l: 14, t: h - 100, r: 44, b: h - 14 },
+      { l: 50, t: h - 38, r: 80, b: h - 18 },
+      { l: w - 404, t: h - 44, r: w - 84, b: h - 14 },
+    ]
     const OVERHANG = 28   // the avatar hangs off a card's left edge
+    const readView = (wrapper) => {
+      const m = worldTransform(wrapper).match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)\s*scale\(([-\d.]+)\)/)
+      const [tx, ty, z] = m.slice(1).map(Number)
+      return { tx, ty, z }
+    }
+    const tileRows = (store) => new Set(Object.entries(store.layout).filter(([k]) => k.startsWith('widget:')).map(([, p]) => p.r)).size
     for (const [label, size] of Object.entries(CANVASES)) {
-      it(label, async () => {
+      it(`${label}: tiles ${size.tileRows === 1 ? 'in one row' : 'two to a row'}, readable, nothing under a control`, async () => {
         canvas = size
         const wrapper = await mountGrid([SYSTEM, BRAIN, CHIEF])
         const store = useFleetGridStore()
-        const m = worldTransform(wrapper).match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)\s*scale\(([-\d.]+)\)/)
-        const [tx, ty, z] = m.slice(1).map(Number)
+        const { tx, ty, z } = readView(wrapper)
         const keys = Object.keys(store.layout)
         expect(keys.filter((k) => k.startsWith('widget:')).length).toBe(4)
+        expect(tileRows(store)).toBe(size.tileRows)
+        expect(z).toBeGreaterThanOrEqual(size.zoom)
         for (const k of keys) {
           const [x, y] = cellXY(store.layout[k].c, store.layout[k].r)
           const box = { l: x * z + tx - OVERHANG * z, t: y * z + ty, r: (x + CELL_W) * z + tx, b: (y + CELL_H) * z + ty }
-          expect(box.l, `${k} left`).toBeGreaterThanOrEqual(CLEAR.left)
-          expect(box.t, `${k} top`).toBeGreaterThanOrEqual(CLEAR.top)
+          expect(box.l, `${k} left`).toBeGreaterThanOrEqual(0)
+          expect(box.t, `${k} top`).toBeGreaterThanOrEqual(0)
           expect(box.r, `${k} right`).toBeLessThanOrEqual(size.w)
-          expect(box.b, `${k} bottom`).toBeLessThanOrEqual(size.h - CLEAR.bottom)
+          expect(box.b, `${k} bottom`).toBeLessThanOrEqual(size.h)
+          for (const o of overlays(size.w, size.h)) {
+            const apart = box.r <= o.l || box.l >= o.r || box.b <= o.t || box.t >= o.b
+            expect(apart, `${k} under the control at ${JSON.stringify(o)}`).toBe(true)
+          }
         }
       })
     }
+
+    it('opening the assistant puts the tiles two to a row; closing it puts them back in one', async () => {
+      canvas = { w: 1377, h: 789 }
+      const wrapper = await mountGrid([SYSTEM, BRAIN, CHIEF])
+      const store = useFleetGridStore()
+      expect(tileRows(store)).toBe(1)
+
+      canvas = { w: 1041, h: 789 }
+      resizeCallbacks.forEach((cb) => cb([]))
+      await nextTick()
+      expect(tileRows(store)).toBe(2)
+      expect(readView(wrapper).z).toBeGreaterThanOrEqual(0.7)
+      expect(store.layoutIsAuto).toBe(true)
+
+      canvas = { w: 1377, h: 789 }
+      resizeCallbacks.forEach((cb) => cb([]))
+      await nextTick()
+      expect(tileRows(store)).toBe(1)
+    })
+
+    it('once the person zooms, opening the assistant no longer reshapes the board', async () => {
+      canvas = { w: 1377, h: 789 }
+      const wrapper = await mountGrid([SYSTEM, BRAIN, CHIEF])
+      const store = useFleetGridStore()
+      wrapper.find('.fleet-canvas').element.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, clientX: 10, clientY: 10, cancelable: true }))
+      await nextTick()
+      canvas = { w: 1041, h: 789 }
+      resizeCallbacks.forEach((cb) => cb([]))
+      await nextTick()
+      expect(tileRows(store)).toBe(1)
+    })
   })
 
   it('stops re-fitting once the person zooms', async () => {

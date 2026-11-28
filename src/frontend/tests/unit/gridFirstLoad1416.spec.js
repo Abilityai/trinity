@@ -10,7 +10,7 @@
  * through the overlay's own `computeZones` / `computeEdges`.
  */
 import { describe, it, expect } from 'vitest'
-import { firstLoadLayout, firstLoadFit, FIRST_VIEW_INSETS, computeZones, computeEdges, orgMeta } from '@/utils/gridOrg'
+import { firstLoadLayout, firstLoadFit, firstLoadBoard, firstViewObstacles, FIRST_VIEW_MIN_ZOOM, computeZones, computeEdges, orgMeta } from '@/utils/gridOrg'
 import { cellXY, CELL_W, CELL_H, GAP_Y } from '@/utils/gridLayout'
 
 const SYSTEM = { name: 'trinity-system', is_system: true, tags: [] }
@@ -112,43 +112,80 @@ describe('firstLoadLayout (ent#1416)', () => {
 })
 
 /*
- * The automatic fit (ent#1416 fix round). Measured against the 1440x900
- * screenshots: the Grid canvas is about 1377x788 with the assistant closed and
- * about 1042x788 with it open. Four fleet tiles in one row are wider than the
- * three-agent board; fitting all of them landed at 58% with the assistant open.
+ * The automatic fit (ent#1416 fix rounds). Measured against the 1440x900
+ * screenshots: the Grid canvas is about 1377x789 with the assistant closed and
+ * about 1041x789 with it open (1217x689 and 881x689 at 1280x800). The view keeps
+ * every card clear of the canvas overlays (corners, not bands), and on a canvas
+ * too narrow for four tiles in a row at 70% the tiles go two to a row.
  */
 describe('firstLoadFit (ent#1416)', () => {
   const FOUR = [...TILES, 'widget:executions']
   const agents = [SYSTEM, BRAIN, CHIEF]
-  const toScreen = (f, c, r) => {
-    const [x, y] = cellXY(c, r)
-    return { x: x * f.z + f.tx, y: y * f.z + f.ty }
+  const box = (f, p) => {
+    const [x, y] = cellXY(p.c, p.r)
+    return { l: (x - 28) * f.z + f.tx, t: y * f.z + f.ty, r: (x + CELL_W) * f.z + f.tx, b: (y + CELL_H) * f.z + f.ty }
   }
+  const SIZES = [[1377, 789], [1041, 789], [1217, 689], [881, 689]]
 
-  it('places the board from the top, under the canvas toolbar, no empty band', () => {
-    const l = arrange(agents, FOUR)
-    for (const [w, h] of [[1377, 789], [1041, 789]]) {
-      const f = firstLoadFit(l, w, h)
-      expect(toScreen(f, 0, -1).y).toBeCloseTo(FIRST_VIEW_INSETS.top, 6)
+  it('keeps every card inside the canvas and off every overlay, the fourth tile included', () => {
+    for (const tileCols of [null, 2]) {
+      const l = firstLoadLayout(agents, FOUR, orgMeta(agents), CORE, { tileCols })
+      for (const [w, h] of SIZES) {
+        const f = firstLoadFit(l, w, h)
+        for (const p of Object.values(l)) {
+          const b = box(f, p)
+          expect(b.l).toBeGreaterThanOrEqual(0)
+          expect(b.t).toBeGreaterThanOrEqual(0)
+          expect(b.r).toBeLessThanOrEqual(w)
+          expect(b.b).toBeLessThanOrEqual(h)
+          for (const o of firstViewObstacles(w, h)) {
+            expect(b.r <= o.x || b.l >= o.x + o.w || b.b <= o.y || b.t >= o.y + o.h).toBe(true)
+          }
+        }
+      }
     }
   })
 
-  it('frames every tile and agent inside the insets, the fourth tile included', () => {
-    const l = arrange(agents, FOUR)
-    for (const [w, h] of [[1377, 789], [1041, 789], [1217, 689], [881, 689]]) {
-      const f = firstLoadFit(l, w, h)
-      for (const p of Object.values(l)) {
-        const tl = toScreen(f, p.c, p.r)
-        expect(tl.x - 28 * f.z).toBeGreaterThanOrEqual(FIRST_VIEW_INSETS.left - 1e-6)
-        expect(tl.x + CELL_W * f.z).toBeLessThanOrEqual(w - FIRST_VIEW_INSETS.right + 1e-6)
-        expect(tl.y + CELL_H * f.z).toBeLessThanOrEqual(h - FIRST_VIEW_INSETS.bottom + 1e-6)
-      }
-    }
+  it('places the board at the top when nothing is in the way there', () => {
+    const l = firstLoadLayout(agents, FOUR, orgMeta(agents), CORE, { tileCols: 2 })
+    const f = firstLoadFit(l, 1041, 789)
+    expect(box(f, { c: 0, r: -2 }).t).toBeLessThan(30)
   })
 
   it('never zooms past 110% on a small board', () => {
     const l = arrange(agents, TILES.slice(0, 2))
     const f = firstLoadFit(l, 2400, 1400)
     expect(f.z).toBe(1.1)
+  })
+})
+
+describe('firstLoadBoard (ent#1416): one row of tiles while it can be read', () => {
+  const FOUR = [...TILES, 'widget:executions']
+  const agents = [SYSTEM, BRAIN, CHIEF]
+  const build = (tileCols) => firstLoadLayout(agents, FOUR, orgMeta(agents), CORE, { tileCols })
+  const rows = (l) => new Set(FOUR.map((k) => l[k].r))
+
+  it('one row on a wide canvas', () => {
+    const l = firstLoadBoard(build, 1377, 789)
+    expect([...rows(l)]).toEqual([-1])
+    expect(firstLoadFit(l, 1377, 789).z).toBeGreaterThanOrEqual(FIRST_VIEW_MIN_ZOOM)
+  })
+
+  it('two rows of two, ending directly above the agents, where one row is too small to read', () => {
+    const l = firstLoadBoard(build, 1041, 789)
+    expect(l['widget:fleet-summary']).toEqual({ c: 0, r: -2 })
+    expect(l['widget:capacity']).toEqual({ c: 1, r: -2 })
+    expect(l['widget:subscriptions']).toEqual({ c: 0, r: -1 })
+    expect(l['widget:executions']).toEqual({ c: 1, r: -1 })
+    expect(l.corbin).toEqual({ c: 0, r: 0 })
+    expect(firstLoadFit(l, 1041, 789).z).toBeGreaterThanOrEqual(FIRST_VIEW_MIN_ZOOM)
+  })
+
+  it('keeps one row when two to a row would not be larger', () => {
+    expect([...rows(firstLoadBoard(build, 1217, 689))]).toEqual([-1])
+  })
+
+  it('one row before the canvas has a size', () => {
+    expect([...rows(firstLoadBoard(build, 0, 0))]).toEqual([-1])
   })
 })

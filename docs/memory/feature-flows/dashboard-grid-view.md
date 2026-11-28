@@ -122,11 +122,17 @@ explains the colors once — never repeated per tile.
   passes for a person's layout; FleetGrid keeps it fitted to the canvas (agent
   arrivals, assistant panel open/close) until the person pans or zooms, with
   `firstLoadFit`: the WHOLE board (every tile, the core group, other agents, the
-  system agent) framed inside the canvas minus `FIRST_VIEW_INSETS` — the bands
-  the canvas overlays take (org toolbar + Tiles button on top, zoom controls on
-  the left, legend + zoom readout at the bottom) — placed from the top-left.
-  Measured on a real run: 1440x900 77% / 57% and 1280x800 67% / 47%
-  (assistant closed / open). The core order is `utils/firstSession.js::coreAgentOrder`
+  system agent) framed inside the canvas at the largest zoom at which no card
+  sits under a canvas overlay — corners, not bands: org toolbar + Tiles button
+  top-right, zoom controls + readout bottom-left, legend bottom-right; FleetGrid
+  measures them, `firstViewObstacles` gives their CSS positions where nothing can
+  be measured — placed as near the top-left as that allows. `firstLoadBoard`
+  picks the tile shape per canvas: one row while it frames at
+  `FIRST_VIEW_MIN_ZOOM` (70%) or more, else two to a row (`tileCols: 2`) when
+  that frames larger; the shape follows canvas resizes (assistant open/close)
+  until the person pans or zooms. Measured on a real run: 1440x900 78% one row /
+  74% two rows of two, 1280x800 68% one row / 62% two rows of two (assistant
+  closed / open). The core order is `utils/firstSession.js::coreAgentOrder`
   (the known seeded names, Chief of Staff first, then any the server adds),
   never only the core agents the first-run read saw: that read can land while
   the seed pass is still creating them. The
