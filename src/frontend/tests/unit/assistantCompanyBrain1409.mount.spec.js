@@ -22,10 +22,12 @@ let brain          // what /api/onboarding/brain answers (null → 500)
 let brainAfterRun  // what it answers once the setup run ended
 let runStatus
 let seeded
+let brainDelay   // ms before /api/onboarding/brain answers (0: at once)
+let taskFails    // the task route refuses
 
 vi.mock('@/api', () => {
   const respond = (method, url, body, config) => {
-    calls.push({ method, url, body, params: config?.params })
+    calls.push({ method, url, body, params: config?.params, headers: config?.headers })
     if (url === '/api/enterprise/assistant/status') {
       return { available: true, contacted: true, reachable: true, plan: 'free', email: null, allowance: null, leads_setup: true,
         trial_terms: { version: 't0', url: '', accepted: 't0' }, profile_known: true }
@@ -41,7 +43,10 @@ vi.mock('@/api', () => {
     if (url === '/api/enterprise/assistant/turn' || url === '/api/enterprise/assistant/turn/continue') {
       return { status: 'final', conversation_id: 'c1', text: 'Thanks.', cards: [], allowance: ALLOWANCE }
     }
-    if (url === `/api/agents/${BRAIN}/task`) return { execution_id: 'exec-brain-1', status: 'accepted' }
+    if (url === `/api/agents/${BRAIN}/task`) {
+      if (taskFails) throw Object.assign(new Error('nope'), { response: { status: 503, data: { detail: 'Cornelius is stopped.' } } })
+      return { execution_id: 'exec-brain-1', status: 'accepted' }
+    }
     if (url === `/api/agents/${BRAIN}/executions/exec-brain-1`) {
       if (runStatus !== 'running') brain = brainAfterRun
       return { id: 'exec-brain-1', status: runStatus, error: runStatus === 'failed' ? 'Authentication failure: Not logged in' : null }
@@ -56,11 +61,16 @@ vi.mock('@/api', () => {
   }
   const call = (method) => vi.fn(async (url, a, b) => {
     const config = method === 'get' || method === 'delete' ? a : b
+    if (url === '/api/onboarding/brain' && brainDelay) await new Promise((r) => setTimeout(r, brainDelay))
     return { status: 200, data: respond(method, url, method === 'get' ? undefined : a, config) }
   })
   return { default: { get: call('get'), post: call('post'), put: call('put'), delete: call('delete') } }
 })
-vi.mock('vue-router', () => ({ useRoute: () => ({ path: '/', params: {}, query: {} }), useRouter: () => ({ push: async () => {} }) }))
+vi.mock('vue-router', async () => {
+  const { reactive } = await import('vue')
+  const route = reactive({ path: '/', params: {}, query: {} })
+  return { useRoute: () => route, useRouter: () => ({ push: async () => {} }), __route: route }
+})
 vi.mock('@/stores/agents', () => ({ useAgentsStore: () => ({ fetchAgents: async () => {} }) }))
 
 import AssistantWidget from '@/components/assistant/AssistantWidget.vue'
@@ -68,9 +78,13 @@ import { useAssistantStore } from '@/stores/assistant'
 import { useFirstRunStore } from '@/stores/firstRun'
 import { BRAIN_OFFER_KEY, teamLabel } from '@/utils/companyBrain'
 import { FIRST_RESULT_KEY } from '@/utils/firstSession'
+import { __route as route } from 'vue-router'
 
 const TURN = '/api/enterprise/assistant/turn'
 const posted = (url) => calls.filter((c) => c.url === url && c.method === 'post')
+const reads = () => calls.filter((c) => c.url === '/api/onboarding/brain').length
+const keptCards = () => JSON.parse(localStorage.getItem('trinity-assistant-conversation') || '{"messages":[]}')
+  .messages.flatMap((m) => m.cards || []).filter((c) => c.card?.action === 'brain')
 const brainCards = (w) => w.findAll('[data-testid="assistant-card"]').filter((c) => c.text().includes('Already on your team'))
 
 describe('the company brain (ent#1409)', () => {
@@ -103,6 +117,9 @@ describe('the company brain (ent#1409)', () => {
     brain = { agent: BRAIN, state: 'not_set_up', notes: 0 }
     brainAfterRun = { agent: BRAIN, state: 'ready', notes: 0 }
     runStatus = 'success'
+    brainDelay = 0
+    taskFails = false
+    route.path = '/'
     wrapper = mount(AssistantWidget, { attachTo: document.body, global: { stubs: { HelpChatWidget: { template: '<div />' } } } })
     store = useAssistantStore()
     await useFirstRunStore().fetchState(true)
@@ -241,6 +258,116 @@ describe('the company brain (ent#1409)', () => {
       const text = brainCards(wrapper)[0].text()
       expect(text).toContain("That didn't work.")
       expect(text).toContain('Not logged in')
+    })
+  })
+
+  describe('the first message never waits on the brain (#4820 validation)', () => {
+    it('a brain read slower than about 2 seconds is left out of the turn, and the turn goes', async () => {
+      brainDelay = 60000
+      const sending = store.send('hello', { path: '/' })
+      await vi.advanceTimersByTimeAsync(2100)
+      await sending
+      const turn = posted(TURN).at(-1)
+      expect(turn.body.message).toBe('hello')
+      expect(turn.body.context.brain).toBeUndefined()
+    })
+
+    it('the read carries on in the background and the next turn has it, read once', async () => {
+      brainDelay = 3000      // past the first turn's budget, inside the second's
+      const first = store.send('hello', { path: '/' })
+      await vi.advanceTimersByTimeAsync(2100)
+      await first
+      expect(posted(TURN).at(-1).body.context.brain).toBeUndefined()
+      const second = store.send('and now?', { path: '/' })
+      await vi.advanceTimersByTimeAsync(1500)
+      await second
+      expect(reads()).toBe(1)
+      expect(posted(TURN).at(-1).body.context.brain).toEqual({ agent: BRAIN, state: 'not_set_up', notes: 0 })
+    })
+  })
+
+  describe('the brain state is read again when it may have changed', () => {
+    it('is not read on every turn', async () => {
+      await store.send('hello', { path: '/' })
+      await store.send('again', { path: '/' })
+      expect(reads()).toBe(1)
+    })
+
+    it('is read again when the person comes back to the dashboard', async () => {
+      await store.send('hello', { path: '/' })
+      brain = { agent: BRAIN, state: 'ready', notes: 3 }
+      route.path = '/agents/cornelius'
+      await flushPromises()
+      route.path = '/'
+      await flushPromises()
+      await store.send('back', { path: '/' })
+      expect(posted(TURN).at(-1).body.context.brain).toEqual({ agent: BRAIN, state: 'ready', notes: 3 })
+    })
+
+    it('after a set-up run the next turn says it is ready', async () => {
+      await store.send('hello', { path: '/' })
+      await firstResult()
+      await press(brainCards(wrapper)[0], 'Set it up')
+      await vi.runAllTimersAsync()
+      await flushPromises()
+      await store.send('what now?', { path: '/' })
+      expect(posted(TURN).at(-1).body.context.brain).toEqual({ agent: BRAIN, state: 'ready', notes: 0 })
+    })
+  })
+
+  describe('one set-up run per card (#4820 validation)', () => {
+    it('the task carries an Idempotency-Key that is the card’s own and survives a reload', async () => {
+      runStatus = 'running'
+      await firstResult()
+      const key = keptCards()[0].card.key
+      expect(key).toMatch(/^brain-setup-/)
+      await press(brainCards(wrapper)[0], 'Set it up')
+      expect(posted(`/api/agents/${BRAIN}/task`).map((c) => c.headers)).toEqual([{ 'Idempotency-Key': key }])
+    })
+  })
+
+  // The widget saves on every store change while it is mounted; these endings
+  // are the store's own to keep (as followBrain's are), so the save is checked
+  // with the widget gone and the store answering the card directly.
+  describe('an ending is kept, so a reload does not reopen the card (#4820 validation)', () => {
+    const answer = async () => {
+      const m = store.messages.find((x) => x.cards?.some((c) => c.card?.action === 'brain'))
+      const c = m.cards.find((x) => x.card.action === 'brain')
+      wrapper.unmount()
+      wrapper = mount({ template: '<div />' })
+      await store.answerCard(m.id, c.id, true, { path: '/' })
+      await flushPromises()
+    }
+    it('done: the brain is gone and only the Chief of Staff is left', async () => {
+      await firstResult()
+      brain = { agent: null, state: 'absent', notes: null }
+      await answer()
+      expect(keptCards()[0].state).toBe('done')
+    })
+
+    it('refused: the brain is gone and nobody else is on the card', async () => {
+      seeded = ['acme-scout', BRAIN]
+      await useFirstRunStore().fetchState(true)
+      await store.refreshFleet()
+      await firstResult()
+      brain = { agent: null, state: 'absent', notes: null }
+      await answer()
+      expect(keptCards()[0].state).toBe('refused')
+    })
+
+    it('refused: the run could not be started', async () => {
+      taskFails = true
+      await firstResult()
+      await answer()
+      expect(keptCards()[0].state).toBe('refused')
+      expect(keptCards()[0].reason).toContain('Cornelius is stopped.')
+    })
+
+    it('done: a brain already ready', async () => {
+      brain = { agent: BRAIN, state: 'ready', notes: 12 }
+      await firstResult()
+      await answer()
+      expect(keptCards()[0].state).toBe('done')
     })
   })
 })

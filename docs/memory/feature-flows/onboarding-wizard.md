@@ -130,6 +130,7 @@ assistant.followRun ── first result marked ──► offerBrain()
     chief = assistant.chiefIn() (ent#1416 core_agents)
     neither → nothing · else one card "Already on your team: Corbin, your Chief of Staff; and Cornelius, your company brain"
 "Set it up" (brain not set up) ── POST /api/agents/cornelius/task {message: "/first-run --empty", async_mode: true}
+    Idempotency-Key: the card's own `card.key` (kept with the card), so a reload and a second click start no second run
     followBrain: GET .../executions/{id} until it ends ─► GET /api/onboarding/brain again
     ready → "Cornelius is ready, with N notes." + where documents go, then how to start the Chief of Staff
     (open it, tell it your name, drop a meeting transcript or an email) · failed → the agent's error
@@ -138,6 +139,13 @@ assistant.followRun ── first result marked ──► offerBrain()
 
 Every turn the panel sends carries `context.brain` (`{agent, state, notes}`) when the
 brain is offerable; the plain lines the page sends after the card say the same thing.
+A turn never waits on the brain: `brainForTurn` uses the state while it still stands, and
+otherwise reads it (one read in flight, shared) with a `BRAIN_TURN_BUDGET_MS` (2 s) budget —
+a read not back by then leaves that turn without `brain` and lands for the next. The state
+stops standing when the person comes back to the dashboard (`forgetBrain`, from the widget's
+route watch) and is read again when a set-up run ends. Every card ending (`done`, `refused`,
+`unsure`) is saved by the store itself (`keep()`), so a reload does not reopen the card.
+`get_brain_state` reads visibility (`_visible_agents`, sync DB) through `asyncio.to_thread`.
 
 ## Tests
 

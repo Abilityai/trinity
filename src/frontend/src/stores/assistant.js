@@ -41,6 +41,9 @@ const SAID_YES = /^(yes|yep|yeah|ok|okay|sure|go|go ahead|do it|build it|build|c
 const FOLLOWED = ['job', 'run']    // cards the page follows instead of asking about
 // ent#1409: an execution's ending statuses, for the brain's setup run.
 const BRAIN_ENDED = ['success', 'failed', 'cancelled', 'error', 'skipped']
+// A turn waits this long for the brain's state, then goes without it (the read carries on).
+export const BRAIN_TURN_BUDGET_MS = 2000
+const BRAIN_READ_TIMEOUT_MS = 30000
 // Until the person has opened the assistant once, the launcher says there is something to read.
 const SEEN_KEY = 'trinity-assistant-seen'
 const neverOpened = () => {
@@ -212,6 +215,8 @@ export const useAssistantStore = defineStore('assistant', {
     openResult: '',      // ent#1355: a first result the page should open in front of the person (the panel does it)
     labels: {},          // ent#1409: agent name → the label the screens show
     brain: null,         // ent#1409: the company brain as the instance last said it: { agent, state, notes }
+    brainReading: null,  // #4820: the brain read in flight, shared by every turn that asks while it runs
+    brainFresh: false,   // whether `brain` still stands: false until read; read again when a set-up run ends, and next turn after a return to the dashboard
   }),
 
   getters: {
@@ -505,7 +510,8 @@ export const useAssistantStore = defineStore('assistant', {
         const fleet = await this.refreshFleet()
         const firstSession = inFirstSession(this.status, fleet, useFirstRunStore().seededAgents || [])
         // ent#1409: the assistant knows where the company brain stands, from the instance.
-        const brainState = brainContext(this.brain || await this.readBrain())
+        // Never more than a short wait: a slow brain leaves the turn without it.
+        const brainState = brainContext(await this.brainForTurn())
         let { data } = await api.post(`${BASE}/turn`, {
           conversation_id: this.conversationId,
           message: clicked.length ? `${clicked.join('\n')}\n${message}` : message,
@@ -695,14 +701,43 @@ export const useAssistantStore = defineStore('assistant', {
     },
 
     /** ent#1409: where the company brain stands, as the instance says it; null when it cannot be asked. */
-    async readBrain() {
+    readBrain() {
+      if (this.brainReading) return this.brainReading
+      const reading = (async () => {
+        try {
+          // The instance bounds its own read at ~25 s; past that, nothing is coming.
+          const { data } = await api.get('/api/onboarding/brain', { timeout: BRAIN_READ_TIMEOUT_MS })
+          this.brain = data && typeof data.state === 'string' ? data : null
+        } catch {
+          this.brain = null
+        }
+        this.brainFresh = Boolean(this.brain)
+        return this.brain
+      })().finally(() => { if (this.brainReading === reading) this.brainReading = null })
+      this.brainReading = reading
+      return reading
+    },
+
+    /**
+     * #4820: the brain's state for a turn, never holding the turn up. A state
+     * still standing is used as it is; otherwise it is read, and a read not
+     * back within BRAIN_TURN_BUDGET_MS leaves this turn without it (it lands
+     * for the next one).
+     */
+    async brainForTurn() {
+      if (this.brainFresh && this.brain) return this.brain
+      let timer
+      const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), BRAIN_TURN_BUDGET_MS) })
       try {
-        const { data } = await api.get('/api/onboarding/brain')
-        this.brain = data && typeof data.state === 'string' ? data : null
-      } catch {
-        this.brain = null
+        return await Promise.race([this.readBrain(), late])
+      } finally {
+        clearTimeout(timer)
       }
-      return this.brain
+    },
+
+    /** The brain may have changed (a set-up run, or the person is back on the dashboard): read it again next time. */
+    forgetBrain() {
+      this.brainFresh = false
     },
 
     /** The brain's name as the screens show it. */
@@ -725,13 +760,16 @@ export const useAssistantStore = defineStore('assistant', {
       const name = offerable(state) ? this.brainName(state.agent) : null
       const chief = chiefAgent ? this.brainName(chiefAgent) : null
       markBrainOffer('offered')
-      const card = { action: 'brain', agent: name ? state.agent : null, chief: chiefAgent }
+      const messageId = newId()
+      const cardId = newId()
+      // #4820: one set-up run per card, across reloads (Invariant #18).
+      const card = { action: 'brain', agent: name ? state.agent : null, chief: chiefAgent, key: `brain-setup-${cardId}-${Date.now().toString(36)}` }
       this.messages.push({
-        id: newId(),
+        id: messageId,
         role: 'assistant',
         content: '',
         cards: [{
-          id: newId(), card, label: brainLabel(name, chief), note: brainNote(name, state, chief), button: brainButton(state),
+          id: cardId, card, label: brainLabel(name, chief), note: brainNote(name, state, chief), button: brainButton(state),
           state: 'open', reason: '', progress: '', picked: '', since: Date.now(), fraction: null,
         }],
       })
@@ -755,26 +793,29 @@ export const useAssistantStore = defineStore('assistant', {
       if (agent && !offerable(state)) {
         entry.state = chief ? 'done' : 'refused'
         entry.reason = [`${name} is not on this instance any more.`, chief ? chiefWords(chief) : ''].filter(Boolean).join(' ')
-        return
+        return this.keep()
       }
       if (!agent || state.state === 'ready') {
         entry.state = 'done'
         entry.reason = readyWords(name, state, chief)
+        this.keep()
         return this.comeBack(brainLine(name, state, 'The person asked how to use the team the instance came with; the card told them.', chief), route)
       }
       let runId = null
       try {
-        const res = await api.post(`/api/agents/${encodeURIComponent(agent)}/task`, { message: BRAIN_SETUP_MESSAGE, async_mode: true })
+        const key = entry.card.key || `brain-setup-${cardId}`
+        const res = await api.post(`/api/agents/${encodeURIComponent(agent)}/task`, { message: BRAIN_SETUP_MESSAGE, async_mode: true },
+          { headers: { 'Idempotency-Key': key } })
         runId = res?.status === 202 ? null : (res?.data?.execution_id ?? res?.data?.task_execution_id ?? null)
         if (!runId) {
           entry.state = 'refused'
           entry.reason = res?.status === 202 ? 'Starting it is waiting for an approval.' : 'It could not be started.'
-          return
+          return this.keep()
         }
       } catch (e) {
         entry.state = 'refused'
         entry.reason = String(e?.response?.data?.detail || `${name} could not be started. Check that it is running on its page.`).slice(0, 300)
-        return
+        return this.keep()
       }
       entry.card = { ...entry.card, execution_id: runId }
       entry.state = 'making'

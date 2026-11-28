@@ -130,6 +130,30 @@ class TestBrainState:
         assert _read(admin_user) == {"agent": None, "state": "absent", "notes": None}
         assert seen == []
 
+    def test_the_visibility_read_runs_off_the_event_loop(self, monkeypatch, admin_user):
+        """Validation of #4820: `_visible_agents` is sync DB I/O; on the loop it stalls every request."""
+        import threading
+
+        _patch_db(monkeypatch, metadata={"cornelius": _meta()})
+        _use_agent(monkeypatch, FakeAgent(marker=False))
+        real = onboarding_service._visible_agents
+        threads = []
+
+        def spy(user):
+            threads.append(threading.current_thread())
+            return real(user)
+
+        monkeypatch.setattr(onboarding_service, "_visible_agents", spy)
+
+        async def go():
+            loop_thread = threading.current_thread()
+            state = await onboarding_service.get_brain_state(admin_user)
+            return loop_thread, state
+
+        loop_thread, state = asyncio.run(go())
+        assert state["state"] == "not_set_up"
+        assert len(threads) == 1 and threads[0] is not loop_thread
+
     def test_a_cornelius_the_caller_cannot_see_is_absent(self, monkeypatch, admin_user):
         _patch_db(monkeypatch, user_row=USER_ROW, metadata={"cornelius": _meta(owner_id=1)})
         _use_agent(monkeypatch, FakeAgent())

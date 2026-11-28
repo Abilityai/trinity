@@ -29,6 +29,7 @@ dismiss on behalf of every user.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import List, Optional, Set
 
@@ -204,7 +205,8 @@ async def get_brain_state(current_user: User) -> dict:
 
     absent = {"agent": None, "state": "absent", "notes": None}
     try:
-        visible = {a["name"] for a in _visible_agents(current_user)}
+        # Sync DB reads: off the event loop, or every request waits on them.
+        visible = {a["name"] for a in await asyncio.to_thread(_visible_agents, current_user)}
     except Exception:  # pragma: no cover - the read is a nudge, never a gate
         logger.warning("[onboarding] brain state unavailable", exc_info=True)
         return absent

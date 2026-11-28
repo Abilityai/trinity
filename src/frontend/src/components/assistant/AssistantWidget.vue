@@ -1135,6 +1135,8 @@ watch(() => store.messages.length, (n) => { if (!n) startTalking() })
 
 // Moving about the app is a chance to hear of a next step, at most every ten minutes.
 watch(() => route.path, () => store.recheck())
+// #4820: back on the dashboard, the company brain may have changed (set up elsewhere): read it again next turn.
+watch(() => route.path, (path, was) => { if (path === '/' && was !== '/') store.forgetBrain() })
 
 watch(() => store.account.step, (step) => {
   code.value = ''
