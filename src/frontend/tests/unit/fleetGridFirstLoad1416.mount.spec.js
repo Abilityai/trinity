@@ -58,7 +58,7 @@ globalThis.ResizeObserver = class {
 import FleetGrid from '@/components/FleetGrid.vue'
 import { useFleetGridStore } from '@/stores/fleetGrid'
 import { useFirstRunStore } from '@/stores/firstRun'
-import { cellXY, defaultLayout } from '@/utils/gridLayout'
+import { cellXY, defaultLayout, CELL_W, CELL_H } from '@/utils/gridLayout'
 
 const SYSTEM = { name: 'trinity-system', status: 'running', is_system: true, tags: [] }
 const CHIEF = { name: 'corbin', status: 'running', tags: ['dept-headquarters'] }
@@ -118,11 +118,47 @@ describe('FleetGrid first load (ent#1416)', () => {
     expect(tiles.every(([, p]) => p.r === -1)).toBe(true)
   })
 
-  it('reads the core order from the first-run store', async () => {
-    await mountGrid([SYSTEM, BRAIN, CHIEF], ['cornelius', 'corbin'])
+  it('a core agent the first-run store adds joins the pair, below it', async () => {
+    const extra = { name: 'archivist', status: 'running', tags: ['dept-headquarters'] }
+    await mountGrid([SYSTEM, BRAIN, CHIEF, extra], ['cornelius', 'archivist', 'corbin'])
+    const store = useFleetGridStore()
+    expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
+    expect(store.layout.cornelius).toEqual({ c: 0, r: 1 })
+    expect(store.layout.archivist).toEqual({ c: 0, r: 2 })
+  })
+
+  // Live walk on 14bf38d (2026-11-28): the first-run read lands while the seed
+  // pass is still running, so it lists only the core agents present THEN. The
+  // Chief of Staff created afterwards must still go above the Brain — the
+  // first paint read it as an ordinary agent and put it beside it.
+  it('stacks the Chief of Staff above the Brain when it lands after the first-run read', async () => {
+    const early = [SYSTEM, { ...BRAIN, tags: [] }]
+    const wrapper = await mountGrid(early, ['cornelius'])
     const store = useFleetGridStore()
     expect(store.layout.cornelius).toEqual({ c: 0, r: 0 })
-    expect(store.layout.corbin).toEqual({ c: 0, r: 1 })
+
+    const landed = [SYSTEM, { ...BRAIN, tags: [] }, { ...CHIEF, tags: [] }]
+    await wrapper.setProps({ agents: landed, orgAgents: landed })
+    await flushPromises()
+    expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
+    expect(store.layout.cornelius).toEqual({ c: 0, r: 1 })
+
+    const tagged = [SYSTEM, BRAIN, CHIEF]   // the org tags land a poll later
+    await wrapper.setProps({ agents: tagged, orgAgents: tagged })
+    await flushPromises()
+    expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
+    expect(store.layout.cornelius).toEqual({ c: 0, r: 1 })
+    expect(store.layoutIsAuto).toBe(true)
+  })
+
+  it('stacks the pair when the first-run read came before either core agent existed', async () => {
+    const wrapper = await mountGrid([SYSTEM], [])
+    const roster = [SYSTEM, BRAIN, CHIEF]
+    await wrapper.setProps({ agents: roster, orgAgents: roster })
+    await flushPromises()
+    const store = useFleetGridStore()
+    expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
+    expect(store.layout.cornelius).toEqual({ c: 0, r: 1 })
   })
 
   it('writes no layout while nobody has arranged it', async () => {
@@ -152,17 +188,95 @@ describe('FleetGrid first load (ent#1416)', () => {
     expect(worldTransform(wrapper)).not.toBe(wide)
   })
 
-  it('places the board from the top and stays readable with the assistant open', async () => {
-    canvas = { w: 1042, h: 788 }   // 1440x900 with the assistant panel open
-    const wrapper = await mountGrid([SYSTEM, BRAIN, CHIEF])
-    const store = useFleetGridStore()
-    const m = worldTransform(wrapper).match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)\s*scale\(([-\d.]+)\)/)
-    const [tx, ty, z] = m.slice(1).map(Number)
-    expect(z).toBeGreaterThanOrEqual(0.75)
-    const topRow = Math.min(...Object.values(store.layout).map((p) => p.r))
-    const [, y] = cellXY(0, topRow)
-    expect(y * z + ty).toBeCloseTo(28, 5)   // normal padding, no empty band above
-    expect(tx).toBeGreaterThan(0)
+  // Live walk on 14bf38d: with the assistant closed (98%) the fourth fleet
+  // tile ran off the right edge and the zoom controls sat on the Brain's card;
+  // with it open, the org toolbar covered a tile. The first view frames the
+  // whole board (every tile, the Headquarters group, the system agent) inside
+  // the canvas and clear of the canvas overlays. Second ruling (trinity-pm,
+  // 2026-11-28): with the assistant open that cost too much zoom (57% at
+  // 1440x900, 47% at 1280x800) for a new person to read the cards, so on a
+  // canvas too narrow for four tiles in a row at 70% the tiles go two to a row.
+  // Canvas sizes measured in a real run of the page: 1440x900 and 1280x800,
+  // assistant panel closed and open.
+  describe('the first view fits inside the canvas, clear of its controls', () => {
+    const CANVASES = {
+      '1440x900 assistant closed': { w: 1377, h: 789, tileRows: 1, zoom: 0.7 },
+      '1440x900 assistant open': { w: 1041, h: 789, tileRows: 2, zoom: 0.7 },
+      '1280x800 assistant closed': { w: 1217, h: 689, tileRows: 1, zoom: 0.65 },
+      '1280x800 assistant open': { w: 881, h: 689, tileRows: 2, zoom: 0.6 },
+    }
+    // The overlays as measured in that real run (canvas pixels): the org
+    // toolbar and the Tiles button top-right, the zoom controls and readout
+    // bottom-left, the legend bottom-right.
+    const overlays = (w, h) => [
+      { l: w - 285, t: 14, r: w - 16, b: 49 },
+      { l: w - 74, t: 58, r: w - 16, b: 88 },
+      { l: 14, t: h - 100, r: 44, b: h - 14 },
+      { l: 50, t: h - 38, r: 80, b: h - 18 },
+      { l: w - 404, t: h - 44, r: w - 84, b: h - 14 },
+    ]
+    const OVERHANG = 28   // the avatar hangs off a card's left edge
+    const readView = (wrapper) => {
+      const m = worldTransform(wrapper).match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)\s*scale\(([-\d.]+)\)/)
+      const [tx, ty, z] = m.slice(1).map(Number)
+      return { tx, ty, z }
+    }
+    const tileRows = (store) => new Set(Object.entries(store.layout).filter(([k]) => k.startsWith('widget:')).map(([, p]) => p.r)).size
+    for (const [label, size] of Object.entries(CANVASES)) {
+      it(`${label}: tiles ${size.tileRows === 1 ? 'in one row' : 'two to a row'}, readable, nothing under a control`, async () => {
+        canvas = size
+        const wrapper = await mountGrid([SYSTEM, BRAIN, CHIEF])
+        const store = useFleetGridStore()
+        const { tx, ty, z } = readView(wrapper)
+        const keys = Object.keys(store.layout)
+        expect(keys.filter((k) => k.startsWith('widget:')).length).toBe(4)
+        expect(tileRows(store)).toBe(size.tileRows)
+        expect(z).toBeGreaterThanOrEqual(size.zoom)
+        for (const k of keys) {
+          const [x, y] = cellXY(store.layout[k].c, store.layout[k].r)
+          const box = { l: x * z + tx - OVERHANG * z, t: y * z + ty, r: (x + CELL_W) * z + tx, b: (y + CELL_H) * z + ty }
+          expect(box.l, `${k} left`).toBeGreaterThanOrEqual(0)
+          expect(box.t, `${k} top`).toBeGreaterThanOrEqual(0)
+          expect(box.r, `${k} right`).toBeLessThanOrEqual(size.w)
+          expect(box.b, `${k} bottom`).toBeLessThanOrEqual(size.h)
+          for (const o of overlays(size.w, size.h)) {
+            const apart = box.r <= o.l || box.l >= o.r || box.b <= o.t || box.t >= o.b
+            expect(apart, `${k} under the control at ${JSON.stringify(o)}`).toBe(true)
+          }
+        }
+      })
+    }
+
+    it('opening the assistant puts the tiles two to a row; closing it puts them back in one', async () => {
+      canvas = { w: 1377, h: 789 }
+      const wrapper = await mountGrid([SYSTEM, BRAIN, CHIEF])
+      const store = useFleetGridStore()
+      expect(tileRows(store)).toBe(1)
+
+      canvas = { w: 1041, h: 789 }
+      resizeCallbacks.forEach((cb) => cb([]))
+      await nextTick()
+      expect(tileRows(store)).toBe(2)
+      expect(readView(wrapper).z).toBeGreaterThanOrEqual(0.7)
+      expect(store.layoutIsAuto).toBe(true)
+
+      canvas = { w: 1377, h: 789 }
+      resizeCallbacks.forEach((cb) => cb([]))
+      await nextTick()
+      expect(tileRows(store)).toBe(1)
+    })
+
+    it('once the person zooms, opening the assistant no longer reshapes the board', async () => {
+      canvas = { w: 1377, h: 789 }
+      const wrapper = await mountGrid([SYSTEM, BRAIN, CHIEF])
+      const store = useFleetGridStore()
+      wrapper.find('.fleet-canvas').element.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, clientX: 10, clientY: 10, cancelable: true }))
+      await nextTick()
+      canvas = { w: 1041, h: 789 }
+      resizeCallbacks.forEach((cb) => cb([]))
+      await nextTick()
+      expect(tileRows(store)).toBe(1)
+    })
   })
 
   it('stops re-fitting once the person zooms', async () => {
@@ -276,5 +390,32 @@ describe('FleetGrid first load (ent#1416)', () => {
       expect(layoutPuts().length).toBe(1)
       expect(store.layout.corbin).toEqual({ c: 6, r: 3 })
     })
+  })
+})
+
+// PR #4826 e2e (run 46152561376): switching Timeline → Grid remounts FleetGrid
+// with the first-run store ALREADY loaded, so setup's own sync arranges the
+// fresh-install board synchronously — before the rest of setup has run. A
+// helper it reached that was declared further down setup threw there, setup
+// aborted and the Grid pane never rendered (`.fleet-canvas` not found).
+describe('FleetGrid remount after a mode switch (ent#1416)', () => {
+  it('renders the canvas and the arranged board when the first-run read is already in', async () => {
+    const agents = [SYSTEM, BRAIN, CHIEF]
+    const first = await mountGrid(agents)
+    expect(useFirstRunStore().loaded).toBe(true)
+    first.unmount()
+
+    const again = mount(FleetGrid, {
+      props: { agents, orgAgents: agents, arrivals: [] },
+      global: { stubs: { AgentTile: true, RouterLink: true, 'router-link': true } },
+      attachTo: document.body,
+    })
+    await flushPromises()
+    await nextTick()
+    expect(again.find('.fleet-canvas').exists()).toBe(true)
+    const store = useFleetGridStore()
+    expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
+    expect(store.layout.cornelius).toEqual({ c: 0, r: 1 })
+    again.unmount()
   })
 })

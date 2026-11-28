@@ -20,7 +20,7 @@
  *  keep in sync with ORG_TAG_PREFIXES in src/backend/db/tags.py.)
  */
 
-import { CELL_W, CELL_H, GAP_X, GAP_Y, cellXY, nearestFreeCell, layoutBBox } from './gridLayout'
+import { CELL_W, CELL_H, GAP_X, GAP_Y, cellXY, nearestFreeCell } from './gridLayout'
 import { isWidgetKey } from './gridWidgets'
 
 /**
@@ -567,7 +567,8 @@ export { GAP_X, GAP_Y }
  * and newcomers are placed beside it as before. Shape:
  *
  *   row -1   info tiles, left to right in one row (directly above the agents —
- *            no empty band between them, which is what left a large gap before)
+ *            no empty band between them, which is what left a large gap before);
+ *            with `tileCols`, rows of that many ending at row -1
  *   row  0+  the person's agents in department blocks, packed left to right:
  *              1. the block holding the core agents (`core`, in that order —
  *                 the Chief of Staff, then the Company Brain), which share one
@@ -582,7 +583,7 @@ export { GAP_X, GAP_Y }
  * first block, so the pair does not jump when the tags land a poll later.
  * Blocks wrap onto a new band past MAX_COLS like `arrangeByDept`.
  */
-export function firstLoadLayout(agents, widgetKeys = [], meta = null, core = []) {
+export function firstLoadLayout(agents, widgetKeys = [], meta = null, core = [], { tileCols = null } = {}) {
   const m = meta || orgMeta(agents)
   const coreNames = (core || []).filter((n) => agents.some((a) => a.name === n && !a.is_system))
   const CORE_GROUP = '\u0000core'
@@ -651,33 +652,93 @@ export function firstLoadLayout(agents, widgetKeys = [], meta = null, core = [])
     system.forEach((n, i) => { out[n] = { c: c + i, r } })
   }
 
-  ;(widgetKeys || []).forEach((k, i) => { out[k] = { c: i, r: -1 } })
+  // One row of info tiles by default; `tileCols` (a narrow canvas, see
+  // `firstLoadBoard`) wraps them into rows of that many, the last row
+  // directly above the agents.
+  const keys = widgetKeys || []
+  const perRow = tileCols && tileCols > 0 ? tileCols : Math.max(1, keys.length)
+  const tileRows = Math.ceil(keys.length / perRow)
+  keys.forEach((k, i) => { out[k] = { c: i % perRow, r: Math.floor(i / perRow) - tileRows } })
   return out
 }
 
 /**
+ * What the first view must keep clear of (trinity-enterprise#1416): FleetGrid's
+ * own canvas overlays, as rectangles in canvas pixels. FleetGrid measures the
+ * real ones (`getBoundingClientRect`); these defaults are their CSS positions
+ * with the sizes measured in a real run of the page, used where nothing can be
+ * measured (before the first paint, or under jsdom). They are corners, not
+ * bands: the org toolbar and the Tiles button top-right, the zoom controls and
+ * their readout bottom-left, the legend bottom-right (clear of the help button).
+ */
+export function firstViewObstacles(vw, vh) {
+  return [
+    { x: vw - 16 - 270, y: 14, w: 270, h: 36 },   // .gv-orgctl
+    { x: vw - 16 - 60, y: 58, w: 60, h: 30 },     // .gv-tilesctl
+    { x: 14, y: vh - 14 - 86, w: 30, h: 86 },     // .gv-zoomctl
+    { x: 50, y: vh - 18 - 20, w: 32, h: 20 },     // .gv-zoomlvl
+    { x: vw - 84 - 320, y: vh - 14 - 30, w: 320, h: 30 },   // .gv-legend
+  ]
+}
+
+/** The zoom a new person can read the cards at (trinity-enterprise#1416). */
+export const FIRST_VIEW_MIN_ZOOM = 0.7
+
+/**
  * The view for the automatic first-load board (trinity-enterprise#1416).
  *
- * Frames the agents plus the tiles row directly above them, placed from the
- * top with normal padding (never centred vertically: a width-bound fit left an
- * empty band above the board). Tiles wider than the agents do not set the
- * zoom: they run on to the right and are reached by panning, so a three-agent
- * board stays readable with the assistant open. `names` are the agents.
+ * Frames the WHOLE board (every info tile, the core group, the other agents and
+ * the system agent) inside the canvas, at the largest zoom (up to `zMax`) at
+ * which no card sits under one of FleetGrid's overlays (`obstacles`), placed as
+ * near the top-left as that allows (never centred: a centred fit left an empty
+ * band above the board). Each card counts its avatar (`overhang`, hanging off
+ * its left edge) and the Headquarters group's frame around it.
  * Returns `{ z, tx, ty }` for the world transform.
  */
-export function firstLoadFit(layout, names, vw, vh, { pad = 28, overhang = 28, zMax = 1.1, zMin = 0.15 } = {}) {
-  const agentCells = names.map((n) => layout[n]).filter(Boolean)
-  const cells = agentCells.length ? agentCells : Object.values(layout)
-  const maxC = Math.max(...cells.map((p) => p.c))
-  const minC = Math.min(...cells.map((p) => p.c))
-  const minR = Math.min(...cells.map((p) => p.r))
-  const frame = {}
-  for (const [k, p] of Object.entries(layout)) {
-    if (p.c >= minC && p.c <= maxC && p.r >= minR - 1) frame[k] = p
+export function firstLoadFit(layout, vw, vh, {
+  obstacles = firstViewObstacles(vw, vh), margin = 14, clearance = 6,
+  overhang = 28, zMax = 1.1, zMin = 0.15, step = 0.005,
+} = {}) {
+  const cells = Object.values(layout || {})
+  if (!cells.length) cells.push({ c: 0, r: 0 })
+  const boxes = cells.map((p) => {
+    const [x, y] = cellXY(p.c, p.r)
+    return { x0: x - overhang, y0: y, x1: x + CELL_W + ZONE_CHROME.right, y1: y + CELL_H + ZONE_CHROME.bottom }
+  })
+  const bx = Math.min(...boxes.map((b) => b.x0))
+  const by = Math.min(...boxes.map((b) => b.y0))
+  const keepOut = (obstacles || []).filter((o) => o && o.w > 0 && o.h > 0)
+    .map((o) => ({ x0: o.x - clearance, y0: o.y - clearance, x1: o.x + o.w + clearance, y1: o.y + o.h + clearance }))
+  // Where the board's top-left corner may go: the margin, or just past an overlay.
+  const lefts = [...new Set([margin, ...keepOut.map((o) => o.x1)])].filter((v) => v >= margin && v < vw).sort((a, b) => a - b)
+  const tops = [...new Set([margin, ...keepOut.map((o) => o.y1)])].filter((v) => v >= margin && v < vh).sort((a, b) => a - b)
+  const fits = (z, left, top) => boxes.every((b) => {
+    const r = { x0: left + (b.x0 - bx) * z, y0: top + (b.y0 - by) * z, x1: left + (b.x1 - bx) * z, y1: top + (b.y1 - by) * z }
+    if (r.x1 > vw - margin || r.y1 > vh - margin) return false
+    return keepOut.every((o) => r.x1 <= o.x0 || r.x0 >= o.x1 || r.y1 <= o.y0 || r.y0 >= o.y1)
+  })
+  for (let z = zMax; z >= zMin - 1e-9; z = Math.round((z - step) * 1000) / 1000) {
+    for (const top of tops) {
+      for (const left of lefts) {
+        if (fits(z, left, top)) return { z, tx: left - bx * z, ty: top - by * z }
+      }
+    }
   }
-  const b = layoutBBox(frame)
-  b.x -= overhang
-  b.w += overhang
-  const z = Math.max(zMin, Math.min((vw - 2 * pad) / b.w, (vh - 2 * pad) / b.h, zMax))
-  return { z, tx: pad - b.x * z, ty: pad - b.y * z }
+  return { z: zMin, tx: margin - bx * zMin, ty: margin - by * zMin }
+}
+
+/**
+ * The first-load board for this canvas (trinity-enterprise#1416). `build(cols)`
+ * returns the arrangement with the info tiles `cols` to a row (null: one row).
+ * One row while it can be read (`FIRST_VIEW_MIN_ZOOM` or more); on a canvas too
+ * narrow for that (the assistant open beside it) the tiles go two to a row,
+ * when that frames the board larger.
+ */
+export function firstLoadBoard(build, vw, vh, fitOptions = {}) {
+  const one = build(null)
+  if (!vw || !vh) return one
+  const z1 = firstLoadFit(one, vw, vh, fitOptions).z
+  if (z1 >= FIRST_VIEW_MIN_ZOOM) return one
+  const two = build(2)
+  return firstLoadFit(two, vw, vh, fitOptions).z > z1 ? two : one
 }

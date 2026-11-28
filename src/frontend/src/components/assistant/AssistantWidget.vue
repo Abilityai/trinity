@@ -739,10 +739,11 @@ import HelpChatWidget from '../HelpChatWidget.vue'
 import { maskAddress, useAssistantStore } from '../../stores/assistant'
 import { useOnboardingStore } from '../../stores/onboarding'
 import { useFirstRunStore } from '../../stores/firstRun'
+import { useNetworkStore } from '../../stores/network'
 import { irreversibleTool, toolWords, webLink } from '../../utils/assistantCards'
 import { describePage } from '../../utils/assistantContext'
 import { starterGroups } from '../../utils/assistantStarters'
-import { OPENING, coreTeamSentence, inFirstSession, isFirstSession, openingGroup } from '../../utils/firstSession'
+import { CORE_AGENT_ROLES, OPENING, coreTeamSentence, inFirstSession, isFirstSession, openingGroup } from '../../utils/firstSession'
 import { renderMarkdown } from '../../utils/markdown'
 
 defineProps({
@@ -818,12 +819,39 @@ function hello() {
   if (own) {
     return `Hi, I'm Trinity's assistant 👋\n\nYou have ${own} ${own === 1 ? 'agent' : 'agents'} here. I can check how they're doing, fix what's failing, set them to run by themselves, or build the next one with you.\n\nTell me one thing about you first, so what I suggest fits your work.`
   }
-  const team = coreTeamSentence(core.filter((n) => store.fleet.some((a) => a.name === n)))
+  const team = coreTeamSentence(helloTeam())
   const shown = (team ? `\n\n${team}` : '') + (examples.length
     ? `\n\nThe ${team ? 'other ' : ''}${examples.length === 1 ? 'agent' : 'agents'} on the dashboard came with Trinity as ${examples.length === 1 ? 'an example' : 'examples'}.`
     : '')
   return `Hi, I'm Trinity's assistant 👋\n\nLet's get you **an agent of your own** working in a few minutes: tell me a little about your work, I'll suggest one, build it and run it once so you see what it produces.${shown}`
 }
+// ent#1416: the core agents the hello names: the ones the first-run read lists that are in the fleet.
+function helloTeam() {
+  const core = firstRun.coreAgents || []
+  return core.filter((n) => store.fleet.some((a) => a.name === n))
+}
+let helloNamed = null   // the team the hello was written with; null = no hello of ours on screen
+// trinity-enterprise#1416: the core agents arrive while the seed pass runs, and
+// the first-run read lists only those present when it was asked. A core agent
+// the page sees (the fleet it read, or the roster the socket keeps current)
+// that the read did not list means the read is stale: read it again, then
+// write the hello again so it names every core agent the instance came with.
+const network = useNetworkStore()
+const coreSeen = computed(() => Object.keys(CORE_AGENT_ROLES).filter((n) =>
+  (network.agents || []).some((a) => a?.name === n) || store.fleet.some((a) => a.name === n)).join(','))
+const coreUnlisted = () => coreSeen.value.split(',').filter(Boolean).some((n) => !(firstRun.coreAgents || []).includes(n))
+watch(coreSeen, async (now) => {
+  if (!now || helloNamed === null) return
+  const seen = now.split(',')
+  if (seen.every((n) => helloNamed.includes(n))) return
+  await Promise.all([
+    coreUnlisted() ? firstRun.fetchState(true) : null,
+    seen.some((n) => !store.fleet.some((a) => a.name === n)) ? store.refreshFleet().catch(() => {}) : null,
+  ])
+  if (helloNamed === null || helloTeam().length <= helloNamed.length) return
+  helloNamed = helloTeam()
+  store.rewelcome(hello())
+})
 // trinity-enterprise#1355: while the first session runs, no settings steps are raised (checkpoint 4).
 const firstSessionOn = computed(() => inFirstSession(store.status, store.fleet, firstRun.seededAgents || []))
 // trinity-enterprise#1355: the instance says the assistant leads, and the person has no agent of their own yet.
@@ -843,6 +871,7 @@ function startTalking() {
   if (firstSession.value) return store.welcome(OPENING)
   if (store.status.profile_known) return
   store.welcome(hello())
+  if (store.messages.length === 1 && store.messages[0].local) helloNamed = helloTeam()
 }
 watch(openingDecided, (now) => { if (now) startTalking() })
 
@@ -981,6 +1010,9 @@ async function open({ quiet = false } = {}) {
   const fleet = store.messages.length ? null : store.refreshFleet().catch(() => {})
   if (!store.status) await store.loadStatus()
   await Promise.all([fleet, firstRun.fetchState()])     // which agents are the install's examples: read once, kept
+  // ent#1416: read again when the fleet already holds a core agent that read
+  // did not list (it was asked while the seed pass was still creating them).
+  if (coreUnlisted()) await firstRun.fetchState(true)
   prepared.value = true
   startTalking()
   if (!quiet) focusInput()

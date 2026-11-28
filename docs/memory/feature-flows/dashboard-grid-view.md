@@ -121,9 +121,21 @@ explains the colors once — never repeated per tile.
   reconcile and **persists nothing** (`layoutIsAuto`), so a reconcile never
   passes for a person's layout; FleetGrid keeps it fitted to the canvas (agent
   arrivals, assistant panel open/close) until the person pans or zooms, with
-  `firstLoadFit`: placed from the top with 28px padding, framed on the agents
-  and the tiles row above them — tiles wider than the agents run on to the
-  right (reached by panning) instead of setting the zoom. The
+  `firstLoadFit`: the WHOLE board (every tile, the core group, other agents, the
+  system agent) framed inside the canvas at the largest zoom at which no card
+  sits under a canvas overlay — corners, not bands: org toolbar + Tiles button
+  top-right, zoom controls + readout bottom-left, legend bottom-right; FleetGrid
+  measures them, `firstViewObstacles` gives their CSS positions where nothing can
+  be measured — placed as near the top-left as that allows. `firstLoadBoard`
+  picks the tile shape per canvas: one row while it frames at
+  `FIRST_VIEW_MIN_ZOOM` (70%) or more, else two to a row (`tileCols: 2`) when
+  that frames larger; the shape follows canvas resizes (assistant open/close)
+  until the person pans or zooms. Measured on a real run: 1440x900 78% one row /
+  74% two rows of two, 1280x800 68% one row / 62% two rows of two (assistant
+  closed / open). The core order is `utils/firstSession.js::coreAgentOrder`
+  (the known seeded names, Chief of Staff first, then any the server adds),
+  never only the core agents the first-run read saw: that read can land while
+  the seed pass is still creating them. The
   first gesture (`_persist()`: drag, tidy, group, block move) saves the board,
   and from then on the saved layout wins and newcomers are placed by
   `normalizeLayout` as before. A record already on the server or in the

@@ -375,8 +375,9 @@ import {
   widgetById,
   widgetIdFromKey,
 } from '@/utils/gridWidgets'
-import { zoneAt, firstLoadLayout, firstLoadFit, orgMeta } from '@/utils/gridOrg'
+import { zoneAt, firstLoadLayout, firstLoadFit, firstLoadBoard, firstViewObstacles, orgMeta } from '@/utils/gridOrg'
 import { useFirstRunStore } from '@/stores/firstRun'
+import { coreAgentOrder } from '@/utils/firstSession'
 import { useOrgOverlay } from '@/composables/useOrgOverlay'
 
 /**
@@ -515,7 +516,8 @@ function isCellBlocked(c, r) {
 
 // trinity-enterprise#1416: the board nobody has arranged yet. Arranged from the
 // roster WITHOUT the type-to-filter (typing must not reshuffle it); the core
-// agents (the Chief of Staff and the Company Brain) lead, side by side.
+// agents (the Chief of Staff, then the Company Brain below it) lead; their
+// order is `coreAgentOrder`, never only the core agents present at the read.
 // Only an install whose first seed ran under ent#1416 opens on it
 // (`fresh_install` on the first-run read); an existing install with nothing
 // saved (a new teammate, a new browser) keeps the old default placement. Until
@@ -525,9 +527,21 @@ function isCellBlocked(c, r) {
 // SHOWN but kept automatic — not saved — while the store asks again; it is
 // saved only once the answer is known or the person moves a tile.
 const firstRunStore = useFirstRunStore()
+// The canvas the first-load board is shaped for: the info tiles go two to a
+// row when one row cannot be read on it (the assistant open beside it). Kept
+// from the moment the person moves the view, so their board never reshapes.
+const boardCanvas = { w: 0, h: 0 }
+// Declared here, before anything that reaches it: setup's own sync arranges the
+// first-load board synchronously when the first-run read is already in (a
+// remount after a mode switch), and a `const` further down is not yet
+// initialised then — the ReferenceError aborted setup and the Grid never drew.
+const OVERLAY_SELECTORS = ['.gv-orgctl', '.gv-tilesctl', '.gv-zoomctl', '.gv-zoomlvl', '.gv-legend']
 function arrangeFirstLoad(widgetKeys) {
   const roster = unfilteredAgents.value
-  return firstLoadLayout(roster, widgetKeys, orgMeta(roster), firstRunStore.coreAgents || [])
+  const meta = orgMeta(roster)
+  const core = coreAgentOrder(firstRunStore.coreAgents)
+  const build = (tileCols) => firstLoadLayout(roster, widgetKeys, meta, core, { tileCols })
+  return firstLoadBoard(build, boardCanvas.w, boardCanvas.h, { obstacles: overlayObstacles(boardCanvas.w, boardCanvas.h) })
 }
 const waitForInstallKind = () => null
 let heldForInstallKind = false
@@ -1124,7 +1138,31 @@ function measureCanvas() {
   if (!canvasEl.value) return
   canvasW.value = canvasEl.value.clientWidth
   canvasH.value = canvasEl.value.clientHeight
+  // ent#1416: an automatic fresh-install board is reshaped for the new canvas
+  // (one row of info tiles, or two to a row) until the person moves the view.
+  const reshape = gridStore.layoutIsAuto && !viewTouched && firstRunStore.freshInstall === true &&
+    (boardCanvas.w !== canvasW.value || boardCanvas.h !== canvasH.value)
+  if (!viewTouched) {
+    boardCanvas.w = canvasW.value
+    boardCanvas.h = canvasH.value
+  }
+  if (reshape) syncLayoutFromAgents()
   fitIfAutomatic()
+}
+
+// ent#1416: the canvas overlays the first view keeps clear of, measured where
+// they are drawn; their CSS positions where nothing can be measured yet.
+// (`OVERLAY_SELECTORS` is declared above `arrangeFirstLoad`: setup's own sync
+// reaches this on a remount.)
+function overlayObstacles(vw, vh) {
+  const el = canvasEl.value
+  const box = el?.getBoundingClientRect?.()
+  const measured = []
+  for (const q of OVERLAY_SELECTORS) {
+    const r = el?.querySelector(q)?.getBoundingClientRect?.()
+    if (box && r && r.width > 0 && r.height > 0) measured.push({ x: r.left - box.left, y: r.top - box.top, w: r.width, h: r.height })
+  }
+  return measured.length === OVERLAY_SELECTORS.length ? measured : firstViewObstacles(vw, vh)
 }
 
 // trinity-enterprise#1416: an automatic board stays fitted to the window — as
@@ -1132,9 +1170,8 @@ function measureCanvas() {
 // person pans or zooms. A saved layout is never re-fitted here.
 function fitIfAutomatic() {
   if (!gridStore.layoutIsAuto || viewTouched || !canvasW.value || !canvasH.value) return
-  // Placed from the top, framed on the agents and the tiles row above them;
-  // extra tiles run on to the right rather than shrinking the board.
-  const f = firstLoadFit(layout.value, placedAgents.value.map((a) => a.name), canvasW.value, canvasH.value)
+  // The whole board, placed from the top-left, clear of the canvas controls.
+  const f = firstLoadFit(layout.value, canvasW.value, canvasH.value, { obstacles: overlayObstacles(canvasW.value, canvasH.value) })
   vz.value = f.z
   vtx.value = f.tx
   vty.value = f.ty
