@@ -10,7 +10,7 @@
  * through the overlay's own `computeZones` / `computeEdges`.
  */
 import { describe, it, expect } from 'vitest'
-import { firstLoadLayout, firstLoadFit, computeZones, computeEdges, orgMeta } from '@/utils/gridOrg'
+import { firstLoadLayout, firstLoadFit, FIRST_VIEW_INSETS, computeZones, computeEdges, orgMeta } from '@/utils/gridOrg'
 import { cellXY, CELL_W, CELL_H, GAP_Y } from '@/utils/gridLayout'
 
 const SYSTEM = { name: 'trinity-system', is_system: true, tags: [] }
@@ -120,39 +120,35 @@ describe('firstLoadLayout (ent#1416)', () => {
 describe('firstLoadFit (ent#1416)', () => {
   const FOUR = [...TILES, 'widget:executions']
   const agents = [SYSTEM, BRAIN, CHIEF]
-  const names = agents.map((a) => a.name)
   const toScreen = (f, c, r) => {
     const [x, y] = cellXY(c, r)
     return { x: x * f.z + f.tx, y: y * f.z + f.ty }
   }
 
-  it('places the board from the top with normal padding, no empty band', () => {
+  it('places the board from the top, under the canvas toolbar, no empty band', () => {
     const l = arrange(agents, FOUR)
-    for (const [w, h] of [[1377, 788], [1042, 788]]) {
-      const f = firstLoadFit(l, names, w, h)
-      expect(toScreen(f, 0, -1).y).toBe(28)
+    for (const [w, h] of [[1377, 789], [1041, 789]]) {
+      const f = firstLoadFit(l, w, h)
+      expect(toScreen(f, 0, -1).y).toBeCloseTo(FIRST_VIEW_INSETS.top, 6)
     }
   })
 
-  it('stays readable with the assistant open: the tiles row does not set the zoom', () => {
+  it('frames every tile and agent inside the insets, the fourth tile included', () => {
     const l = arrange(agents, FOUR)
-    const f = firstLoadFit(l, names, 1042, 788)
-    expect(f.z).toBeGreaterThanOrEqual(0.75)
-    // every agent tile is fully in view
-    for (const n of names) {
-      const tl = toScreen(f, l[n].c, l[n].r)
-      expect(tl.x).toBeGreaterThanOrEqual(0)
-      expect(tl.x + CELL_W * f.z).toBeLessThanOrEqual(1042)
-      expect(tl.y + CELL_H * f.z).toBeLessThanOrEqual(788)
+    for (const [w, h] of [[1377, 789], [1041, 789], [1217, 689], [881, 689]]) {
+      const f = firstLoadFit(l, w, h)
+      for (const p of Object.values(l)) {
+        const tl = toScreen(f, p.c, p.r)
+        expect(tl.x - 28 * f.z).toBeGreaterThanOrEqual(FIRST_VIEW_INSETS.left - 1e-6)
+        expect(tl.x + CELL_W * f.z).toBeLessThanOrEqual(w - FIRST_VIEW_INSETS.right + 1e-6)
+        expect(tl.y + CELL_H * f.z).toBeLessThanOrEqual(h - FIRST_VIEW_INSETS.bottom + 1e-6)
+      }
     }
-    // the fourth tile is reached by panning to the right
-    expect(toScreen(f, 3, -1).x).toBeGreaterThan(1042 - CELL_W * f.z)
   })
 
-  it('fits the whole board when it is small enough anyway', () => {
+  it('never zooms past 110% on a small board', () => {
     const l = arrange(agents, TILES.slice(0, 2))
-    const f = firstLoadFit(l, names, 1377, 788)
-    expect(f.z).toBeLessThanOrEqual(1.1)
-    expect(toScreen(f, 2, 0).x + CELL_W * f.z).toBeLessThanOrEqual(1377)
+    const f = firstLoadFit(l, 2400, 1400)
+    expect(f.z).toBe(1.1)
   })
 })

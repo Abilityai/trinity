@@ -656,28 +656,31 @@ export function firstLoadLayout(agents, widgetKeys = [], meta = null, core = [])
 }
 
 /**
+ * Where the first view may draw (trinity-enterprise#1416): canvas pixels kept
+ * clear of FleetGrid's canvas overlays. Top: the org toolbar (top 14px) and the
+ * Tiles button under it (top 58px), about 88px down. Left: the zoom controls
+ * (left 14px, 30px wide). Bottom: the legend and the zoom readout (bottom 14px,
+ * about 32px tall). Each with a small margin.
+ */
+export const FIRST_VIEW_INSETS = Object.freeze({ top: 96, right: 28, bottom: 52, left: 56 })
+
+/**
  * The view for the automatic first-load board (trinity-enterprise#1416).
  *
- * Frames the agents plus the tiles row directly above them, placed from the
- * top with normal padding (never centred vertically: a width-bound fit left an
- * empty band above the board). Tiles wider than the agents do not set the
- * zoom: they run on to the right and are reached by panning, so a three-agent
- * board stays readable with the assistant open. `names` are the agents.
+ * Frames the WHOLE board (every info tile, the core group, the other agents and
+ * the system agent) inside the canvas minus `insets`, placed from the top-left
+ * (never centred: a centred fit left an empty band above the board). The live
+ * walk on 14bf38d showed the cost of framing only the agents: the fourth tile
+ * ran off the right edge and the canvas controls sat on the cards.
+ * `overhang` is the avatar that hangs off a card's left edge.
  * Returns `{ z, tx, ty }` for the world transform.
  */
-export function firstLoadFit(layout, names, vw, vh, { pad = 28, overhang = 28, zMax = 1.1, zMin = 0.15 } = {}) {
-  const agentCells = names.map((n) => layout[n]).filter(Boolean)
-  const cells = agentCells.length ? agentCells : Object.values(layout)
-  const maxC = Math.max(...cells.map((p) => p.c))
-  const minC = Math.min(...cells.map((p) => p.c))
-  const minR = Math.min(...cells.map((p) => p.r))
-  const frame = {}
-  for (const [k, p] of Object.entries(layout)) {
-    if (p.c >= minC && p.c <= maxC && p.r >= minR - 1) frame[k] = p
-  }
-  const b = layoutBBox(frame)
+export function firstLoadFit(layout, vw, vh, { insets = FIRST_VIEW_INSETS, overhang = 28, zMax = 1.1, zMin = 0.15 } = {}) {
+  const b = layoutBBox(layout)
   b.x -= overhang
   b.w += overhang
-  const z = Math.max(zMin, Math.min((vw - 2 * pad) / b.w, (vh - 2 * pad) / b.h, zMax))
-  return { z, tx: pad - b.x * z, ty: pad - b.y * z }
+  const availW = vw - insets.left - insets.right
+  const availH = vh - insets.top - insets.bottom
+  const z = Math.max(zMin, Math.min(availW / b.w, availH / b.h, zMax))
+  return { z, tx: insets.left - b.x * z, ty: insets.top - b.y * z }
 }

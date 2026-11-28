@@ -58,7 +58,7 @@ globalThis.ResizeObserver = class {
 import FleetGrid from '@/components/FleetGrid.vue'
 import { useFleetGridStore } from '@/stores/fleetGrid'
 import { useFirstRunStore } from '@/stores/firstRun'
-import { cellXY, defaultLayout } from '@/utils/gridLayout'
+import { cellXY, defaultLayout, CELL_W, CELL_H } from '@/utils/gridLayout'
 
 const SYSTEM = { name: 'trinity-system', status: 'running', is_system: true, tags: [] }
 const CHIEF = { name: 'corbin', status: 'running', tags: ['dept-headquarters'] }
@@ -188,17 +188,43 @@ describe('FleetGrid first load (ent#1416)', () => {
     expect(worldTransform(wrapper)).not.toBe(wide)
   })
 
-  it('places the board from the top and stays readable with the assistant open', async () => {
-    canvas = { w: 1042, h: 788 }   // 1440x900 with the assistant panel open
-    const wrapper = await mountGrid([SYSTEM, BRAIN, CHIEF])
-    const store = useFleetGridStore()
-    const m = worldTransform(wrapper).match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)\s*scale\(([-\d.]+)\)/)
-    const [tx, ty, z] = m.slice(1).map(Number)
-    expect(z).toBeGreaterThanOrEqual(0.75)
-    const topRow = Math.min(...Object.values(store.layout).map((p) => p.r))
-    const [, y] = cellXY(0, topRow)
-    expect(y * z + ty).toBeCloseTo(28, 5)   // normal padding, no empty band above
-    expect(tx).toBeGreaterThan(0)
+  // Live walk on 14bf38d: with the assistant closed (98%) the fourth fleet
+  // tile ran off the right edge and the zoom controls sat on the Brain's card;
+  // with it open, the org toolbar covered a tile. The first view frames the
+  // whole board (every tile, the Headquarters group, the system agent) inside
+  // the canvas and clear of the canvas overlays. Canvas sizes measured in a real
+  // run of the page: 1440x900 and 1280x800, assistant panel closed and open.
+  describe('the first view fits inside the canvas, clear of its controls', () => {
+    const CANVASES = {
+      '1440x900 assistant closed': { w: 1377, h: 789 },
+      '1440x900 assistant open': { w: 1041, h: 789 },
+      '1280x800 assistant closed': { w: 1217, h: 689 },
+      '1280x800 assistant open': { w: 881, h: 689 },
+    }
+    // Overlay bands from FleetGrid's own CSS: the org toolbar and Tiles button
+    // (top: 14px + 58px rows, ~88px down), the zoom controls (left 14px, 30px
+    // wide), the legend and zoom readout (bottom 14px, ~32px tall).
+    const CLEAR = { top: 88, left: 44, bottom: 46 }
+    const OVERHANG = 28   // the avatar hangs off a card's left edge
+    for (const [label, size] of Object.entries(CANVASES)) {
+      it(label, async () => {
+        canvas = size
+        const wrapper = await mountGrid([SYSTEM, BRAIN, CHIEF])
+        const store = useFleetGridStore()
+        const m = worldTransform(wrapper).match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)\s*scale\(([-\d.]+)\)/)
+        const [tx, ty, z] = m.slice(1).map(Number)
+        const keys = Object.keys(store.layout)
+        expect(keys.filter((k) => k.startsWith('widget:')).length).toBe(4)
+        for (const k of keys) {
+          const [x, y] = cellXY(store.layout[k].c, store.layout[k].r)
+          const box = { l: x * z + tx - OVERHANG * z, t: y * z + ty, r: (x + CELL_W) * z + tx, b: (y + CELL_H) * z + ty }
+          expect(box.l, `${k} left`).toBeGreaterThanOrEqual(CLEAR.left)
+          expect(box.t, `${k} top`).toBeGreaterThanOrEqual(CLEAR.top)
+          expect(box.r, `${k} right`).toBeLessThanOrEqual(size.w)
+          expect(box.b, `${k} bottom`).toBeLessThanOrEqual(size.h - CLEAR.bottom)
+        }
+      })
+    }
   })
 
   it('stops re-fitting once the person zooms', async () => {

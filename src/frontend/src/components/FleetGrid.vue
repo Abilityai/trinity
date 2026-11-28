@@ -1134,9 +1134,8 @@ function measureCanvas() {
 // person pans or zooms. A saved layout is never re-fitted here.
 function fitIfAutomatic() {
   if (!gridStore.layoutIsAuto || viewTouched || !canvasW.value || !canvasH.value) return
-  // Placed from the top, framed on the agents and the tiles row above them;
-  // extra tiles run on to the right rather than shrinking the board.
-  const f = firstLoadFit(layout.value, placedAgents.value.map((a) => a.name), canvasW.value, canvasH.value)
+  // The whole board, placed from the top-left, clear of the canvas controls.
+  const f = firstLoadFit(layout.value, canvasW.value, canvasH.value)
   vz.value = f.z
   vtx.value = f.tx
   vty.value = f.ty
