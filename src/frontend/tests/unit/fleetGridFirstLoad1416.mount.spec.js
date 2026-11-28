@@ -118,11 +118,47 @@ describe('FleetGrid first load (ent#1416)', () => {
     expect(tiles.every(([, p]) => p.r === -1)).toBe(true)
   })
 
-  it('reads the core order from the first-run store', async () => {
-    await mountGrid([SYSTEM, BRAIN, CHIEF], ['cornelius', 'corbin'])
+  it('a core agent the first-run store adds joins the pair, below it', async () => {
+    const extra = { name: 'archivist', status: 'running', tags: ['dept-headquarters'] }
+    await mountGrid([SYSTEM, BRAIN, CHIEF, extra], ['cornelius', 'archivist', 'corbin'])
+    const store = useFleetGridStore()
+    expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
+    expect(store.layout.cornelius).toEqual({ c: 0, r: 1 })
+    expect(store.layout.archivist).toEqual({ c: 0, r: 2 })
+  })
+
+  // Live walk on 14bf38d (2026-11-28): the first-run read lands while the seed
+  // pass is still running, so it lists only the core agents present THEN. The
+  // Chief of Staff created afterwards must still go above the Brain — the
+  // first paint read it as an ordinary agent and put it beside it.
+  it('stacks the Chief of Staff above the Brain when it lands after the first-run read', async () => {
+    const early = [SYSTEM, { ...BRAIN, tags: [] }]
+    const wrapper = await mountGrid(early, ['cornelius'])
     const store = useFleetGridStore()
     expect(store.layout.cornelius).toEqual({ c: 0, r: 0 })
-    expect(store.layout.corbin).toEqual({ c: 0, r: 1 })
+
+    const landed = [SYSTEM, { ...BRAIN, tags: [] }, { ...CHIEF, tags: [] }]
+    await wrapper.setProps({ agents: landed, orgAgents: landed })
+    await flushPromises()
+    expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
+    expect(store.layout.cornelius).toEqual({ c: 0, r: 1 })
+
+    const tagged = [SYSTEM, BRAIN, CHIEF]   // the org tags land a poll later
+    await wrapper.setProps({ agents: tagged, orgAgents: tagged })
+    await flushPromises()
+    expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
+    expect(store.layout.cornelius).toEqual({ c: 0, r: 1 })
+    expect(store.layoutIsAuto).toBe(true)
+  })
+
+  it('stacks the pair when the first-run read came before either core agent existed', async () => {
+    const wrapper = await mountGrid([SYSTEM], [])
+    const roster = [SYSTEM, BRAIN, CHIEF]
+    await wrapper.setProps({ agents: roster, orgAgents: roster })
+    await flushPromises()
+    const store = useFleetGridStore()
+    expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
+    expect(store.layout.cornelius).toEqual({ c: 0, r: 1 })
   })
 
   it('writes no layout while nobody has arranged it', async () => {

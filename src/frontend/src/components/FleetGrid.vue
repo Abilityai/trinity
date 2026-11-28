@@ -377,6 +377,7 @@ import {
 } from '@/utils/gridWidgets'
 import { zoneAt, firstLoadLayout, firstLoadFit, orgMeta } from '@/utils/gridOrg'
 import { useFirstRunStore } from '@/stores/firstRun'
+import { coreAgentOrder } from '@/utils/firstSession'
 import { useOrgOverlay } from '@/composables/useOrgOverlay'
 
 /**
@@ -515,7 +516,8 @@ function isCellBlocked(c, r) {
 
 // trinity-enterprise#1416: the board nobody has arranged yet. Arranged from the
 // roster WITHOUT the type-to-filter (typing must not reshuffle it); the core
-// agents (the Chief of Staff and the Company Brain) lead, side by side.
+// agents (the Chief of Staff, then the Company Brain below it) lead; their
+// order is `coreAgentOrder`, never only the core agents present at the read.
 // Only an install whose first seed ran under ent#1416 opens on it
 // (`fresh_install` on the first-run read); an existing install with nothing
 // saved (a new teammate, a new browser) keeps the old default placement. Until
@@ -527,7 +529,7 @@ function isCellBlocked(c, r) {
 const firstRunStore = useFirstRunStore()
 function arrangeFirstLoad(widgetKeys) {
   const roster = unfilteredAgents.value
-  return firstLoadLayout(roster, widgetKeys, orgMeta(roster), firstRunStore.coreAgents || [])
+  return firstLoadLayout(roster, widgetKeys, orgMeta(roster), coreAgentOrder(firstRunStore.coreAgents))
 }
 const waitForInstallKind = () => null
 let heldForInstallKind = false

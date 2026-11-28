@@ -155,6 +155,20 @@ export function claudeHelp(tokenCard = CLAUDE_TOKEN_CARD) {
  */
 export const CORE_AGENT_ROLES = Object.freeze({ corbin: 'Chief of Staff', cornelius: 'Company Brain' })
 
+/**
+ * trinity-enterprise#1416: the core agents in the order the Grid stacks them
+ * (the Chief of Staff on top, the Company Brain below), whatever the first-run
+ * read listed. The backend lists only the core agents present when it was
+ * asked; on a fresh install that read can land while the seed pass is still
+ * creating them, so the Chief of Staff arriving afterwards would be placed as
+ * an ordinary agent beside the Brain. Names the server adds that are not known
+ * here keep the server's order after the known pair.
+ */
+export function coreAgentOrder(serverList = []) {
+  const known = Object.keys(CORE_AGENT_ROLES)
+  return [...known, ...coreList(serverList).filter((n) => !known.includes(n))]
+}
+
 /** "Your Chief of Staff (corbin) and Company Brain (cornelius) are already here." or ''. */
 export function coreTeamSentence(core = []) {
   const parts = coreList(core)
