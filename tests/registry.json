@@ -10181,6 +10181,28 @@
         "frontend"
       ],
       "description": "First-run store: a forced re-read answering fresh_install null keeps a known install kind; a re-read that knows it still updates it."
+    },
+    {
+      "file": "unit/test_ent1409_brain_state.py",
+      "feature": "trinity-enterprise#1409",
+      "added": "2026-11-27",
+      "categories": [
+        "unit",
+        "backend",
+        "onboarding"
+      ],
+      "description": "trinity-enterprise#1409 backend: GET /api/onboarding/brain says where the company brain stands — absent (no Cornelius the caller can see), not_set_up (no ~/.trinity-bootstrap.done), ready with the person's notes counted (template scaffold excluded), or unknown when the agent cannot be read (never not_set_up). Driven through the shipped agent-server files router over the template's real Brain/ layout (no error logged on the agent); the route is person-only (an agent key gets 403)."
+    },
+    {
+      "file": "../src/frontend/tests/unit/assistantCompanyBrain1409.mount.spec.js",
+      "feature": "trinity-enterprise#1409",
+      "added": "2026-11-27",
+      "categories": [
+        "unit",
+        "frontend",
+        "assistant"
+      ],
+      "description": "trinity-enterprise#1409, mounted: after the first result only, one card introduces the team the instance came with ('Already on your team: Corbin, your Chief of Staff; and Cornelius, your company brain'); a 'Not now' never comes back; a deleted brain leaves only the Chief of Staff, neither offers nothing, no Chief of Staff offers the brain alone; an unreadable brain says so; accepting runs /first-run --empty with no command typed, follows the run and ends with the note count, where documents go and how to start the Chief of Staff (name, then a transcript or an email); the turn context carries the brain's state."
     }
   ]
 }

@@ -26,6 +26,7 @@ import { useAgentsStore } from './agents'
 import { useAuthStore } from './auth'
 import { useFirstRunStore } from './firstRun'
 import { examplesOutOfSight, examplesShownOnRequest, examplesToHide, firstResultSeen, inFirstSession, markFirstResultSeen, resultPath } from '../utils/firstSession'
+import { BRAIN_SETUP_MESSAGE, brainButton, brainContext, brainLabel, brainLine, brainNote, brainOfferAnswered, chiefWords, markBrainOffer, offerable, readyWords } from '../utils/companyBrain'
 
 export const FEATURE_ID = 'assistant'
 
@@ -38,6 +39,11 @@ const RUN_FIRST_POLL_MS = 1500   // a short run is over before the first slow po
 // A plain yes to a design that is waiting. Nothing longer: "yes but change the name" is a message.
 const SAID_YES = /^(yes|yep|yeah|ok|okay|sure|go|go ahead|do it|build it|build|create it|create them|make it|please do|yes please|yes go ahead|ok build it|yes build it)[.! ]*$/i
 const FOLLOWED = ['job', 'run']    // cards the page follows instead of asking about
+// ent#1409: an execution's ending statuses, for the brain's setup run.
+const BRAIN_ENDED = ['success', 'failed', 'cancelled', 'error', 'skipped']
+// A turn waits this long for the brain's state, then goes without it (the read carries on).
+export const BRAIN_TURN_BUDGET_MS = 2000
+const BRAIN_READ_TIMEOUT_MS = 30000
 // Until the person has opened the assistant once, the launcher says there is something to read.
 const SEEN_KEY = 'trinity-assistant-seen'
 const neverOpened = () => {
@@ -207,6 +213,10 @@ export const useAssistantStore = defineStore('assistant', {
     fleet: [],
     systemAgents: [],    // ent#1390: names of the instance's system agents, never named to the person
     openResult: '',      // ent#1355: a first result the page should open in front of the person (the panel does it)
+    labels: {},          // ent#1409: agent name → the label the screens show
+    brain: null,         // ent#1409: the company brain as the instance last said it: { agent, state, notes }
+    brainReading: null,  // #4820: the brain read in flight, shared by every turn that asks while it runs
+    brainFresh: false,   // whether `brain` still stands: false until read; read again when a set-up run ends, and next turn after a return to the dashboard
   }),
 
   getters: {
@@ -407,6 +417,9 @@ export const useAssistantStore = defineStore('assistant', {
       if (!Array.isArray(agents)) return this.fleet
       this.systemAgents = agents.filter((a) => a?.is_system && typeof a.name === 'string').map((a) => a.name)
       this.fleet = buildFleet(agents, autonomy, schedules?.schedules || [])
+      // ent#1409: the names the Workspace shows (agentDisplayName), so the brain is called what the screen calls it.
+      this.labels = Object.fromEntries(agents.filter((a) => typeof a?.display_label === 'string' && a.display_label.trim())
+        .map((a) => [a.name, a.display_label.trim()]))
       return this.fleet
     },
 
@@ -496,12 +509,15 @@ export const useAssistantStore = defineStore('assistant', {
       try {
         const fleet = await this.refreshFleet()
         const firstSession = inFirstSession(this.status, fleet, useFirstRunStore().seededAgents || [])
+        // ent#1409: the assistant knows where the company brain stands, from the instance.
+        // Never more than a short wait: a slow brain leaves the turn without it.
+        const brainState = brainContext(await this.brainForTurn())
         let { data } = await api.post(`${BASE}/turn`, {
           conversation_id: this.conversationId,
           message: clicked.length ? `${clicked.join('\n')}\n${message}` : message,
           context: { ...buildContext(route, fleet.filter((a) => !this.outOfSight(fleet).has(a.name))), ...(said ? { said } : {}), ...setupSteps(),
             // trinity-enterprise#1355: the assistant leads this session and follows its script for it.
-            ...(firstSession ? { first_session: true } : {}) },
+            ...(firstSession ? { first_session: true } : {}), ...(brainState ? { brain: brainState } : {}) },
           counted,
         }, { timeout: STEP_TIMEOUT_MS })
         reached = true
@@ -644,6 +660,7 @@ export const useAssistantStore = defineStore('assistant', {
       const find = () => this.messages.find((m) => m.id === messageId)?.cards?.find((c) => c.id === cardId)
       const { agent, execution_id: runId, title } = find()?.card || {}
       let seen = null
+      let firstResult = false
       for (let i = 0; i < JOB_POLL_LIMIT; i++) {
         await wait(i < 5 ? RUN_FIRST_POLL_MS : JOB_POLL_MS)
         const entry = find()
@@ -666,6 +683,7 @@ export const useAssistantStore = defineStore('assistant', {
         if (this.status?.leads_setup && !firstResultSeen()) {
           markFirstResultSeen()
           this.openResult = entry.result
+          firstResult = true
         }
         line = `The run "${title}" on ${agent} finished (execution ${runId}). Read its result and tell the person what it produced.`
       } else if (seen?.ended) {
@@ -678,6 +696,173 @@ export const useAssistantStore = defineStore('assistant', {
         line = `The run "${title}" on ${agent} is still going after half an hour (execution ${runId}). I have stopped watching it.`
       }
       await this.comeBack(line, route)
+      // ent#1409: the company brain is offered after the first result, never before it.
+      if (firstResult) await this.offerBrain()
+    },
+
+    /** ent#1409: where the company brain stands, as the instance says it; null when it cannot be asked. */
+    readBrain() {
+      if (this.brainReading) return this.brainReading
+      const reading = (async () => {
+        try {
+          // The instance bounds its own read at ~25 s; past that, nothing is coming.
+          const { data } = await api.get('/api/onboarding/brain', { timeout: BRAIN_READ_TIMEOUT_MS })
+          this.brain = data && typeof data.state === 'string' ? data : null
+        } catch {
+          this.brain = null
+        }
+        this.brainFresh = Boolean(this.brain)
+        return this.brain
+      })().finally(() => { if (this.brainReading === reading) this.brainReading = null })
+      this.brainReading = reading
+      return reading
+    },
+
+    /**
+     * #4820: the brain's state for a turn, never holding the turn up. A state
+     * still standing is used as it is; otherwise it is read, and a read not
+     * back within BRAIN_TURN_BUDGET_MS leaves this turn without it (it lands
+     * for the next one).
+     */
+    async brainForTurn() {
+      if (this.brainFresh && this.brain) return this.brain
+      let timer
+      const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), BRAIN_TURN_BUDGET_MS) })
+      try {
+        return await Promise.race([this.readBrain(), late])
+      } finally {
+        clearTimeout(timer)
+      }
+    },
+
+    /** The brain may have changed (a set-up run, or the person is back on the dashboard): read it again next time. */
+    forgetBrain() {
+      this.brainFresh = false
+    },
+
+    /** The brain's name as the screens show it. */
+    brainName(agent) {
+      return this.labels?.[agent] || agent
+    },
+
+    /**
+     * ent#1409: one card that introduces the team the instance came with, once:
+     * the company brain (drop a document) and the Chief of Staff (ent#1416: a
+     * transcript or an email, and the person's name). Not when the person
+     * already answered it (a "Not now" does not come back), and not when the
+     * instance has neither (deleted, or never seeded).
+     */
+    async offerBrain() {
+      if (brainOfferAnswered()) return
+      const state = await this.readBrain()
+      const chiefAgent = this.chiefIn()
+      if (!offerable(state) && !chiefAgent) return
+      const name = offerable(state) ? this.brainName(state.agent) : null
+      const chief = chiefAgent ? this.brainName(chiefAgent) : null
+      markBrainOffer('offered')
+      const messageId = newId()
+      const cardId = newId()
+      // #4820: one set-up run per card, across reloads (Invariant #18).
+      const card = { action: 'brain', agent: name ? state.agent : null, chief: chiefAgent, key: `brain-setup-${cardId}-${Date.now().toString(36)}` }
+      this.messages.push({
+        id: messageId,
+        role: 'assistant',
+        content: '',
+        cards: [{
+          id: cardId, card, label: brainLabel(name, chief), note: brainNote(name, state, chief), button: brainButton(state),
+          state: 'open', reason: '', progress: '', picked: '', since: Date.now(), fraction: null,
+        }],
+      })
+      if (!this.panelOpen) this.unread += 1
+      this.keep()
+    },
+
+    /**
+     * ent#1409: the person said yes. A brain that is ready only needs the way
+     * in; otherwise its own setup runs (`/first-run`, unattended) and the card
+     * follows it until the instance says it is ready.
+     */
+    async setUpBrain(messageId, cardId, route) {
+      const find = () => this.messages.find((m) => m.id === messageId)?.cards?.find((c) => c.id === cardId)
+      const entry = find()
+      const agent = entry.card.agent
+      const name = agent ? this.brainName(agent) : null
+      const chief = entry.card.chief ? this.brainName(entry.card.chief) : null
+      markBrainOffer('accepted')
+      const state = agent ? await this.readBrain() : null
+      if (agent && !offerable(state)) {
+        entry.state = chief ? 'done' : 'refused'
+        entry.reason = [`${name} is not on this instance any more.`, chief ? chiefWords(chief) : ''].filter(Boolean).join(' ')
+        return this.keep()
+      }
+      if (!agent || state.state === 'ready') {
+        entry.state = 'done'
+        entry.reason = readyWords(name, state, chief)
+        this.keep()
+        return this.comeBack(brainLine(name, state, 'The person asked how to use the team the instance came with; the card told them.', chief), route)
+      }
+      let runId = null
+      try {
+        const key = entry.card.key || `brain-setup-${cardId}`
+        const res = await api.post(`/api/agents/${encodeURIComponent(agent)}/task`, { message: BRAIN_SETUP_MESSAGE, async_mode: true },
+          { headers: { 'Idempotency-Key': key } })
+        runId = res?.status === 202 ? null : (res?.data?.execution_id ?? res?.data?.task_execution_id ?? null)
+        if (!runId) {
+          entry.state = 'refused'
+          entry.reason = res?.status === 202 ? 'Starting it is waiting for an approval.' : 'It could not be started.'
+          return this.keep()
+        }
+      } catch (e) {
+        entry.state = 'refused'
+        entry.reason = String(e?.response?.data?.detail || `${name} could not be started. Check that it is running on its page.`).slice(0, 300)
+        return this.keep()
+      }
+      entry.card = { ...entry.card, execution_id: runId }
+      entry.state = 'making'
+      entry.progress = `Setting up ${name}`
+      entry.since = Date.now()
+      this.keep()
+      return this.followBrain(messageId, cardId, route)
+    },
+
+    /** Follow the brain's setup run until it ends, then say what the instance says. */
+    async followBrain(messageId, cardId, route) {
+      const find = () => this.messages.find((m) => m.id === messageId)?.cards?.find((c) => c.id === cardId)
+      const { agent, execution_id: runId, chief: chiefAgent } = find()?.card || {}
+      const name = this.brainName(agent)
+      const chief = chiefAgent ? this.brainName(chiefAgent) : null
+      let seen = null
+      for (let i = 0; i < JOB_POLL_LIMIT; i++) {
+        await wait(i < 5 ? RUN_FIRST_POLL_MS : JOB_POLL_MS)
+        const entry = find()
+        if (!entry || entry.state !== 'making') return
+        try {
+          seen = (await api.get(`/api/agents/${encodeURIComponent(agent)}/executions/${encodeURIComponent(runId)}`)).data
+        } catch {
+          continue
+        }
+        entry.progress = ['pending', 'queued'].includes(seen?.status) ? 'Waiting its turn' : `Setting up ${name}`
+        if (BRAIN_ENDED.includes(seen?.status)) break
+      }
+      const entry = find()
+      if (!entry || entry.state !== 'making') return
+      const state = await this.readBrain()
+      let line
+      if (state?.state === 'ready') {
+        entry.state = 'done'
+        entry.reason = readyWords(name, state, chief)
+        line = brainLine(name, state, `The person set up the company brain (execution ${runId}); the card told them it is ready and how to give it documents.`, chief)
+      } else if (seen && BRAIN_ENDED.includes(seen.status)) {
+        entry.state = 'refused'
+        entry.reason = String(seen.error || `${name} finished without saying it is ready.`).slice(0, 300)
+        line = brainLine(name, state, `Setting up the company brain did not finish (execution ${runId}). ${seen.error || ''} Say what went wrong and what would fix it.`)
+      } else {
+        entry.state = 'unsure'
+        entry.reason = 'It is still going. Ask me about it later.'
+        line = brainLine(name, state, `Setting up the company brain is still going (execution ${runId}). I have stopped watching it.`)
+      }
+      this.keep()
+      await this.comeBack(line.replace(/\s+/g, ' '), route)
     },
 
 
@@ -826,6 +1011,7 @@ export const useAssistantStore = defineStore('assistant', {
           if (c.state !== 'making') continue
           if (c.card.action === 'job') this.followJob(m.id, c.id, route)
           if (c.card.action === 'run') this.followRun(m.id, c.id, route)
+          if (c.card.action === 'brain') this.followBrain(m.id, c.id, route)
         }
       }
     },
@@ -896,7 +1082,13 @@ export const useAssistantStore = defineStore('assistant', {
       if (!entry || entry.state !== 'open') return
       if (!confirm) {
         entry.state = 'declined'
+        // ent#1409: a "Not now" to the company brain is kept, so it is not offered again.
+        if (entry.card.action === 'brain') markBrainOffer('declined')
         return this.send(outcomeLine('declined', entry.label), route, { shown: false })
+      }
+      if (entry.card.action === 'brain') {
+        entry.state = 'running'
+        return this.setUpBrain(messageId, cardId, route)
       }
       if (entry.card.action === 'upgrade') {
         // Not a change the page can make by itself: the person signs in first.

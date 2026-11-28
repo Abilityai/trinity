@@ -6078,6 +6078,20 @@ class FirstRunState(BaseModel):
     install: Optional[str] = None
 
 
+class BrainState(BaseModel):
+    """The company brain's state, for the assistant (trinity-enterprise#1409).
+
+    `agent` is the seeded Cornelius when the caller can see it, else None and
+    `state` is `absent`. Otherwise `state` is `not_set_up` (no setup marker),
+    `ready` (the template's setup finished) or `unknown` (the agent could not be
+    read: stopped, or unreachable). `notes` counts the person's notes in the
+    vault, scaffold excluded; None when it could not be counted.
+    """
+    agent: Optional[str] = None
+    state: str
+    notes: Optional[int] = None
+
+
 # =============================================================================
 # Recorded metric points (trinity-enterprise#478)
 # =============================================================================
