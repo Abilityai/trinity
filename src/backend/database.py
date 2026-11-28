@@ -1336,6 +1336,9 @@ class DatabaseManager:
     def share_agent(self, agent_name: str, owner_username: str, share_with_email: str):
         return self._agent_ops.share_agent(agent_name, owner_username, share_with_email)
 
+    def get_agent_owner_email(self, agent_name: str):
+        return self._agent_ops.get_agent_owner_email(agent_name)
+
     def unshare_agent(self, agent_name: str, owner_username: str, share_with_email: str):
         return self._agent_ops.unshare_agent(agent_name, owner_username, share_with_email)
 

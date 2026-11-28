@@ -69,9 +69,12 @@ class SharingMixin:
         if not normalized_email:
             return None
 
-        # Prevent self-sharing (check if owner's email matches target email)
-        owner_email = (owner.get("email") or "").strip().lower()
-        if owner_email and owner_email == normalized_email:
+        # An owner's agents are already on their roster, so sharing one with
+        # its owner is redundant. Compare against the agent's OWNER, not the
+        # caller: a non-owner admin adding themselves is the only way the
+        # agent reaches their Workspace (#4666).
+        agent_owner_email = self.get_agent_owner_email(agent_name)
+        if agent_owner_email and agent_owner_email == normalized_email:
             return None
 
         now = utc_now_iso()
@@ -318,6 +321,15 @@ class SharingMixin:
         for name in names:
             self.is_agent_shared_with_user.prime(name, username, value=name in shared)
         return shared
+
+    def get_agent_owner_email(self, agent_name: str) -> Optional[str]:
+        """The agent owner's email, stripped and lowercased, or None."""
+        owner = self.get_agent_owner(agent_name)
+        if not owner:
+            return None
+        user = self._user_ops.get_user_by_username(owner["owner_username"])
+        email = ((user or {}).get("email") or "").strip().lower()
+        return email or None
 
     def can_user_share_agent(self, username: str, agent_name: str) -> bool:
         """Check if a user can share an agent (only owner or admin)."""

@@ -77,7 +77,7 @@
     "src/backend/routers/settings/retention.py": 1,
     "src/backend/routers/settings/whitelist.py": 5,
     "src/backend/routers/setup.py": 9,
-    "src/backend/routers/sharing.py": 20,
+    "src/backend/routers/sharing.py": 19,
     "src/backend/routers/skills.py": 12,
     "src/backend/routers/slack.py": 38,
     "src/backend/routers/subscriptions.py": 34,

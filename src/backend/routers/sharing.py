@@ -106,10 +106,20 @@ async def share_agent_endpoint(
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    current_user_data = db.get_user_by_username(current_user.username)
-    current_user_email = (current_user_data.get("email") or "") if current_user_data else ""
-    if current_user_email and current_user_email.lower() == share_request.email.lower():
-        raise HTTPException(status_code=400, detail="Cannot share an agent with yourself")
+    # #4666: refuse a share with the agent's OWNER (it is already on their
+    # roster), not with the caller. A non-owner admin may add themselves: it is
+    # the only way the agent reaches their Workspace.
+    target_email = share_request.email.strip().lower()
+    owner_email = await asyncio.to_thread(db.get_agent_owner_email, agent_name)
+    caller_email = await asyncio.to_thread(_user_email, current_user)
+    if owner_email and owner_email == target_email:
+        if owner_email == caller_email:
+            detail = ("Cannot share an agent with yourself: "
+                      "you own it, so it is already on your Workspace")
+        else:
+            detail = "Cannot share an agent with its owner: it is already on their Workspace"
+        raise HTTPException(status_code=400, detail=detail)
+    is_self_add = target_email == caller_email
 
     share = db.share_agent(agent_name, current_user.username, share_request.email)
     if not share:
@@ -142,12 +152,21 @@ async def share_agent_endpoint(
     )
 
     # trinity-enterprise#459: tell a pending person. The share stands either way.
-    invitation = await agent_invite_service.invite_on_share(
-        agent_name, share_request.email, current_user.username)
+    # #4666: an admin who added themselves is not emailed an invitation.
+    if is_self_add:
+        invitation = agent_invite_service.NOT_NEEDED
+    else:
+        invitation = await agent_invite_service.invite_on_share(
+            agent_name, share_request.email, current_user.username)
     if invitation in (agent_invite_service.SENT, agent_invite_service.FAILED):
         await _audit_invite(request, current_user, agent_name, share_request.email, "share", invitation)
 
     return AgentShareResult(**share.model_dump(), invitation=invitation)
+
+
+def _user_email(current_user) -> str:
+    user = db.get_user_by_username(current_user.username)
+    return ((user or {}).get("email") or "").strip().lower()
 
 
 async def _audit_invite(request: Request, current_user, agent_name: str, email: str,
