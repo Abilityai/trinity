@@ -375,6 +375,18 @@ export const useAssistantStore = defineStore('assistant', {
       this.opening = text
     },
 
+    /**
+     * trinity-enterprise#1416: the page's own hello, written again (the core
+     * agents it names arrived after it was written). Only while it is still the
+     * whole conversation: once anyone has said anything it is left as it was.
+     */
+    rewelcome(text) {
+      const [m] = this.messages
+      if (this.messages.length !== 1 || !m?.local || !m.opener || this.sending || !text || m.content === text) return
+      m.content = text
+      this.opening = text
+    },
+
     /** The person waved the launcher's hello away without opening the panel. */
     dismissPeek() {
       this.peek = false

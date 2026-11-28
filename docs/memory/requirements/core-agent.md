@@ -2584,7 +2584,9 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
     arrow between them), other agents next to them, the system agent one column apart — and it is placed
     from the top-left with the whole board (every tile included) inside the canvas, clear of the canvas
     controls, with the assistant open or closed, until the first pan/zoom, which saves
-    the board. A saved layout always wins. This arrangement is for **fresh installs only** (first-run
+    the board. Where one row of tiles cannot be framed at 70% or more (the assistant open beside the
+    Grid), the tiles go in two rows of two so the cards stay readable: 74% at 1440x900, 62% at 1280x800
+    (the most that size allows); with the assistant closed they stay in one row. A saved layout always wins. This arrangement is for **fresh installs only** (first-run
     state `fresh_install`, read from the persisted verdict); a person with no saved layout on an existing
     install keeps the old default placement. When the answer is not known (the read failed, or the
     verdict is not recorded yet — the backend answers `null`, never `false`), the old placement is shown
@@ -2593,6 +2595,10 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   - **The pair stacks whenever it arrives**: the Grid's core order is the known seeded names (Chief of
     Staff first), not only the core agents present when the first-run state was read — that read can
     land while the seed pass is still creating them (live walk on 14bf38d).
+  - **The assistant's hello names both, whenever they arrive**: written from the same first-run read, it
+    is read again when the page sees a core agent that read did not list, and the hello is written
+    again (only while nobody has said anything yet), so it names the Chief of Staff and the Company
+    Brain and never counts a late core agent as the person's own.
   - **Named by role**: each is created with its role as its display label — "Chief of Staff" and
     "Company Brain" — so the Grid card reads the role with the slug under it. The label comes from the
     seeder, not `template.yaml` (cornelius's template names itself "Cornelius"); the person can rename it.
