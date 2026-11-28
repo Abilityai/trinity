@@ -171,7 +171,7 @@ def test_error_event_is_recorded_on_metadata():
 
 def test_reasoning_tokens_are_counted_as_output():
     """OpenCode reports ``tokens.output`` WITHOUT reasoning (``getUsage``
-    subtracts it), so a thinking-model turn's output is the sum of both."""
+    subtracts it), so a thinking-model turn's output is the sum of both (#4824)."""
     lines = (
         _step("x", tokens={"input": 10, "output": 100, "reasoning": 400})
         + _step("y", tokens={"input": 10, "output": 5, "reasoning": 20})
@@ -183,7 +183,7 @@ def test_reasoning_tokens_are_counted_as_output():
 def test_cached_tokens_are_part_of_the_context_size():
     """OpenCode reports ``tokens.input`` WITHOUT cache reads/writes, while
     ``metadata.input_tokens`` includes them. A mostly cached last step must
-    not read as an almost empty context."""
+    not read as an almost empty context (#4824)."""
     lines = (
         _step("a", tokens={"input": 1000, "output": 1})
         + _step("b", tokens={"input": 0, "output": 1,
