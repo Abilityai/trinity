@@ -2071,6 +2071,18 @@ async def _resolve_template(
                 source_metadata.get("library_skills")
             )
             tr.declared_model = agent_model_seed.declared_model(source_metadata)
+            # #4723: same as the `local:` branch — the template's `runtime:`
+            # block picks the container runtime and model. Type and model come
+            # from this ONE read, so a failed read (`{}`) leaves both defaults
+            # and a non-Claude model is never paired with a Claude container.
+            # `validate_runtime` / `validate_runtime_model` run on the final
+            # config further down, exactly as for `local:`.
+            _runtime_config = source_metadata.get("runtime")
+            if isinstance(_runtime_config, dict):
+                config.runtime = _runtime_config.get("type", config.runtime)
+                config.runtime_model = _runtime_config.get("model", config.runtime_model)
+            elif isinstance(_runtime_config, str):
+                config.runtime = _runtime_config
             (
                 tr.github_repo_for_agent,
                 tr.github_pat_for_agent,

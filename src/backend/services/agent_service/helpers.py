@@ -80,6 +80,13 @@ def validate_runtime_model(runtime: Optional[str], model: Optional[str]) -> None
         HTTPException(400): with a reason naming what is wrong and what a
             valid id looks like.
     """
+    if model is not None and not isinstance(model, str):
+        # A template's `runtime.model: 5` is YAML, not a string: refuse it here
+        # (400) instead of letting it reach AGENT_RUNTIME_MODEL.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Runtime model must be a string, got {type(model).__name__}.",
+        )
     if not model or (runtime or "").lower() != "opencode":
         return
     candidate = model.strip()
@@ -115,8 +122,15 @@ def validate_runtime(runtime: Optional[str]) -> None:
     Raises:
         HTTPException(400): if ``runtime`` is set to an unrecognized value.
     """
-    if not runtime:
+    if runtime is None or runtime == "":
         return
+    if not isinstance(runtime, str):
+        # A template's `runtime: {type: 123}` is YAML, not a string: 400, not
+        # an AttributeError (500) from `.lower()`.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Runtime must be a string, got {type(runtime).__name__}.",
+        )
     if runtime.lower() not in KNOWN_RUNTIME_NAMES:
         raise HTTPException(
             status_code=400,
