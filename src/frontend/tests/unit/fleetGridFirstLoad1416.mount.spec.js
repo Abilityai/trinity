@@ -392,3 +392,30 @@ describe('FleetGrid first load (ent#1416)', () => {
     })
   })
 })
+
+// PR #4826 e2e (run 46152561376): switching Timeline → Grid remounts FleetGrid
+// with the first-run store ALREADY loaded, so setup's own sync arranges the
+// fresh-install board synchronously — before the rest of setup has run. A
+// helper it reached that was declared further down setup threw there, setup
+// aborted and the Grid pane never rendered (`.fleet-canvas` not found).
+describe('FleetGrid remount after a mode switch (ent#1416)', () => {
+  it('renders the canvas and the arranged board when the first-run read is already in', async () => {
+    const agents = [SYSTEM, BRAIN, CHIEF]
+    const first = await mountGrid(agents)
+    expect(useFirstRunStore().loaded).toBe(true)
+    first.unmount()
+
+    const again = mount(FleetGrid, {
+      props: { agents, orgAgents: agents, arrivals: [] },
+      global: { stubs: { AgentTile: true, RouterLink: true, 'router-link': true } },
+      attachTo: document.body,
+    })
+    await flushPromises()
+    await nextTick()
+    expect(again.find('.fleet-canvas').exists()).toBe(true)
+    const store = useFleetGridStore()
+    expect(store.layout.corbin).toEqual({ c: 0, r: 0 })
+    expect(store.layout.cornelius).toEqual({ c: 0, r: 1 })
+    again.unmount()
+  })
+})

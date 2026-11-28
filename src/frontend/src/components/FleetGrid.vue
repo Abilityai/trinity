@@ -531,6 +531,11 @@ const firstRunStore = useFirstRunStore()
 // row when one row cannot be read on it (the assistant open beside it). Kept
 // from the moment the person moves the view, so their board never reshapes.
 const boardCanvas = { w: 0, h: 0 }
+// Declared here, before anything that reaches it: setup's own sync arranges the
+// first-load board synchronously when the first-run read is already in (a
+// remount after a mode switch), and a `const` further down is not yet
+// initialised then — the ReferenceError aborted setup and the Grid never drew.
+const OVERLAY_SELECTORS = ['.gv-orgctl', '.gv-tilesctl', '.gv-zoomctl', '.gv-zoomlvl', '.gv-legend']
 function arrangeFirstLoad(widgetKeys) {
   const roster = unfilteredAgents.value
   const meta = orgMeta(roster)
@@ -1147,7 +1152,8 @@ function measureCanvas() {
 
 // ent#1416: the canvas overlays the first view keeps clear of, measured where
 // they are drawn; their CSS positions where nothing can be measured yet.
-const OVERLAY_SELECTORS = ['.gv-orgctl', '.gv-tilesctl', '.gv-zoomctl', '.gv-zoomlvl', '.gv-legend']
+// (`OVERLAY_SELECTORS` is declared above `arrangeFirstLoad`: setup's own sync
+// reaches this on a remount.)
 function overlayObstacles(vw, vh) {
   const el = canvasEl.value
   const box = el?.getBoundingClientRect?.()
