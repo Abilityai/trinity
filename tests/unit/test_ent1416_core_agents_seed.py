@@ -87,6 +87,7 @@ def install(monkeypatch):
         created.append({
             "name": config.name, "template": config.template, "kind": config.kind,
             "source_mode": config.source_mode, "pull_only": allow_unforked_pull_only,
+            "display_label": config.display_label,
             "memory_ceiling": memory_ceiling,
         })
         if config.name in fail:
@@ -138,6 +139,16 @@ class TestFreshInstall:
 
         assert {c["name"]: c["memory_ceiling"] for c in install.created} == {
             "cornelius": "4g", "corbin": "2g",
+        }
+
+    def test_the_cards_read_their_roles_with_the_slug_kept(self, install):
+        """Live walk on 14bf38d: the cards read "corbin" and "cornelius". Each is
+        created with its role as the display label (ent#181/#1640 label, set by
+        the create path); the slug stays the agent's name."""
+        _pass()
+
+        assert {c["name"]: c["display_label"] for c in install.created} == {
+            "cornelius": "Company Brain", "corbin": "Chief of Staff",
         }
 
     def test_they_are_one_named_group_with_a_line_and_a_permission(self, install):

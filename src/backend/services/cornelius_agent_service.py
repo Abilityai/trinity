@@ -108,6 +108,7 @@ class CorneliusAgentService:
         label: str = "Cornelius",
         memory_ceiling: Optional[str] = CORNELIUS_MEMORY_CEILING,
         enables_brain_orb: bool = True,
+        display_label: Optional[str] = "Company Brain",
     ):
         self.agent_name = agent_name
         self.template = template
@@ -116,6 +117,10 @@ class CorneliusAgentService:
         self.label = label
         self.memory_ceiling = memory_ceiling
         self.enables_brain_orb = enables_brain_orb
+        # trinity-enterprise#1416: what the Grid card and every other surface
+        # shows (the ent#181 display label, set by the create path); the slug
+        # stays the agent's name and is shown beside it. The person can rename it.
+        self.display_label = display_label
 
     async def ensure_seeded(self, fresh: Optional[bool] = None) -> dict:
         """
@@ -274,6 +279,7 @@ class CorneliusAgentService:
             # to have write access there (the ent#162 class).
             kind="deployment",
             source_mode=True,
+            display_label=self.display_label,
         )
         # The template declares `fork_to_own: required` (2026-09-11), which the
         # clone path enforces by 400 for any caller that does not fork. The
@@ -364,4 +370,5 @@ chief_of_staff_agent_service = CorneliusAgentService(
     label="Chief of Staff",
     memory_ceiling=CHIEF_OF_STAFF_MEMORY_CEILING,
     enables_brain_orb=False,
+    display_label="Chief of Staff",
 )
