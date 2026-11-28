@@ -704,7 +704,12 @@ class GeminiRuntime(AgentRuntime):
             stats = msg.get("stats", {})
             if stats:
                 metadata.input_tokens = stats.get("input_tokens", 0)
-                metadata.output_tokens = stats.get("output_tokens", 0)
+                # gemini-cli's output_tokens is the candidates count only. Thinking
+                # tokens are billed as output but appear just in total_tokens.
+                metadata.output_tokens = max(
+                    stats.get("output_tokens", 0),
+                    stats.get("total_tokens", 0) - metadata.input_tokens,
+                )
                 metadata.duration_ms = stats.get("duration_ms", metadata.duration_ms)
 
             # Fallback to usage field if stats not present
