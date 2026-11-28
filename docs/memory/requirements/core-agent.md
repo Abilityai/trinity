@@ -2582,14 +2582,20 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   - **Grid first load**: with nothing saved the layout is automatic and persists nothing — fleet tiles in
     one row above the agents, the Chief of Staff with the Brain directly below in their group (one short
     arrow between them), other agents next to them, the system agent one column apart — and it is placed
-    from the top and framed on the agents (tiles wider than them run on to the right, so a small fleet
-    stays readable with the assistant open) until the first pan/zoom, which saves
+    from the top-left with the whole board (every tile included) inside the canvas, clear of the canvas
+    controls, with the assistant open or closed, until the first pan/zoom, which saves
     the board. A saved layout always wins. This arrangement is for **fresh installs only** (first-run
     state `fresh_install`, read from the persisted verdict); a person with no saved layout on an existing
     install keeps the old default placement. When the answer is not known (the read failed, or the
     verdict is not recorded yet — the backend answers `null`, never `false`), the old placement is shown
     without being saved and the read is retried; a layout is saved only once the answer is known or the
     person moves a tile.
+  - **The pair stacks whenever it arrives**: the Grid's core order is the known seeded names (Chief of
+    Staff first), not only the core agents present when the first-run state was read — that read can
+    land while the seed pass is still creating them (live walk on 14bf38d).
+  - **Named by role**: each is created with its role as its display label — "Chief of Staff" and
+    "Company Brain" — so the Grid card reads the role with the slug under it. The label comes from the
+    seeder, not `template.yaml` (cornelius's template names itself "Cornelius"); the person can rename it.
   - **Upgrades keep their examples**: an install seeded with the starter fleet before this change keeps
     those agents as examples. The stored seed record holds the system name and a count, so the names are
     derived from the bundled manifest when the recorded system is its system.
