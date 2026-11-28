@@ -9,9 +9,9 @@ The load-bearing cases, in the order they matter:
   * **empty final text is a FAILED turn** (#520) — live on qwen3.6:27b via
     Ollama, which answers in a non-standard ``reasoning`` field with
     ``content: ""`` *while reporting success*. Exit code 0 is not proof.
-  * **no cost double-count** — ``tokens.reasoning`` ⊂ ``tokens.output`` and
-    ``tokens.cache.read`` ⊂ ``tokens.input``. Cost is native, so the assertion
-    is that nothing is added to it and no pricing table exists.
+  * **token buckets and native cost** — OpenCode's ``input``/``cache`` and
+    ``output``/``reasoning`` are disjoint and get summed; cost is native, so no
+    pricing table exists.
   * **final text is the LAST step's text**, not every text ever emitted.
   * error→HTTP: auth 503, rate 429, generic 500 (NOT 503 — that is the
     backend's AUTH signal and the dispatch breaker counts AUTH only), pipe
@@ -84,8 +84,8 @@ def test_parse_populates_metadata_and_session():
 
     assert outcome == FINAL_OK
     assert text == "the answer"
-    assert metadata.input_tokens == 1000
-    assert metadata.output_tokens == 500
+    assert metadata.input_tokens == 1300
+    assert metadata.output_tokens == 800
     assert metadata.cache_read_tokens == 200
     assert metadata.cost_usd == pytest.approx(0.0042)
     assert metadata.session_id == "ses_1"
@@ -169,19 +169,28 @@ def test_error_event_is_recorded_on_metadata():
 # cost: native, and no double-count
 # ---------------------------------------------------------------------------
 
-def test_reasoning_tokens_are_not_added_to_output():
-    """`tokens.reasoning` is a SUBSET of `tokens.output`. Adding it would
-    inflate every thinking-model turn's billed output."""
-    lines = _step("x", tokens={"input": 10, "output": 500, "reasoning": 400})
+def test_reasoning_tokens_are_counted_as_output():
+    """OpenCode reports ``tokens.output`` WITHOUT reasoning (``getUsage``
+    subtracts it), so a thinking-model turn's output is the sum of both (#4824)."""
+    lines = (
+        _step("x", tokens={"input": 10, "output": 100, "reasoning": 400})
+        + _step("y", tokens={"input": 10, "output": 5, "reasoning": 20})
+    )
     _text, _log, metadata, _raw, _outcome = parse_opencode_jsonl(lines)
-    assert metadata.output_tokens == 500, "reasoning must not be summed into output"
+    assert metadata.output_tokens == 525
 
 
-def test_cache_read_is_not_added_to_input():
-    """`tokens.cache.read` is a SUBSET of `tokens.input`."""
-    lines = _step("x", tokens={"input": 1000, "output": 1, "cache": {"read": 900}})
+def test_cached_tokens_are_part_of_the_context_size():
+    """OpenCode reports ``tokens.input`` WITHOUT cache reads/writes, while
+    ``metadata.input_tokens`` includes them. A mostly cached last step must
+    not read as an almost empty context (#4824)."""
+    lines = (
+        _step("a", tokens={"input": 1000, "output": 1})
+        + _step("b", tokens={"input": 0, "output": 1,
+                             "cache": {"read": 900, "write": 150}})
+    )
     _text, _log, metadata, _raw, _outcome = parse_opencode_jsonl(lines)
-    assert metadata.input_tokens == 1000
+    assert metadata.input_tokens == 1050
     assert metadata.cache_read_tokens == 900
 
 

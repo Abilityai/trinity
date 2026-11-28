@@ -26,9 +26,10 @@ Abilityai/lilu#257 pre-dispatch findings)
 * There is **no separate result line**. The final response is the
   concatenation of the ``text`` parts belonging to the LAST step.
 
-Two subset traps, both of which would silently inflate billing:
-``tokens.reasoning`` is a SUBSET of ``tokens.output`` and ``tokens.cache.read``
-is a subset of ``tokens.input``. Neither is ever added to anything. Cost is
+The token buckets are DISJOINT (OpenCode's ``getUsage``): ``tokens.input``
+excludes cache reads and writes, and ``tokens.output`` excludes
+``tokens.reasoning``. Trinity's ``input_tokens`` includes cached tokens and its
+``output_tokens`` includes reasoning, so they are added back here. Cost is
 read, not computed.
 
 Empty final text is a FAILED turn (#520)
@@ -944,9 +945,9 @@ def _accumulate_usage(state: _OpenCodeParseState, event: dict) -> None:
     budget is a spend control, so the safe failure direction is over- not
     under-reporting.
 
-    ``tokens.reasoning`` ⊂ ``tokens.output`` and ``tokens.cache.read`` ⊂
-    ``tokens.input``. Both are recorded separately and NEITHER is added to any
-    total — adding them is the double-count this runtime must not commit.
+    OpenCode reports ``input``, ``cache.read`` and ``cache.write`` as disjoint
+    buckets, and likewise ``output`` and ``reasoning``. A step's context size
+    is the sum of the first three; its output is the sum of the last two.
 
     A reported ``cost: 0`` (Ollama, free OpenRouter models) is kept as
     ``0.0``, not ``None``: it is the binary's own native figure, and ``None``
@@ -967,15 +968,18 @@ def _accumulate_usage(state: _OpenCodeParseState, event: dict) -> None:
         tokens = (event.get("usage") or {}) if isinstance(event.get("usage"), dict) else {}
     cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
 
-    step_input = _as_int(tokens.get("input"))
+    cache_read = _as_int(cache.get("read"))
+    cache_write = _as_int(cache.get("write"))
+    reasoning = _as_int(tokens.get("reasoning"))
+    step_input = _as_int(tokens.get("input")) + cache_read + cache_write
     state.input_tokens_total += step_input
     if step_input:
         state.metadata.input_tokens = step_input
-    state.metadata.output_tokens += _as_int(tokens.get("output"))
-    state.metadata.cache_read_tokens += _as_int(cache.get("read"))
-    state.cache_write_tokens += _as_int(cache.get("write"))
-    state.metadata.cache_creation_tokens += _as_int(cache.get("write"))
-    state.reasoning_tokens += _as_int(tokens.get("reasoning"))
+    state.metadata.output_tokens += _as_int(tokens.get("output")) + reasoning
+    state.metadata.cache_read_tokens += cache_read
+    state.cache_write_tokens += cache_write
+    state.metadata.cache_creation_tokens += cache_write
+    state.reasoning_tokens += reasoning
 
     cost = event.get("cost")
     if cost is None and isinstance(event.get("usage"), dict):
